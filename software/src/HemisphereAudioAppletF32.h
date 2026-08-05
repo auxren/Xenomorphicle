@@ -59,7 +59,9 @@ private:
 template <AudioChannels Channels>
 class HemisphereAudioAppletF32 : public HemisphereAudioApplet {
 public:
-  static const uint_fast8_t MAX_CABLES_F32 = 16;
+  // Matches the int16 base's MAX_CABLES; the stereo Delay applet alone needs
+  // 28 F32 cables. Pool is heap-allocated on first PatchCableF32().
+  static const uint_fast8_t MAX_CABLES_F32 = 32;
 
   AudioStream* InputStream() override {
     return &input_adapter;
