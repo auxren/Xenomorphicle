@@ -4,7 +4,7 @@ Minimal subset vendored for the float32 engine migration (24-bit I/O). Do not ed
 in place without noting divergence here.
 
 Sources:
-- `AudioStream_F32.*`, `AudioSettings_F32.*`, `AudioConvert_F32.h` from
+- `AudioStream_F32.*`, `AudioSettings_F32.*`, `AudioConvert_F32.h`, `AudioMixer_F32.*` from
   [chipaudette/OpenAudio_ArduinoLibrary](https://github.com/chipaudette/OpenAudio_ArduinoLibrary)
   @ `22014fdef317f9acb042b63e0260cc8cddd0c839` (MIT)
 - `input_i2s2_F32.*`, `output_i2s2_F32.*`, `basic_DSPutils.*` from
