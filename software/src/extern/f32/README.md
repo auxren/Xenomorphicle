@@ -16,3 +16,13 @@ The I2S2 drivers run 32-bit frames on the wire (SAI2, same pins/BCLK as the stoc
 `audio_block_f32_t`. F32 objects share the stock `AudioStream::update_all()`
 software interrupt, so int16 and float graphs coexist; bridge with
 `AudioConvert_I16toF32` / `AudioConvert_F32toI16`.
+
+Local divergences from upstream (marked with "Xenomorphicle" comments in-file):
+- `input_i2s2_F32.cpp` / `output_i2s2_F32.cpp` / `AudioStream_F32.cpp` /
+  `AudioSettings_F32.cpp` / `basic_DSPutils.cpp` / `AudioMixer_F32.cpp`:
+  whole-file `#ifdef ARDUINO_TEENSY41` guards (non-T4.1 envs build these TUs
+  empty; T4.0 envs `lib_ignore` the Audio library entirely).
+- `AudioStream_F32.{h,cpp}`: `AudioConnection_F32` is pointer-based with a
+  default constructor, re-`connect(...)`, and `disconnect()`, mirroring the
+  stock int16 `AudioConnection` API so F32 patch cables can be pooled and
+  re-patched on applet hot-swap.
