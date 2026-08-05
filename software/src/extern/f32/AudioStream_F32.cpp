@@ -141,9 +141,9 @@ void AudioStream_F32::transmit(audio_block_f32_t *block, unsigned char index)
       //Serial.print("  : loop1, c->src_index = ");Serial.println(c->src_index);
     if (c->src_index == index) {
         //Serial.println("  : if1");
-      if (c->dst.inputQueue_f32[c->dest_index] == NULL) {
+      if (c->dst->inputQueue_f32[c->dest_index] == NULL) {
           //Serial.println("  : if2");
-        c->dst.inputQueue_f32[c->dest_index] = block;
+        c->dst->inputQueue_f32[c->dest_index] = block;
         block->ref_count++;
           //Serial.print("  : block->ref_count = "); Serial.println(block->ref_count);
       }
@@ -185,17 +185,55 @@ audio_block_f32_t * AudioStream_F32::receiveWritable_f32(unsigned int index)
 void AudioConnection_F32::connect(void) {
   AudioConnection_F32 *p;
 
-  if (dest_index > dst.num_inputs_f32) return;
+  if (isConnected || !src || !dst) return;
+  if (dest_index > dst->num_inputs_f32) return;
   __disable_irq();
-  p = src.destination_list_f32;
+  p = src->destination_list_f32;
   if (p == NULL) {
-    src.destination_list_f32 = this;
+    src->destination_list_f32 = this;
   } else {
     while (p->next_dest) p = p->next_dest;
     p->next_dest = this;
   }
-  src.active = true;
-  dst.active = true;
+  src->active = true;
+  dst->active = true;
+  isConnected = true;
+  __enable_irq();
+}
+
+// Xenomorphicle additions (see header note): re-target and unlink, mirroring
+// the stock int16 AudioConnection semantics.
+void AudioConnection_F32::connect(AudioStream_F32 &source, unsigned char sourceOutput,
+    AudioStream_F32 &destination, unsigned char destinationInput) {
+  if (isConnected) disconnect();
+  src = &source;
+  dst = &destination;
+  src_index = sourceOutput;
+  dest_index = destinationInput;
+  connect();
+}
+
+void AudioConnection_F32::disconnect(void) {
+  AudioConnection_F32 *p;
+
+  if (!isConnected || !src || !dst) return;
+  if (dest_index > dst->num_inputs_f32) return;
+  __disable_irq();
+  // unlink from the source's destination list
+  p = src->destination_list_f32;
+  if (p == this) {
+    src->destination_list_f32 = next_dest;
+  } else {
+    while (p && p->next_dest != this) p = p->next_dest;
+    if (p) p->next_dest = next_dest;
+  }
+  next_dest = NULL;
+  // drop any block still queued for the destination input
+  if (dst->inputQueue_f32[dest_index]) {
+    AudioStream_F32::release(dst->inputQueue_f32[dest_index]);
+    dst->inputQueue_f32[dest_index] = NULL;
+  }
+  isConnected = false;
   __enable_irq();
 }
 

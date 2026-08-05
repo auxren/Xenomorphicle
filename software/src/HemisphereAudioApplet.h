@@ -102,7 +102,7 @@ public:
     compressor_factory.release(comp);
   }
 
-  void Disconnect() {
+  virtual void Disconnect() {
     for (size_t i = 0; i < cable_count; ++i) {
       cables[i].disconnect();
     }

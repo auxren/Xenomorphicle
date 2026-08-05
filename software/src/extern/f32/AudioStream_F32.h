@@ -82,27 +82,38 @@ class audio_block_f32_t {
         unsigned long id;
 };
 
+// Xenomorphicle divergence from upstream OpenAudio: pointer-based src/dst with
+// a default constructor, re-connect(), and disconnect() — mirrors the stock
+// int16 AudioConnection API so F32 patch cables can be pooled and re-patched
+// when applets are hot-swapped.
 class AudioConnection_F32
 {
   public:
+    AudioConnection_F32() :
+      src(NULL), dst(NULL), src_index(0), dest_index(0),
+      next_dest(NULL), isConnected(false) {}
     AudioConnection_F32(AudioStream_F32 &source, AudioStream_F32 &destination) :
-      src(source), dst(destination), src_index(0), dest_index(0),
-      next_dest(NULL)
+      src(&source), dst(&destination), src_index(0), dest_index(0),
+      next_dest(NULL), isConnected(false)
       { connect(); }
     AudioConnection_F32(AudioStream_F32 &source, unsigned char sourceOutput,
       AudioStream_F32 &destination, unsigned char destinationInput) :
-      src(source), dst(destination),
+      src(&source), dst(&destination),
       src_index(sourceOutput), dest_index(destinationInput),
-      next_dest(NULL)
+      next_dest(NULL), isConnected(false)
       { connect(); }
+    void connect(AudioStream_F32 &source, unsigned char sourceOutput,
+      AudioStream_F32 &destination, unsigned char destinationInput);
+    void disconnect(void);
     friend class AudioStream_F32;
   protected:
     void connect(void);
-    AudioStream_F32 &src;
-    AudioStream_F32 &dst;
+    AudioStream_F32 *src;
+    AudioStream_F32 *dst;
     unsigned char src_index;
     unsigned char dest_index;
     AudioConnection_F32 *next_dest;
+    bool isConnected;
 };
 
 
