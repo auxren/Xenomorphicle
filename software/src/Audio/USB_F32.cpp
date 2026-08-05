@@ -4,6 +4,7 @@
 
 #include "USB_F32.h"
 #include <arm_math.h>
+#include "sample_convert.h"
 
 audio_block_f32_t *AudioInputUSB_F32::rxBuffer[USBAudioInInterface::ringRxBufferSize][USB_AUDIO_MAX_NO_CHANNELS];
 audio_block_f32_t *AudioOutputUSB_F32::txBuffer[USBAudioOutInterface::ringTxBufferSize][USB_AUDIO_MAX_NO_CHANNELS];
@@ -38,16 +39,14 @@ void AudioInputUSB_F32::copy_to_buffers(const uint8_t *src, uint16_t bIdx, uint1
   const int16_t *src16 = (const int16_t *)src;
   for (uint32_t i = 0; i < len; i++)
     for (uint16_t j = 0; j < noChannels; j++)
-      rxBuffer[bIdx][j]->data[count + i] = (float)(*src16++) * (1.0f / 32768.0f);
+      rxBuffer[bIdx][j]->data[count + i] = samplefmt::f32_from_i16(*src16++);
 }
 #elif AUDIO_SUBSLOT_SIZE == 3
 void AudioInputUSB_F32::copy_to_buffers(const uint8_t *src, uint16_t bIdx, uint16_t noChannels, unsigned int count, unsigned int len) {
   for (uint32_t i = 0; i < len; i++) {
     for (uint16_t j = 0; j < noChannels; j++) {
-      // 24-bit little-endian -> sign-extended int32 -> float, full fidelity
-      int32_t v = (int32_t)((uint32_t)src[0] << 8 | (uint32_t)src[1] << 16 | (uint32_t)src[2] << 24) >> 8;
+      rxBuffer[bIdx][j]->data[count + i] = samplefmt::f32_from_i24le(src);
       src += 3;
-      rxBuffer[bIdx][j]->data[count + i] = (float)v * (1.0f / 8388608.0f);
     }
   }
 }
@@ -136,8 +135,7 @@ void AudioOutputUSB_F32::copy_from_buffers(uint8_t *dst, uint16_t bIdx, uint16_t
   int16_t *dst16 = (int16_t *)dst;
   for (uint32_t i = 0; i < len; i++) {
     for (uint16_t j = 0; j < noChannels; j++) {
-      int32_t v = (int32_t)lrintf(txBuffer[bIdx][j]->data[count + i] * 32768.0f);
-      *dst16++ = (int16_t)__SSAT(v, 16);
+      *dst16++ = samplefmt::f32_to_i16(txBuffer[bIdx][j]->data[count + i]);
     }
   }
 }
@@ -145,11 +143,8 @@ void AudioOutputUSB_F32::copy_from_buffers(uint8_t *dst, uint16_t bIdx, uint16_t
 void AudioOutputUSB_F32::copy_from_buffers(uint8_t *dst, uint16_t bIdx, uint16_t noChannels, unsigned int count, unsigned int len) {
   for (uint32_t i = 0; i < len; i++) {
     for (uint16_t j = 0; j < noChannels; j++) {
-      int32_t v = (int32_t)lrintf(txBuffer[bIdx][j]->data[count + i] * 8388608.0f);
-      v = __SSAT(v, 24);
-      *dst++ = (uint8_t)(v & 255);         // 24-bit little-endian
-      *dst++ = (uint8_t)((v >> 8) & 255);
-      *dst++ = (uint8_t)((v >> 16) & 255);
+      samplefmt::f32_to_i24le(txBuffer[bIdx][j]->data[count + i], dst);
+      dst += 3;
     }
   }
 }
