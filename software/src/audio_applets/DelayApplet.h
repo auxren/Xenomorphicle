@@ -131,7 +131,7 @@ public:
     }
   }
 
-  void View() {
+  FLASHMEM void View() {
     // gfxPrint(0, 15, delaySecs * 1000.0f, 0);
     int unit_x = 6 * 7 + 1;
     gfxPos(1, 15);
@@ -219,11 +219,11 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void AuxButton() override {
+  FLASHMEM void AuxButton() override {
     if (cursor == WET) send_mode ^= 1;
     CancelEdit();
   }
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(TIME_CV, delay_time_cv),
@@ -234,7 +234,7 @@ public:
     CursorToggle();
   }
 
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       MoveCursor(cursor, direction, CURSOR_LENGTH - 1);
       // cursor position 0 is the clock source, which is hidden if not using
@@ -317,13 +317,13 @@ public:
   delay_time, pack<3>(time_units), ratio, pack<1>(delay_mod_type), feedback, \
     wet, pack<4>(taps), pack<1>(send_mode)
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     data[0] = PackPackables(DELAY_PARAMS);
     data[1] = PackPackables(delay_time_cv, feedback_cv, wet_cv);
     data[2] = PackPackables(clock_source);
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     uint16_t oldclk = 0;
     UnpackPackables(data[0], DELAY_PARAMS);
     set_taps(taps);

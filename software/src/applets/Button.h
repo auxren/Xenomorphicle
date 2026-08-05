@@ -51,12 +51,12 @@ public:
     }
 
 	/* Draw the screen */
-    void View() {
+    FLASHMEM void View() {
         DrawIndicator();
     }
 
 	/* Called when the encoder button for this hemisphere is pressed */
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         PressButton(channel);
         trigger_countdown = 1667; // Trigger display countdown
     }
@@ -65,7 +65,7 @@ public:
 	 * direction 1 is clockwise
 	 * direction -1 is counterclockwise
 	 */
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (direction > 0) // CW toggles which channel
             channel = 1 - channel;
         else { // CCW toggles between Trig/Gate output
@@ -79,19 +79,19 @@ public:
         
     /* No state data for this applet
      */
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         return data;
     }
 
     /* No state data for this applet
      */
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         return;
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = gate_mode[0] ? "Toggle" : "Trig";
     help[HELP_DIGITAL2] = gate_mode[1] ? "Toggle" : "Trig";

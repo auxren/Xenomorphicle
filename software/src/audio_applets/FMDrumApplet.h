@@ -161,7 +161,7 @@ public:
         output_mixer.gain(1, constrain(eff_noi * mix_gain * 0.01f, 0.f, 2.f));
     }
 
-    void View() override {
+    FLASHMEM void View() override {
         if (trigger_flash)
             gfxIcon(56, 2, ZAP_ICON);
 
@@ -181,7 +181,7 @@ public:
         gfxDisplayInputMapEditor();
     }
 
-    void OnEncoderMove(int direction) override {
+    FLASHMEM void OnEncoderMove(int direction) override {
         if (!EditMode()) {
             MoveCursor(cursor, direction, NUM_CURSORS - 1);
             // Scroll to keep active row visible
@@ -227,7 +227,7 @@ public:
         }
     }
 
-    void OnButtonPress() override {
+    FLASHMEM void OnButtonPress() override {
         if (CheckEditInputMapPress(cursor,
               IndexedInput(TRG,    trg),
               IndexedInput(CV_PIT, pitch_cv),
@@ -243,12 +243,12 @@ public:
         CursorToggle();
     }
 
-    void AuxButton() override {
+    FLASHMEM void AuxButton() override {
         preset_idx = (preset_idx >= NUM_PRESETS) ? 0 : preset_idx + 1;
         LoadPreset(preset_idx);
     }
 
-    void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
         uint16_t trigga = trg.Pack(); // abandon extra Euclidean params
         data[0] = PackPackables(pitch_hz, pack<12>(dec), swp, rto, fmi, pack<12>(fmd));
         data[1] = PackPackables(noi, ndc, mix, trigga, mix_cv);
@@ -256,7 +256,7 @@ public:
         data[3] = PackPackables(fmi_cv, fmd_cv, noi_cv, ndc_cv);
     }
 
-    void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
         uint16_t trigga;
         UnpackPackables(data[0], pitch_hz, pack<12>(dec), swp, rto, fmi, pack<12>(fmd));
         UnpackPackables(data[1], noi, ndc, mix, trigga, mix_cv);
@@ -392,7 +392,7 @@ private:
 
     // DrawRow renders a display row (by row index 0..NUM_ROWS-1).
     // Each param row shows value cursor then CV source cursor inline.
-    void DrawRow(int row, int y) {
+    FLASHMEM void DrawRow(int row, int y) {
         switch (row) {
             case 0: // TRG
                 gfxPrint(1, y, "TRG:");

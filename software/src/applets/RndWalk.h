@@ -84,13 +84,13 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawDisplay();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 5);
             return;
@@ -121,7 +121,7 @@ public:
 
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,1}, yClkSrc);
         Pack(data, PackLocation {1,4}, yClkDiv);
@@ -132,7 +132,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         yClkSrc = Unpack(data, PackLocation {0,1});
         yClkDiv = Unpack(data, PackLocation {1,4});
         range = Unpack(data, PackLocation {5,8});
@@ -144,7 +144,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "X Clock";
     help[HELP_DIGITAL2] = "Y Clock";
@@ -176,7 +176,7 @@ private:
     float currentOut[2];
     int cursor; // 0=Y clk src, 1=Y clk div, 2=Range,  3=step, 4=Smoothnes
     
-    void DrawDisplay() {
+    FLASHMEM void DrawDisplay() {
 
         if (cursor < 3) {
             gfxPrint(1, 15, "Range");

@@ -94,7 +94,7 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         switch (cursor) {
             default:
             case hMIDIIn_A_MIDI_CHANNEL:
@@ -120,7 +120,7 @@ public:
         }
     }
 
-    void AuxButton() override {
+    FLASHMEM void AuxButton() override {
       switch (cursor) {
         case hMIDIIn_A_OUTPUT_MODE:
         case hMIDIIn_B_OUTPUT_MODE:
@@ -138,7 +138,7 @@ public:
     }
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, hMIDIIn_CURSOR_LAST);
             io_page = (cursor >= MAP_INDEX_B);
@@ -190,20 +190,20 @@ public:
         ResetCursor();
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation{0, 5}, map_index[0]);
         Pack(data, PackLocation{8, 5}, map_index[1]);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         map_index[0] = Unpack(data, PackLocation {0,5});
         map_index[1] = Unpack(data, PackLocation {8,5});
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                      "-------" <-- Label size guide
         //help[HELP_DIGITAL1] = "";
         //help[HELP_DIGITAL2] = "";
@@ -223,7 +223,7 @@ private:
     int io_page = 0;
     int last_icon_ticks[2];
 
-    void DrawMonitor() {
+    FLASHMEM void DrawMonitor() {
         if ((OC::CORE::ticks - frame.MIDIState.last_msg_tick) < 100) {
             // reset icon display timers
             if (frame.MIDIState.mapping[map_index[0]].get_channel() == frame.MIDIState.last_midi_channel)
@@ -236,7 +236,7 @@ private:
             gfxIcon(54, 13, MIDI_ICON);
     }
 
-    void DrawChannelPage() {
+    FLASHMEM void DrawChannelPage() {
         gfxPrint(1, 13, OutputLabel(io_page));
         graphics.printf(":  M%2d", map_index[io_page] + 1);
 
@@ -297,7 +297,7 @@ private:
         gfxInvert(0, 55, 63, 9);
     }
 
-    void DrawGlobalPage() {
+    FLASHMEM void DrawGlobalPage() {
         gfxPrint(1, 13, "Global");
         gfxLine(1, 22, 63, 22);
 
@@ -334,7 +334,7 @@ private:
         gfxInvert(0, 55, 63, 9);
     }
 
-    void DrawLog() {
+    FLASHMEM void DrawLog() {
         if (frame.MIDIState.log_index) {
             for (int i = 0; i < frame.MIDIState.log_index; i++) {
                 PrintLogEntry(15 + i * 8, i);

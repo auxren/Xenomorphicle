@@ -105,11 +105,11 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (RE_ZAP == cursor) {
           Start();
           cursor = 0;
@@ -123,14 +123,14 @@ public:
         } else
             CursorToggle();
     }
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
       const int ch = (cursor) / NUM_STEPS;
       const int s = (cursor) % NUM_STEPS;
       div_seq[ch].ToggleStep(s);
       CancelEdit();
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, LAST_SETTING);
             return;
@@ -146,7 +146,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         const size_t b = 6; // bitsize
         ForEachChannel(ch) {
@@ -167,7 +167,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         const size_t b = 6; // bitsize
         ForEachChannel(ch) {
             int offset = Unpack(data, PackLocation { size_t(60 + ch*2), 1 }) ? 16 : 0;
@@ -185,7 +185,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "Reset";
@@ -203,7 +203,7 @@ private:
 
     int pulse_animation[2] = {0,0};
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
       if (RE_ZAP == cursor) {
         gfxIcon(28, 22, DOWN_ICON);
         gfxIcon(18, 32, RIGHT_ICON);

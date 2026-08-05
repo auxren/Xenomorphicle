@@ -117,7 +117,7 @@ public:
     // View  (64×64 px display region)
     // -----------------------------------------------------------------------
 
-    void View() override {
+    FLASHMEM void View() override {
         if (!SDcard_Ready) {
             gfxPrint(4, 35, "NO SD CARD!");
             return;
@@ -186,18 +186,18 @@ public:
     // Input handling
     // -----------------------------------------------------------------------
 
-    void AuxButton() override {
+    FLASHMEM void AuxButton() override {
         arm_toggle = true;
     }
 
-    void OnButtonPress() override {
+    FLASHMEM void OnButtonPress() override {
         if (CheckEditInputMapPress(cursor,
                 IndexedInput(REC_CV, rec_cv)
             )) return;
         CursorToggle();
     }
 
-    void OnEncoderMove(int direction) override {
+    FLASHMEM void OnEncoderMove(int direction) override {
         if (!EditMode()) {
             MoveCursor(cursor, direction, NUM_PARAMS - 1);
             return;
@@ -211,12 +211,12 @@ public:
     // Persistence
     // -----------------------------------------------------------------------
 
-    void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
         SyncStop();
         data[0] = PackPackables(rec_cv);
     }
 
-    void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
         SyncStop();
         UnpackPackables(data[0], rec_cv);
     }

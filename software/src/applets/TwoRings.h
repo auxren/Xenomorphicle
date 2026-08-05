@@ -270,7 +270,7 @@ class TwoRings : public HemisphereApplet {
     void View();
     void DrawFullScreen();
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
       if (cursor == HOLD_PITCH_A) {
         hold_pitch_a ^= 1;
       } else if (cursor == HOLD_PITCH_B) {
@@ -280,7 +280,7 @@ class TwoRings : public HemisphereApplet {
       }
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
       switch (cursor) {
       case QUANT_A:
       case QUANT_B:
@@ -303,7 +303,7 @@ class TwoRings : public HemisphereApplet {
       }
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, LAST_SETTING);
             SetAux(cursor == PROB || cursor == LENGTH || cursor == QUANT_A || cursor == QUANT_B);
@@ -345,7 +345,7 @@ class TwoRings : public HemisphereApplet {
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,7}, p);
         Pack(data, PackLocation {7,5}, length - 1);
@@ -369,7 +369,7 @@ class TwoRings : public HemisphereApplet {
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         p = Unpack(data, PackLocation {0,7});
         length = Unpack(data, PackLocation {7,5}) + 1;
         range = Unpack(data, PackLocation{12,5}) + 1;
@@ -392,7 +392,7 @@ class TwoRings : public HemisphereApplet {
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "p Gate";
@@ -473,7 +473,7 @@ private:
       }
     }
 
-    void DrawOutputMode(int ch) {
+    FLASHMEM void DrawOutputMode(int ch) {
         const int y = 35;
         const int x = 34*ch;
 
@@ -511,7 +511,7 @@ private:
         gfxBitmap(24+x, y, 3, (outmode[ch] % 2) ? SUP_ONE : SUB_TWO );
     }
 
-    void DrawCVMode(int ch) {
+    FLASHMEM void DrawCVMode(int ch) {
         const int y = 25;
         const int x = 34*ch;
 
@@ -550,7 +550,7 @@ private:
 
     }
 
-    void DrawSelector() {
+    FLASHMEM void DrawSelector() {
         gfxBitmap(1, 14, 8, LOOP_ICON);
         gfxPrint(11 + pad(10, len_mod), 15, len_mod);
         gfxIcon(25, 15, rotate_right ? ROTATE_R_ICON : ROTATE_L_ICON);
@@ -633,7 +633,7 @@ private:
     }
 
     // for full screen visual of the full thing
-    void DrawSequence() {
+    FLASHMEM void DrawSequence() {
         const int ii = (len_mod <= 16) ? 16 : 32;
         const int w = 128;
         for (int b = 0; b < ii; ++b)
@@ -656,7 +656,7 @@ private:
           gfxDottedLine(x_, 14, x_, 63);
         }
     }
-    void DrawIndicator() {
+    FLASHMEM void DrawIndicator() {
         gfxLine(0, 45, 63, 45);
         gfxLine(0, 62, 63, 62);
 

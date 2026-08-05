@@ -173,16 +173,16 @@ public:
       }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawStuff();
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
         rec_step = (rec_step<0)?0:-1;
         step = -1;
         CancelEdit();
     }
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
       if (cursor == REC_OVERDUB) {
         overdub ^= 1;
         if (!overdub) {
@@ -194,7 +194,7 @@ public:
       } else
         CursorToggle();
     }
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, MAX_CURSOR);
             return;
@@ -213,20 +213,20 @@ public:
         ResetCursor();
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation{0, 6}, length - 1);
         Pack(data, PackLocation{8, 5}, midi_ch);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         length = Unpack(data, PackLocation{0, 6}) + 1;
         midi_ch = Unpack(data, PackLocation{8, 5});
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "Reset";
@@ -252,7 +252,7 @@ private:
 
     std::array<std::vector<HS::MIDIMessage>, MAX_LOOP_LENGTH> buffer;
 
-    void DrawStuff() {
+    FLASHMEM void DrawStuff() {
       int y = 15;
       gfxPrint(2, y, "Ch: ");
       if (midi_ch > y) gfxPrint("Om");

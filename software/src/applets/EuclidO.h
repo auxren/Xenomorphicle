@@ -146,11 +146,11 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawRing();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         enum {
             FILLS_PARAM = 0,
             ROTATION_PARAM = 1,
@@ -162,7 +162,7 @@ public:
         param_cursor_ = (param_cursor_ + 1) % MAX_PARAM;
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         enum {
             FILLS_PARAM = 0,
             ROTATION_PARAM = 1,
@@ -184,7 +184,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0, 5}, state_.length());
         Pack(data, PackLocation {5, 5}, state_.fills());
@@ -192,14 +192,14 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         state_.set_length(Unpack(data, PackLocation {0, 5}));
         state_.set_fills(Unpack(data, PackLocation {5, 5}));
         state_.set_rotation(Unpack(data, PackLocation {10, 4}));
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "Reset";
@@ -231,7 +231,7 @@ private:
     static constexpr int cx = 31;
     static constexpr int cy = 38;
 
-    void DrawRing() {
+    FLASHMEM void DrawRing() {
         const uint8_t n = state_.length();
         const uint32_t pat = state_.pattern();
         const uint8_t playhead = state_.playhead_cursor();
@@ -282,7 +282,7 @@ private:
         }
     }
 
-    void DrawStepCircle(int x, int y, int r, bool filled) {
+    FLASHMEM void DrawStepCircle(int x, int y, int r, bool filled) {
         gfxCircle(x, y, r);
         if (filled && r > 0) {
             int inner = r - 1;
@@ -290,7 +290,7 @@ private:
         }
     }
 
-    void DrawStepTriangle(int sx, int sy, int r, bool filled) {
+    FLASHMEM void DrawStepTriangle(int sx, int sy, int r, bool filled) {
         // Triangle tip points toward ring center using true direction vector
         int dx = cx - sx;
         int dy = cy - sy;

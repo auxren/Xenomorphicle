@@ -52,30 +52,30 @@ public:
         GateOut(1, HS::clock_m.IsRunning());
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
       ++cursor %= 2;
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
       if (cursor)
         HS::clock_m.SetMultiply(HS::clock_m.GetMultiply(io_offset) + direction, io_offset);
       else
         HS::clock_m.SetTempoBPM(HS::clock_m.GetTempo() + direction);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         return 0;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "";
@@ -90,7 +90,7 @@ protected:
 
 private:
     uint8_t cursor = 0;
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         gfxIcon(1, 15, NOTE4_ICON);
         gfxPrint(9, 15, "= ");
         gfxPrint(pad(100, HS::clock_m.tempo), HS::clock_m.tempo);
@@ -113,7 +113,7 @@ private:
         DrawMetronome();
     }
 
-    void DrawMetronome() {
+    FLASHMEM void DrawMetronome() {
         gfxLine(20,60,38,63); // Bottom Front
         gfxLine(38,62,44,55); // Bottom Right
         gfxLine(44,55,36,27); // Rear right edge

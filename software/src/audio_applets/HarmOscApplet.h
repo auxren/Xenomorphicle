@@ -61,7 +61,7 @@ public:
         mixer.gain(0, 1.0f - m);
     }
 
-    void View() override {
+    FLASHMEM void View() override {
         gfxIcon(4 + 00, 26, NOTE_ICON);  // pitch
         gfxIcon(4 + 16, 26, PhzIcons::speaker);  // level
         gfxIcon(4 + 32, 26, BEAKER_ICON);  // mix
@@ -163,7 +163,7 @@ public:
         gfxDisplayInputMapEditor();
     }
 
-    void OnButtonPress() override {
+    FLASHMEM void OnButtonPress() override {
         if (cursor >= PARTIAL1 && partial_param == 2) {
             if (CheckEditInputMapPress(cursor,
                 IndexedInput(cursor, amp_cv[cursor - PARTIAL1])
@@ -178,12 +178,12 @@ public:
         CursorToggle();
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
         if (cursor >= PARTIAL1)
             (partial_param + 1) > 2 ? partial_param = 0 : ++partial_param;
     }
 
-    void OnEncoderMove(int direction) override {
+    FLASHMEM void OnEncoderMove(int direction) override {
         if (!EditMode()) {
             MoveCursor(cursor, direction, PARTIAL16);
             return;
@@ -225,7 +225,7 @@ public:
         }
     }
 
-    void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
         data[0] = PackPackables(pitch, level, mix);
         data[1] = PackPackables(pitch_cv, level_cv, mix_cv);
         for (size_t i = 0; i < MAX_PARTIALS; ++i) {
@@ -257,7 +257,7 @@ public:
         // using 8 out of 32 extra blobs
     }
 
-    void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
         UnpackPackables(data[0], pitch, level, mix);
         UnpackPackables(data[1], pitch_cv, level_cv, mix_cv);
         for (size_t i = 0; i < MAX_PARTIALS; ++i) {

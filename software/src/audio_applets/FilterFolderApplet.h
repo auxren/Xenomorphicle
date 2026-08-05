@@ -70,7 +70,7 @@ public:
     }
   }
 
-  void View() {
+  FLASHMEM void View() {
     const int label_x = 1;
     int label_y = 15;
 
@@ -142,7 +142,7 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(FILTER_FREQ_CV, pitch_cv),
@@ -154,7 +154,7 @@ public:
       return;
     CursorToggle();
   }
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       do {
         MoveCursor(cursor, direction, CURSOR_MAX);
@@ -199,13 +199,13 @@ public:
     }
   }
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     data[0] = PackPackables(pitch, res, fold, amplevel, filtfolder[0].modesel);
     data[1] = PackPackables(pitch_cv, res_cv, fold_cv, amp_cv);
     data[2] = PackPackables(pitch_cv2);
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     UnpackPackables(data[0], pitch, res, fold, amplevel, filtfolder[0].modesel);
     UnpackPackables(data[1], pitch_cv, res_cv, fold_cv, amp_cv);
     UnpackPackables(data[2], pitch_cv2);

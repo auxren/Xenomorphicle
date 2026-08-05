@@ -97,13 +97,13 @@ public:
         Out(1, signal);
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 4);
             return;
@@ -128,7 +128,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,6}, tone[0]);
         Pack(data, PackLocation {6,6}, decay[0]);
@@ -138,7 +138,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         tone[0] = Unpack(data, PackLocation {0,6});
         decay[0] = Unpack(data, PackLocation {6,6});
         tone[1] = Unpack(data, PackLocation {12,6});
@@ -147,7 +147,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Trig BD";
     help[HELP_DIGITAL2] = "Trig SD";
@@ -173,7 +173,7 @@ private:
     int decay[2];
     int8_t blend;
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         const uint8_t w = 16;
         const uint8_t x = 45;
 

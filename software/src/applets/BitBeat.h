@@ -85,7 +85,7 @@ public:
     void Controller();
     void View();
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
         if (cursor > CURSOR_LAST) return;
 
         // Check current assignments for this parameter
@@ -108,7 +108,7 @@ public:
         }
     }
 
-    void OnButtonPress() override {
+    FLASHMEM void OnButtonPress() override {
       if (current_page > 1) {
         // ZAP MODE!!!
         current_page = 0;
@@ -135,7 +135,7 @@ public:
       } else
         CursorToggle();
     }
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             // Handle cursor navigation and page switching
             int new_cursor = cursor + direction;
@@ -168,7 +168,7 @@ public:
         EditParameter(current_page, direction);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,4}, equation[0]);
         Pack(data, PackLocation {4,4}, equation[1]);
@@ -185,7 +185,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         equation[0] = Unpack(data, PackLocation {0,4});
         equation[1] = Unpack(data, PackLocation {4,4});
         speed[0] = Unpack(data, PackLocation {8,8});
@@ -202,7 +202,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
       help[HELP_DIGITAL1] = "Reset1";
       help[HELP_DIGITAL2] = "Reset2";
 
@@ -411,7 +411,7 @@ private:
         bytebeat[alg_idx].Configure(parameters, stepmode[alg_idx], loopmode[alg_idx]);
     }
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         frame_counter++;
 
         if (current_page > 1) {

@@ -62,7 +62,7 @@ public:
     mixer.gain(0, 1.0f - m);
   }
 
-  void View() override {
+  FLASHMEM void View() override {
     gfxStartCursor(1, 15);
     gfxPrint(WAVEFORM_NAMES[waveform]);
     gfxEndCursor(cursor == WAVEFORM);
@@ -125,13 +125,13 @@ public:
 #define OSC_PARAMS \
   pw, pitch, mod_depth, level, mix, pack<2>(waveform), pack<2>(mod_type)
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     data[0] = PackPackables(OSC_PARAMS);
     data[1] = PackPackables(pw_cv, pitch_cv, mod_cv, level_cv);
     data[2] = PackPackables(mix_cv);
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     UnpackPackables(data[0], OSC_PARAMS);
     SetWaveform(waveform);
     SetModType(mod_type);
@@ -140,7 +140,7 @@ public:
     UnpackPackables(data[2], mix_cv);
   }
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(cursor,
           IndexedInput(PITCH_CV, pitch_cv),
           IndexedInput(PW_CV, pw_cv),
@@ -152,7 +152,7 @@ public:
     CursorToggle();
   }
 
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       do {
         MoveCursor(cursor, direction, MIX_CV);

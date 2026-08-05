@@ -61,12 +61,12 @@ public:
 
   void View() final;
 
-  void AuxButton() override {
+  FLASHMEM void AuxButton() override {
     if (cursor == MIX) send_mode ^= 1;
     CancelEdit();
   }
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(MIX_CV, mix_cv),
@@ -83,13 +83,13 @@ public:
 #define BLACKHOLE_PARAMS \
   wet, gravity, size, mod_depth, mod_rate, locut, hidamp, predelay_2ms
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     data[0] = PackPackables(BLACKHOLE_PARAMS);
     data[1] = PackPackables(mix_cv, grav_cv, size_cv, mod_cv);
     data[2] = PackPackables(pack<1>(send_mode));
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     UnpackPackables(data[0], BLACKHOLE_PARAMS);
     UnpackPackables(data[1], mix_cv, grav_cv, size_cv, mod_cv);
     UnpackPackables(data[2], pack<1>(send_mode));
@@ -140,7 +140,7 @@ private:
     }
   }
 
-  void DrawRow(int r, int y) {
+  FLASHMEM void DrawRow(int r, int y) {
     const int rx = 63 - 8; // right edge for values, like DelayApplet
     switch (r) {
       case 0:

@@ -86,14 +86,14 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawSelector();
         DrawIndicator();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 2);
             return;
@@ -106,7 +106,7 @@ public:
         else sensitivity = constrain(sensitivity + direction, 4, TRENDING_MAX_SENS);
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,4}, assign[0]);
         Pack(data, PackLocation {4,4}, assign[1]);
@@ -114,14 +114,14 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         assign[0] = Unpack(data, PackLocation {0,4});
         assign[1] = Unpack(data, PackLocation {4,4});
         sensitivity = Unpack(data, PackLocation {8,8});
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "";
         help[HELP_DIGITAL2] = "";
@@ -148,7 +148,7 @@ private:
     uint8_t assign[2];
     int sensitivity;
 
-    void DrawSelector() {
+    FLASHMEM void DrawSelector() {
         gfxPrint(1, 15, OutputLabel(0));
         gfxPrint(":");
         gfxPrint(Trending_assignments[assign[0]]);
@@ -164,7 +164,7 @@ private:
         }
     }
 
-    void DrawIndicator() {
+    FLASHMEM void DrawIndicator() {
         ForEachChannel(ch)
         {
             if (last_trend[ch] == Trend::rising) gfxDottedLine(5, 57 + (ch * 5), 57, 47 + (ch * 5), ch + 2);

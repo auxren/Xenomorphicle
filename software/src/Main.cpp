@@ -218,7 +218,7 @@ void BootMenu() {
 }
 #endif
 
-void setup() {
+FLASHMEM void setup() {
   delay(50);
   Serial.begin(9600);
 

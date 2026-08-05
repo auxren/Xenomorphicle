@@ -88,14 +88,14 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawSelector();
         if (play) DrawWaveform();
     }
 
     //void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 3);
             return;
@@ -117,7 +117,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,7}, dt_pct);
         Pack(data, PackLocation {7,7}, feedback);
@@ -126,7 +126,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         dt_pct = constrain(Unpack(data, PackLocation {0,7}), 0, 99);
         feedback = constrain(Unpack(data, PackLocation {7,7}), 0, 125);
         rate = constrain(Unpack(data, PackLocation {14,5}), 1, 32);
@@ -134,7 +134,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Pause";
     help[HELP_DIGITAL2] = "FB=100";
@@ -162,7 +162,7 @@ private:
 
     uint8_t* lofi_pcm_buffer;
 
-    void DrawWaveform() {
+    FLASHMEM void DrawWaveform() {
         int inc = rate_mod/2 + 1;
         int pos = head - (inc * 31) - random(1,3); // Try to center the head
         if (pos < 0) pos += length;

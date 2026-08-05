@@ -36,7 +36,7 @@ public:
     interp_stream.Push(Clip16((gain_cv.InF(0.0f) + dbToScalar(gain)) * scalar * in));
   }
 
-  void View() override {
+  FLASHMEM void View() override {
     gfxPrint(1, 15, "Source:");
     gfxStartCursor();
     gfxPrint(input);
@@ -74,7 +74,7 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(0, input),
@@ -88,7 +88,7 @@ public:
     }
   }
 
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       MoveCursor(cursor, direction, 4);
       return;
@@ -112,12 +112,12 @@ public:
         break;
     }
   }
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     data[0] = PackPackables(pack(gain), pack<1>(ac_couple), pack<2>(method));
     data[1] = PackPackables(input, gain_cv);
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     UnpackPackables(data[0], pack(gain), pack<1>(ac_couple), pack<2>(method));
     UnpackPackables(data[1], input, gain_cv);
     CONSTRAIN(gain, LVL_MIN_DB, LVL_MAX_DB);

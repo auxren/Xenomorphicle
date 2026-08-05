@@ -210,13 +210,13 @@ public:
     void View() final;
 
     /*
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
         shape_edit ^= 1;
     }
     */
     //void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
           cursor = constrain(cursor + direction, 0, CURSOR_MAX);
           return;
@@ -233,7 +233,7 @@ public:
           adsr.setting[stage] = constrain(adsr.setting[stage] + direction, 1, STAGE_MAX_VALUE);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         for(size_t ch = 0; ch < 2; ++ch) {
           Pack(data, PackLocation {ch*32 +  0,8}, adsr_env[ch].setting[0]);
@@ -244,7 +244,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
       if (!data) {
         Start(); // If empty data, initialize
         return;
@@ -258,7 +258,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "GateCh1";
     help[HELP_DIGITAL2] = "GateCh2";
@@ -280,7 +280,7 @@ private:
 
     const char* const labels[NUM_STAGES] = { "A=", "D=", "S=", "R=" };
 
-    void DrawIndicator() {
+    FLASHMEM void DrawIndicator() {
         ForEachChannel(ch)
         {
             int w = Proportion(adsr_env[ch].GetAmplitude(), HEMISPHERE_MAX_CV, 62);
@@ -297,7 +297,7 @@ private:
         }
     }
 
-    void DrawActiveParam() {
+    FLASHMEM void DrawActiveParam() {
         const int curEG = (cursor / NUM_STAGES);
         const int stage = cursor % NUM_STAGES;
         auto &adsr = adsr_env[curEG];
@@ -318,7 +318,7 @@ private:
         }
     }
 
-    void DrawADSR() {
+    FLASHMEM void DrawADSR() {
         const int curEG = (cursor / NUM_STAGES);
         auto &adsr = adsr_env[curEG];
         int length = adsr.GetLength();
@@ -329,7 +329,7 @@ private:
         DrawRelease(x, length);
     }
 
-    int DrawAttack(int x, int length) {
+    FLASHMEM int DrawAttack(int x, int length) {
         const int curEG = (cursor / NUM_STAGES);
         auto &adsr = adsr_env[curEG];
         int xA = x + Proportion(adsr.setting[ATTACK_STAGE], length, 62);
@@ -337,7 +337,7 @@ private:
         return xA;
     }
 
-    int DrawDecay(int x, int length) {
+    FLASHMEM int DrawDecay(int x, int length) {
         const int curEG = (cursor / NUM_STAGES);
         auto &adsr = adsr_env[curEG];
         int xD = x + Proportion(adsr.setting[DECAY_STAGE], length, 62);
@@ -347,7 +347,7 @@ private:
         return xD;
     }
 
-    int DrawSustain(int x, int length) {
+    FLASHMEM int DrawSustain(int x, int length) {
         const int curEG = (cursor / NUM_STAGES);
         auto &adsr = adsr_env[curEG];
         int xS = x + Proportion(SUSTAIN_CONST, length, 62);
@@ -358,7 +358,7 @@ private:
         return xS;
     }
 
-    int DrawRelease(int x, int length) {
+    FLASHMEM int DrawRelease(int x, int length) {
         const int curEG = (cursor / NUM_STAGES);
         auto &adsr = adsr_env[curEG];
         int xR = x + Proportion(adsr.setting[RELEASE_STAGE], length, 62);

@@ -36,7 +36,7 @@ public:
     cv_stream.Push(float_to_q15(invert ? -cv : cv));
   }
 
-  void View() {
+  FLASHMEM void View() {
     gfxPrint(1, 15, "Lvl:");
     gfxStartCursor();
     gfxPrintDb(level);
@@ -71,7 +71,7 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(1, level_cv),
@@ -81,7 +81,7 @@ public:
     CursorToggle();
   }
 
-  void OnEncoderMove(int direction) {
+  FLASHMEM void OnEncoderMove(int direction) {
     if (!EditMode()) {
       MoveCursor(cursor, direction, NUM_PARAMS - 1);
       return;
@@ -112,7 +112,7 @@ public:
     }
   }
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) {
     uint64_t& d = data[0];
     d = PackPackables(level, bias, shape);
     Pack(d, {62, 1}, rectify);
@@ -120,7 +120,7 @@ public:
     data[1] = PackPackables(level_cv, shape_cv);
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) {
     uint64_t d = data[0];
     UnpackPackables(d, level, bias, shape);
     rectify = Unpack(d, {62, 1});

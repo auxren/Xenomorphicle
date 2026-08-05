@@ -171,14 +171,14 @@ public:
 
     // --- AuxButton: manual test strike ---------------------------------------
 
-    void AuxButton() override {
+    FLASHMEM void AuxButton() override {
         manual_strike_ = true;
         CancelEdit();
     }
 
     // --- Button / encoder ----------------------------------------------------
 
-    void OnButtonPress() override {
+    FLASHMEM void OnButtonPress() override {
         if (CheckEditInputMapPress(
                 cursor,
                 IndexedInput(FREQ_CV,   freq_cv),
@@ -194,7 +194,7 @@ public:
         CursorToggle();
     }
 
-    void OnEncoderMove(int direction) override {
+    FLASHMEM void OnEncoderMove(int direction) override {
         if (!EditMode()) {
             MoveCursor(cursor, direction, VEL_CV);
             return;
@@ -232,7 +232,7 @@ public:
     // --- Persistence ---------------------------------------------------------
 
 #define MODAL_PARAMS pitch, structure, brightness, damping, position, mix, velocity
-    void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
         uint16_t dummy = 0;
         data[0] = PackPackables(MODAL_PARAMS);
         data[1] = PackPackables(freq_cv, struct_cv, bright_cv, damp_cv);
@@ -240,7 +240,7 @@ public:
         data[3] = PackPackables(strike_input);
     }
 
-    void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
         uint16_t dummy = 0;
         UnpackPackables(data[0], MODAL_PARAMS);
         UnpackPackables(data[1], freq_cv, struct_cv, bright_cv, damp_cv);

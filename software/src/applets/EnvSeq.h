@@ -428,7 +428,7 @@ public:
 
     void View();
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (random_menu_active) {
             switch (random_menu_cursor.cursor_pos()) {
             case RandomCursor::RANDOM_APPLY:
@@ -541,7 +541,7 @@ public:
         }
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
         if (cursor > EnvSeqCursor::STEP_VIEW) {
             step_select = !step_select;
         }
@@ -550,7 +550,7 @@ public:
         }
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (linked_cursor < MAX_LINKED_CURSOR) {
             if (!EditMode()) {
                 MoveCursor(linked_cursor, direction, LinkedCursor::MAX_LINKED_CURSOR - 1);
@@ -678,7 +678,7 @@ public:
         reinit_osc();
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
 
         uint8_t* p = (uint8_t*)steps;
@@ -721,7 +721,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         trigger2 = Unpack(data, PackLocation {0, 1});
         num_steps = constrain(Unpack(data, PackLocation {1, 5}) + 1, 1, MAX_NUM_STEPS);
         mod1_mode = (ModulationMode)constrain(Unpack(data, PackLocation {6, 3}), 0, ModulationMode::MAX_MODULATION_MODE - 1);
@@ -764,7 +764,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = trigger2 ? "Trigger" : "Reset";

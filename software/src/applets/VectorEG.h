@@ -76,11 +76,11 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
       modshape = cursor & 1;
       if (!modshape) {
         ForEachChannel(ch) {
@@ -92,7 +92,7 @@ public:
     }
     //void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 3);
             return;
@@ -112,7 +112,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,6}, waveform_number[0]);
         Pack(data, PackLocation {6,6}, waveform_number[1]);
@@ -121,7 +121,7 @@ public:
         Pack(data, PackLocation {32, 1}, modshape);
         return data;
     }
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         freq[0] = Unpack(data, PackLocation {12,10});
         freq[1] = Unpack(data, PackLocation {22,10});
         waveform_number[0] = Unpack(data, PackLocation {0,6});
@@ -132,7 +132,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Gate 1";
         help[HELP_DIGITAL2] = "Gate 2";
@@ -157,7 +157,7 @@ private:
     int16_t freq[2];
     int16_t freq_mod[2];
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         uint8_t c = cursor & 1;
         uint8_t ch = cursor >> 1;
 
@@ -183,7 +183,7 @@ private:
         if (c == 1 && (EditMode() || CursorBlink()) ) gfxFrame(0, 24, 63, 40, true);
     }
 
-    void DrawWaveform(uint8_t ch) {
+    FLASHMEM void DrawWaveform(uint8_t ch) {
         uint16_t total_time = osc[ch].TotalTime();
         VOSegment seg = osc[ch].GetSegment(osc[ch].SegmentCount() - 1);
         uint8_t prev_x = 0; // Starting coordinates

@@ -44,28 +44,28 @@ public:
         else Out(1, output);
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         amp_offset_pct = constrain(amp_offset_pct + direction, 0, 100);
         amp_offset_cv = Proportion(amp_offset_pct, 100, HEMISPHERE_MAX_CV);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Gate 1";
     help[HELP_DIGITAL2] = "Mute 2";
@@ -82,7 +82,7 @@ private:
     int amp_offset_pct; // Offset as percentage of max cv
     int amp_offset_cv; // Raw CV offset; calculated on encoder move
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         gfxPrint(0, 15, "Offset:");
         gfxPrint(pad(100, amp_offset_pct), amp_offset_pct);
         gfxSkyline();

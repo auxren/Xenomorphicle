@@ -91,15 +91,15 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawIndicator();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         cursor = 1 - cursor;
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (cursor == 0) {
             attack = constrain(attack + direction, 0, HEM_ADEG_MAX_VALUE);
             last_ms_value = Proportion(attack, HEM_ADEG_MAX_VALUE, HEM_ADEG_MAX_TICKS) / 17;
@@ -111,20 +111,20 @@ public:
         last_change_ticks = OC::CORE::ticks;
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,8}, attack);
         Pack(data, PackLocation {8,8}, decay);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         attack = Unpack(data, PackLocation {0,8});
         decay = Unpack(data, PackLocation {8,8});
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Trigger";
     help[HELP_DIGITAL2] = "Reverse";
@@ -150,7 +150,7 @@ private:
     int attack; // Time to reach signal level if signal < 5V
     int decay; // Time to reach signal level if signal > 0V
 
-    void DrawIndicator() {
+    FLASHMEM void DrawIndicator() {
         int a_x = Proportion(attack, HEM_ADEG_MAX_VALUE, 31);
         int d_x = a_x + Proportion(decay, HEM_ADEG_MAX_VALUE, 31);
 

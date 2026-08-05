@@ -190,7 +190,7 @@ public:
 
     void View() final;
 
-    void OnButtonPress() override {
+    FLASHMEM void OnButtonPress() override {
         if (random_menu_active) {
             switch (random_menu_cursor.cursor_pos()) {
                 case RandomCursor::RANDOM_CH1:
@@ -280,7 +280,7 @@ public:
         }
     }
 
-    void AuxButton() override {
+    FLASHMEM void AuxButton() override {
         if (random_menu_active) {
             // Just exit random menu on aux button.
             random_menu_active = false;
@@ -302,7 +302,7 @@ public:
         }
     }
 
-    void OnEncoderMove(int direction) override {
+    FLASHMEM void OnEncoderMove(int direction) override {
         if (random_menu_active) {
             random_menu_cursor.Scroll(direction);
             return;
@@ -370,7 +370,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() override {
+    FLASHMEM uint64_t OnDataRequest() override {
         uint64_t data = 0;
 
         uint8_t* p = (uint8_t*)cv_values;
@@ -406,7 +406,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) override {
+    FLASHMEM void OnDataReceive(uint64_t data) override {
         input2_mode = (Input2Mode)constrain(Unpack(data, PackLocation {0, 2}), 0, Input2Mode::MAX_INPUT2_MODE - 1);
         output2_mode = (Output2Mode)constrain(Unpack(data, PackLocation {2, 3}), 0, Output2Mode::MAX_OUTPUT2_MODE - 1);
         qselect = constrain(Unpack(data, PackLocation {5, 3}), 0, QUANT_CHANNEL_COUNT - 1);
@@ -440,7 +440,7 @@ public:
     }
 
 protected:
-    void SetHelp() override {
+    FLASHMEM void SetHelp() override {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "Reset";

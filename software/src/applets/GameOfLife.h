@@ -38,7 +38,7 @@ public:
         Out(1, constrain(local_density_cv, 0, HEMISPHERE_MAX_CV));
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawBoard();
         DrawIndicator();
         DrawCrosshairs();
@@ -49,26 +49,26 @@ public:
         DrawIndicator();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         for (int i = 0; i < 80; i++) board[i] = 0;
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         weight = constrain(weight += direction, 0, 100);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,6}, weight);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         weight = Unpack(data, PackLocation {0,6});
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "Draw";
@@ -89,7 +89,7 @@ private:
     int tx;
     int ty;
 
-    void DrawBoard() {
+    FLASHMEM void DrawBoard() {
         for (int y = 0; y < 40; y++)
         {
             for (int b = 0; b < 2; b++)
@@ -102,7 +102,7 @@ private:
         }
     }
 
-    void DrawIndicator() {
+    FLASHMEM void DrawIndicator() {
         // Output indicators
         ForEachChannel(ch)
         {
@@ -110,7 +110,7 @@ private:
         }
     }
 
-    void DrawCrosshairs() {
+    FLASHMEM void DrawCrosshairs() {
         gfxLine(tx, 23, tx, 63);
         gfxLine(0, ty + 22, 62, ty + 22);
     }

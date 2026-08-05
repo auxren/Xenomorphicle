@@ -92,7 +92,7 @@ public:
     }
   }
 
-  void View() {
+  FLASHMEM void View() {
     gfxPrint(1, 15, "Q"); gfxPrint(qselect_mod + 1);
     gfxPrint(15, 15, OC::scale_names_short[HS::GetScale(qselect_mod)]);
     gfxPrint(45, 15, OC::Strings::note_names_unpadded[HS::GetRootNote(qselect_mod)]);
@@ -165,7 +165,7 @@ public:
 
   //void OnButtonPress() { }
 
-  void AuxButton() {
+  FLASHMEM void AuxButton() {
     if (cursor == QUANT)
       HS::QuantizerEdit(qselect);
 
@@ -179,7 +179,7 @@ public:
     CancelEdit();
   }
 
-  void OnEncoderMove(int direction) {
+  FLASHMEM void OnEncoderMove(int direction) {
     if (!EditMode()) {
       MoveCursor(cursor, direction, INTERVAL_START + length - 1);
       return;
@@ -204,7 +204,7 @@ public:
     }
   }
 
-  uint64_t OnDataRequest() {
+  FLASHMEM uint64_t OnDataRequest() {
     uint64_t data = 0;
     Pack(data, PackLocation{0, 4}, qselect);
     Pack(data, PackLocation{12, 9}, spacing);
@@ -217,7 +217,7 @@ public:
     return data;
   }
 
-  void OnDataReceive(uint64_t data) {
+  FLASHMEM void OnDataReceive(uint64_t data) {
     qselect = Unpack(data, PackLocation{0, 4});
     spacing = Unpack(data, PackLocation{12, 9});
     length = Unpack(data, PackLocation{21, 4});
@@ -233,7 +233,7 @@ public:
   }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Strm Up";
         help[HELP_DIGITAL2] = "Strm Dn";

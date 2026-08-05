@@ -62,7 +62,7 @@ public:
         }
     }
 
-    void View() override {
+    FLASHMEM void View() override {
         static const char* const MODE_NAMES[] = { "CLIP", "SAT ", "CRUS", "DECI" };
 
         // Row 1 (y=15): Mode
@@ -112,12 +112,12 @@ public:
     }
 
     // AuxButton: cycle mode
-    void AuxButton() override {
+    FLASHMEM void AuxButton() override {
         mode_ = (mode_ + 1) % 4;
         CancelEdit();
     }
 
-    void OnButtonPress() override {
+    FLASHMEM void OnButtonPress() override {
         if (CheckEditInputMapPress(
                 cursor,
                 IndexedInput(DRIVE_CV, drv_cv),
@@ -129,7 +129,7 @@ public:
         CursorToggle();
     }
 
-    void OnEncoderMove(int direction) override {
+    FLASHMEM void OnEncoderMove(int direction) override {
         if (!EditMode()) {
             MoveCursor(cursor, direction, CURSOR_LENGTH - 1);
             return;
@@ -151,12 +151,12 @@ public:
     }
 
 #define GRIT_PARAMS mode_, drive, amt, tone, mix
-    void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
         data[0] = PackPackables(GRIT_PARAMS);
         data[1] = PackPackables(drv_cv, amt_cv, tone_cv, mix_cv);
     }
 
-    void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
         UnpackPackables(data[0], GRIT_PARAMS);
         UnpackPackables(data[1], drv_cv, amt_cv, tone_cv, mix_cv);
         mode_ = constrain(mode_, 0, 3);

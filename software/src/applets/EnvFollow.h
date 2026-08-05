@@ -74,14 +74,14 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
         gfxSkyline();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, MAX_CURSOR);
             return;
@@ -105,7 +105,7 @@ public:
         ResetCursor();
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,5}, gain[0]);
         Pack(data, PackLocation {5,5}, gain[1]);
@@ -115,7 +115,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         gain[0] = Unpack(data, PackLocation {0,5});
         gain[1] = Unpack(data, PackLocation {5,5});
         duck[0] = Unpack(data, PackLocation {10,1});
@@ -125,7 +125,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "";
     help[HELP_DIGITAL2] = "";
@@ -150,7 +150,7 @@ private:
     bool duck[2]; // Choose between follow and duck per channel
     int speed = 1; // attack/release rate
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         ForEachChannel(ch)
         {
             // Duck

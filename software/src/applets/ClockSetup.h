@@ -129,7 +129,7 @@ public:
         if (slide_anim) --slide_anim;
     }
 
-    void DrawIndicator() {
+    FLASHMEM void DrawIndicator() {
       // Clock indicator icons overlay
       if (clock_m.IsRunning() || clock_m.IsPaused()) {
         graphics.clearRect(59, 4, 10, 10);
@@ -142,7 +142,7 @@ public:
         }
       }
     }
-    void View() {
+    FLASHMEM void View() {
       if (OC::CORE::ticks - view_tick > 1000) {
         slide_anim = SLIDEOUT_TIME;
       }
@@ -151,7 +151,7 @@ public:
       DrawInterface();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (!EditMode()) { // special cases for toggle buttons
             if (cursor == PLAY_STOP) PlayStop();
             else if (cursor >= BOOP1 && cursor <= BOOP4) {
@@ -180,7 +180,7 @@ public:
         }
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         taps = 0;
         last_tap_tick = 0;
         if (!EditMode()) {
@@ -255,7 +255,7 @@ public:
       else OnEncoderMove(direction);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation { 0, 9 }, clock_m.GetTempo());
         Pack(data, PackLocation { 9, 7 }, clock_m.GetShuffle());
@@ -269,7 +269,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         if (!clock_m.IsRunning())
             clock_m.SetTempoBPM(Unpack(data, PackLocation { 0, 9 }));
         clock_m.SetShuffle(Unpack(data, PackLocation { 9, 7 }));
@@ -342,7 +342,7 @@ private:
 
     // This applet is an overlay, drawn on top of the applet view.
     // Space must be cleared first, depending on the cursor position.
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
       if (slide_anim) {
         const int h_norm = (cursor < TRIG1) ? 23 : 33;
         if (cursor < OUTSKIP1) {

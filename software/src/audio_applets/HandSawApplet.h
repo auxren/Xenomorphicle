@@ -71,7 +71,7 @@ class HandSawApplet : public HemisphereAudioApplet {
             vca_level.Push(float_to_q15(m));
         }
 
-        void View() override {
+        FLASHMEM void View() override {
 
             gfxPrint(1, 25, "Wave: ");
             gfxStartCursor();
@@ -127,7 +127,7 @@ class HandSawApplet : public HemisphereAudioApplet {
     #define SWARM_OSC_PARAMS \
         pitch[0], pitch[1], pitch[2], pitch[3]
 
-        void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+        FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
             int8_t dummy = 0;
             data[0] = PackPackables(SWARM_OSC_PARAMS);
             data[1] = PackPackables(pitch_cv[0], pitch_cv[1], pitch_cv[2], pitch_cv[3]);
@@ -135,7 +135,7 @@ class HandSawApplet : public HemisphereAudioApplet {
             data[3] = PackPackables(waveform, detune, phase, dummy, amp);
         }
 
-        void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+        FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
             int8_t dummy;
             UnpackPackables(data[0], SWARM_OSC_PARAMS);
             UnpackPackables(data[1], pitch_cv[0], pitch_cv[1], pitch_cv[2], pitch_cv[3]);
@@ -144,7 +144,7 @@ class HandSawApplet : public HemisphereAudioApplet {
             SetWaveform(waveform);
         }
 
-        void AuxButton() override {
+        FLASHMEM void AuxButton() override {
             switch (cursor) {
                 case PITCH1:
                 case PITCH2:
@@ -167,7 +167,7 @@ class HandSawApplet : public HemisphereAudioApplet {
             }
         }
 
-        void OnButtonPress() override {
+        FLASHMEM void OnButtonPress() override {
             if (CheckEditInputMapPress(cursor,
                 IndexedInput(DETUNE_CV, detune_cv),
                 IndexedInput(PHASE_CV,  phase_cv),
@@ -190,7 +190,7 @@ class HandSawApplet : public HemisphereAudioApplet {
             }
         }
 
-        void OnEncoderMove(int direction) override {
+        FLASHMEM void OnEncoderMove(int direction) override {
             if (!EditMode()) {
                 MoveCursor(cursor, direction, AMP_CV);
                 return;

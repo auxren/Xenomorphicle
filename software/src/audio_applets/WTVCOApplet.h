@@ -63,7 +63,7 @@ public:
         mixer.gain(0, 1.0f - m);
     }
 
-    void View() override {
+    FLASHMEM void View() override {
         if (cursor > WAVEFORM_LAST) {
             DrawParams();
         } else {
@@ -74,7 +74,7 @@ public:
         gfxDisplayInputMapEditor();
     }
 
-    void OnButtonPress() override {
+    FLASHMEM void OnButtonPress() override {
         userwave_select = false;
         if (cursor == PARAM_OSC_DIRECTION) {
             osc_rev = !osc_rev;
@@ -90,7 +90,7 @@ public:
         CursorToggle();
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
         if (cursor > WAVEFORM_OUT && cursor <= WAVEFORM_LAST) {
             const int idx = cursor - WAVEFORM_A;
             if (waveform[idx] == WAVE_NOISE) noise_freeze = !noise_freeze;  // toggle "realtime" or frozen noise wave buffer
@@ -99,7 +99,7 @@ public:
         }
     }
 
-    void OnEncoderMove(int direction) override {
+    FLASHMEM void OnEncoderMove(int direction) override {
         if (!EditMode()) {
             MoveCursor(cursor, direction, CURSOR_LAST);
             return;
@@ -162,13 +162,13 @@ public:
         }
     }
 
-    void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
         data[0] = PackPackables(pitch, wt_blend, pulse_duty, level, mix);
         data[1] = PackPackables(pitch_cv, wt_blend_cv, pulse_duty_cv, level_cv);
         data[2] = PackPackables(mix_cv, waveform[A], waveform[B], waveform[C], userwave[A], userwave[B], userwave[C]);
     }
 
-    void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
         UnpackPackables(data[0], pitch, wt_blend, pulse_duty, level, mix);
         UnpackPackables(data[1], pitch_cv, wt_blend_cv, pulse_duty_cv, level_cv);
         UnpackPackables(data[2], mix_cv, waveform[A], waveform[B], waveform[C], userwave[A], userwave[B], userwave[C]);
@@ -281,7 +281,7 @@ private:
         }
     }
 
-    void DrawSelector() {
+    FLASHMEM void DrawSelector() {
         uint8_t x = 0;
         uint8_t y = HEADER_HEIGHT + 1;
         uint8_t w = X_DIV;
@@ -293,7 +293,7 @@ private:
         else return;
     }
 
-    void DrawBlendicator(int b) {
+    FLASHMEM void DrawBlendicator(int b) {
         const uint8_t y = 2 * HEADER_HEIGHT;
         const uint8_t h = 2;
         uint8_t x =  1 + X_DIV * (1 + (b / 128)) + ((b / 64) % 2) * Proportion(b - (64 * (b / 64)), 63, X_DIV);
@@ -301,7 +301,7 @@ private:
         gfxRect(x, y, w, h);
     }
 
-    void DrawWaveMenu() {
+    FLASHMEM void DrawWaveMenu() {
         uint8_t x = 3;
         uint8_t y = MENU_ROW;
         if (!EditMode() || cursor == WAVEFORM_OUT) {
@@ -330,7 +330,7 @@ private:
         }
     }
 
-    void DrawScope() {
+    FLASHMEM void DrawScope() {
         switch(cursor) {
             case WAVEFORM_A:
             case WAVEFORM_B:
@@ -346,7 +346,7 @@ private:
         gfxDottedLine(0, 63, 63, 63, 4U);
     }
 
-    void DrawParams() {
+    FLASHMEM void DrawParams() {
         switch(cursor) {
             case PARAM_OCTAVE:
             case PARAM_PITCH:

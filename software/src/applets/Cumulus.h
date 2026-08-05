@@ -93,14 +93,14 @@ public:
 
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawIndicator();
         DrawSelector();
     }
 
     //void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, LAST_CURSOR - 1);
             return;
@@ -123,7 +123,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation { 0, 3}, accoperator);
         Pack(data, PackLocation { 3, 4}, b_constant);
@@ -132,7 +132,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         accoperator = (AccOperator) constrain(Unpack(data, PackLocation { 0, 3}), 0, OP_LAST - 1);
         b_constant = constrain(Unpack(data, PackLocation { 3, 4}), ACC_MIN_B, ACC_MAX_B);
         outmode[0] = constrain(Unpack(data, PackLocation { 7, 4}), 0, 7);
@@ -140,7 +140,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "Rand Z";
@@ -169,7 +169,7 @@ private:
     const char* OP_NAMES[OP_LAST] = {"z+k", "z-k", "z*k+1", "(z^k)<<1", "(z-k)>>2"};
 
 
-    void DrawSelector() {
+    FLASHMEM void DrawSelector() {
         a_display = EditMode() ? outmode[0] : a_mod;
         gfxIcon(1, 15, CLOCK_ICON);
         gfxPrint(12, 15, OP_NAMES[accoperator]);
@@ -194,7 +194,7 @@ private:
         }
     }
 
-    void DrawIndicator() {
+    FLASHMEM void DrawIndicator() {
         gfxPrint(1, 40, "k");
         gfxPrint(1, 52, "Z");
 

@@ -221,13 +221,13 @@ public:
 
     void View() final;
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
       if (cursor == 10) mix_outs = !mix_outs;
       else
         CursorToggle();
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 10);
             return;
@@ -271,7 +271,7 @@ public:
 
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         // parameters are 6 bits each
         uint64_t data = 0;
         Pack(data, PackLocation {0,6}, tone_kick);
@@ -291,7 +291,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         tone_kick = Unpack(data, PackLocation {0,6});
         decay_kick = Unpack(data, PackLocation {6,6});
         punch = Unpack(data, PackLocation {12,6});
@@ -309,7 +309,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Kick";
     help[HELP_DIGITAL2] = "Snare";
@@ -370,7 +370,7 @@ private:
     uint8_t cv_mode_kick;
     uint8_t cv_mode_snare;
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         DrawDrumBody(1, _tone_kick, _decay_kick, _punch, _decay_punch, 0);
         DrawDrumBody(32, _tone_snare, _decay_snare, _snap, _blend_snare, 1);
 
@@ -420,7 +420,7 @@ private:
                       30, ProportionCV(levels[ch], 34));
     }
 
-    void DrawDrumBody(byte x, byte tone, byte decay, byte punch, byte pdecay, bool is_snare) {
+    FLASHMEM void DrawDrumBody(byte x, byte tone, byte decay, byte punch, byte pdecay, bool is_snare) {
         const int8_t wmin = 10;
         const int8_t wmax = 30;
         const int8_t hmin = 6;

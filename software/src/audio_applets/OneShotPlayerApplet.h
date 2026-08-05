@@ -223,7 +223,7 @@ public:
     }
   }
 
-  void View() {
+  FLASHMEM void View() {
     if (!SDcard_Ready) {
       gfxPrint(4, 25, "NO SD CARD!!");
       return;
@@ -288,7 +288,7 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void AuxButton() {
+  FLASHMEM void AuxButton() {
     // Manual trigger
     if (SDcard_Ready && folder_file_count > 0) {
       sample_playtrig = true;
@@ -301,7 +301,7 @@ public:
     }
   }
 
-  void OnButtonPress() {
+  FLASHMEM void OnButtonPress() {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(SAMPLE_CV, sample_cv),
@@ -314,7 +314,7 @@ public:
     CursorToggle();
   }
 
-  void OnEncoderMove(int direction) {
+  FLASHMEM void OnEncoderMove(int direction) {
     if (!EditMode()) {
       MoveCursor(cursor, direction, NUM_PARAMS - 1);
       return;
@@ -362,7 +362,7 @@ public:
     }
   }
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     // Stop playback to avoid SD card hangup on preset save
     wavplayer.stop();
 
@@ -385,7 +385,7 @@ public:
     );
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     UnpackPackables(data[0], folder_num, sample_index, sample_cv, playrate, level);
     UnpackPackables(data[1], playrate_cv, level_cv, trigger_cv);
     UnpackPackables(data[2], trig_mode, attack, release);

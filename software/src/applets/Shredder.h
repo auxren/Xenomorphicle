@@ -97,13 +97,13 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawParams();
         DrawMeters();
         DrawGrid();
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
       if (cursor < 2) {
         Shred(cursor, true);
       }
@@ -111,7 +111,7 @@ public:
         CancelEdit();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
       switch (cursor) {
         case CHAN1_RANGE:
         case CHAN2_RANGE:
@@ -134,7 +134,7 @@ public:
       }
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, MAX_CURSOR);
             return;
@@ -164,7 +164,7 @@ public:
           quant_channels = constrain(quant_channels + direction, 0, 2);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         // Not enough room to save the sequences, so we'll just have to save settings
         Pack(data, PackLocation {0,4}, range[0]); // range will never be more than 4 bits
@@ -180,7 +180,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         range[0] = Unpack(data, PackLocation {0,4}); // only 4 bits used for range
         bipolar[0] = Unpack(data, PackLocation {4,1}); 
         shred_on_reset[0] = Unpack(data, PackLocation {5,1});
@@ -198,7 +198,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "Reset";
@@ -233,7 +233,7 @@ private:
     int confirm_animation_countdown;
     int confirm_animation_position;
 
-    void DrawParams() {
+    FLASHMEM void DrawParams() {
         // Channel 1 voltage
         char outlabel[] = { (char)('A' + io_offset), ':', '+', '\0' };
         gfxPrint(1, 15, outlabel);
@@ -276,7 +276,7 @@ private:
 
     }
 
-    void DrawMeters() {
+    FLASHMEM void DrawMeters() {
       ForEachChannel(ch) {
         int o = ch * 10; // offset
         gfxLine(34, 47+o, 62, 47+o); // top line
@@ -293,7 +293,7 @@ private:
       }
     }
     
-    void DrawGrid() {
+    FLASHMEM void DrawGrid() {
         // Draw the Cartesian plane
         for (int s = 0; s < 16; s++) gfxFrame(1 + (8 * (s % 4)), 26 + (8 * (s / 4)), 5, 5);
 

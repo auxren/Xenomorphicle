@@ -56,7 +56,7 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         gfxPrint(1, 15, "Thr:");
         gfxPrintVoltage(threshold_mod);
         gfxSkyline();
@@ -64,21 +64,21 @@ public:
 
     void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         threshold = constrain(threshold + (direction * 128), MIN_THRESH, MAX_THRESH); // 1V - 5V
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,16}, threshold);
         return data;
     }
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         threshold = Unpack(data, PackLocation {0,16});
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "Freeze";

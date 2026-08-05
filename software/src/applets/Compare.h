@@ -49,29 +49,29 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         level = constrain(level + direction, 0, HEM_COMPARE_MAX_VALUE);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,8}, level);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         level = Unpack(data, PackLocation {0,8});
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "";
     help[HELP_DIGITAL2] = "";
@@ -89,7 +89,7 @@ private:
     int mod_cv; // Modified CV used in comparison
     bool in_greater; // Result of last comparison
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         // Draw currently-selected level
         gfxFrame(1, 15, 62, 6);
         int x = Proportion(level, HEM_COMPARE_MAX_VALUE, 62);

@@ -70,13 +70,13 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         if (!continuous) gfxIcon(0, 13, CLOCK_ICON);
         DrawKeyboard();
         DrawMaskIndicators();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         uint8_t scale = cursor > 11 ? 1 : 0;
         uint8_t bit = cursor - (scale * 12);
 
@@ -86,20 +86,20 @@ public:
             SetMask(mask[scale]);
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (cursor == 0 && direction == -1) cursor = 1;
         cursor = constrain(cursor + direction, 0, 23);
         ResetCursor();
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,12}, mask[0]);
         Pack(data, PackLocation {12,12}, mask[1]);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         mask[0] = Unpack(data, PackLocation {0,12});
         mask[1] = Unpack(data, PackLocation {12,12});
 
@@ -108,7 +108,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "S&H Clk";
     help[HELP_DIGITAL2] = "Scale2";
@@ -130,7 +130,7 @@ private:
 
     braids::Quantizer quant;
 
-    void DrawKeyboard() {
+    FLASHMEM void DrawKeyboard() {
         // Border
         gfxFrame(0, 27, 63, 32);
 
@@ -154,7 +154,7 @@ private:
         gfxPrint(cursor < 12 ? 1 : 2);
     }
 
-    void DrawMaskIndicators() {
+    FLASHMEM void DrawMaskIndicators() {
         uint8_t scale = cursor < 12 ? 0 : 1;
         uint8_t x[12] = {2, 7, 10, 15, 18, 26, 31, 34, 39, 42, 47, 50};
         uint8_t p[12] = {0, 1,  0,  1,  0,  0,  1,  0,  1,  0,  1,  0};

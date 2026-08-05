@@ -158,13 +158,13 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawMonitor();
         if (cursor == LOG_VIEW) DrawLog();
         else DrawSelector();
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
       if (cursor == TRANSPOSE) {
         if (functionA == NOTE)
           functionA = CC_CONTROL;
@@ -174,7 +174,7 @@ public:
         CommitSettings();
       }
     }
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (cursor == LEGATO && !EditMode()) { // special case to toggle legato
             legato = !legato;
             ResetCursor();
@@ -233,7 +233,7 @@ public:
       }
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
       if (!EditMode()) {
         MoveCursor(cursor, direction, MAX_CURSOR);
         return;
@@ -265,7 +265,7 @@ public:
       ResetCursor();
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,4}, channel);
         //Pack(data, PackLocation {4,3}, functionB);
@@ -279,7 +279,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         channel = Unpack(data, PackLocation {0,4});
         //functionB = Unpack(data, PackLocation {4,3});
         legato = Unpack(data, PackLocation {7,1});
@@ -291,7 +291,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Gate";
         help[HELP_DIGITAL2] = "";
@@ -339,7 +339,7 @@ private:
         }
     }
 
-    void DrawMonitor() {
+    FLASHMEM void DrawMonitor() {
         if (OC::CORE::ticks - last_tick < 4000) {
             if (hemisphere & 1)
                 gfxIcon( 9, 1, MIDI_ICON);
@@ -348,7 +348,7 @@ private:
         }
     }
 
-    void DrawSelector() {
+    FLASHMEM void DrawSelector() {
         // MIDI Channel
         gfxPrint(1, 15, "Ch:");
         gfxPrint(24, 15, channel + 1);
@@ -399,7 +399,7 @@ private:
         gfxInvert(0, 55, 63, 9);
     }
 
-    void DrawLog() {
+    FLASHMEM void DrawLog() {
         if (log_index) {
             for (int i = 0; i < log_index; i++) {
                 log_entry(15 + (i * 8), i);

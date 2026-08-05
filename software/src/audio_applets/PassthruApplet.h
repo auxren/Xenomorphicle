@@ -7,7 +7,7 @@ public:
   void Start() override {}
   void Controller() override {}
   void View() override {}
-  uint64_t OnDataRequest() override {
+  FLASHMEM uint64_t OnDataRequest() override {
     return 0;
   }
   void OnDataReceive(uint64_t data) override {}

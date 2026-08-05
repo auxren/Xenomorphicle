@@ -42,7 +42,7 @@ public:
     dry_wet_mixer.gain(1, 1.0f - m);
   }
 
-  void View() override {
+  FLASHMEM void View() override {
     if (!phaser) {
       gfxPrint(1, 15, "Out Of RAM !!!");
       return;
@@ -87,17 +87,17 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     data[0] = PackPackables(mix, depth, feedback, rate);
     data[1] = PackPackables(mix_cv, depth_cv, feedback_cv, rate_cv);
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     UnpackPackables(data[0], mix, depth, feedback, rate);
     UnpackPackables(data[1], mix_cv, depth_cv, feedback_cv, rate_cv);
   }
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(MIX_CV, mix_cv),
@@ -109,7 +109,7 @@ public:
     CursorToggle();
   }
 
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       MoveCursor(cursor, direction, MIX_CV);
       return;

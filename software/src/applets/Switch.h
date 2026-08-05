@@ -49,28 +49,28 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawCaptions();
         DrawIndicator();
         gfxSkyline();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Flip";
         help[HELP_DIGITAL2] = "Gate";

@@ -52,26 +52,26 @@ public:
         Out(1, count);
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawDisplay();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Bit 3";
     help[HELP_DIGITAL2] = "Bit 2";
@@ -90,7 +90,7 @@ private:
     const int B0Val = HEMISPHERE_MAX_CV / 15; // Votage of Bit 0
     SegmentDisplay segment{SegmentSize::BIG_SEGMENTS};
 
-    void DrawDisplay() {
+    FLASHMEM void DrawDisplay() {
         segment.SetPosition(11 + (hemisphere * 64), 32);
         for (int b = 0; b < 4; b++)
         {

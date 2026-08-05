@@ -159,7 +159,7 @@ public:
         if (slide_anim) --slide_anim;
     }
 
-    void DrawIndicator(const bool centered = false) const {
+    FLASHMEM void DrawIndicator(const bool centered = false) const {
       const int x = centered? 27 : 4;
       // Clock indicator icons overlay
       if (HS::clock_m.IsRunning() || HS::clock_m.IsPaused()) {
@@ -173,7 +173,7 @@ public:
         }
       }
     }
-    void View() {
+    FLASHMEM void View() {
       if (OC::CORE::ticks - view_tick > 1000) {
         slide_anim = SLIDEOUT_TIME;
       }
@@ -182,7 +182,7 @@ public:
       DrawInterface();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (!EditMode()) { // special cases for toggle buttons
             if (cursor == PLAY_STOP) PlayStop();
             else if (cursor >= BOOP1 && cursor <= BOOP8) {
@@ -211,7 +211,7 @@ public:
         }
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         taps = 0;
         last_tap_tick = 0;
         if (!EditMode()) {
@@ -307,7 +307,7 @@ public:
     }
 
     // Same data blobs as T3 version, but different layout
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation { 0, 9 }, HS::clock_m.GetTempo());
         Pack(data, PackLocation { 9, 7 }, HS::clock_m.GetShuffle());
@@ -317,7 +317,7 @@ public:
 
         return data;
     }
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         if (!HS::clock_m.IsRunning())
             HS::clock_m.SetTempoBPM(Unpack(data, PackLocation { 0, 9 }));
         HS::clock_m.SetShuffle(Unpack(data, PackLocation { 9, 7 }));
@@ -378,7 +378,7 @@ private:
 
     // This applet is an overlay, drawn on top of the applet view.
     // Space must be cleared first, depending on the cursor position.
-    void DrawInterface() const {
+    FLASHMEM void DrawInterface() const {
       if (slide_anim) {
         if (cursor < OUTSKIP1) {
           const int height = 23 - (slide_anim * 23 / SLIDEOUT_TIME);

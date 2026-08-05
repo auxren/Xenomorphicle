@@ -86,14 +86,14 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawSelector();
         gfxSkyline();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(selected, direction, 1);
             return;
@@ -102,20 +102,20 @@ public:
         rand_clocked[selected] = 0;
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0, 8}, operation[0]);
         Pack(data, PackLocation {8, 8}, operation[1]);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         operation[0] = constrain(Unpack(data, PackLocation {0, 8}), 0, CALC_FN_COUNT - 1);
         operation[1] = constrain(Unpack(data, PackLocation {8, 8}), 0, CALC_FN_COUNT - 1);
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "HoldCV1";
     help[HELP_DIGITAL2] = "HoldCV2";

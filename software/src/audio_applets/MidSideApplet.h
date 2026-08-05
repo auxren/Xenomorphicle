@@ -18,20 +18,20 @@ public:
 
   void Controller() override {}
 
-  void View() override {
+  FLASHMEM void View() override {
     gfxPos(32 - 5 * 3, 25);
     graphics.printf("%3ddB", gain);
   }
 
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     SetGain(gain + direction);
   }
 
-  uint64_t OnDataRequest() override {
+  FLASHMEM uint64_t OnDataRequest() override {
     return PackPackables(gain);
   }
 
-  void OnDataReceive(uint64_t data) override {
+  FLASHMEM void OnDataReceive(uint64_t data) override {
     UnpackPackables(data, gain);
     SetGain(gain);
   }

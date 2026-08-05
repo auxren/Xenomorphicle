@@ -130,11 +130,11 @@ public:
 
     void View() final;
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         CursorToggle();
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, LAST_SETTING);
             return;
@@ -158,7 +158,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,  4}, steps_idx);
         Pack(data, PackLocation {4,  4}, ops_base);   // 0–8
@@ -168,7 +168,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         steps_idx  = constrain((int)Unpack(data, PackLocation {0,  4}), 0, NUM_STEP_LENGTHS - 1);
         ops_base   = constrain((int)Unpack(data, PackLocation {4,  4}), 0, OPS_CV_CTRL);
         tree_base  = constrain((int)Unpack(data, PackLocation {8,  3}), 0, TREE_CV_CTRL);
@@ -178,7 +178,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = tr2_names[(int)tr2_mode];
@@ -296,7 +296,7 @@ private:
     //  Row 4 (y=45): OUT1 history (16 dots)
     //  Row 5 (y=55): OUT2 history (16 dots)
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         if (cursor == OPS || cursor == TR2_MODE || cursor == OUT2_MODE) {
             graphics.clearRect(gfx_offset, 0, 64, 10);
         }

@@ -57,7 +57,7 @@ public:
     attenuations[1].Push(float_to_q15(in));
   }
 
-  void View() override {
+  FLASHMEM void View() override {
     gfxFrame(1, 28, 62, 8);
 
     int param_x = static_cast<int>(static_cast<float>(crosspan) * 0.01f * 62);
@@ -79,13 +79,13 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(cursor, IndexedInput(1, crosspan_cv)))
       return;
     CursorToggle();
   }
 
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       MoveCursor(cursor, direction, 2);
       return;
@@ -106,11 +106,11 @@ public:
     }
   }
 
-  uint64_t OnDataRequest() override {
+  FLASHMEM uint64_t OnDataRequest() override {
     return PackPackables(crosspan, crosspan_cv, pack<1>(xfade_shape));
   }
 
-  void OnDataReceive(uint64_t data) override {
+  FLASHMEM void OnDataReceive(uint64_t data) override {
     UnpackPackables(data, crosspan, crosspan_cv, pack<1>(xfade_shape));
   }
 

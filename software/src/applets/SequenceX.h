@@ -81,23 +81,23 @@ public:
 
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawPanel();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (cursor >= SEQX_STEPS && !EditMode()) // toggle mute
             muted ^= (0x01 << (cursor - SEQX_STEPS));
         else
             CursorToggle();
     }
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
       const int s = cursor % SEQX_STEPS;
       muted ^= (0x01 << s);
       CancelEdit();
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, SEQX_STEPS*2-1);
             return;
@@ -111,7 +111,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         const int b = 6; // bits per step
         for (size_t s = 0; s < SEQX_STEPS; s++)
@@ -122,7 +122,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         const int b = 6; // bits per step
         for (size_t s = 0; s < SEQX_STEPS; s++)
         {
@@ -133,7 +133,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "Reset";
@@ -160,7 +160,7 @@ private:
         if (step_is_muted(step) && step != starting_point) Advance(starting_point);
     }
 
-    void DrawPanel() {
+    FLASHMEM void DrawPanel() {
         const int y = 20;
         const int h = 60 - y;
         // dotted middle line

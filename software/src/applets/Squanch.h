@@ -66,13 +66,13 @@ public:
 
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, LAST_SETTING);
             return;
@@ -105,7 +105,7 @@ public:
         }
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,8}, GetScale(0));
         Pack(data, PackLocation {8,8}, shift[0] + 48);
@@ -116,7 +116,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         int scale = Unpack(data, PackLocation {0,8});
         shift[0] = Unpack(data, PackLocation {8,8}) - 48;
         shift[1] = Unpack(data, PackLocation {16,8}) - 48;
@@ -130,7 +130,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "+OctCh1";
@@ -152,7 +152,7 @@ private:
     // Settings
     int16_t shift[2];
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         const uint8_t * notes[2] = {NOTE_ICON, NOTE2_ICON};
 
         // Shift for A/C

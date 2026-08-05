@@ -84,7 +84,7 @@ public:
         }
     }
 
-    void View() override {
+    FLASHMEM void View() override {
         if (!channels[0].grain_stream.IsReady()) {
             gfxPrint(1, 15, "No PSRAM");
             return;
@@ -163,12 +163,12 @@ public:
     }
 
     // AuxButton: latch/unlatch manual freeze (live performance, no cable needed).
-    void AuxButton() override {
+    FLASHMEM void AuxButton() override {
         manual_freeze_ ^= 1;
         CancelEdit();
     }
 
-    void OnButtonPress() override {
+    FLASHMEM void OnButtonPress() override {
         if (CheckEditInputMapPress(
                 cursor,
                 IndexedInput(POS_CV,      pos_cv),
@@ -186,7 +186,7 @@ public:
         CursorToggle();
     }
 
-    void OnEncoderMove(int direction) override {
+    FLASHMEM void OnEncoderMove(int direction) override {
         if (!EditMode()) {
             MoveCursor(cursor, direction, CURSOR_LENGTH - 1);
             return;
@@ -218,14 +218,14 @@ public:
     }
 
 #define MISTIER_PARAMS  pos, density, size, texture, pitch, psprd, fdb, mix
-    void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
         data[0] = PackPackables(MISTIER_PARAMS);
         data[1] = PackPackables(pos_cv, density_cv, size_cv, spray_cv);
         data[2] = PackPackables(pitch_cv, fdb_cv, texture_cv, mix_cv);
         data[3] = PackPackables(freeze_input, spray, psprd_cv);
     }
 
-    void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
         UnpackPackables(data[0], MISTIER_PARAMS);
         UnpackPackables(data[1], pos_cv, density_cv, size_cv, spray_cv);
         UnpackPackables(data[2], pitch_cv, fdb_cv, texture_cv, mix_cv);

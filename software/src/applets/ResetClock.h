@@ -70,13 +70,13 @@ public:
         } 
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
       if (!EditMode()) {
         MoveCursor(cursor, direction, 3);
         return;
@@ -106,7 +106,7 @@ public:
       if (pending_clocks < 0) pending_clocks += length;
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,5}, length-1);
         Pack(data, PackLocation {5,5}, offset);
@@ -114,7 +114,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         length = Unpack(data, PackLocation {0,5}) + 1;
         offset = Unpack(data, PackLocation {5,5});
         spacing = Unpack(data, PackLocation {10,7});
@@ -122,7 +122,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "Reset";
@@ -146,7 +146,7 @@ private:
     int offset, offset_mod;
     int spacing;
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         // Length
         gfxIcon(1, 14, LOOP_ICON);
         gfxPrint(12 + pad(10, length), 15, length);
@@ -170,7 +170,7 @@ private:
         }
     }
 
-    void DrawIndicator() {
+    FLASHMEM void DrawIndicator() {
         gfxLine(0, 45, 63, 45);
         if (cursor != 3) gfxLine(0, 62, 63, 62);
         for(int i = 0; i < length; i++)

@@ -40,7 +40,7 @@ class ReverbApplet : public HemisphereAudioApplet {
             dry_wet_mixer.gain(1, 1.0f - m);
         }
 
-        void View() override {
+        FLASHMEM void View() override {
             if (!reverb) {
               gfxPrint(1, 15, "Out Of RAM !!!");
               return;
@@ -84,19 +84,19 @@ class ReverbApplet : public HemisphereAudioApplet {
             gfxDisplayInputMapEditor();
         }
 
-        void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+        FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
             data[0] = PackPackables(mix, size, damp);
             data[1] = PackPackables(size_cv, damp_cv, mix_cv);
             data[2] = PackPackables(cutoff, cutoff_cv);
         }
 
-        void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+        FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
             UnpackPackables(data[0], mix, size, damp);
             UnpackPackables(data[1], size_cv, damp_cv, mix_cv);
             UnpackPackables(data[2], cutoff, cutoff_cv);
         }
 
-        void OnButtonPress() override {
+        FLASHMEM void OnButtonPress() override {
             if (CheckEditInputMapPress(cursor,
                 IndexedInput(MIX_CV, mix_cv),
                 IndexedInput(SIZE_CV, size_cv),
@@ -107,7 +107,7 @@ class ReverbApplet : public HemisphereAudioApplet {
           CursorToggle();
         }
         
-        void OnEncoderMove(int direction) override {
+        FLASHMEM void OnEncoderMove(int direction) override {
             if (!EditMode()) {
                 MoveCursor(cursor, direction, MIX_CV);
                 return;

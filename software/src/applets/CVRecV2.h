@@ -86,11 +86,11 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (cursor == 2 && !EditMode()) { // special case to toggle smoothing
             smooth = 1 - smooth;
             ResetCursor();
@@ -104,7 +104,7 @@ public:
         CursorToggle();
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) { //not editing, move cursor
             MoveCursor(cursor, direction, 3);
             return;
@@ -133,7 +133,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
 
         // save full CV data in extra storage
@@ -158,7 +158,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         start = constrain(Unpack(data, PackLocation {0,9}), 0, CVREC_MAX_STEP - 2);
         end = constrain(Unpack(data, PackLocation {9,9}), start + 1, CVREC_MAX_STEP - 1);
         smooth = Unpack(data, PackLocation {18,1});
@@ -178,7 +178,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "Reset";
@@ -208,7 +208,7 @@ private:
     int16_t step = 0; // Current step
     int16_t punch_out = 0;
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         // Range
         gfxIcon(1, 15, LOOP_ICON);
         gfxPrint(18 + pad(100, start + 1), 15, start + 1);

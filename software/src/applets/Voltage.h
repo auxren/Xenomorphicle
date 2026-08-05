@@ -54,13 +54,13 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
     //void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 3);
             return;
@@ -75,7 +75,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,9}, voltage[0] + 256);
         Pack(data, PackLocation {10,9}, voltage[1] + 256);
@@ -84,7 +84,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         voltage[0] = Unpack(data, PackLocation {0,9}) - 256;
         voltage[1] = Unpack(data, PackLocation {10,9}) - 256;
         gate[0] = Unpack(data, PackLocation {19,1});
@@ -95,7 +95,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Gate 1";
         help[HELP_DIGITAL2] = "Gate 2";
@@ -116,7 +116,7 @@ private:
     int voltage[2];
     bool gate[2]; // 0 = Normally on, gate turns off, 1= Normally off, gate turns on
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         ForEachChannel(ch)
         {
             gfxPrint(0, 15 + (ch * 20), OutputLabel(ch));

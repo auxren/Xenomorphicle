@@ -37,7 +37,7 @@ private:
     bool center_reset_enable;
     bool center_reset;
 
-    void DrawBalanceIndicator() {
+    FLASHMEM void DrawBalanceIndicator() {
       if (!EditMode()) {
         gfxFrame(1, 15, 62, 6);
         if (center_reset_enable)

@@ -100,7 +100,7 @@ public:
     gfxEndCursor(cursor == LIMIT_THRESH);
   }
 
-  void OnEncoderMove(int direction) {
+  FLASHMEM void OnEncoderMove(int direction) {
     if (!EditMode()) {
       MoveCursor(cursor, direction, MAX_CURSOR);
       return;
@@ -128,10 +128,10 @@ public:
     SetParams();
   }
 
-  uint64_t OnDataRequest() {
+  FLASHMEM uint64_t OnDataRequest() {
     return PackPackables(gate_threshold, comp_threshold, limit_threshold, makeupgain);
   }
-  void OnDataReceive(uint64_t data) {
+  FLASHMEM void OnDataReceive(uint64_t data) {
     UnpackPackables(data, gate_threshold, comp_threshold, limit_threshold, makeupgain);
     SetParams();
   }

@@ -97,7 +97,7 @@ public:
         }
     }
 
-    void View() override {
+    FLASHMEM void View() override {
         if (!channels[0].glitch_stream.IsReady()) {
             gfxPrint(1, 15, "No PSRAM");
             return;
@@ -117,7 +117,7 @@ public:
         gfxDisplayInputMapEditor();
     }
 
-    void DrawRow(int row, int y) {
+    FLASHMEM void DrawRow(int row, int y) {
         switch (row) {
             case 0:
                 gfxPos(1, y);
@@ -199,12 +199,12 @@ public:
     }
 
     // AuxButton latches/unlatches manual hold for performance without a patch.
-    void AuxButton() override {
+    FLASHMEM void AuxButton() override {
         manual_hold_ ^= 1;
         CancelEdit();
     }
 
-    void OnButtonPress() override {
+    FLASHMEM void OnButtonPress() override {
         if (CheckEditInputMapPress(
                 cursor,
                 IndexedInput(CLOCK_SRC,   clock_source),
@@ -220,7 +220,7 @@ public:
         CursorToggle();
     }
 
-    void OnEncoderMove(int direction) override {
+    FLASHMEM void OnEncoderMove(int direction) override {
         if (!EditMode()) {
             cursor = (Cursor)constrain(cursor + direction, 0, CURSOR_LENGTH - 1);
             int row = cursorToRow(cursor);
@@ -254,7 +254,7 @@ public:
 
 #define GLITCH_PARAMS  pack<3>(div), pack<2>(mode), pack<3>(ratchet), mix, \
                        pack<4>(bits_), pack<4>(decimate_), pack<4>(offset_)
-    void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
         uint16_t clk = clock_source.Pack();
         uint16_t hld = hold_input.Pack();
         uint16_t frz = freeze_input.Pack();
@@ -264,7 +264,7 @@ public:
         data[3] = PackPackables(off_cv);
     }
 
-    void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
         uint16_t clk, hld, frz;
         UnpackPackables(data[0], GLITCH_PARAMS);
         UnpackPackables(data[1], clk, hld, frz, mix_cv);

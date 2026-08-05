@@ -60,7 +60,7 @@ private:
   int8_t param1;
   int8_t param2;
 
-  void DrawInterface() {
+  FLASHMEM void DrawInterface() {
     int y = 14;
     gfxPrint(1, y, "p1: ");
     gfxPrint(param1);

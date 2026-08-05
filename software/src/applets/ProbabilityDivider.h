@@ -145,7 +145,7 @@ public:
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, LAST_SETTING);
             return;
@@ -174,7 +174,7 @@ public:
         }
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         // example: pack property_name at bit 0, with size of 8 bits
         Pack(data, PackLocation {0,4}, weight_1); 
@@ -186,7 +186,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         // example: unpack value at bit 0 with size of 8 bits to property_name
         weight_1 = Unpack(data, PackLocation {0,4});
         weight_2 = Unpack(data, PackLocation {4,4});
@@ -201,7 +201,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "Reset";
@@ -239,7 +239,7 @@ private:
     const int *weights[4] = {&weight_1, &weight_2, &weight_4, &weight_8};
     const int divs[4] = {1, 2, 4, 8};
     
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         // divisions
         for(int i = 0; i < 4; i++) {
           gfxPrint(1, 15 + (i*10), "/");

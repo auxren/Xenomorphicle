@@ -220,11 +220,11 @@ class DuoTET : public HemisphereApplet {
 
     // void OnButtonPress() {}
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
       aux_cursor = !aux_cursor;
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if(EditMode()) {
           if (aux_cursor && cursor > DUOTET_PARAM_OFFSET) {
             cv_inputs[cursor].ChangeSource(direction);
@@ -238,7 +238,7 @@ class DuoTET : public HemisphereApplet {
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         uint32_t offset = 0;
         for(uint32_t i=0; i<DUOTET_PARAM_LAST; i++) {
@@ -258,7 +258,7 @@ class DuoTET : public HemisphereApplet {
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         uint32_t offset = 0;
         for(uint32_t i=0; i<DUOTET_PARAM_LAST; i++) {
             params[i] = Unpack(data, PackLocation {offset, DUOTET_PARAM_BITS[i]});
@@ -277,7 +277,7 @@ class DuoTET : public HemisphereApplet {
 
 protected:
 
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock 1";
     help[HELP_DIGITAL2] = "Clock 2";

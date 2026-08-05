@@ -181,7 +181,7 @@ public:
     }
 
     void StoreToPreset(int id);
-    void store_to_preset(int id) {
+    FLASHMEM void store_to_preset(int id) {
         preset_id = id;
         // preset id is upper 5 bits - 32 presets per bank
         uint16_t preset_key = id << 11;
@@ -310,7 +310,7 @@ public:
     }
 
     void LoadFromPreset(int id);
-    void load_from_preset(int id) {
+    FLASHMEM void load_from_preset(int id) {
         preset_id = id;
 
         uint16_t preset_key = id << 11;
@@ -1719,7 +1719,7 @@ private:
     }
 };
 
-void QuadrantSysExHandler() {
+FLASHMEM void QuadrantSysExHandler() {
   // TODO
 }
 

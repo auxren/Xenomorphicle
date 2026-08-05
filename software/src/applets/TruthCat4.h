@@ -135,11 +135,11 @@ public:
 
     void View() final;
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         CursorToggle();
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, LAST_SETTING);
             return;
@@ -165,7 +165,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,  4}, steps_idx);
         Pack(data, PackLocation {4,  5}, ops_base);   // 0–16
@@ -175,7 +175,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         steps_idx  = constrain((int)Unpack(data, PackLocation {0,  4}), 0, NUM_STEP_LENGTHS - 1);
         ops_base   = constrain((int)Unpack(data, PackLocation {4,  5}), 0, OPS_CV_CTRL);
         tree_base  = constrain((int)Unpack(data, PackLocation {9,  4}), 0, TREE_CV_CTRL);
@@ -185,7 +185,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = tr2_names[(int)tr2_mode];
@@ -334,7 +334,7 @@ private:
     //  Row 4 (y=45): "X" + 16 dots   — OUT1 history  (X = output letter ch0)
     //  Row 5 (y=55): "X" + 16 dots   — OUT2 history  (X = output letter ch1)
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         // Context help — replaces the framework header for certain cursors.
         // The framework has already drawn the applet name (white pixels on black).
         // One gfxInvert over the header region flips those pixels: name becomes black,

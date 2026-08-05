@@ -139,13 +139,13 @@ public:
     }
   }
 
-  void DrawFullScreen() override {
+  FLASHMEM void DrawFullScreen() override {
     DrawInterface(true);
   }
-  void View() override {
+  FLASHMEM void View() override {
     DrawInterface(false);
   }
-  void DrawInterface(bool fullscreen) {
+  FLASHMEM void DrawInterface(bool fullscreen) {
     const int x = (1-fullscreen)*gfx_offset;
     const int w = (fullscreen+1)*64;
     // waveform display
@@ -252,7 +252,7 @@ public:
       gfxInvert(0, 55, 64, 9);
   }
 
-  void OnButtonPress() {
+  FLASHMEM void OnButtonPress() {
     switch (cursor) {
     case ONESHOT_MODE:
       oneshot_mode = !oneshot_mode;
@@ -265,7 +265,7 @@ public:
     }
   }
 
-  void OnEncoderMove(int direction) {
+  FLASHMEM void OnEncoderMove(int direction) {
     if (!EditMode()) {
       MoveCursor(cursor, direction, MAX_CURSOR);
       return;
@@ -329,7 +329,7 @@ public:
       knob_accel <<= 1;
   }
 
-  uint64_t OnDataRequest() {
+  FLASHMEM uint64_t OnDataRequest() {
     uint64_t data = 0;
     Pack(data, PackLocation{0, 16}, pitch + (1 << 15));
     Pack(data, PackLocation{16, 7}, slope);
@@ -344,7 +344,7 @@ public:
     return data;
   }
 
-  void OnDataReceive(uint64_t data) {
+  FLASHMEM void OnDataReceive(uint64_t data) {
     clocks_received = 0;
     pitch = Unpack(data, PackLocation{0, 16}) - (1 << 15);
     slope = Unpack(data, PackLocation{16, 7});
@@ -359,7 +359,7 @@ public:
   }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = oneshot_mode ? "Retrig" : "Reset";

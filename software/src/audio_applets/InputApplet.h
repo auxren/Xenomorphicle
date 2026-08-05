@@ -54,7 +54,7 @@ public:
       attenuations[ch].Push(float_to_q15(level_cv.InF(1.0)));
     }
   }
-  void View() override {
+  FLASHMEM void View() override {
     const char* const txt[] = {
       "Left", "Right", "Dual", "Mixed",
 #ifdef AUDIO_INTERFACE
@@ -79,12 +79,12 @@ public:
 
     gfxDisplayInputMapEditor();
   }
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     // abandoning old data at index 0
     //data[0] = PackPackables(...);
     data[1] = PackPackables(modesel_, level, level_cv);
   }
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     if (data[0] != 0) {
       // backward compat
       bool mixtomono;
@@ -98,13 +98,13 @@ public:
   }
 
   // *****
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(cursor, IndexedInput(LEVEL_CV, level_cv)))
       return;
     CursorToggle();
   }
   // *****
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       MoveCursor(cursor, direction, MAX_CURSOR);
       return;

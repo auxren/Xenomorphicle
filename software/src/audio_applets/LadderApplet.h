@@ -22,7 +22,7 @@ public:
     }
   }
 
-  void View() override {
+  FLASHMEM void View() override {
     const int label_x = 1;
     gfxStartCursor(label_x, 15);
     gfxPrintPitchHz(pitch);
@@ -58,7 +58,7 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(1, pitch_cv),
@@ -70,7 +70,7 @@ public:
     CursorToggle();
   }
 
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       MoveCursor(cursor, direction, 7);
       return;
@@ -104,12 +104,12 @@ public:
     }
   }
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) {
     data[0] = PackPackables(pitch, res, gain, pb_gain);
     data[1] = PackPackables(pitch_cv, res_cv, gain_cv, pitch_cv2);
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) {
     UnpackPackables(data[0], pitch, res, gain, pb_gain);
     UnpackPackables(data[1], pitch_cv, res_cv, gain_cv, pitch_cv2);
   }

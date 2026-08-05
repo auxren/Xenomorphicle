@@ -91,12 +91,12 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawSelector();
         DrawGrid();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (cursor == SHUFFLE && !EditMode()) // special case toggle
             shuffle ? ImprintChord(sel_chord) : ShuffleChord();
         else // Advance or toggle cursor
@@ -109,7 +109,7 @@ public:
         }
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, LAST_SETTING);
             return;
@@ -139,20 +139,20 @@ public:
         if (cursor != CHORD) replay = 1;
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,8}, sel_chord);
         Pack(data, PackLocation {8,8}, transpose + 24);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         ImprintChord(constrain(Unpack(data, PackLocation {0,8}), 0, Nr_of_arp_chords -1));
         transpose = constrain((Unpack(data, PackLocation {8,8}) - 24), -24, 24);
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "Reset";
@@ -184,7 +184,7 @@ private:
     int confirm_animation_countdown;
     int confirm_animation_position;
 
-    void DrawSelector() {
+    FLASHMEM void DrawSelector() {
         // Chord selector
         gfxPrint(0, 15, Arp_Chords[chord].chord_name);
         if (cursor == CHORD) {
@@ -210,7 +210,7 @@ private:
         if (cursor == NOTE_EDIT) gfxCursor(32, 58, 30);
     }
 
-    void DrawGrid() {
+    FLASHMEM void DrawGrid() {
         // Draw the Cartesian plane
         for (int s = 0; s < 16; s++) gfxFrame(1 + (8 * (s % 4)), 26 + (8 * (s / 4)), 5, 5);
 

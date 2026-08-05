@@ -145,11 +145,11 @@ public:
       if (edit_ticker) --edit_ticker;
     }
 
-    void View() {
+    FLASHMEM void View() {
       DrawPanel();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
       if (cursor == QUANT_SCALE)
         HS::QuantizerEdit(io_offset);
       else
@@ -167,7 +167,7 @@ public:
         }
       }
     }
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
       if (cursor == WRITE_MODE) {
         seq.ToggleMute(seq.step);
         return;
@@ -193,7 +193,7 @@ public:
       CancelEdit();
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
       if (!EditMode()) {
         MoveCursor(cursor, direction, MAX_CURSOR - (MiniSeq::MAX_STEPS - seq.GetLength()));
         return;
@@ -233,7 +233,7 @@ public:
       }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         // TODO: save Global Settings data to store modified sequences
         Pack(data, PackLocation {0, 4}, pattern_index);
@@ -248,7 +248,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
       pattern_mod = pattern_index = Unpack(data, PackLocation {0, 4});
       seqmode = (AccentMode)Unpack(data, PackLocation {4, 4});
       glide_on = Unpack(data, PackLocation {8, 1});
@@ -266,7 +266,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = write_mode? "Record":"Clock";
         help[HELP_DIGITAL2] = write_mode? "Rest":"Reset";
@@ -293,12 +293,12 @@ private:
     int flash_ticker = 0;
     int edit_ticker = 0;
 
-    void DrawSequenceNumber() {
+    FLASHMEM void DrawSequenceNumber() {
         gfxPrint(0, 13, "#");
         gfxPrint(edit_ticker? pattern_index + 1 : pattern_mod + 1);
         if (edit_ticker == 0 && pattern_mod != pattern_index) gfxIcon(11, 10, CV_ICON);
     }
-    void DrawPanel() {
+    FLASHMEM void DrawPanel() {
       gfxDottedLine(0, 27, 63, 27, 3);
 
       switch (cursor) {

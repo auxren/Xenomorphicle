@@ -67,18 +67,18 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawDendrites();
         DrawAxon();
         DrawStates();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (++selected > 3) selected = 0;
         ResetCursor();
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (selected < 3) {
             dendrite_weight[selected] = constrain(dendrite_weight[selected] + direction, -9, 9);
         } else {
@@ -86,7 +86,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,5}, dendrite_weight[0] + 9);
         Pack(data, PackLocation {5,5}, dendrite_weight[1] + 9);
@@ -95,7 +95,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         dendrite_weight[0] = Unpack(data, PackLocation {0,5}) - 9;
         dendrite_weight[1] = Unpack(data, PackLocation {5,5}) - 9;
         dendrite_weight[2] = Unpack(data, PackLocation {10,5}) - 9;
@@ -103,7 +103,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Dendrt1";
         help[HELP_DIGITAL2] = "Dendrt2";
@@ -125,7 +125,7 @@ private:
     int axon_radius = 5;
     int axon_countdown;
 
-    void DrawDendrites() {
+    FLASHMEM void DrawDendrites() {
         for (int d = 0; d < 3; d++)
         {
             int weight = dendrite_weight[d];
@@ -136,7 +136,7 @@ private:
         }
     }
 
-    void DrawAxon() {
+    FLASHMEM void DrawAxon() {
         gfxCircle(48, 37, 12);
         int x = 41; // Starting x position for number
         if (threshold < 10 && threshold > -10) x += 5; // Shove over a bit if a one-digit number
@@ -145,7 +145,7 @@ private:
         if (selected == 3 && CursorBlink()) gfxCircle(48, 37, 11);
     }
 
-    void DrawStates() {
+    FLASHMEM void DrawStates() {
         for (int d = 0; d < 3; d++)
         {
             byte indent = d == 1 ? 4 : 0;
