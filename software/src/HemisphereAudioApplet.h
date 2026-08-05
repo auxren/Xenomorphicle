@@ -2,7 +2,7 @@
 
 #include "HemisphereApplet.h"
 #include "dsputils.h"
-#include "Audio/effect_reverb_schroeder.h"
+#include "Audio/effect_reverb_schroeder_F32.h"
 #include "Audio/effect_freeverb_F32.h"
 #include "src/Audio/effect_dynamics.h"
 #include <AudioStream.h>
@@ -16,8 +16,8 @@ enum AudioChannels : uint8_t {
 class HemisphereAudioApplet : public HemisphereApplet {
 public:
 
-  static Factory<AudioEffectReverbSchroeder, 8> bung_factory;
-  // F32 Freeverb: only the F32 Reverb applet draws from this pool
+  // F32 reverbs: only the F32 Reverb/Bungverb applets draw from these pools
+  static Factory<AudioEffectReverbSchroederF32, 8> bung_factory;
   static Factory<AudioEffectFreeverbF32, 8> verb_factory;
   static Factory<AudioEffectDynamics, 20> compressor_factory;
 
@@ -83,10 +83,10 @@ public:
     cables[cable_count++].connect(source, s_ch, dest, d_ch);
   }
 
-  AudioEffectReverbSchroeder *GetBungverb() {
+  AudioEffectReverbSchroederF32 *GetBungverb() {
     return bung_factory.get();
   }
-  void ReleaseBungverb(AudioEffectReverbSchroeder* verb) {
+  void ReleaseBungverb(AudioEffectReverbSchroederF32* verb) {
     bung_factory.release(verb);
   }
 
