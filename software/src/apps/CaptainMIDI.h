@@ -119,6 +119,8 @@ const settings::ValueAttributes CaptainSettings[] = {
   { 0, 0, ADC_CHANNEL_COUNT < 7 ? ADC_CHANNEL_COUNT : 7, "", captain_vel_src, settings::STORAGE_TYPE_U8 },
   // 12: Clock multiplier
   { 0, 0, 15, "", captain_clkdiv, settings::STORAGE_TYPE_U8 },
+  // 13: Poly voice
+  { 0, 0, DAC_CHANNEL_COUNT - 1, "", NULL, settings::STORAGE_TYPE_U8 },
 };
 
 enum CaptainsKeys : uint16_t {
@@ -227,12 +229,16 @@ public:
 
     static constexpr int MIDI_INDICATOR_COUNTDOWN = 2000;
 
-    OC::menu::ScreenCursor<OC::menu::kScreenLines> cursor;
+    OC::menu::ScreenCursor<OC::menu::kScreenLines> cursor;       // overview rows
+    OC::menu::ScreenCursor<OC::menu::kScreenLines> param_cursor; // detail rows
+
+    static constexpr int kNumRows = DAC_CHANNEL_COUNT + HS::MIDIFrame::kOutPorts;
 
     void Start() {
-        screen = 0;
+        detail_port = -1;
         display = 0;
-        cursor.Init(0, DAC_CHANNEL_COUNT + HS::MIDIFrame::kOutPorts - 1);
+        cursor.Init(0, kNumRows - 1);
+        param_cursor.Init(0, 0);
         log_index = 0;
         log_view = 0;
         active_setup = 0;
@@ -248,13 +254,43 @@ public:
         for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
             setups[s].outports[i] = frame.MIDIState.outports[i].Pack();
     }
+
+    // Clamp a packed in-map blob so stale/garbage EEPROM data can never
+    // index a name table out of bounds (that reads a wild pointer:
+    // garbled draws at best, a hard fault at worst).
+    static uint64_t SanitizeInMapPacked(uint64_t d) {
+        auto byte = [&d](int n) { return uint8_t((d >> (n * 8)) & 0xff); };
+        auto setbyte = [&d](int n, uint8_t v) {
+            d = (d & ~(uint64_t(0xff) << (n * 8))) | (uint64_t(v) << (n * 8));
+        };
+        // function: type in upper 3 bits, CCONTROL (5) is the highest
+        if ((byte(1) >> 5) > 5) setbyte(1, 0);
+        if (byte(2) > 16) setbyte(2, 16);                       // channel
+        const int8_t t = int8_t(byte(4));                       // transpose
+        if (t < -48 || t > 48) setbyte(4, 0);
+        if (byte(5) > 127) setbyte(5, 0);                       // range_low
+        if (byte(6) > 127) setbyte(6, 127);                     // range_high
+        if (byte(3) >= DAC_CHANNEL_COUNT) setbyte(3, 0);        // polyvoice
+        return d;
+    }
+
     // apply setups[s] to the live state
     void UnpackSetup(int s) {
-        for (int i = 0; i < MIDIMAP_MAX; ++i)
+        for (int i = 0; i < MIDIMAP_MAX; ++i) {
+            setups[s].inmaps[i] = SanitizeInMapPacked(setups[s].inmaps[i]);
             frame.MIDIState.mapping[i].Unpack(setups[s].inmaps[i]);
+        }
         for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) {
-            frame.MIDIState.outports[i].Unpack(setups[s].outports[i]);
-            frame.MIDIState.outports[i].ResetRuntime();
+            HS::MIDIOutPort &o = frame.MIDIState.outports[i];
+            o.Unpack(setups[s].outports[i]);
+            // clamp per port class: garbage functions crash the label lookup
+            const uint8_t fn_count = (i >= HS::MIDIFrame::kCVOutPorts)
+                ? HS::TRFN_COUNT : HS::CVFN_COUNT;
+            if (o.function >= fn_count) o.function = 0;
+            if (o.velocity_source() > ADC_CHANNEL_COUNT)
+                o.flags &= ~HS::MIDIOutSettings::VEL_SOURCE_MASK;
+            o.ResetRuntime();
+            setups[s].outports[i] = o.Pack(); // keep the blob canonical too
         }
         frame.MIDIState.UpdateMidiChannelFilter();
         frame.MIDIState.UpdateMaxPolyphony();
@@ -293,13 +329,13 @@ public:
               setups[s].outports[i] = data;
         }
         UnpackSetup(active_setup);
-        screen = 0;
+        LeaveDetail();
     }
 #else
     // T3.x: setups[] persist via SaveAppData/RestoreAppData (EEPROM pool)
     void Resume() {
         UnpackSetup(active_setup);
-        screen = 0;
+        LeaveDetail();
     }
 #endif
 
@@ -334,64 +370,151 @@ public:
     void View() const;
     void MainView() const {
         if (copy_mode) DrawCopyScreen();
-        else if (display == 0) DrawSetupScreens();
-        else DrawLogScreen();
+        else if (display) DrawLogScreen();
+        else if (detail_port >= 0) DrawDetail();
+        else DrawOverview();
     }
 
-    void EncoderEdit(int dir) {
-      int pos = cursor.cursor_pos();
-      bool input = pos < DAC_CHANNEL_COUNT;
+    // ---- two-level navigation ----
+    // Overview: one row per port; turn R to scroll, press R to open the port.
+    // Detail: all parameters of one port; turn R scrolls, press R edits,
+    // press L goes back. Turn L: switch setup (overview) / switch port
+    // (detail) / scroll (log view).
 
-      if (input) {
-        MIDIMapping &m = frame.MIDIState.mapping[pos];
-        switch (screen) {
-          case 0: m.AdjustFunction(dir); break;
-          case 1: m.AdjustChannel(dir); break;
-          case 2: m.AdjustTranspose(dir); break;
-          case 3: m.AdjustRangeLow(dir); break;
-          case 4: m.AdjustRangeHigh(dir); break;
-          default: break;
+    int DetailParamCount(int row) const {
+        if (row < DAC_CHANNEL_COUNT) return 6;
+        const int p = row - DAC_CHANNEL_COUNT;
+        return (p >= HS::MIDIFrame::kCVOutPorts) ? 9 : 10;
+    }
+
+    void EnterDetail(int row) {
+        detail_port = row;
+        param_cursor.Init(0, DetailParamCount(row) - 1);
+    }
+    void LeaveDetail() { detail_port = -1; }
+
+    const char* DetailParamLabel(int row, int par) const {
+        static const char* const in_labels[6] = {
+            "Assign", "Channel", "Transpose", "Range Low", "Range High", "Voice" };
+        static const char* const cv_labels[10] = {
+            "Function", "Channel", "Data 1", "Data 2", "Transpose",
+            "Range Low", "Range High", "Quantize", "Legato", "Vel Source" };
+        static const char* const tr_labels[9] = {
+            "Function", "Channel", "Data 1", "Data 2", "Transpose",
+            "Range Low", "Range High", "Vel Source", "Clock Mult" };
+        if (row < DAC_CHANNEL_COUNT) return in_labels[par];
+        const int p = row - DAC_CHANNEL_COUNT;
+        return (p >= HS::MIDIFrame::kCVOutPorts) ? tr_labels[par] : cv_labels[par];
+    }
+
+    // attr index into CaptainSettings for the value column / edit icon
+    int DetailParamAttr(int row, int par) const {
+        if (row < DAC_CHANNEL_COUNT) {
+            static const uint8_t a[6] = { 0, 3, 4, 5, 6, 13 };
+            return a[par];
         }
-        return;
-      }
-
-      const int p = pos - DAC_CHANNEL_COUNT;
-      HS::MIDIOutPort &o = frame.MIDIState.outports[p];
-      const bool is_trig = p >= HS::MIDIFrame::kCVOutPorts;
-      const int fn_count = is_trig ? HS::TRFN_COUNT : HS::CVFN_COUNT;
-      const int max_vel_src = ADC_CHANNEL_COUNT < 7 ? ADC_CHANNEL_COUNT : 7;
-      switch (screen) {
-        case 0:
-          o.function = constrain(o.function + dir, 0, fn_count - 1);
-          o.ResetRuntime();
-          break;
-        case 1: o.channel = constrain(o.channel + dir, 0, 15); break;
-        case 2: o.transpose = constrain(o.transpose + dir, -48, 48); break;
-        case 3: o.range_low = constrain(o.range_low + dir, 0, o.range_high); break;
-        case 4: o.range_high = constrain(o.range_high + dir, o.range_low, 127); break;
-        case 5: o.data1 = constrain(o.data1 + dir, 0, 127); break;
-        case 6: o.data2 = constrain(o.data2 + dir, 0, 127); break;
-        case 7:
-          if (dir) o.flags ^= HS::MIDIOutSettings::FLAG_QUANTIZE;
-          break;
-        case 8:
-          if (dir) o.flags ^= HS::MIDIOutSettings::FLAG_LEGATO;
-          break;
-        case 9: {
-          int src = constrain(int(o.velocity_source()) + dir, 0, max_vel_src);
-          o.flags = (o.flags & ~HS::MIDIOutSettings::VEL_SOURCE_MASK)
-                  | (src << HS::MIDIOutSettings::VEL_SOURCE_SHIFT);
-          break;
+        const int p = row - DAC_CHANNEL_COUNT;
+        const bool is_trig = p >= HS::MIDIFrame::kCVOutPorts;
+        const HS::MIDIOutPort &o = frame.MIDIState.outports[p];
+        if (par == 0) return is_trig ? 2 : 1;
+        if (par == 2) { // data1: note names when it denotes a note
+            const bool note_d1 = is_trig
+                ? (o.function >= HS::TRFN_NOTE && o.function <= HS::TRFN_NOTE_LATCH)
+                : (o.function == HS::CVFN_GATE_NOTE);
+            return note_d1 ? 7 : 8;
         }
-        case 10: o.clkdiv = constrain(o.clkdiv + dir, 0, 15); break;
-        default: break;
-      }
-    }
-    void MoveCursor(int dir) {
-        cursor.Scroll(dir);
+        if (is_trig) {
+            static const uint8_t a[9] = { 2, 3, 8, 9, 4, 5, 6, 11, 12 };
+            return a[par];
+        }
+        static const uint8_t a[10] = { 1, 3, 8, 9, 4, 5, 6, 10, 10, 11 };
+        return a[par];
     }
 
-    void SelectSetup(int setup_number, int new_screen = -1) {
+    int DetailParamValue(int row, int par) const {
+        if (row < DAC_CHANNEL_COUNT) {
+            MIDIMapping &m = frame.MIDIState.mapping[row];
+            switch (par) {
+              case 0: return m.get_type() | m.get_subtype();
+              case 1: return m.get_channel();
+              case 2: return m.get_transpose();
+              case 3: return m.get_low();
+              case 4: return m.get_high();
+              case 5: return m.get_voice();
+            }
+            return 0;
+        }
+        const int p = row - DAC_CHANNEL_COUNT;
+        const bool is_trig = p >= HS::MIDIFrame::kCVOutPorts;
+        const HS::MIDIOutPort &o = frame.MIDIState.outports[p];
+        switch (par) {
+          case 0: return o.function;
+          case 1: return o.channel;
+          case 2: return o.data1;
+          case 3: return o.data2;
+          case 4: return o.transpose;
+          case 5: return o.range_low;
+          case 6: return o.range_high;
+        }
+        if (is_trig) {
+            if (par == 7) return o.velocity_source();
+            if (par == 8) return o.clkdiv;
+        } else {
+            if (par == 7) return (o.flags & HS::MIDIOutSettings::FLAG_QUANTIZE) ? 1 : 0;
+            if (par == 8) return (o.flags & HS::MIDIOutSettings::FLAG_LEGATO) ? 1 : 0;
+            if (par == 9) return o.velocity_source();
+        }
+        return 0;
+    }
+
+    void EditDetailParam(int row, int par, int dir) {
+        if (row < DAC_CHANNEL_COUNT) {
+            MIDIMapping &m = frame.MIDIState.mapping[row];
+            switch (par) {
+              case 0: m.AdjustFunction(dir); break;
+              case 1: m.AdjustChannel(dir); break;
+              case 2: m.AdjustTranspose(dir); break;
+              case 3: m.AdjustRangeLow(dir); break;
+              case 4: m.AdjustRangeHigh(dir); break;
+              case 5: m.AdjustVoice(dir); break;
+            }
+            return;
+        }
+        const int p = row - DAC_CHANNEL_COUNT;
+        const bool is_trig = p >= HS::MIDIFrame::kCVOutPorts;
+        HS::MIDIOutPort &o = frame.MIDIState.outports[p];
+        const int fn_count = is_trig ? HS::TRFN_COUNT : HS::CVFN_COUNT;
+        const int max_vel_src = ADC_CHANNEL_COUNT < 7 ? ADC_CHANNEL_COUNT : 7;
+        auto edit_vel_src = [&](int d) {
+            int src = constrain(int(o.velocity_source()) + d, 0, max_vel_src);
+            o.flags = (o.flags & ~HS::MIDIOutSettings::VEL_SOURCE_MASK)
+                    | (src << HS::MIDIOutSettings::VEL_SOURCE_SHIFT);
+        };
+        switch (par) {
+          case 0:
+            o.function = constrain(o.function + dir, 0, fn_count - 1);
+            o.ResetRuntime();
+            break;
+          case 1: o.channel = constrain(o.channel + dir, 0, 15); break;
+          case 2: o.data1 = constrain(o.data1 + dir, 0, 127); break;
+          case 3: o.data2 = constrain(o.data2 + dir, 0, 127); break;
+          case 4: o.transpose = constrain(o.transpose + dir, -48, 48); break;
+          case 5: o.range_low = constrain(o.range_low + dir, 0, o.range_high); break;
+          case 6: o.range_high = constrain(o.range_high + dir, o.range_low, 127); break;
+          default:
+            if (is_trig) {
+                if (par == 7) edit_vel_src(dir);
+                if (par == 8) o.clkdiv = constrain(o.clkdiv + dir, 0, 15);
+            } else {
+                if (par == 7 && dir) o.flags ^= HS::MIDIOutSettings::FLAG_QUANTIZE;
+                if (par == 8 && dir) o.flags ^= HS::MIDIOutSettings::FLAG_LEGATO;
+                if (par == 9) edit_vel_src(dir);
+            }
+            break;
+        }
+    }
+
+    void SelectSetup(int setup_number) {
         // moving to another setup?
         if (setup_number != get_setup_number()) {
           PackSetup(active_setup); // store current settings
@@ -399,21 +522,18 @@ public:
           UnpackSetup(active_setup);
           Reset();
         }
-
-        // Screen switching, default to same
-        if (new_screen == -1) new_screen = screen;
-
-        screen = new_screen;
     }
 
-    void SwitchScreenOrLogView(int dir) {
-        if (display == 0) {
-            // Switch screen
-            int new_screen = constrain(screen + dir, 0, 10);
-            SelectSetup(get_setup_number(), new_screen);
-        } else {
+    void LeftEncoderTurn(int dir) {
+        if (display) {
             // Scroll Log view
             if (log_index > 6) log_view = constrain(log_view + dir, 0, log_index - 6);
+        } else if (detail_port >= 0) {
+            // browse adjacent ports without leaving the editor
+            const int row = constrain(detail_port + dir, 0, kNumRows - 1);
+            if (row != detail_port) EnterDetail(row);
+        } else {
+            SwitchSetup(dir);
         }
     }
 
@@ -428,6 +548,7 @@ public:
 
     void ToggleDisplay() {
         if (copy_mode) copy_mode = 0;
+        else if (detail_port >= 0) LeaveDetail(); // back to overview
         else display = 1 - display;
     }
 
@@ -957,7 +1078,8 @@ public:
 
    void ToggleCursor() {
        if (copy_mode) CopySetup(copy_setup_target, copy_setup_source);
-       else cursor.toggle_editing();
+       else if (detail_port < 0) EnterDetail(cursor.cursor_pos());
+       else param_cursor.toggle_editing();
    }
 
    /* Perform a copy or sysex dump */
@@ -975,7 +1097,7 @@ public:
 
 private:
     // Housekeeping
-    int screen; // 0=Assign, 1=Channel, 2=Transpose, 3=Range Low, 4=Range High
+    int8_t detail_port; // -1 = overview list, else the open port row
     bool display; // 0=Setup Edit 1=Log
     bool copy_mode; // Copy mode on/off
     int active_setup; // index of current setup
@@ -1000,124 +1122,7 @@ private:
     };
     SetupBlob setups[kNumSetups];
 
-    void DrawSetupScreens() {
-        // Create the header, showing the current Setup and Screen name
-        gfxHeader("");
-        switch (screen) {
-          case 0: graphics.print("MIDI Assign"); break;
-          case 1: graphics.print("MIDI Channel"); break;
-          case 2: graphics.print("Transpose"); break;
-          case 3: graphics.print("Range Low"); break;
-          case 4: graphics.print("Range High"); break;
-          case 5: graphics.print("Data 1"); break;
-          case 6: graphics.print("Data 2"); break;
-          case 7: graphics.print("Quantize"); break;
-          case 8: graphics.print("Legato"); break;
-          case 9: graphics.print("Vel Source"); break;
-          case 10: graphics.print("Clock Mult"); break;
-          default: break;
-        }
-        gfxPrint(128 - 48, 1, "Setup ");
-        gfxPrint(get_setup_number() + 1);
-        if (LiveConfigDirty()) gfxPrint("*"); // unsaved changes
-
-        // Iterate through the current range of settings
-        OC::menu::SettingsList<OC::menu::kScreenLines, 0, OC::menu::kDefaultValueX - 1> settings_list(cursor);
-        OC::menu::SettingsListItem list_item;
-        while (settings_list.available())
-        {
-            bool suppress = 0; // Don't show the setting if it's not relevant
-            const int current = settings_list.Next(list_item);
-            int p = current % (DAC_CHANNEL_COUNT + HS::MIDIFrame::kOutPorts);
-            const bool is_input = p < DAC_CHANNEL_COUNT;
-
-            // MIDI In and Out indicators for all screens
-            if (is_input) { // It's a MIDI In assignment
-                int in_fn = get_in_assign(p);
-                if (screen >= 5) suppress = 1; // out-port-only screens
-                if (in_fn == MIDI_IN_OFF && screen > 0) suppress = 1;
-
-                if (indicator_in[p] > 0 || note_in[p] > -1) {
-                    if (in_fn == MIDI_IN_NOTE) {
-                        if (note_in[p] > -1) {
-                            graphics.setPrintPos(70, list_item.y + 2);
-                            graphics.print(midi_note_numbers[note_in[p]]);
-                        }
-                    } else graphics.drawBitmap8(70, list_item.y + 2, 8, MIDI_ICON);
-                }
-
-                // Indicate if the assignment is a note type
-                if (in_fn == MIDI_IN_NOTE)
-                    graphics.drawBitmap8(56, list_item.y + 1, 8, MIDI_note_icon);
-                else if (screen > 1) suppress = 1;
-
-                // Indicate if the assignment is a clock
-                if (in_fn >= MIDI_IN_CLOCK_4TH) {
-                    uint8_t o_x = (frame.MIDIState.clock_count < 12) ? 2 : 0;
-                    graphics.drawBitmap8(80 + o_x, list_item.y + 1, 8, MIDI_clock_icon);
-                    if (screen > 0) suppress = 1;
-                }
-
-            } else { // It's a MIDI Out assignment (CV or trigger port)
-                p -= DAC_CHANNEL_COUNT;
-                const HS::MIDIOutPort &port = frame.MIDIState.outports[p];
-                const bool is_trig = p >= HS::MIDIFrame::kCVOutPorts;
-                const bool note_fn = is_trig
-                    ? (port.function >= HS::TRFN_NOTE && port.function <= HS::TRFN_NOTE_LATCH)
-                    : (port.function == HS::CVFN_PITCH || port.function == HS::CVFN_PITCH_FREE
-                       || port.function == HS::CVFN_GATE_NOTE);
-
-                if (!port.function && screen > 0) suppress = 1;
-
-                if (port.indicator > 0 || port.gated) {
-                    if (note_fn && port.gated) {
-                        graphics.setPrintPos(70, list_item.y + 2);
-                        graphics.print(midi_note_numbers[port.last_note]);
-                    } else graphics.drawBitmap8(70, list_item.y + 2, 8, MIDI_ICON);
-                }
-
-                // Indicate if the assignment is a note type
-                if (note_fn)
-                    graphics.drawBitmap8(56, list_item.y + 1, 8, MIDI_note_icon);
-                else if (screen > 1) suppress = 1;
-            }
-
-            // Draw the item last so that if it's selected, the icons are reversed, too
-            if (!suppress) {
-              int idx;
-              switch (screen) {
-                case 0:
-                  if (is_input) idx = 0;
-                  else idx = (p >= HS::MIDIFrame::kCVOutPorts) ? 2 : 1;
-                  break;
-                case 1: case 2: case 3: case 4:
-                  idx = screen + 2; // channel/transpose/low/high
-                  break;
-                case 5: { // data1: note name for note-ish trig functions
-                  const HS::MIDIOutPort &o = frame.MIDIState.outports[p];
-                  const bool note_d1 = (p >= HS::MIDIFrame::kCVOutPorts)
-                      ? (o.function >= HS::TRFN_NOTE && o.function <= HS::TRFN_NOTE_LATCH)
-                      : (o.function == HS::CVFN_GATE_NOTE);
-                  idx = note_d1 ? 7 : 8;
-                  break;
-                }
-                case 6: idx = 9; break;
-                case 7: case 8: idx = 10; break;
-                case 9: idx = 11; break;
-                case 10: idx = 12; break;
-                default: idx = 0; break;
-              }
-              list_item.SetPrintPos();
-              graphics.print(RowLabel(current));
-              list_item.DrawDefault(GetLabel(current), GetValue(current), CaptainSettings[idx]);
-            } else {
-                list_item.SetPrintPos();
-                graphics.print("                   --");
-                list_item.DrawCustom();
-            }
-        }
-    }
-
+    // 8-char port names for the overview rows
     const char* RowLabel(int pos) const {
         if (pos < DAC_CHANNEL_COUNT) return midi2cv_label[pos];
         const int p = pos - DAC_CHANNEL_COUNT;
@@ -1125,42 +1130,79 @@ private:
         return trig2midi_label[p - HS::MIDIFrame::kCVOutPorts];
     }
 
-    // The value of the parameter at the given cursor position
-    int GetValue(int pos) const {
-      if (pos < DAC_CHANNEL_COUNT) {
-        MIDIMapping &m = frame.MIDIState.mapping[pos];
-        switch (screen) {
-          case 0: return (m.get_type() | m.get_subtype()); // idk man
-          case 1: return m.get_channel();
-          case 2: return m.get_transpose();
-          case 3: return m.get_low();
-          case 4: return m.get_high();
-          default: return 0;
-        }
-      }
-      const HS::MIDIOutPort &o = frame.MIDIState.outports[pos - DAC_CHANNEL_COUNT];
-      switch (screen) {
-        case 0: return o.function;
-        case 1: return o.channel;
-        case 2: return o.transpose;
-        case 3: return o.range_low;
-        case 4: return o.range_high;
-        case 5: return o.data1;
-        case 6: return o.data2;
-        case 7: return (o.flags & HS::MIDIOutSettings::FLAG_QUANTIZE) ? 1 : 0;
-        case 8: return (o.flags & HS::MIDIOutSettings::FLAG_LEGATO) ? 1 : 0;
-        case 9: return o.velocity_source();
-        case 10: return o.clkdiv;
-        default: return 0;
-      }
+    // the function currently assigned to a row, as a safe display string
+    const char* RowFunctionName(int pos) const {
+        if (pos < DAC_CHANNEL_COUNT)
+            return frame.MIDIState.mapping[pos].get_label();
+        const int p = pos - DAC_CHANNEL_COUNT;
+        const HS::MIDIOutPort &o = frame.MIDIState.outports[p];
+        if (p >= HS::MIDIFrame::kCVOutPorts)
+            return trig_out_fn_names[o.function < HS::TRFN_COUNT ? o.function : 0];
+        return cv_out_fn_names[o.function < HS::CVFN_COUNT ? o.function : 0];
     }
-    const char* const GetLabel(int pos) const {
-      if (pos < DAC_CHANNEL_COUNT)
-        return frame.MIDIState.mapping[pos].get_label();
-      const int p = pos - DAC_CHANNEL_COUNT;
-      const HS::MIDIOutPort &o = frame.MIDIState.outports[p];
-      if (p >= HS::MIDIFrame::kCVOutPorts) return trig_out_fn_names[o.function];
-      return cv_out_fn_names[o.function];
+
+    // draw MIDI activity for a row: icon, or the sounding note name
+    void DrawRowActivity(int pos, int y) const {
+        if (pos < DAC_CHANNEL_COUNT) {
+            if (indicator_in[pos] > 0 || note_in[pos] > -1)
+                graphics.drawBitmap8(70, y + 2, 8, MIDI_ICON);
+            return;
+        }
+        const HS::MIDIOutPort &o = frame.MIDIState.outports[pos - DAC_CHANNEL_COUNT];
+        if (o.gated && o.last_note <= 127) {
+            graphics.setPrintPos(70, y + 2);
+            graphics.print(midi_note_numbers[o.last_note]);
+        } else if (o.indicator > 0) {
+            graphics.drawBitmap8(70, y + 2, 8, MIDI_ICON);
+        }
+    }
+
+    void DrawOverview() const {
+        gfxHeader("Captain MIDI");
+        gfxPrint(128 - 48, 1, "Setup ");
+        gfxPrint(get_setup_number() + 1);
+        if (LiveConfigDirty()) gfxPrint("*"); // unsaved changes
+
+        OC::menu::SettingsList<OC::menu::kScreenLines, 0, 76> settings_list(cursor);
+        OC::menu::SettingsListItem list_item;
+        while (settings_list.available()) {
+            const int current = settings_list.Next(list_item);
+            if (current >= kNumRows) { list_item.DrawCustom(); continue; }
+
+            DrawRowActivity(current, list_item.y);
+            list_item.SetPrintPos();
+            graphics.print(RowLabel(current));
+            // right column: assigned function; press to open the editor
+            graphics.setPrintPos(0, list_item.y + 2); // reset for DrawDefault path
+            list_item.DrawDefault(RowFunctionName(current), 0, CaptainSettings[0]);
+        }
+    }
+
+    void DrawDetail() const {
+        const int row = detail_port;
+        gfxHeader(RowLabel(row));
+        gfxPrint(128 - 48, 1, "Setup ");
+        gfxPrint(get_setup_number() + 1);
+        if (LiveConfigDirty()) gfxPrint("*");
+
+        OC::menu::SettingsList<OC::menu::kScreenLines, 0, 76> settings_list(param_cursor);
+        OC::menu::SettingsListItem list_item;
+        const int n_params = DetailParamCount(row);
+        while (settings_list.available()) {
+            const int current = settings_list.Next(list_item);
+            if (current >= n_params) { list_item.DrawCustom(); continue; }
+
+            list_item.SetPrintPos();
+            graphics.print(DetailParamLabel(row, current));
+            const int value = DetailParamValue(row, current);
+            const auto &attr = CaptainSettings[DetailParamAttr(row, current)];
+            if (row < DAC_CHANNEL_COUNT && current == 0) {
+                // in-map Assign: composite value; print its label string
+                list_item.DrawDefault(frame.MIDIState.mapping[row].get_label(), value, attr);
+            } else {
+                list_item.DrawDefault(value, attr);
+            }
+        }
     }
 
     void DrawLogScreen() {
@@ -1293,7 +1335,10 @@ size_t AppCaptainMIDI::RestoreAppData(util::StreamBufferReader &stream_buffer) {
 #else
   const uint8_t version = stream_buffer.Read<uint8_t>();
   if (version != 1) return stream_buffer.read();
-  active_setup = constrain(stream_buffer.Read<uint8_t>(), 0, kNumSetups - 1);
+  // NB: constrain() is a macro that re-evaluates its argument — never
+  // feed it a stream read directly (it desyncs the whole stream)
+  const uint8_t stored_setup = stream_buffer.Read<uint8_t>();
+  active_setup = constrain(stored_setup, 0, kNumSetups - 1);
   stream_buffer.Read<uint16_t>(); // reserved
   for (int s = 0; s < kNumSetups; ++s) {
     for (int i = 0; i < MIDIMAP_MAX; ++i)
@@ -1378,13 +1423,15 @@ void AppCaptainMIDI::HandleButtonEvent(const UI::Event &event) {
 
 void AppCaptainMIDI::HandleEncoderEvent(const UI::Event &event) {
     if (event.control == OC::CONTROL_ENCODER_R) {
-        if (cursor.editing()) {
-            EncoderEdit(event.value);
+        if (detail_port < 0) {
+            cursor.Scroll(event.value); // overview: pick a port
+        } else if (param_cursor.editing()) {
+            EditDetailParam(detail_port, param_cursor.cursor_pos(), event.value);
         } else {
-            MoveCursor(event.value);
+            param_cursor.Scroll(event.value); // detail: pick a parameter
         }
     }
     if (event.control == OC::CONTROL_ENCODER_L) {
-        SwitchScreenOrLogView(event.value);
+        LeftEncoderTurn(event.value);
     }
 }

@@ -360,7 +360,7 @@ bool AppSwitcher::Init(bool reset_settings) {
 
   APPS_SERIAL_PRINTLN("Init");
   app_container.for_each([](RuntimeSlot app) {
-    APPS_SERIAL_PRINTLN("> %s", app->name());
+    APPS_SERIAL_PRINTLN("> %s", static_cast<AppBase *>(app.instance)->name());
     app.InitDefaults(app.instance);
   });
 
