@@ -141,7 +141,15 @@ static AppContainer<void // this space intentionally left blank
 static_assert(decltype(app_container)::TotalAppDataStorageSize() < AppData::kAppDataSize,
               "Apps use too much EEPROM space!");
 
+#if defined(NLM_hOC) && defined(ENABLE_APP_MIDI)
+// hOC MIDI build boots into Captain MIDI: [0]=AppSettings, [1]=Calibr8or, [2]=CaptainMIDI
+static constexpr int DEFAULT_APP_INDEX = 2;
+#else
 static constexpr int DEFAULT_APP_INDEX = 1;
+#endif
 static constexpr uint16_t DEFAULT_APP_ID = decltype(app_container)::GetAppIDAtIndex<DEFAULT_APP_INDEX>();
+#if defined(NLM_hOC) && defined(ENABLE_APP_MIDI)
+static_assert(DEFAULT_APP_ID == AppCaptainMIDI::kAppId, "DEFAULT_APP_INDEX must select Captain MIDI");
+#endif
 
 }

@@ -155,6 +155,10 @@ struct MIDIMapping : protected MIDIMapSettings {
 
   static constexpr size_t Size = 64; // Make this compatible with Packable
 
+  // settings snapshot access for EEPROM persistence (T3 global settings)
+  const MIDIMapSettings & settings() const { return *this; }
+  void apply_settings(const MIDIMapSettings &s) { static_cast<MIDIMapSettings &>(*this) = s; }
+
   // state
   bool gate_retrig = false;
   int16_t trigout_countdown = 0;

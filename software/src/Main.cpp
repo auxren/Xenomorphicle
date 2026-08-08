@@ -365,11 +365,14 @@ FLASHMEM void setup() {
   vbias_m->SetState(VBiasManager::BI);
 #endif
 
+  bool firstrun = false;
+#ifdef __IMXRT1062__
   // use default global config file in LFS
-  bool firstrun = !PhzConfig::load_config();
+  firstrun = !PhzConfig::load_config();
+#endif
 
-  // initialize apps
-  OC::app_switcher.Init(reset_settings || firstrun);
+  // initialize apps (on T3.x firstrun is detected by the EEPROM load inside)
+  firstrun |= !OC::app_switcher.Init(reset_settings || firstrun);
 
   // Welcome splash
   OC::ui.Splashscreen(firstrun, 1);

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 #ifdef __IMXRT1062__
 #include <LittleFS.h>
 #include <SD.h>
@@ -36,5 +38,26 @@ namespace PhzConfig {
   void printSpaces(int num);
   void eraseFiles(FS &fs = myfs);
 
+}
+#else
+// Teensy 3.x: no LittleFS/SD. Inert stubs keep shared code compiling
+// (HemisphereApplet GetData/SetData, Main.cpp setup); persistence on T3
+// goes through the EEPROM PageStorage paths instead.
+namespace PhzConfig {
+  using KEY = uint16_t;
+  using VALUE = uint64_t;
+
+  inline void Init() {}
+  inline bool load_config(const char* = nullptr) { return false; }
+  inline bool save_config(const char* = nullptr) { return false; }
+  inline void clear_config() {}
+
+  inline void setValue(KEY, VALUE) {}
+  inline bool getValue(KEY, VALUE &) { return false; }
+  inline void deleteKey(KEY) {}
+
+  inline void setData(KEY, VALUE) {}
+  inline bool getData(KEY, VALUE &) { return false; }
+  inline void deleteData(KEY) {}
 }
 #endif

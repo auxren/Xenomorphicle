@@ -226,13 +226,7 @@ static void SaveGlobalSettings() {
     global_settings.q_engines[i].root_note = HS::q_engine[i].root_note;
   }
   for (int i = 0; i < MIDIMAP_MAX; ++i) {
-    global_settings.midi_maps[i].channel       = HS::frame.MIDIState.mapping[i].channel      ;
-    global_settings.midi_maps[i].dac_polyvoice = HS::frame.MIDIState.mapping[i].dac_polyvoice;
-    global_settings.midi_maps[i].function      = HS::frame.MIDIState.mapping[i].function     ;
-    global_settings.midi_maps[i].function_cc   = HS::frame.MIDIState.mapping[i].function_cc  ;
-    global_settings.midi_maps[i].transpose     = HS::frame.MIDIState.mapping[i].transpose    ;
-    global_settings.midi_maps[i].range_low     = HS::frame.MIDIState.mapping[i].range_low    ;
-    global_settings.midi_maps[i].range_high    = HS::frame.MIDIState.mapping[i].range_high   ;
+    global_settings.midi_maps[i] = HS::frame.MIDIState.mapping[i].settings();
   }
 
   global_settings_storage.Save(global_settings);
@@ -362,7 +356,7 @@ void AppSwitcher::set_current_app(size_t index)
 }
 
 FLASHMEM
-void AppSwitcher::Init(bool reset_settings) {
+bool AppSwitcher::Init(bool reset_settings) {
 
   APPS_SERIAL_PRINTLN("Init");
   app_container.for_each([](RuntimeSlot app) {
@@ -389,17 +383,33 @@ void AppSwitcher::Init(bool reset_settings) {
   global_settings.current_app_id = DEFAULT_APP_ID;
   memset(HS::user_turing_machines, 0, sizeof(HS::user_turing_machines));
 
+  bool gs_restored = false;
+#ifdef __IMXRT1062__
   uint64_t data = 0;
   // check metadata for validity
   if (PhzConfig::getValue(METADATA_KEY, data)) {
     global_settings.current_app_id = Unpack(data, PackLocation{0, 16});
     global_settings.encoders_enable_acceleration = Unpack(data, PackLocation{16, 1});
     global_settings.valid = Unpack(data, PackLocation{17, 1});
+    gs_restored = global_settings.valid;
     // 15 bits empty...
     // TODO:
     //global_settings.DAC_scaling = Unpack(data, PackLocation{32, 32});
     //OC::DAC::restore_scaling(global_settings.DAC_scaling);
   }
+#else
+  // Teensy 3.x: load global settings from EEPROM before the reset check,
+  // so .valid and current_app_id are seeded. PageStorage::Load leaves
+  // global_settings (defaults) untouched on failure.
+  APPS_SERIAL_PRINTLN("Load global settings: size: %u, PAGESIZE=%u, PAGES=%u, LENGTH=%u",
+                sizeof(GlobalSettings),
+                GlobalSettingsStorage::PAGESIZE,
+                GlobalSettingsStorage::PAGES,
+                GlobalSettingsStorage::LENGTH);
+  gs_restored = global_settings_storage.Load(global_settings);
+  if (!gs_restored)
+    APPS_SERIAL_PRINTLN("Settings invalid, using defaults!");
+#endif
 
   if (reset_settings || !global_settings.valid) {
     if (ui.ConfirmReset()) {
@@ -418,6 +428,7 @@ void AppSwitcher::Init(bool reset_settings) {
       app_data_storage.Init();
       global_settings.valid = true;
       SaveGlobalSettings();
+      gs_restored = false; // report firstrun after a confirmed reset
     } else {
       reset_settings = false;
     }
@@ -530,15 +541,8 @@ void AppSwitcher::Init(bool reset_settings) {
     }
 
 #else // Teensy 3.2
-    APPS_SERIAL_PRINTLN("Load global settings: size: %u, PAGESIZE=%u, PAGES=%u, LENGTH=%u",
-                  sizeof(GlobalSettings),
-                  GlobalSettingsStorage::PAGESIZE,
-                  GlobalSettingsStorage::PAGES,
-                  GlobalSettingsStorage::LENGTH);
-
-    if (!global_settings_storage.Load(global_settings)) {
-      APPS_SERIAL_PRINTLN("Settings invalid, using defaults!");
-    } else {
+    // global_settings_storage.Load() already ran before the reset check
+    if (gs_restored) {
       APPS_SERIAL_PRINTLN("Loaded settings from page_index %d, current_app_id is %02x",
                     global_settings_storage.page_index(),global_settings.current_app_id);
       memcpy(user_scales, global_settings.user_scales, sizeof(user_scales));
@@ -561,13 +565,7 @@ void AppSwitcher::Init(bool reset_settings) {
         HS::q_engine[i].Reconfig();
       }
       for (int i = 0; i < MIDIMAP_MAX; ++i) {
-        HS::frame.MIDIState.mapping[i].channel       = global_settings.midi_maps[i].channel      ;
-        HS::frame.MIDIState.mapping[i].dac_polyvoice = global_settings.midi_maps[i].dac_polyvoice;
-        HS::frame.MIDIState.mapping[i].function      = global_settings.midi_maps[i].function     ;
-        HS::frame.MIDIState.mapping[i].function_cc   = global_settings.midi_maps[i].function_cc  ;
-        HS::frame.MIDIState.mapping[i].transpose     = global_settings.midi_maps[i].transpose    ;
-        HS::frame.MIDIState.mapping[i].range_low     = global_settings.midi_maps[i].range_low    ;
-        HS::frame.MIDIState.mapping[i].range_high    = global_settings.midi_maps[i].range_high   ;
+        HS::frame.MIDIState.mapping[i].apply_settings(global_settings.midi_maps[i]);
       }
       HS::frame.MIDIState.UpdateMidiChannelFilter();
       HS::frame.MIDIState.UpdateMaxPolyphony();
@@ -610,6 +608,8 @@ void AppSwitcher::Init(bool reset_settings) {
   set_current_app(current_app_index);
 
   delay(100);
+
+  return gs_restored;
 }
 
 FLASHMEM
