@@ -437,9 +437,14 @@ namespace {
 
   // pitch of CV port i, honoring its quantize flag and transpose
   uint8_t NoteForCVPort(const int i, const MIDIOutPort &cvport) {
-      int cv = cvmap[i].In();
-      if (cvport.flags & MIDIOutSettings::FLAG_QUANTIZE)
-          cv = input_quant[i].Process(cv);
+      const int cv = cvmap[i].In();
+      if (cvport.flags & MIDIOutSettings::FLAG_QUANTIZE) {
+          // Process() returns a semitone COUNT, not a pitch CV — do not
+          // feed it back through NoteNumber's /128 scaling
+          const int semis = input_quant[i].Process(cv);
+          const int note = semis + cvport.transpose + 12 * OC::DAC::kOctaveZero;
+          return constrain(note, 0, 127);
+      }
       return MIDIQuantizer::NoteNumber(cv, cvport.transpose);
   }
 
