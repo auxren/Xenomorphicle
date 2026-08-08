@@ -22,6 +22,7 @@
 #include "util/util_macros.h"
 #include "util/clkdivmult.h"
 #include "src/extern/bjorklund.h"
+#include "HSMIDITypes.h"
 
 namespace HS {
 
@@ -55,13 +56,6 @@ struct MIDILogEntry {
     uint8_t data2;
 };
 */
-
-struct MIDINoteData {
-    uint8_t note; // data1
-    uint8_t vel;  // data2
-};
-// TODO: use static array instead of vector
-using NoteBuffer = std::vector<MIDINoteData>;
 
 struct PolyphonyData {
     uint8_t note;
@@ -451,6 +445,9 @@ constexpr MIDIMapping& pack(MIDIMapping& input) {
   return input;
 }
 
+// MIDIOutSettings / MIDIOutPort (CV/trigger -> MIDI output ports) live in
+// HSMIDITypes.h so host-side tests can include them without Arduino deps.
+
 struct alignas(32) MIDIFrame {
     MIDIMapping mapping[MIDIMAP_MAX];
     MIDIMapping outmap[ADC_CHANNEL_COUNT];
@@ -619,74 +616,64 @@ struct alignas(32) MIDIFrame {
     }
 
     void RemoveNoteData(NoteBuffer &buffer, const uint8_t note) {
-        buffer.erase(
-            std::remove_if(buffer.begin(), buffer.end(), [&](MIDINoteData const &data) {
-                return data.note == note;
-            }),
-            buffer.end()
-        );
+        buffer.remove(note);
     }
 
     void MonoBufferPush(const uint8_t m_ch, const uint8_t note, const uint8_t vel) {
         if (CheckMidiChannelFilter(m_ch)) {
-            RemoveNoteData(note_buffer[m_ch], note); // if new note is already in buffer, promote to latest and update velocity
-            note_buffer[m_ch].push_back({note, vel}); // else just append to the end
+            // if new note is already in buffer, promote to latest and update velocity
+            note_buffer[m_ch].remove(note);
+            note_buffer[m_ch].push(note, vel);
         }
     }
 
     void MonoBufferPop(const uint8_t m_ch, const uint8_t note) {
         if (CheckMidiChannelFilter(m_ch)) {
-            RemoveNoteData(note_buffer[m_ch], note);
-            if (note_buffer[m_ch].size() == 0) note_buffer[m_ch].shrink_to_fit(); // free up memory when MIDI is not used
+            note_buffer[m_ch].remove(note);
         }
     }
 
     void ClearMonoBuffer(const int8_t m_ch = -1) {
         if (m_ch > 0) {
             note_buffer[m_ch].clear();
-            note_buffer[m_ch].shrink_to_fit();
         } else { // clear on all channels if no args passed
             for (uint8_t c = 0; c < 16; ++c) {
                 note_buffer[c].clear();
-                note_buffer[c].shrink_to_fit();
             }
         }
     }
 
-    // int GetNote(std::vector<MIDINoteData> &buffer, const int n) {
-    //     return buffer.at(buffer.size()-n).note;
-    // }
-
     int GetNoteFirst(NoteBuffer &buffer) {
-        return buffer.front().note;
+        return buffer.empty() ? 0 : buffer.front().note;
     }
 
     int GetNoteLast(NoteBuffer &buffer) {
-        return buffer.back().note;
+        return buffer.empty() ? 0 : buffer.back().note;
     }
 
     int GetNoteLastInv(NoteBuffer &buffer) {
-        return 127 - buffer.back().note;
+        return 127 - GetNoteLast(buffer);
     }
 
     int GetNoteMin(NoteBuffer &buffer) {
         uint8_t m = 127;
-        std::for_each (buffer.begin(), buffer.end(), [&](MIDINoteData const &data) {
+        for (auto const &data : buffer) {
             if (data.note < m) m = data.note;
-        });
+        }
         return m;
     }
 
     int GetNoteMax(NoteBuffer &buffer) {
         uint8_t m = 0;
-        std::for_each (buffer.begin(), buffer.end(), [&](MIDINoteData const &data) {
+        for (auto const &data : buffer) {
             if (data.note > m) m = data.note;
-        });
+        }
         return m;
     }
 
     int GetVel(NoteBuffer &buffer, const int n) {
-        return buffer.at(buffer.size()-n).vel;
+        if (buffer.size() < n || n < 1) return 0;
+        return buffer.at(buffer.size() - n).vel;
     }
 
     void ClearSustainLatch(int8_t m_ch = -1) {
