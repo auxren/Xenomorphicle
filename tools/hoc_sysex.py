@@ -54,10 +54,13 @@ PARAM_COUNT = {0: 7, 1: 7, 2: 9, 3: 9}
 
 
 def find_port(substr):
+    # comma-separated alternatives; the hOC enumerates as USB device
+    # "Phazerville" but its MIDI port is named "PewPewMIDI"
     names = mido.get_output_names()
-    for n in names:
-        if substr.lower() in n.lower():
-            return n
+    for alt in substr.split(","):
+        for n in names:
+            if alt.strip().lower() in n.lower():
+                return n
     sys.exit(f"no MIDI port matching {substr!r}; available: {names}")
 
 
@@ -274,8 +277,8 @@ def cmd_monitor(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--port", default="Phazerville",
-                    help="substring of the MIDI port name (default: Phazerville)")
+    ap.add_argument("--port", default="PewPewMIDI,Phazerville",
+                    help="comma-separated port name substrings tried in order")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("ports").set_defaults(fn=cmd_ports)
