@@ -59,20 +59,12 @@ using Type = MIDIMapSettings::Type;
 using PitchType = MIDIMapSettings::PitchType;
 using GateType = MIDIMapSettings::GateType;
 
-enum MIDI_OUT_FUNCTION : uint8_t {
-    MIDI_OUT_OFF,
-    MIDI_OUT_NOTE,
-    MIDI_OUT_LEGATO,
-    MIDI_OUT_VELOCITY,
-    MIDI_OUT_MOD,
-    MIDI_OUT_AFTERTOUCH,
-    MIDI_OUT_PITCHBEND,
-
-    MIDI_OUT_FUNCTION_COUNT
+// labels for the CV/trigger -> MIDI engine functions (HSMIDITypes.h)
+const char* const cv_out_fn_names[HS::CVFN_COUNT] = {
+    "--", "Pitch", "FreeN", "CC", "CC14", "Veloc", "Bend", "Aft", "NRPN", "NRP14", "PgmC", "GateN"
 };
-
-const char* const midi_out_functions[MIDI_OUT_FUNCTION_COUNT] = {
-    "--", "Note", "Leg.", "Veloc", "CC", "Aft", "Bend"
+const char* const trig_out_fn_names[HS::TRFN_COUNT] = {
+    "--", "Note", "Trig", "Latch", "CC", "CCLat", "Start", "Stop", "Cont", "Run", "Clock", "Panic"
 };
 
 const char* const midi2cv_label[] = {
@@ -80,8 +72,12 @@ const char* const midi2cv_label[] = {
   "MIDI > E", "MIDI > F", "MIDI > G", "MIDI > H",
 };
 const char* const cv2midi_label[] = {
-  "1 > MIDI", "2 > MIDI", "3 > MIDI", "4 > MIDI",
-  "5 > MIDI", "6 > MIDI", "7 > MIDI", "8 > MIDI",
+  "CV1>MIDI", "CV2>MIDI", "CV3>MIDI", "CV4>MIDI",
+  "CV5>MIDI", "CV6>MIDI", "CV7>MIDI", "CV8>MIDI",
+};
+const char* const trig2midi_label[] = {
+  "TR1>MIDI", "TR2>MIDI", "TR3>MIDI", "TR4>MIDI",
+  "TR5>MIDI", "TR6>MIDI", "TR7>MIDI", "TR8>MIDI",
 };
 
 // per channel
@@ -90,12 +86,14 @@ const settings::ValueAttributes CaptainSettings[] = {
   // MIDI-to-CV
   { 0, 0, HEM_MIDI_MAX_FUNCTION, "", midi_fn_name, settings::STORAGE_TYPE_U8 },
   // CV-to-MIDI
-  { 0, 0, MIDI_OUT_FUNCTION_COUNT-1, "", midi_out_functions, settings::STORAGE_TYPE_U8 },
+  { 0, 0, HS::CVFN_COUNT-1, "", cv_out_fn_names, settings::STORAGE_TYPE_U8 },
+  // Trigger-to-MIDI
+  { 0, 0, HS::TRFN_COUNT-1, "", trig_out_fn_names, settings::STORAGE_TYPE_U8 },
 
   // Channel
   { 0, 0, 16, "", midi_channels, settings::STORAGE_TYPE_U8 },
   // Transpose
-  { 0, -24, 24, "", NULL, settings::STORAGE_TYPE_I8 },
+  { 0, -48, 48, "", NULL, settings::STORAGE_TYPE_I8 },
   // Range Low
   { 0, 0, 127, "", midi_note_numbers, settings::STORAGE_TYPE_U8 },
   // Range High
@@ -184,7 +182,27 @@ OC_APP_CLASS(AppCaptainMIDI, TWOCCS("MI"), "Captain MIDI", "MIDI I/O"),
   public HSApplication, public SystemExclusiveHandler
 {
 public:
-  OC_APP_INTERFACE_DECLARE(AppCaptainMIDI, 0); // TODO
+    // number of stored setups, and the serialized size of one setup:
+    // all in-maps + all out-ports, one packed uint64 each.
+    // T3 EEPROM cost scales with this — builds with many apps sharing the
+    // pool override it (see platformio.ini; the static_assert in
+    // apps/_config.h is the budget gate)
+#ifndef CAPTAIN_SETUP_COUNT
+#define CAPTAIN_SETUP_COUNT 1
+#endif
+    static constexpr int kNumSetups = CAPTAIN_SETUP_COUNT;
+    static constexpr size_t kSetupBlobWords =
+        MIDIMAP_MAX + HS::MIDIFrame::kOutPorts;
+    // version/active/reserved header + setups (see SaveAppData)
+    static constexpr size_t kCaptainStorageSize =
+        4 + kNumSetups * kSetupBlobWords * sizeof(uint64_t);
+
+#ifdef __IMXRT1062__
+  // T4.x persists to PhzConfig (LittleFS) instead of the EEPROM pool
+  OC_APP_INTERFACE_DECLARE(AppCaptainMIDI, 0);
+#else
+  OC_APP_INTERFACE_DECLARE(AppCaptainMIDI, AppCaptainMIDI::kCaptainStorageSize);
+#endif
 
     static constexpr int MIDI_INDICATOR_COUNTDOWN = 2000;
 
@@ -193,47 +211,98 @@ public:
     void Start() {
         screen = 0;
         display = 0;
-        cursor.Init(0, ADC_CHANNEL_COUNT + DAC_CHANNEL_COUNT - 1);
+        cursor.Init(0, DAC_CHANNEL_COUNT + HS::MIDIFrame::kOutPorts - 1);
         log_index = 0;
         log_view = 0;
+        active_setup = 0;
+        // seed all setups from the freshly-initialized live state
+        for (int s = 0; s < kNumSetups; ++s) PackSetup(s);
         Reset();
     }
 
+    // pack the live mapping/outports state into setups[s]
+    void PackSetup(int s) {
+        for (int i = 0; i < MIDIMAP_MAX; ++i)
+            setups[s].inmaps[i] = frame.MIDIState.mapping[i].Pack();
+        for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+            setups[s].outports[i] = frame.MIDIState.outports[i].Pack();
+    }
+    // apply setups[s] to the live state
+    void UnpackSetup(int s) {
+        for (int i = 0; i < MIDIMAP_MAX; ++i)
+            frame.MIDIState.mapping[i].Unpack(setups[s].inmaps[i]);
+        for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) {
+            frame.MIDIState.outports[i].Unpack(setups[s].outports[i]);
+            frame.MIDIState.outports[i].ResetRuntime();
+        }
+        frame.MIDIState.UpdateMidiChannelFilter();
+        frame.MIDIState.UpdateMaxPolyphony();
+    }
+
     void Suspend() {
+        PackSetup(active_setup);
+#ifdef __IMXRT1062__
         StoreData();
+#endif
         OnSendSysEx();
     }
+
+#ifdef __IMXRT1062__
     void StoreData() {
         PhzConfig::setValue(SETUP_KEY, active_setup);
-        StoreSetup();
+        for (int s = 0; s < kNumSetups; ++s) {
+          for (int i = 0; i < MIDIMAP_MAX; ++i)
+            PhzConfig::setValue(INPUT_MAP_KEY + i + s*MIDIMAP_MAX, setups[s].inmaps[i]);
+          for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+            PhzConfig::setValue(OUTPUT_MAP_KEY + i + s*HS::MIDIFrame::kOutPorts, setups[s].outports[i]);
+        }
         PhzConfig::save_config("CAPTAIN.DAT");
     }
     void Resume() {
         PhzConfig::load_config("CAPTAIN.DAT");
         uint64_t data = 0;
         PhzConfig::getValue(SETUP_KEY, data);
-        active_setup = data;
-        SelectSetup(get_setup_number(), 0);
+        active_setup = constrain((int)data, 0, kNumSetups - 1);
+        for (int s = 0; s < kNumSetups; ++s) {
+          for (int i = 0; i < MIDIMAP_MAX; ++i)
+            if (PhzConfig::getValue(INPUT_MAP_KEY + i + s*MIDIMAP_MAX, data))
+              setups[s].inmaps[i] = data;
+          for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+            if (PhzConfig::getValue(OUTPUT_MAP_KEY + i + s*HS::MIDIFrame::kOutPorts, data))
+              setups[s].outports[i] = data;
+        }
+        UnpackSetup(active_setup);
+        screen = 0;
     }
-
-    void Controller() {
-        // Process incoming MIDI traffic
-        process_midi_in(usbMIDI);
-#ifdef ARDUINO_TEENSY41
-        process_midi_in(usbHostMIDI[0]);
-        process_midi_in(usbHostMIDI[1]);
-        process_midi_in(MIDI1);
+#else
+    // T3.x: setups[] persist via SaveAppData/RestoreAppData (EEPROM pool)
+    void Resume() {
+        UnpackSetup(active_setup);
+        screen = 0;
+    }
 #endif
 
-        // Convert CV inputs to outgoing MIDI messages
-        process_midi_out();
+    void Controller() {
+        // Drain incoming MIDI traffic; cap per-tick work to bound ISR time
+        int budget = 4;
+        while (budget-- > 0 && poll_midi(usbMIDI)) {}
+#ifdef ARDUINO_TEENSY41
+        budget = 4;
+        while (budget-- > 0 && poll_midi(usbHostMIDI[0])) {}
+        budget = 4;
+        while (budget-- > 0 && poll_midi(usbHostMIDI[1])) {}
+        budget = 4;
+        while (budget-- > 0 && poll_midi(MIDI1)) {}
+#endif
+
+        // Convert CV/trigger inputs to outgoing MIDI messages
+        frame.MIDIState.ProcessOutputs(frame);
 
         // set CV outputs from MIDI mappings
         for (int ch = 0; ch < DAC_CHANNEL_COUNT; ch++)
         {
             // Handle clock timing
             if (indicator_in[ch] > 0) --indicator_in[ch];
-            if (indicator_out[ch] > 0) --indicator_out[ch];
 
             MIDIMapping &map = frame.MIDIState.mapping[ch];
 
@@ -251,72 +320,46 @@ public:
     void EncoderEdit(int dir) {
       int pos = cursor.cursor_pos();
       bool input = pos < DAC_CHANNEL_COUNT;
-      MIDIMapping &m = input ?
-          frame.MIDIState.mapping[pos] :
-          frame.MIDIState.outmap[pos - DAC_CHANNEL_COUNT];
 
+      if (input) {
+        MIDIMapping &m = frame.MIDIState.mapping[pos];
         switch (screen) {
-          case 0:
-            if (input)
-              m.AdjustFunction(dir);
-            else
-              m.AdjustType(dir); // TODO
-
-            // if (input && m.IsCC())
-            //   m.AutoLearn(); // learn
-            break;
-          case 1:
-            m.AdjustChannel(dir);
-            break;
-          case 2:
-            m.AdjustTranspose(dir);
-            break;
-          case 3:
-            m.AdjustRangeLow(dir);
-            break;
-          case 4:
-            m.AdjustRangeHigh(dir);
-            break;
+          case 0: m.AdjustFunction(dir); break;
+          case 1: m.AdjustChannel(dir); break;
+          case 2: m.AdjustTranspose(dir); break;
+          case 3: m.AdjustRangeLow(dir); break;
+          case 4: m.AdjustRangeHigh(dir); break;
           default: break;
         }
+        return;
+      }
+
+      const int p = pos - DAC_CHANNEL_COUNT;
+      HS::MIDIOutPort &o = frame.MIDIState.outports[p];
+      const bool is_trig = p >= HS::MIDIFrame::kCVOutPorts;
+      const int fn_count = is_trig ? HS::TRFN_COUNT : HS::CVFN_COUNT;
+      switch (screen) {
+        case 0:
+          o.function = constrain(o.function + dir, 0, fn_count - 1);
+          o.ResetRuntime();
+          break;
+        case 1: o.channel = constrain(o.channel + dir, 0, 15); break;
+        case 2: o.transpose = constrain(o.transpose + dir, -48, 48); break;
+        case 3: o.range_low = constrain(o.range_low + dir, 0, o.range_high); break;
+        case 4: o.range_high = constrain(o.range_high + dir, o.range_low, 127); break;
+        default: break;
+      }
     }
     void MoveCursor(int dir) {
         cursor.Scroll(dir);
     }
 
-    void StoreSetup() {
-        for (int i = 0; i < MIDIMAP_MAX; ++i) {
-          PhzConfig::setValue(INPUT_MAP_KEY + i + active_setup*MIDIMAP_MAX,
-              PackPackables(frame.MIDIState.mapping[i]));
-        }
-        for (int i = 0; i < ADC_CHANNEL_COUNT; ++i) {
-          PhzConfig::setValue(OUTPUT_MAP_KEY + i + active_setup*ADC_CHANNEL_COUNT,
-              PackPackables(frame.MIDIState.outmap[i]));
-        }
-    }
     void SelectSetup(int setup_number, int new_screen = -1) {
         // moving to another setup?
         if (setup_number != get_setup_number()) {
-          // store current settings
-          StoreSetup();
-
-          // Load from config file
+          PackSetup(active_setup); // store current settings
           active_setup = setup_number;
-          uint64_t data = 0;
-          for (int i = 0; i < MIDIMAP_MAX; ++i) {
-            if (!PhzConfig::getValue(INPUT_MAP_KEY + i + active_setup*MIDIMAP_MAX, data)) {
-              frame.MIDIState.Init();
-              break;
-            }
-            UnpackPackables(data, frame.MIDIState.mapping[i]);
-          }
-          for (int i = 0; i < ADC_CHANNEL_COUNT; ++i) {
-            if (!PhzConfig::getValue(OUTPUT_MAP_KEY + i + active_setup*ADC_CHANNEL_COUNT, data)) {
-              frame.MIDIState.Init();
-              break;
-            }
-            UnpackPackables(data, frame.MIDIState.outmap[i]);
-          }
+          UnpackSetup(active_setup);
           Reset();
         }
 
@@ -339,9 +382,9 @@ public:
 
     void SwitchSetup(int dir) {
         if (copy_mode) {
-            copy_setup_target = constrain(copy_setup_target + dir, 0, 3);
+            copy_setup_target = constrain(copy_setup_target + dir, 0, kNumSetups - 1);
         } else {
-            int new_setup = constrain(get_setup_number() + dir, 0, 3);
+            int new_setup = constrain(get_setup_number() + dir, 0, kNumSetups - 1);
             SelectSetup(new_setup);
         }
     }
@@ -356,24 +399,27 @@ public:
         for (int ch = 0; ch < DAC_CHANNEL_COUNT; ch++)
         {
             note_in[ch] = -1;
-            note_out[ch] = -1;
             indicator_in[ch] = 0;
-            indicator_out[ch] = 0;
             Out(ch, 0);
         }
         frame.MIDIState.clock_count = 0;
     }
 
+    // Queue a panic; the MIDI traffic is sent from Loop(), not the ISR/UI
     void Panic() {
         Reset();
-        auto &hMIDI = HS::frame.MIDIState;
+        frame.MIDIState.panic_request = true;
+    }
 
-        // Send all notes off on every channel
-        for (int note = 0; note < 128; note++)
-        {
-            for (int channel = 0; channel < 16; channel++)
-            {
-                hMIDI.SendNoteOff(channel, note);
+    // runs in the main loop (not the ISR): drains deferred work
+    void DoLoop() {
+        auto &hMIDI = frame.MIDIState;
+        if (hMIDI.panic_request) {
+            hMIDI.panic_request = false;
+            hMIDI.PanicOutputs(); // targeted note-offs for engine notes
+            for (int ch = 0; ch < 16; ++ch) {
+                hMIDI.SendCC(ch, 120, 0); // All Sound Off
+                hMIDI.SendCC(ch, 123, 0); // All Notes Off
             }
         }
     }
@@ -439,19 +485,10 @@ public:
        if (source == target) {
            OnSendSysEx();
        } else {
-          uint64_t data = 0;
-          for (int i = 0; i < MIDIMAP_MAX; ++i) {
-            if (!PhzConfig::getValue(INPUT_MAP_KEY + i + source*MIDIMAP_MAX, data))
-              break;
-            PhzConfig::setValue(INPUT_MAP_KEY + i + target*MIDIMAP_MAX, data);
-          }
-          for (int i = 0; i < ADC_CHANNEL_COUNT; ++i) {
-            if (!PhzConfig::getValue(OUTPUT_MAP_KEY + i + source*ADC_CHANNEL_COUNT, data))
-              break;
-            PhzConfig::setValue(OUTPUT_MAP_KEY + i + target*ADC_CHANNEL_COUNT, data);
-          }
-           SelectSetup(target);
-           Resume();
+           PackSetup(active_setup); // capture live edits first
+           setups[target] = setups[source];
+           if (target == active_setup) UnpackSetup(active_setup);
+           else SelectSetup(target);
        }
        copy_mode = 0;
    }
@@ -474,12 +511,14 @@ private:
     int note_in[DAC_CHANNEL_COUNT]; // track active note per DAC channel
     uint16_t indicator_in[DAC_CHANNEL_COUNT]; // A MIDI indicator will display next to MIDI In assignment
 
-    // MIDI Out
-    bool gated[ADC_CHANNEL_COUNT]; // Current gated status of each input
-    int note_out[ADC_CHANNEL_COUNT]; // Most recent note from this input channel
-    int last_channel[ADC_CHANNEL_COUNT]; // Keep track of the actual send channel, in case it's changed while the note is on
-    int legato_on[ADC_CHANNEL_COUNT]; // The note handler may currently respond to legato note changes
-    uint16_t indicator_out[ADC_CHANNEL_COUNT]; // A MIDI indicator will display next to MIDI Out assignment
+    // MIDI Out state lives in frame.MIDIState.outports[] (engine-owned)
+
+    // stored setups: packed in-maps + out-ports (see PackSetup/UnpackSetup)
+    struct SetupBlob {
+        uint64_t inmaps[MIDIMAP_MAX];
+        uint64_t outports[HS::MIDIFrame::kOutPorts];
+    };
+    SetupBlob setups[kNumSetups];
 
     void DrawSetupScreens() {
         // Create the header, showing the current Setup and Screen name
@@ -502,7 +541,7 @@ private:
         {
             bool suppress = 0; // Don't show the setting if it's not relevant
             const int current = settings_list.Next(list_item);
-            int p = current % (DAC_CHANNEL_COUNT+ADC_CHANNEL_COUNT);
+            int p = current % (DAC_CHANNEL_COUNT + HS::MIDIFrame::kOutPorts);
             const bool is_input = p < DAC_CHANNEL_COUNT;
 
             // MIDI In and Out indicators for all screens
@@ -531,34 +570,41 @@ private:
                     if (screen > 0) suppress = 1;
                 }
 
-            } else { // It's a MIDI Out assignment
+            } else { // It's a MIDI Out assignment (CV or trigger port)
                 p -= DAC_CHANNEL_COUNT;
-                MIDI_OUT_FUNCTION out_fn = get_out_assign(p);
+                const HS::MIDIOutPort &port = frame.MIDIState.outports[p];
+                const bool is_trig = p >= HS::MIDIFrame::kCVOutPorts;
+                const bool note_fn = is_trig
+                    ? (port.function >= HS::TRFN_NOTE && port.function <= HS::TRFN_NOTE_LATCH)
+                    : (port.function == HS::CVFN_PITCH || port.function == HS::CVFN_PITCH_FREE
+                       || port.function == HS::CVFN_GATE_NOTE);
 
-                if (out_fn == MIDI_OUT_OFF && screen > 0) suppress = 1;
+                if (!port.function && screen > 0) suppress = 1;
 
-                if (indicator_out[p] > 0 || note_out[p] > -1) {
-                    if (out_fn == MIDI_OUT_NOTE || out_fn == MIDI_OUT_LEGATO) {
-                        if (note_out[p] > -1) {
-                            graphics.setPrintPos(70, list_item.y + 2);
-                            graphics.print(midi_note_numbers[note_out[p]]);
-                        }
+                if (port.indicator > 0 || port.gated) {
+                    if (note_fn && port.gated) {
+                        graphics.setPrintPos(70, list_item.y + 2);
+                        graphics.print(midi_note_numbers[port.last_note]);
                     } else graphics.drawBitmap8(70, list_item.y + 2, 8, MIDI_ICON);
                 }
 
                 // Indicate if the assignment is a note type
-                if (out_fn == MIDI_OUT_NOTE || out_fn == MIDI_OUT_LEGATO)
+                if (note_fn)
                     graphics.drawBitmap8(56, list_item.y + 1, 8, MIDI_note_icon);
                 else if (screen > 1) suppress = 1;
             }
 
             // Draw the item last so that if it's selected, the icons are reversed, too
             if (!suppress) {
-              const int idx = (is_input && screen == 0) ? 0 : screen + 1;
+              int idx;
+              if (screen == 0) {
+                if (is_input) idx = 0;
+                else idx = (p >= HS::MIDIFrame::kCVOutPorts) ? 2 : 1;
+              } else {
+                idx = screen + 2;
+              }
               list_item.SetPrintPos();
-              graphics.print(is_input ?
-                  midi2cv_label[current] :
-                  cv2midi_label[current - DAC_CHANNEL_COUNT]);
+              graphics.print(RowLabel(current));
               list_item.DrawDefault(GetLabel(current), GetValue(current), CaptainSettings[idx]);
             } else {
                 list_item.SetPrintPos();
@@ -568,24 +614,43 @@ private:
         }
     }
 
+    const char* RowLabel(int pos) const {
+        if (pos < DAC_CHANNEL_COUNT) return midi2cv_label[pos];
+        const int p = pos - DAC_CHANNEL_COUNT;
+        if (p < HS::MIDIFrame::kCVOutPorts) return cv2midi_label[p];
+        return trig2midi_label[p - HS::MIDIFrame::kCVOutPorts];
+    }
+
     // The value of the parameter at the given cursor position
     int GetValue(int pos) const {
-      MIDIMapping &m = (pos < DAC_CHANNEL_COUNT) ?
-          frame.MIDIState.mapping[pos] :
-          frame.MIDIState.outmap[pos - DAC_CHANNEL_COUNT];
+      if (pos < DAC_CHANNEL_COUNT) {
+        MIDIMapping &m = frame.MIDIState.mapping[pos];
+        switch (screen) {
+          case 0: return (m.get_type() | m.get_subtype()); // idk man
+          case 1: return m.get_channel();
+          case 2: return m.get_transpose();
+          case 3: return m.get_low();
+          case 4: return m.get_high();
+          default: return 0;
+        }
+      }
+      const HS::MIDIOutPort &o = frame.MIDIState.outports[pos - DAC_CHANNEL_COUNT];
       switch (screen) {
-        case 0: return (m.get_type() | m.get_subtype()); // idk man
-        case 1: return m.get_channel();
-        case 2: return m.get_transpose();
-        case 3: return m.get_low();
-        case 4: return m.get_high();
+        case 0: return o.function;
+        case 1: return o.channel;
+        case 2: return o.transpose;
+        case 3: return o.range_low;
+        case 4: return o.range_high;
         default: return 0;
       }
     }
     const char* const GetLabel(int pos) const {
       if (pos < DAC_CHANNEL_COUNT)
         return frame.MIDIState.mapping[pos].get_label();
-      return midi_out_functions[get_out_assign(pos - DAC_CHANNEL_COUNT)];
+      const int p = pos - DAC_CHANNEL_COUNT;
+      const HS::MIDIOutPort &o = frame.MIDIState.outports[p];
+      if (p >= HS::MIDIFrame::kCVOutPorts) return trig_out_fn_names[o.function];
+      return cv_out_fn_names[o.function];
     }
 
     void DrawLogScreen() {
@@ -635,234 +700,23 @@ private:
         return active_setup;
     }
 
-    // CV inputs translated to MIDI messages
-    void process_midi_out() {
-        auto &hMIDI = HS::frame.MIDIState;
-        for (int ch = 0; ch < ADC_CHANNEL_COUNT; ch++)
-        {
-            MIDI_OUT_FUNCTION out_fn = get_out_assign(ch);
-            if (out_fn == MIDI_OUT_OFF) continue;
-
-            int out_ch = get_out_channel(ch);
-            bool indicator = 0;
-
-            if (out_fn == MIDI_OUT_NOTE || out_fn == MIDI_OUT_LEGATO) {
-                bool read_gate = Gate(ch);
-                bool legato = out_fn == MIDI_OUT_LEGATO;
-
-                // Prepare to read pitch and send gate in the near future; there's a slight
-                // lag between when a gate is read and when the CV can be read.
-                if (read_gate && !gated[ch]) StartADCLag(ch);
-                bool note_on = EndOfADCLag(ch); // If the ADC lag has ended, a note will always be sent
-
-                if (note_on || legato_on[ch]) {
-                    // Get a new reading when gated, or when checking for legato changes
-                    uint8_t midi_note = MIDIQuantizer::NoteNumber(In(ch), get_out_transpose(ch));
-
-                    if (legato_on[ch] && midi_note != note_out[ch]) {
-                        // Send note off if the note has changed
-                        hMIDI.SendNoteOff(last_channel[ch], note_out[ch]);
-                        UpdateLog(0, ch, 1, last_channel[ch], note_out[ch], 0);
-                        note_out[ch] = -1;
-                        indicator = 1;
-                        note_on = 1;
-                    }
-
-                    if (!in_out_range(ch, midi_note)) note_on = 0; // Don't play if out of range
-
-                    if (note_on) {
-                        int velocity = 0x64;
-                        // Look for an input assigned to velocity on the same channel and, if found, use it
-                        for (int vch = 0; vch < DAC_CHANNEL_COUNT; vch++)
-                        {
-                            if (get_out_assign(vch) == MIDI_OUT_VELOCITY && get_out_channel(vch) == out_ch) {
-                                velocity = Proportion(In(vch), HSAPPLICATION_5V, 127);
-                            }
-                        }
-                        CONSTRAIN(velocity, 0, 127);
-                        hMIDI.SendNoteOn(out_ch, midi_note, velocity);
-                        UpdateLog(0, ch, 0, out_ch, midi_note, velocity);
-                        indicator = 1;
-                        note_out[ch] = midi_note;
-                        last_channel[ch] = out_ch;
-                        if (legato) legato_on[ch] = 1;
-                    }
-                }
-
-                if (!read_gate && gated[ch]) { // A note off message should be sent
-                    hMIDI.SendNoteOff(last_channel[ch], note_out[ch], 0);
-                    UpdateLog(0, ch, 1, last_channel[ch], note_out[ch], 0);
-                    note_out[ch] = -1;
-                    indicator = 1;
-                }
-
-                gated[ch] = read_gate;
-                if (!gated[ch]) legato_on[ch] = 0;
-            }
-
-            // Handle other messages
-            if (Changed(ch)) {
-                // Modulation wheel
-                if (out_fn == MIDI_OUT_MOD) {
-                    int cc = get_out_cc(ch);
-
-                    int value = Proportion(In(ch), HSAPPLICATION_5V, 127);
-                    CONSTRAIN(value, 0, 127);
-                    if (cc == 64) value = (value >= 60) ? 127 : 0; // On or off for sustain pedal
-
-                    hMIDI.SendCC(out_ch, cc, value);
-                    UpdateLog(0, ch, 2, out_ch, cc, value);
-                    indicator = 1;
-                }
-
-                // Aftertouch
-                if (out_fn == MIDI_OUT_AFTERTOUCH) {
-                    int value = Proportion(In(ch), HSAPPLICATION_5V, 127);
-                    CONSTRAIN(value, 0, 127);
-                    hMIDI.SendAfterTouch(out_ch, value);
-                    UpdateLog(0, ch, 3, out_ch, 0, value);
-                    indicator = 1;
-                }
-
-                // Pitch Bend
-                if (out_fn == MIDI_OUT_PITCHBEND) {
-                    int16_t bend = Proportion(In(ch) + HSAPPLICATION_3V, HSAPPLICATION_3V * 2, 16383);
-                    CONSTRAIN(bend, 0, 16383);
-                    hMIDI.SendPitchBend(out_ch, bend);
-                    UpdateLog(0, ch, 4, out_ch, 0, bend - 8192);
-                    indicator = 1;
-                }
-            }
-
-            if (indicator) indicator_out[ch] = MIDI_INDICATOR_COUNTDOWN;
-        }
-    }
-
+    // CV/trigger -> MIDI conversion lives in HS::MIDIFrame::ProcessOutputs
+    // (HSIOFrame.cpp); the old per-app implementation is gone.
+    // read one message from the device; returns whether one was processed
     template <typename T1>
-    void process_midi_in(T1 &device) {
-        if (device.read()) {
-            uint8_t message = device.getType();
-            uint8_t channel = device.getChannel();
-            uint8_t data1 = device.getData1();
-            uint8_t data2 = device.getData2();
+    bool poll_midi(T1 &device) {
+        if (!device.read()) return false;
 
-            // Handle system exclusive dump for Setup data
-            if (message == HEM_MIDI_SYSEX) OnReceiveSysEx();
+        uint8_t message = device.getType();
+        uint8_t channel = device.getChannel();
+        uint8_t data1 = device.getData1();
+        uint8_t data2 = device.getData2();
 
-            HS::frame.MIDIState.ProcessMIDIMsg({channel, message, data1, data2});
-            //old_process_midi_in(message, channel, data1, data2);
-        }
-    }
+        // Handle system exclusive dump for Setup data
+        if (message == HEM_MIDI_SYSEX) OnReceiveSysEx();
 
-    [[ deprecated ]] // TODO: verify all this is handled in HS::MIDIState, MIDIMapping
-    void old_process_midi_in(int message, int channel, int data1, int data2) {
-
-        bool note_captured = 0; // A note or gate should only be captured by
-        bool gate_captured = 0; // one assignment, to allow polyphony in the interface
-
-        // A MIDI message has been received; go through each channel to see if it
-        // needs to be routed to any of the CV outputs
-        for (int ch = 0; ch < DAC_CHANNEL_COUNT; ch++)
-        {
-            int in_fn = get_in_assign(ch);
-            int in_ch = get_in_channel(ch);
-            bool indicator = 0;
-            if (message == HEM_MIDI_NOTE_ON && in_ch == channel) {
-                if (note_in[ch] == -1) { // If this channel isn't already occupied with another note, handle Note On
-                    if (in_fn == MIDI_IN_NOTE && !note_captured) {
-                        // Send quantized pitch CV. Isolate transposition to quantizer so that it notes off aren't
-                        // misinterpreted if transposition is changed during the note.
-                        int note = data1 + get_in_transpose(ch);
-                        note = constrain(note, 0, 127);
-                        if (in_in_range(ch, note)) {
-                            Out(ch, MIDIQuantizer::CV(note));
-                            UpdateLog(1, ch, 0, in_ch, note, data2);
-                            indicator = 1;
-                            note_captured = 1;
-                            note_in[ch] = data1;
-                        } else note_in[ch] = -1;
-                    }
-
-                    if (in_fn == MIDI_IN_GATE && !gate_captured) {
-                        // Send a gate at Note On
-                        GateOut(ch, 1);
-                        indicator = 1;
-                        gate_captured = 1;
-                        note_in[ch] = data1;
-                    }
-
-                    if (in_fn == MIDI_IN_TRIGGER) {
-                        // Send a trigger pulse to CV
-                        ClockOut(ch);
-                        indicator = 1;
-                        gate_captured = 1;
-                    }
-
-                    if (in_fn == MIDI_IN_VELOCITY) {
-                        // Send velocity data to CV
-                        Out(ch, Proportion(data2, 127, HSAPPLICATION_5V));
-                        indicator = 1;
-                    }
-                }
-            }
-
-            if (message == HEM_MIDI_NOTE_OFF && in_ch == channel) {
-                if (note_in[ch] == data1) { // If the note off matches the note on assingned to this output
-                    note_in[ch] = -1;
-                    if (in_fn == MIDI_IN_GATE) {
-                        // Turn off gate on Note Off
-                        GateOut(ch, 0);
-                        indicator = 1;
-                    } else if (in_fn == MIDI_IN_NOTE) {
-                        // Log Note Off on the note assignment
-                        UpdateLog(1, ch, 1, in_ch, data1, 0);
-                    } else if (in_fn == MIDI_IN_VELOCITY) {
-                        Out(ch, 0);
-                    }
-                }
-            }
-
-            bool cc = (in_fn == MIDI_IN_MOD || in_fn >= MIDI_IN_EXPRESSION);
-            if (cc && message == HEM_MIDI_CC && in_ch == channel) {
-                uint8_t cc = 1; // Modulation wheel
-                if (in_fn == MIDI_IN_EXPRESSION) cc = 11;
-                if (in_fn == MIDI_IN_PAN) cc = 10;
-                if (in_fn == MIDI_IN_HOLD) cc = 64;
-                if (in_fn == MIDI_IN_BREATH) cc = 2;
-                if (in_fn == MIDI_IN_Y_AXIS) cc = 74;
-
-                // Send CC wheel to CV
-                if (data1 == cc) {
-                    if (in_fn == MIDI_IN_HOLD && data2 > 0) data2 = 127;
-                    Out(ch, Proportion(data2, 127, HSAPPLICATION_5V));
-                    UpdateLog(1, ch, 2, in_ch, data1, data2);
-                    indicator = 1;
-                }
-            }
-
-            if (message == HEM_MIDI_AFTERTOUCH_CHANNEL && in_fn == MIDI_IN_AFTERTOUCH && in_ch == channel) {
-                // Send aftertouch to CV
-                Out(ch, Proportion(data1, 127, HSAPPLICATION_5V));
-                UpdateLog(1, ch, 3, in_ch, data1, data2);
-                indicator = 1;
-            }
-
-            if (message == HEM_MIDI_PITCHBEND && in_fn == MIDI_IN_PITCHBEND && in_ch == channel) {
-                // Send pitch bend to CV
-                int data = (data2 << 7) + data1 - 8192;
-                Out(ch, Proportion(data, 0x7fff, HSAPPLICATION_3V));
-                UpdateLog(1, ch, 4, in_ch, 0, data);
-                indicator = 1;
-            }
-
-            #ifdef MIDI_DIAGNOSTIC
-            if (message > 0) {
-                UpdateLog(1, ch, 6, message, data1, data2);
-            }
-            #endif
-
-            if (indicator) indicator_in[ch] = MIDI_INDICATOR_COUNTDOWN;
-        }
+        HS::frame.MIDIState.ProcessMIDIMsg({channel, message, data1, data2});
+        return true;
     }
 
     uint8_t get_in_assign(int ch) {
@@ -879,33 +733,6 @@ private:
 
     bool in_in_range(int ch, int note) {
       return frame.MIDIState.in_in_range(ch, note);
-    }
-
-    MIDI_OUT_FUNCTION get_out_assign(int ch) {
-      switch (frame.MIDIState.get_out_assign(ch) & Type::TYPE_MASK) {
-        default:
-        case Type::NONE: return MIDI_OUT_OFF;
-        case Type::PITCH: return MIDI_OUT_NOTE;
-        case Type::GATE: return MIDI_OUT_LEGATO;
-        case Type::TRIGGER: return MIDI_OUT_VELOCITY;
-        case Type::MODULATOR: return MIDI_OUT_PITCHBEND;
-        case Type::CCONTROL: return MIDI_OUT_MOD;
-      }
-    }
-    uint8_t get_out_cc(int ch) {
-      return frame.MIDIState.get_out_assign(ch) & ~Type::TYPE_MASK;
-    }
-
-    uint8_t get_out_channel(int ch) {
-      return frame.MIDIState.get_out_channel(ch);
-    }
-
-    int8_t get_out_transpose(int ch) {
-      return frame.MIDIState.get_out_transpose(ch);
-    }
-
-    bool in_out_range(int ch, int note) {
-      return frame.MIDIState.in_out_range(ch, note);
     }
 
     void UpdateLog(bool midi_in, int ch, uint8_t message, uint8_t channel, int16_t data1, int16_t data2) {
@@ -933,10 +760,40 @@ private:
 void AppCaptainMIDI::Init() { BaseStart(); }
 
 size_t AppCaptainMIDI::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
-  return 0;
+#ifdef __IMXRT1062__
+  return 0; // T4.x persists via PhzConfig (see StoreData)
+#else
+  // NOTE: a save captures the live state only if Suspend()/PackSetup ran;
+  // the framework saves from the settings menu, which suspends the app first.
+  stream_buffer.Write(uint8_t(1)); // schema version
+  stream_buffer.Write(uint8_t(active_setup));
+  stream_buffer.Write(uint16_t(0)); // reserved
+  for (int s = 0; s < kNumSetups; ++s) {
+    for (int i = 0; i < MIDIMAP_MAX; ++i)
+      stream_buffer.Write(setups[s].inmaps[i]);
+    for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+      stream_buffer.Write(setups[s].outports[i]);
+  }
+  return stream_buffer.written();
+#endif
 }
 size_t AppCaptainMIDI::RestoreAppData(util::StreamBufferReader &stream_buffer) {
+#ifdef __IMXRT1062__
   return 0;
+#else
+  const uint8_t version = stream_buffer.Read<uint8_t>();
+  if (version != 1) return stream_buffer.read();
+  active_setup = constrain(stream_buffer.Read<uint8_t>(), 0, kNumSetups - 1);
+  stream_buffer.Read<uint16_t>(); // reserved
+  for (int s = 0; s < kNumSetups; ++s) {
+    for (int i = 0; i < MIDIMAP_MAX; ++i)
+      setups[s].inmaps[i] = stream_buffer.Read<uint64_t>();
+    for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+      setups[s].outports[i] = stream_buffer.Read<uint64_t>();
+  }
+  UnpackSetup(active_setup);
+  return stream_buffer.read();
+#endif
 }
 
 void AppCaptainMIDI::Process(OC::IOFrame *ioframe) {
@@ -980,7 +837,7 @@ void AppCaptainMIDI::HandleAppEvent(OC::AppEvent event) {
   }
 }
 
-void AppCaptainMIDI::Loop() {} // Deprecated
+void AppCaptainMIDI::Loop() { DoLoop(); } // deferred (non-ISR) work
 
 FLASHMEM
 void AppCaptainMIDI::DrawMenu() const { BaseView(); }

@@ -450,7 +450,17 @@ constexpr MIDIMapping& pack(MIDIMapping& input) {
 
 struct alignas(32) MIDIFrame {
     MIDIMapping mapping[MIDIMAP_MAX];
+#ifndef NO_HEMISPHERE
+    // legacy per-DAC out mapping, still used by the hMIDIOut applet and the
+    // autoMIDIOut path; superseded by outports[] + ProcessOutputs()
     MIDIMapping outmap[ADC_CHANNEL_COUNT];
+#endif
+
+    // CV/trigger -> MIDI engine: CV input ports first, then trigger ports
+    static constexpr int kCVOutPorts = ADC_CHANNEL_COUNT;
+    static constexpr int kTrigOutPorts = OC::DIGITAL_INPUT_LAST;
+    static constexpr int kOutPorts = kCVOutPorts + kTrigOutPorts;
+    MIDIOutPort outports[kOutPorts];
 
     uint32_t last_msg_tick; // Tick of last received message
     uint16_t sustain_latch; // each bit is a MIDI channel's sustain state
@@ -483,13 +493,27 @@ struct alignas(32) MIDIFrame {
         mapping[ch].Init();
         mapping[ch].AdjustVoice(ch / 2 % DAC_CHANNEL_COUNT); // each quad is a unique voice
       }
+#ifndef NO_HEMISPHERE
       for (int ch = 0; ch < ADC_CHANNEL_COUNT; ++ch) {
         outmap[ch].Init();
         if (ch & 1) outmap[ch].SetGate(0);
         else outmap[ch].SetPitch(0);
         //outmap[ch].function_cc = ch + 1; // idk why I did this
       }
+#endif
+      InitOutPorts();
       clock_count = 0;
+    }
+
+    void InitOutPorts() {
+      // default: each CV/TR pair is a mono note voice on its own MIDI channel
+      for (int i = 0; i < kOutPorts; ++i) {
+        static_cast<MIDIOutSettings &>(outports[i]) = MIDIOutSettings();
+        outports[i].ResetRuntime();
+        const bool is_trig = i >= kCVOutPorts;
+        outports[i].function = is_trig ? TRFN_NOTE : CVFN_PITCH;
+        outports[i].channel = is_trig ? (i - kCVOutPorts) : i;
+      }
     }
 
     // getters for access to mappings
@@ -506,6 +530,7 @@ struct alignas(32) MIDIFrame {
       return mapping[ch].InRange(note);
     }
 
+#ifndef NO_HEMISPHERE
     uint8_t get_out_assign(int ch) {
       return outmap[ch].get_type() | outmap[ch].get_subtype();
     }
@@ -518,6 +543,7 @@ struct alignas(32) MIDIFrame {
     bool in_out_range(int ch, int note) {
       return outmap[ch].InRange(note);
     }
+#endif
 
     void UpdateMidiChannelFilter() {
         uint16_t filter = 0;
@@ -717,7 +743,11 @@ struct alignas(32) MIDIFrame {
     }
 
     void ProcessMIDIMsg(const MIDIMessage msg);
-    void Send(const SlewedValue *outvals);
+#ifndef NO_HEMISPHERE
+    void Send(const SlewedValue *outvals); // legacy autoMIDIOut path
+#endif
+    void ProcessOutputs(IOFrame &f); // CV/trigger -> MIDI engine
+    void PanicOutputs();             // note-offs for all tracked engine notes
 
     void SendAfterTouch(const uint8_t midi_ch, uint8_t val) {
 #ifdef ARDUINO_TEENSY41
@@ -774,6 +804,30 @@ struct alignas(32) MIDIFrame {
       usbMIDI.sendNoteOff(note, vel, midi_ch + 1);
 #endif
     }
+    void SendProgramChange(const uint8_t midi_ch, uint8_t program) {
+#ifdef ARDUINO_TEENSY41
+      if (~midi_msgtx_disable & mMaskUSBDev)   usbMIDI.sendProgramChange(program, midi_ch + 1);
+      if (~midi_msgtx_disable & mMaskUSBHost)  usbHostMIDI[0].sendProgramChange(program, midi_ch + 1);
+      if (~midi_msgtx_disable & mMaskUSBHost2) usbHostMIDI[1].sendProgramChange(program, midi_ch + 1);
+      if (~midi_msgtx_disable & mMaskSerial)   MIDI1.sendProgramChange(program, midi_ch + 1);
+#else
+      usbMIDI.sendProgramChange(program, midi_ch + 1);
+#endif
+    }
+    void SendRealTime(const uint8_t type) { // usbMIDI.Clock / Start / Stop / Continue
+#ifdef ARDUINO_TEENSY41
+      if (~midi_msgtx_disable & mMaskUSBDev)   usbMIDI.sendRealTime(type);
+      if (~midi_msgtx_disable & mMaskUSBHost)  usbHostMIDI[0].sendRealTime(type);
+      if (~midi_msgtx_disable & mMaskUSBHost2) usbHostMIDI[1].sendRealTime(type);
+      if (~midi_msgtx_disable & mMaskSerial)   MIDI1.sendRealTime((midi::MidiType)type);
+#else
+      usbMIDI.sendRealTime(type);
+#endif
+    }
+
+    // set by TRFN_PANIC hardware trigger; the app's Loop() drains it with a
+    // full all-notes-off sweep (too much traffic to send from the ISR)
+    bool panic_request = false;
 };
 
 // shared IO Frame, updated every tick

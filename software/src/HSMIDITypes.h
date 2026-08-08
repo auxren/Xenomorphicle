@@ -6,6 +6,9 @@
 
 namespace HS {
 
+// how long a port's UI activity indicator stays lit, in 16.67kHz ticks
+constexpr uint16_t kMIDIIndicatorTicks = 2000;
+
 struct MIDINoteData {
     uint8_t note; // data1
     uint8_t vel;  // data2
@@ -140,19 +143,22 @@ struct MIDIOutSettings {
 struct MIDIOutPort : public MIDIOutSettings {
   // runtime state, not serialized
   bool gated = false;        // note currently on
+  bool prev_gate = false;    // gate level last tick (edge detection)
   bool latch_state = false;  // for *_LATCH functions
   uint8_t last_note = 0;     // note# actually sent (for the matching note-off)
   uint8_t last_channel = 0;  // channel it was sent on
   uint16_t last_value = 0xffff; // last 7/14-bit value sent (rate limiting)
   int16_t trigout_countdown = 0; // NOTE_TRIG remaining ticks
-  uint8_t clk_phase = 0;
+  uint8_t lag_count = 0;     // ADC settling delay after gate rise, in ticks
+  uint16_t indicator = 0;    // UI activity countdown, in ticks
 
   void ResetRuntime() {
-    gated = latch_state = false;
+    gated = prev_gate = latch_state = false;
     last_note = last_channel = 0;
     last_value = 0xffff;
     trigout_countdown = 0;
-    clk_phase = 0;
+    lag_count = 0;
+    indicator = 0;
   }
 };
 

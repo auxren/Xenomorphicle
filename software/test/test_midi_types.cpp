@@ -145,9 +145,11 @@ int main() {
   // --- MIDIOutPort: runtime reset ---
   {
     MIDIOutPort p;
-    p.gated = true; p.last_note = 61; p.last_value = 42; p.clk_phase = 3;
+    p.gated = true; p.prev_gate = true; p.last_note = 61;
+    p.last_value = 42; p.lag_count = 9; p.indicator = 5;
     p.ResetRuntime();
-    CHECK(!p.gated && p.last_note == 0 && p.last_value == 0xffff && p.clk_phase == 0);
+    CHECK(!p.gated && !p.prev_gate && p.last_note == 0 &&
+          p.last_value == 0xffff && p.lag_count == 0 && p.indicator == 0);
   }
 
   printf("test_midi_types: all %d checks passed\n", checks);
