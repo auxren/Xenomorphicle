@@ -1414,9 +1414,9 @@ void AppCaptainMIDI::HandleButtonEvent(const UI::Event &event) {
     }
 
     if (event.control == OC::CONTROL_BUTTON_A && event.type == UI::EVENT_BUTTON_PRESS)
-        SwitchSetup(-1);
+        SwitchSetup(1); // hOC: A is the + button
     if (event.control == OC::CONTROL_BUTTON_B) {
-        if (event.type == UI::EVENT_BUTTON_PRESS) SwitchSetup(1);
+        if (event.type == UI::EVENT_BUTTON_PRESS) SwitchSetup(-1);
         if (event.type == UI::EVENT_BUTTON_LONG_PRESS) ToggleCopyMode();
     }
 }
