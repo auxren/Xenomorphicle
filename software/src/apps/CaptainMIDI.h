@@ -140,6 +140,10 @@ const char* const midi_messages[7] = {
     "Note", "Off", "CC#", "Aft", "Bend", "SysEx", "Diag"
 };
 
+// Teensy USB device state: nonzero once a host has configured us,
+// cleared on bus reset. The closest thing to "is the computer there".
+extern "C" volatile uint8_t usb_configuration;
+
 //#define MIDI_DIAGNOSTIC
 struct CaptainMIDILog {
     bool midi_in; // 0 = out, 1 = in
@@ -1262,8 +1266,20 @@ private:
         }
     }
 
+    // header badge: inverted USB = host connected, struck through = not
+    void DrawUSBStatus(int x) const {
+        graphics.setPrintPos(x, 1);
+        graphics.print("USB");
+        if (usb_configuration) {
+            graphics.invertRect(x - 2, 0, 21, 9);
+        } else {
+            graphics.drawLine(x - 2, 9, x + 18, 0);
+        }
+    }
+
     void DrawOverview() const {
-        gfxHeader("Captain MIDI");
+        gfxHeader("Captain");
+        DrawUSBStatus(48);
         gfxPrint(128 - 48, 1, "Setup ");
         gfxPrint(get_setup_number() + 1);
         if (LiveConfigDirty()) gfxPrint("*"); // unsaved changes
@@ -1287,6 +1303,7 @@ private:
     void DrawDetail() const {
         const int row = detail_port;
         gfxHeader(RowLabel(row));
+        DrawUSBStatus(52);
         gfxPrint(128 - 48, 1, "Setup ");
         gfxPrint(get_setup_number() + 1);
         if (LiveConfigDirty()) gfxPrint("*");
