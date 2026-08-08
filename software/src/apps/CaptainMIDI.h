@@ -80,24 +80,45 @@ const char* const trig2midi_label[] = {
   "TR5>MIDI", "TR6>MIDI", "TR7>MIDI", "TR8>MIDI",
 };
 
+const char* const captain_off_on[2] = { "Off", "On" };
+const char* const captain_vel_src[9] = {
+  "Fixed", "CV1", "CV2", "CV3", "CV4", "CV5", "CV6", "CV7", "CV8"
+};
+const char* const captain_clkdiv[16] = {
+  "x1", "x2", "x3", "x4", "x6", "x8", "x12", "x24", "x48", "x96",
+  "x1", "x1", "x1", "x1", "x1", "x1"
+};
+
 // per channel
 const settings::ValueAttributes CaptainSettings[] = {
-  // Assigned function
-  // MIDI-to-CV
+  // 0: Assigned function, MIDI-to-CV
   { 0, 0, HEM_MIDI_MAX_FUNCTION, "", midi_fn_name, settings::STORAGE_TYPE_U8 },
-  // CV-to-MIDI
+  // 1: CV-to-MIDI
   { 0, 0, HS::CVFN_COUNT-1, "", cv_out_fn_names, settings::STORAGE_TYPE_U8 },
-  // Trigger-to-MIDI
+  // 2: Trigger-to-MIDI
   { 0, 0, HS::TRFN_COUNT-1, "", trig_out_fn_names, settings::STORAGE_TYPE_U8 },
 
-  // Channel
+  // 3: Channel
   { 0, 0, 16, "", midi_channels, settings::STORAGE_TYPE_U8 },
-  // Transpose
+  // 4: Transpose
   { 0, -48, 48, "", NULL, settings::STORAGE_TYPE_I8 },
-  // Range Low
+  // 5: Range Low
   { 0, 0, 127, "", midi_note_numbers, settings::STORAGE_TYPE_U8 },
-  // Range High
+  // 6: Range High
   { 0, 0, 127, "", midi_note_numbers, settings::STORAGE_TYPE_U8 },
+
+  // 7: Data 1 as note number
+  { 0, 0, 127, "", midi_note_numbers, settings::STORAGE_TYPE_U8 },
+  // 8: Data 1 as plain number (CC#/NRPN LSB)
+  { 0, 0, 127, "", NULL, settings::STORAGE_TYPE_U8 },
+  // 9: Data 2 (on-value / velocity / NRPN MSB)
+  { 0, 0, 127, "", NULL, settings::STORAGE_TYPE_U8 },
+  // 10: Off/On (quantize, legato)
+  { 0, 0, 1, "", captain_off_on, settings::STORAGE_TYPE_U8 },
+  // 11: Velocity source
+  { 0, 0, ADC_CHANNEL_COUNT < 7 ? ADC_CHANNEL_COUNT : 7, "", captain_vel_src, settings::STORAGE_TYPE_U8 },
+  // 12: Clock multiplier
+  { 0, 0, 15, "", captain_clkdiv, settings::STORAGE_TYPE_U8 },
 };
 
 enum CaptainsKeys : uint16_t {
@@ -338,6 +359,7 @@ public:
       HS::MIDIOutPort &o = frame.MIDIState.outports[p];
       const bool is_trig = p >= HS::MIDIFrame::kCVOutPorts;
       const int fn_count = is_trig ? HS::TRFN_COUNT : HS::CVFN_COUNT;
+      const int max_vel_src = ADC_CHANNEL_COUNT < 7 ? ADC_CHANNEL_COUNT : 7;
       switch (screen) {
         case 0:
           o.function = constrain(o.function + dir, 0, fn_count - 1);
@@ -347,6 +369,21 @@ public:
         case 2: o.transpose = constrain(o.transpose + dir, -48, 48); break;
         case 3: o.range_low = constrain(o.range_low + dir, 0, o.range_high); break;
         case 4: o.range_high = constrain(o.range_high + dir, o.range_low, 127); break;
+        case 5: o.data1 = constrain(o.data1 + dir, 0, 127); break;
+        case 6: o.data2 = constrain(o.data2 + dir, 0, 127); break;
+        case 7:
+          if (dir) o.flags ^= HS::MIDIOutSettings::FLAG_QUANTIZE;
+          break;
+        case 8:
+          if (dir) o.flags ^= HS::MIDIOutSettings::FLAG_LEGATO;
+          break;
+        case 9: {
+          int src = constrain(int(o.velocity_source()) + dir, 0, max_vel_src);
+          o.flags = (o.flags & ~HS::MIDIOutSettings::VEL_SOURCE_MASK)
+                  | (src << HS::MIDIOutSettings::VEL_SOURCE_SHIFT);
+          break;
+        }
+        case 10: o.clkdiv = constrain(o.clkdiv + dir, 0, 15); break;
         default: break;
       }
     }
@@ -372,7 +409,7 @@ public:
     void SwitchScreenOrLogView(int dir) {
         if (display == 0) {
             // Switch screen
-            int new_screen = constrain(screen + dir, 0, 4);
+            int new_screen = constrain(screen + dir, 0, 10);
             SelectSetup(get_setup_number(), new_screen);
         } else {
             // Scroll Log view
@@ -511,7 +548,7 @@ public:
         SendSyxFrame(SYX_DUMP_END, endpkt, 3);
     }
 
-    bool LiveConfigDirty() {
+    bool LiveConfigDirty() const {
         for (int i = 0; i < MIDIMAP_MAX; ++i)
             if (frame.MIDIState.mapping[i].Pack() != setups[active_setup].inmaps[i]) return true;
         for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
@@ -972,10 +1009,17 @@ private:
           case 2: graphics.print("Transpose"); break;
           case 3: graphics.print("Range Low"); break;
           case 4: graphics.print("Range High"); break;
+          case 5: graphics.print("Data 1"); break;
+          case 6: graphics.print("Data 2"); break;
+          case 7: graphics.print("Quantize"); break;
+          case 8: graphics.print("Legato"); break;
+          case 9: graphics.print("Vel Source"); break;
+          case 10: graphics.print("Clock Mult"); break;
           default: break;
         }
-        gfxPrint(128 - 42, 1, "Setup ");
+        gfxPrint(128 - 48, 1, "Setup ");
         gfxPrint(get_setup_number() + 1);
+        if (LiveConfigDirty()) gfxPrint("*"); // unsaved changes
 
         // Iterate through the current range of settings
         OC::menu::SettingsList<OC::menu::kScreenLines, 0, OC::menu::kDefaultValueX - 1> settings_list(cursor);
@@ -990,6 +1034,7 @@ private:
             // MIDI In and Out indicators for all screens
             if (is_input) { // It's a MIDI In assignment
                 int in_fn = get_in_assign(p);
+                if (screen >= 5) suppress = 1; // out-port-only screens
                 if (in_fn == MIDI_IN_OFF && screen > 0) suppress = 1;
 
                 if (indicator_in[p] > 0 || note_in[p] > -1) {
@@ -1040,11 +1085,27 @@ private:
             // Draw the item last so that if it's selected, the icons are reversed, too
             if (!suppress) {
               int idx;
-              if (screen == 0) {
-                if (is_input) idx = 0;
-                else idx = (p >= HS::MIDIFrame::kCVOutPorts) ? 2 : 1;
-              } else {
-                idx = screen + 2;
+              switch (screen) {
+                case 0:
+                  if (is_input) idx = 0;
+                  else idx = (p >= HS::MIDIFrame::kCVOutPorts) ? 2 : 1;
+                  break;
+                case 1: case 2: case 3: case 4:
+                  idx = screen + 2; // channel/transpose/low/high
+                  break;
+                case 5: { // data1: note name for note-ish trig functions
+                  const HS::MIDIOutPort &o = frame.MIDIState.outports[p];
+                  const bool note_d1 = (p >= HS::MIDIFrame::kCVOutPorts)
+                      ? (o.function >= HS::TRFN_NOTE && o.function <= HS::TRFN_NOTE_LATCH)
+                      : (o.function == HS::CVFN_GATE_NOTE);
+                  idx = note_d1 ? 7 : 8;
+                  break;
+                }
+                case 6: idx = 9; break;
+                case 7: case 8: idx = 10; break;
+                case 9: idx = 11; break;
+                case 10: idx = 12; break;
+                default: idx = 0; break;
               }
               list_item.SetPrintPos();
               graphics.print(RowLabel(current));
@@ -1084,6 +1145,12 @@ private:
         case 2: return o.transpose;
         case 3: return o.range_low;
         case 4: return o.range_high;
+        case 5: return o.data1;
+        case 6: return o.data2;
+        case 7: return (o.flags & HS::MIDIOutSettings::FLAG_QUANTIZE) ? 1 : 0;
+        case 8: return (o.flags & HS::MIDIOutSettings::FLAG_LEGATO) ? 1 : 0;
+        case 9: return o.velocity_source();
+        case 10: return o.clkdiv;
         default: return 0;
       }
     }
