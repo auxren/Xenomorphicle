@@ -330,12 +330,14 @@ public:
         }
         UnpackSetup(active_setup);
         LeaveDetail();
+        saved_checksum = live_checksum_prev = LiveChecksum();
     }
 #else
     // T3.x: setups[] persist via SaveAppData/RestoreAppData (EEPROM pool)
     void Resume() {
         UnpackSetup(active_setup);
         LeaveDetail();
+        saved_checksum = live_checksum_prev = LiveChecksum();
     }
 #endif
 
@@ -669,6 +671,58 @@ public:
         SendSyxFrame(SYX_DUMP_END, endpkt, 3);
     }
 
+    // ---- auto-save ----
+    // Persist every change (UI or SysEx) once edits settle for a few
+    // seconds. Debounced so encoder sweeps don't hammer the EEPROM.
+    static constexpr uint8_t kAutoSaveSettleSecs = 3;
+    uint32_t autosave_last_check = 0;
+    uint32_t live_checksum_prev = 0;
+    uint32_t saved_checksum = 0;
+    uint8_t settle_seconds = 0;
+
+    uint32_t LiveChecksum() const {
+        uint32_t h = 2166136261u ^ active_setup;
+        auto mix = [&h](uint64_t d) {
+            h = (h ^ uint32_t(d)) * 16777619u;
+            h = (h ^ uint32_t(d >> 32)) * 16777619u;
+        };
+        for (int i = 0; i < MIDIMAP_MAX; ++i)
+            mix(frame.MIDIState.mapping[i].Pack());
+        for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+            mix(frame.MIDIState.outports[i].Pack());
+        for (int s = 0; s < kNumSetups; ++s) {
+            for (int i = 0; i < MIDIMAP_MAX; ++i) mix(setups[s].inmaps[i]);
+            for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) mix(setups[s].outports[i]);
+        }
+        mix(uint64_t(frame.MIDIState.bend_range) | (uint64_t(frame.MIDIState.poly_mode) << 8)
+            | (uint64_t(frame.MIDIState.pc_channel) << 16) | (uint64_t(HS::trig_length) << 24));
+        return h;
+    }
+
+    void PersistNow() {
+        PackSetup(active_setup);
+#ifdef __IMXRT1062__
+        StoreData();
+#else
+        OC::save_app_data(); // global settings + every app's EEPROM chunk
+#endif
+        saved_checksum = live_checksum_prev = LiveChecksum();
+        settle_seconds = 0;
+    }
+
+    void AutoSaveTick() {
+        const uint32_t now = millis();
+        if (now - autosave_last_check < 1000) return;
+        autosave_last_check = now;
+        const uint32_t cs = LiveChecksum();
+        if (cs != live_checksum_prev) {
+            live_checksum_prev = cs; // still being edited; restart settle timer
+            settle_seconds = 0;
+        } else if (cs != saved_checksum && ++settle_seconds >= kAutoSaveSettleSecs) {
+            PersistNow();
+        }
+    }
+
     bool LiveConfigDirty() const {
         for (int i = 0; i < MIDIMAP_MAX; ++i)
             if (frame.MIDIState.mapping[i].Pack() != setups[active_setup].inmaps[i]) return true;
@@ -680,6 +734,8 @@ public:
     // runs in the main loop (not the ISR): drains deferred work
     void DoLoop() {
         auto &hMIDI = frame.MIDIState;
+
+        AutoSaveTick();
 
         // surface engine sends in the log display
         HS::MIDIFrame::OutLogEvent e;
@@ -732,12 +788,7 @@ public:
             SendDump(syx_dump_setup);
         }
         if (pending & PEND_SAVE) {
-            PackSetup(active_setup);
-#ifdef __IMXRT1062__
-            StoreData();
-#else
-            OC::save_app_data(); // global settings + every app's EEPROM chunk
-#endif
+            PersistNow();
             const uint8_t echo = SYX_SAVE;
             SendSyxFrame(SYX_ACK, &echo, 1);
         }
