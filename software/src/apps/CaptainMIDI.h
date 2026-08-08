@@ -411,6 +411,114 @@ public:
         frame.MIDIState.panic_request = true;
     }
 
+    // build+send one protocol frame: F0 7D 62 4D <ver> <cmd> <payload> F7
+    void SendSyxFrame(uint8_t cmd, const uint8_t *payload, uint8_t plen) {
+        uint8_t buf[64];
+        uint8_t n = 0;
+        buf[n++] = 0xF0; buf[n++] = 0x7D; buf[n++] = 0x62; buf[n++] = 'M';
+        buf[n++] = SYX_PROTO_VERSION;
+        buf[n++] = cmd;
+        for (uint8_t i = 0; i < plen && n < 62; ++i) buf[n++] = payload[i] & 0x7f;
+        buf[n++] = 0xF7;
+        usbMIDI.sendSysEx(n, buf, true);
+    }
+
+    // the 7 in-map / 9 out-port parameter values from a packed blob,
+    // encoded exactly as GET_PARAM returns them
+    static void InMapParams(uint64_t d, uint8_t out[7]) {
+        const uint8_t fcc = d & 0xff;
+        out[0] = uint8_t((d >> 8) & 0xff) >> 5;              // type
+        out[1] = (fcc == 0xff) ? 127 : (fcc & 0x7f);         // subtype/CC
+        out[2] = (d >> 16) & 0xff;                           // channel
+        out[3] = uint8_t(int8_t((d >> 32) & 0xff) + 64);     // transpose+64
+        out[4] = (d >> 40) & 0x7f;                           // range_low
+        out[5] = (d >> 48) & 0x7f;                           // range_high
+        out[6] = (d >> 24) & 0xff;                           // polyvoice
+    }
+    static void OutPortParams(uint64_t d, uint8_t out[9]) {
+        HS::MIDIOutSettings tmp;
+        tmp.Unpack(d);
+        out[0] = tmp.function; out[1] = tmp.channel;
+        out[2] = tmp.data1; out[3] = tmp.data2;
+        out[4] = uint8_t(tmp.transpose + 64);
+        out[5] = tmp.range_low; out[6] = tmp.range_high;
+        out[7] = tmp.flags; out[8] = tmp.clkdiv;
+    }
+
+    // full-setup dump as a stream of DUMP_DATA packets + DUMP_END
+    void SendDump(uint8_t s) {
+        if (s == active_setup) PackSetup(s); // canonicalize live edits
+        constexpr int kRecBytes =
+            (2 + kGlobalParamCount) + MIDIMAP_MAX * (2 + kInParamCount)
+            + HS::MIDIFrame::kOutPorts * (2 + kOutParamCount);
+        uint8_t rec[kRecBytes];
+        int rn = 0;
+
+        rec[rn++] = CLS_GLOBAL; rec[rn++] = 0;
+        for (uint8_t par = 0; par < kGlobalParamCount; ++par) {
+            uint8_t v = 0;
+            get_param(CLS_GLOBAL, 0, par, v);
+            rec[rn++] = v;
+        }
+        for (int i = 0; i < MIDIMAP_MAX; ++i) {
+            rec[rn++] = CLS_IN; rec[rn++] = i;
+            InMapParams(setups[s].inmaps[i], &rec[rn]);
+            rn += kInParamCount;
+        }
+        for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) {
+            const bool trig = i >= HS::MIDIFrame::kCVOutPorts;
+            rec[rn++] = trig ? CLS_TR : CLS_CV;
+            rec[rn++] = trig ? (i - HS::MIDIFrame::kCVOutPorts) : i;
+            OutPortParams(setups[s].outports[i], &rec[rn]);
+            rn += kOutParamCount;
+        }
+
+        // chunk whole records into <=49-byte packet payloads
+        uint8_t xorsum = 0;
+        for (int i = 0; i < rn; ++i) xorsum ^= rec[i];
+        // pre-count packets
+        uint8_t total = 0;
+        for (int i = 0; i < rn; ) {
+            int take = 0;
+            while (i + take < rn) {
+                const uint8_t cls = rec[i + take];
+                const int rlen = 2 + ((cls == CLS_GLOBAL) ? kGlobalParamCount
+                               : (cls == CLS_IN) ? kInParamCount : kOutParamCount);
+                if (take + rlen > 49) break;
+                take += rlen;
+            }
+            i += take;
+            ++total;
+        }
+        uint8_t seq = 0;
+        for (int i = 0; i < rn; ) {
+            uint8_t pkt[52];
+            int n = 0;
+            pkt[n++] = s; pkt[n++] = seq; pkt[n++] = total;
+            while (i < rn) {
+                const uint8_t cls = rec[i];
+                const int rlen = 2 + ((cls == CLS_GLOBAL) ? kGlobalParamCount
+                               : (cls == CLS_IN) ? kInParamCount : kOutParamCount);
+                if (n - 3 + rlen > 49) break;
+                memcpy(&pkt[n], &rec[i], rlen);
+                n += rlen;
+                i += rlen;
+            }
+            SendSyxFrame(SYX_DUMP_DATA, pkt, n);
+            ++seq;
+        }
+        const uint8_t endpkt[3] = {s, seq, uint8_t(xorsum & 0x7f)};
+        SendSyxFrame(SYX_DUMP_END, endpkt, 3);
+    }
+
+    bool LiveConfigDirty() {
+        for (int i = 0; i < MIDIMAP_MAX; ++i)
+            if (frame.MIDIState.mapping[i].Pack() != setups[active_setup].inmaps[i]) return true;
+        for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+            if (frame.MIDIState.outports[i].Pack() != setups[active_setup].outports[i]) return true;
+        return false;
+    }
+
     // runs in the main loop (not the ISR): drains deferred work
     void DoLoop() {
         auto &hMIDI = frame.MIDIState;
@@ -422,50 +530,385 @@ public:
                 hMIDI.SendCC(ch, 123, 0); // All Notes Off
             }
         }
+
+        if (!syx_pending) return;
+        const uint8_t pending = syx_pending;
+        syx_pending = 0;
+
+        if (pending & PEND_REPLY) {
+            SendSyxFrame(syx_reply[0], &syx_reply[1], syx_reply_len - 1);
+        }
+        if (pending & PEND_IDENTITY) {
+            // Universal Device Inquiry reply: mfr 7D, family "hOC", fw version
+            const uint8_t reply[] = {
+                0xF0, 0x7E, 0x7F, 0x06, 0x02,
+                0x7D, 'h', 'O', 'C', SYX_PROTO_VERSION,
+                2, 0, 1, 0, 0xF7,
+            };
+            usbMIDI.sendSysEx(sizeof(reply), reply, true);
+        }
+        if (pending & PEND_INFO) {
+            const uint8_t info[] = {
+                1, // schema
+                2, 0, 1, // firmware version
+                MIDIMAP_MAX,
+                HS::MIDIFrame::kCVOutPorts, HS::MIDIFrame::kTrigOutPorts,
+                kNumSetups, uint8_t(active_setup),
+                uint8_t(LiveConfigDirty() ? 1 : 0),
+            };
+            SendSyxFrame(SYX_INFO_R, info, sizeof(info));
+        }
+        if (pending & PEND_DUMP) {
+            SendDump(syx_dump_setup);
+        }
+        if (pending & PEND_SAVE) {
+            PackSetup(active_setup);
+#ifdef __IMXRT1062__
+            StoreData();
+#else
+            OC::save_app_data(); // global settings + every app's EEPROM chunk
+#endif
+            const uint8_t echo = SYX_SAVE;
+            SendSyxFrame(SYX_ACK, &echo, 1);
+        }
+        if (pending & PEND_LOAD) {
+            // revert to the stored blob, discarding live edits
+            active_setup = syx_load_target;
+            UnpackSetup(active_setup);
+            Reset();
+            const uint8_t echo[2] = {SYX_LOAD, syx_load_target};
+            SendSyxFrame(SYX_ACK, echo, 2);
+        }
+        if (pending & PEND_FACTORY) {
+            hMIDI.Init();
+            for (int s = 0; s < kNumSetups; ++s) PackSetup(s);
+            active_setup = 0;
+            Reset();
+            const uint8_t echo = SYX_FACTORY;
+            SendSyxFrame(SYX_ACK, &echo, 1);
+        }
     }
 
-    /* When the app is suspended, it sends out a system exclusive dump, generated here */
-    void OnSendSysEx() {
-        // Teensy will receive 60-byte sysex files, so there's room for one and only one
-        // Setup. The currently-selected Setup will be the one we're sending. That's 40
-        // bytes.
-        uint8_t V[MIDI_PARAMETER_COUNT];
-        for (int i = 0; i < MIDI_PARAMETER_COUNT; i++)
-        {
-          // TODO
-            int p = 0;
-            // uint8_t offset = MIDI_PARAMETER_COUNT * get_setup_number();
-            // int p = values_[i + offset];
-            if (i > 15 && i < 24) p += 24; // These are signed, so they need to be converted
-            V[i] = static_cast<uint8_t>(p);
-        }
+    // ------------------------------------------------------------------
+    // SysEx protocol v1 — see docs/hoc-midi-sysex.md
+    // Frame: F0 7D 62 4D <ver> <cmd> <body...> F7, all bytes 7-bit, <=60 total
+    // ------------------------------------------------------------------
+    static constexpr uint8_t SYX_PROTO_VERSION = 1;
+    enum SyxCmd : uint8_t {
+      SYX_INFO = 0x01, SYX_GET = 0x02, SYX_SET = 0x03, SYX_GET_DUMP = 0x04,
+      SYX_SAVE = 0x06, SYX_LOAD = 0x07, SYX_FACTORY = 0x08, SYX_PANIC = 0x09,
+      SYX_SELECT = 0x0A,
+      SYX_ACK = 0x40, SYX_INFO_R = 0x41, SYX_GET_R = 0x42,
+      SYX_DUMP_DATA = 0x44, SYX_DUMP_END = 0x45,
+      SYX_NAK = 0x7E,
+    };
+    enum SyxErr : uint8_t {
+      SYXERR_VERSION = 1, SYXERR_CMD = 2, SYXERR_ADDR = 3,
+      SYXERR_VALUE = 4, SYXERR_BUSY = 5, SYXERR_CHECKSUM = 6,
+    };
+    enum SyxClass : uint8_t { CLS_GLOBAL = 0, CLS_IN = 1, CLS_CV = 2, CLS_TR = 3 };
+    static constexpr uint8_t kGlobalParamCount = 7;
+    static constexpr uint8_t kInParamCount = 7;
+    static constexpr uint8_t kOutParamCount = 9;
 
-        // Pack the data and send it out
-        UnpackedData unpacked;
-        unpacked.set_data(40, V);
-        PackedData packed = unpacked.pack();
-        SendSysEx(packed, 'M');
+    // parameter access; value encoding matches the spec (transpose stored +64,
+    // in-map subtype 127 = auto-learn)
+    bool get_param(uint8_t cls, uint8_t idx, uint8_t par, uint8_t &value) {
+        auto &M = frame.MIDIState;
+        switch (cls) {
+          case CLS_GLOBAL:
+            if (idx != 0) return false;
+            switch (par) {
+              case 0: value = 1; return true; // schema
+              case 1: value = active_setup; return true;
+              case 2: value = kNumSetups; return true;
+              case 3: value = M.bend_range; return true;
+              case 4: value = M.poly_mode; return true;
+              case 5: value = M.pc_channel; return true;
+              case 6: value = HS::trig_length; return true;
+              default: return false;
+            }
+          case CLS_IN: {
+            if (idx >= MIDIMAP_MAX || par >= kInParamCount) return false;
+            uint64_t d = M.mapping[idx].Pack();
+            const uint8_t b[7] = {
+              uint8_t(d & 0xff),         // function_cc
+              uint8_t((d >> 8) & 0xff),  // function (type in upper 3 bits)
+              uint8_t((d >> 16) & 0xff), // channel
+              uint8_t((d >> 24) & 0xff), // dac_polyvoice
+              uint8_t((d >> 32) & 0xff), // transpose (raw int8)
+              uint8_t((d >> 40) & 0xff), // range_low
+              uint8_t((d >> 48) & 0xff), // range_high
+            };
+            switch (par) {
+              case 0: value = b[1] >> 5; return true;                 // type
+              case 1: value = (b[0] == 0xff) ? 127 : (b[0] & 0x7f); return true; // subtype/CC (127=learn)
+              case 2: value = b[2]; return true;                      // channel
+              case 3: value = uint8_t(int8_t(b[4]) + 64); return true; // transpose+64
+              case 4: value = b[5]; return true;
+              case 5: value = b[6]; return true;
+              case 6: value = b[3]; return true;                      // polyvoice
+            }
+            return false;
+          }
+          case CLS_CV:
+          case CLS_TR: {
+            const int p = (cls == CLS_TR) ? HS::MIDIFrame::kCVOutPorts + idx : idx;
+            const int limit = (cls == CLS_TR) ? HS::MIDIFrame::kTrigOutPorts
+                                              : HS::MIDIFrame::kCVOutPorts;
+            if (idx >= limit || par >= kOutParamCount) return false;
+            const HS::MIDIOutPort &o = M.outports[p];
+            switch (par) {
+              case 0: value = o.function; return true;
+              case 1: value = o.channel; return true;
+              case 2: value = o.data1; return true;
+              case 3: value = o.data2; return true;
+              case 4: value = uint8_t(o.transpose + 64); return true;
+              case 5: value = o.range_low; return true;
+              case 6: value = o.range_high; return true;
+              case 7: value = o.flags; return true;
+              case 8: value = o.clkdiv; return true;
+            }
+            return false;
+          }
+          default: return false;
+        }
+    }
+
+    // returns 0 on success, else a SyxErr
+    uint8_t set_param(uint8_t cls, uint8_t idx, uint8_t par, uint8_t value) {
+        auto &M = frame.MIDIState;
+        switch (cls) {
+          case CLS_GLOBAL:
+            if (idx != 0) return SYXERR_ADDR;
+            switch (par) {
+              case 1:
+                if (value >= kNumSetups) return SYXERR_VALUE;
+                SelectSetup(value);
+                return 0;
+              case 3:
+                if (value < 1 || value > 24) return SYXERR_VALUE;
+                M.bend_range = value; return 0;
+              case 4:
+                if (value > 2) return SYXERR_VALUE;
+                M.poly_mode = value;
+                M.UpdateMaxPolyphony();
+                return 0;
+              case 5:
+                if (value > 16) return SYXERR_VALUE;
+                M.pc_channel = value; return 0;
+              case 6:
+                if (value < 1) return SYXERR_VALUE;
+                HS::trig_length = value; return 0;
+              case 0: case 2: return SYXERR_VALUE; // read-only
+              default: return SYXERR_ADDR;
+            }
+          case CLS_IN: {
+            if (idx >= MIDIMAP_MAX || par >= kInParamCount) return SYXERR_ADDR;
+            uint64_t d = M.mapping[idx].Pack();
+            auto setbyte = [&d](int n, uint8_t v) {
+              d = (d & ~(uint64_t(0xff) << (n * 8))) | (uint64_t(v) << (n * 8));
+            };
+            switch (par) {
+              case 0:
+                if (value > 5) return SYXERR_VALUE;
+                setbyte(1, value << 5);
+                break;
+              case 1: setbyte(0, (value == 127) ? 0xff : value); break;
+              case 2:
+                if (value > 16) return SYXERR_VALUE;
+                setbyte(2, value); break;
+              case 3:
+                if (value < 16 || value > 112) return SYXERR_VALUE;
+                setbyte(4, uint8_t(int8_t(value) - 64)); break;
+              case 4: setbyte(5, value & 0x7f); break;
+              case 5: setbyte(6, value & 0x7f); break;
+              case 6:
+                if (value >= DAC_CHANNEL_COUNT) return SYXERR_VALUE;
+                setbyte(3, value); break;
+            }
+            M.mapping[idx].Unpack(d);
+            M.UpdateMidiChannelFilter();
+            M.UpdateMaxPolyphony();
+            return 0;
+          }
+          case CLS_CV:
+          case CLS_TR: {
+            const int p = (cls == CLS_TR) ? HS::MIDIFrame::kCVOutPorts + idx : idx;
+            const int limit = (cls == CLS_TR) ? HS::MIDIFrame::kTrigOutPorts
+                                              : HS::MIDIFrame::kCVOutPorts;
+            const int fn_count = (cls == CLS_TR) ? HS::TRFN_COUNT : HS::CVFN_COUNT;
+            if (idx >= limit || par >= kOutParamCount) return SYXERR_ADDR;
+            HS::MIDIOutPort &o = M.outports[p];
+            switch (par) {
+              case 0:
+                if (value >= fn_count) return SYXERR_VALUE;
+                o.function = value;
+                o.ResetRuntime();
+                break;
+              case 1:
+                if (value > 15) return SYXERR_VALUE;
+                o.channel = value; break;
+              case 2: o.data1 = value & 0x7f; break;
+              case 3: o.data2 = value & 0x7f; break;
+              case 4:
+                if (value < 16 || value > 112) return SYXERR_VALUE;
+                o.transpose = int8_t(value) - 64; break;
+              case 5: o.range_low = value & 0x7f; break;
+              case 6: o.range_high = value & 0x7f; break;
+              case 7: o.flags = value; break;
+              case 8:
+                if (value > 15) return SYXERR_VALUE;
+                o.clkdiv = value; break;
+            }
+            o.Sanitize();
+            return 0;
+          }
+          default: return SYXERR_ADDR;
+        }
+    }
+
+    // pending SysEx work: flags set in ISR context, drained in DoLoop()
+    enum SyxPending : uint8_t {
+      PEND_REPLY = 1, PEND_IDENTITY = 2, PEND_INFO = 4,
+      PEND_DUMP = 8, PEND_SAVE = 16, PEND_LOAD = 32, PEND_FACTORY = 64,
+    };
+    volatile uint8_t syx_pending = 0;
+    uint8_t syx_reply[8]; // cmd + payload for ACK/NAK/GET_R
+    uint8_t syx_reply_len = 0;
+    uint8_t syx_dump_setup = 0;
+    uint8_t syx_load_target = 0;
+    // incoming dump bookkeeping
+    uint8_t syx_rx_xor = 0;
+    uint8_t syx_rx_packets = 0;
+
+    void QueueReply(uint8_t cmd, std::initializer_list<uint8_t> payload) {
+        syx_reply[0] = cmd;
+        uint8_t n = 1;
+        for (uint8_t b : payload) {
+            if (n >= sizeof(syx_reply)) break;
+            syx_reply[n++] = b;
+        }
+        syx_reply_len = n;
+        syx_pending |= PEND_REPLY;
+    }
+    void QueueAck(std::initializer_list<uint8_t> echo) { QueueReply(SYX_ACK, echo); }
+    void QueueNak(uint8_t cmd, uint8_t err) { QueueReply(SYX_NAK, {cmd, err}); }
+
+    /* Suspend hook / manual [DUMP]: send the active setup over SysEx */
+    void OnSendSysEx() {
+        syx_dump_setup = active_setup;
+        syx_pending |= PEND_DUMP;
     }
 
     void OnReceiveSysEx() {
-        // Since only one Setup is coming, use the currently-selected setup to determine
-        // where to stash it.
-        uint8_t V[MIDI_PARAMETER_COUNT];
-        if (ExtractSysExData(V, 'M')) {
-            for (int i = 0; i < MIDI_PARAMETER_COUNT; i++)
-            {
-                int p = (int)V[i];
-                if (i > 15 && i < 24) p -= 24; // Restore the sign removed in OnSendSysEx()
-                // TODO
-                // uint8_t offset = MIDI_PARAMETER_COUNT * get_setup_number();
-                // apply_value(i + offset, p);
-            }
-            UpdateLog(1, 0, 5, 0, 'M', 0);
-        } else {
-            char app_code = LastSysExApplicationCode();
-            UpdateLog(1, 0, 5, 0, app_code, 0);
+        const uint8_t *sx = usbMIDI.getSysExArray();
+        const unsigned len = usbMIDI.getSysExArrayLength();
+        HandleSysEx(sx, len);
+    }
+
+    void HandleSysEx(const uint8_t *sx, unsigned len) {
+        // Universal Device Inquiry: F0 7E <dev> 06 01 F7
+        if (len >= 6 && sx[1] == 0x7E && sx[3] == 0x06 && sx[4] == 0x01) {
+            syx_pending |= PEND_IDENTITY;
+            return;
         }
-        Resume();
+        if (len < 7 || sx[1] != 0x7D || sx[2] != 0x62) return; // not ours
+        if (sx[3] != 'M') { // another app's dump passing by; just log it
+            UpdateLog(1, 0, 5, 0, sx[3], 0);
+            return;
+        }
+        const uint8_t ver = sx[4];
+        const uint8_t cmd = sx[5];
+        const uint8_t *body = sx + 6;
+        const unsigned blen = (len >= 7) ? len - 7 : 0; // strip F0..cmd and F7
+        if (ver != SYX_PROTO_VERSION) { QueueNak(cmd, SYXERR_VERSION); return; }
+
+        UpdateLog(1, 0, 5, 0, 'M', cmd);
+
+        switch (cmd) {
+          case SYX_INFO: syx_pending |= PEND_INFO; break;
+
+          case SYX_GET: {
+            uint8_t value = 0;
+            if (blen >= 3 && get_param(body[0], body[1], body[2], value))
+                QueueReply(SYX_GET_R, {body[0], body[1], body[2], value});
+            else QueueNak(cmd, SYXERR_ADDR);
+            break;
+          }
+          case SYX_SET: {
+            if (blen < 4) { QueueNak(cmd, SYXERR_ADDR); break; }
+            const uint8_t err = set_param(body[0], body[1], body[2], body[3]);
+            if (err) QueueNak(cmd, err);
+            else QueueAck({body[0], body[1], body[2], body[3]});
+            break;
+          }
+          case SYX_GET_DUMP: {
+            uint8_t s = (blen >= 1) ? body[0] : 0x7f;
+            if (s == 0x7f) s = active_setup;
+            if (s >= kNumSetups) { QueueNak(cmd, SYXERR_VALUE); break; }
+            syx_dump_setup = s;
+            syx_pending |= PEND_DUMP;
+            break;
+          }
+          case SYX_DUMP_DATA: { // host -> device restore, applied live
+            if (blen < 3) { QueueNak(cmd, SYXERR_ADDR); break; }
+            const uint8_t seq = body[1];
+            if (seq == 0) { syx_rx_xor = 0; syx_rx_packets = 0; }
+            unsigned i = 3; // past setup#/seq/total
+            uint8_t err = 0;
+            while (i + 1 < blen) {
+                const uint8_t cls = body[i], idx = body[i + 1];
+                const uint8_t np = (cls == CLS_GLOBAL) ? kGlobalParamCount
+                                 : (cls == CLS_IN) ? kInParamCount : kOutParamCount;
+                if (i + 2 + np > blen) { err = SYXERR_ADDR; break; }
+                for (uint8_t par = 0; par < np; ++par) {
+                    const uint8_t v = body[i + 2 + par];
+                    // skip read-only globals; tolerate per-param rejects
+                    if (cls == CLS_GLOBAL && (par == 0 || par == 1 || par == 2)) continue;
+                    set_param(cls, idx, par, v);
+                }
+                for (unsigned b = i; b < i + 2 + np; ++b) syx_rx_xor ^= body[b];
+                i += 2 + np;
+            }
+            ++syx_rx_packets;
+            if (err) QueueNak(cmd, err);
+            else QueueAck({seq});
+            break;
+          }
+          case SYX_DUMP_END: {
+            if (blen < 3) { QueueNak(cmd, SYXERR_ADDR); break; }
+            const bool ok = (body[1] == syx_rx_packets) && (body[2] == (syx_rx_xor & 0x7f));
+            syx_rx_xor = 0;
+            syx_rx_packets = 0;
+            if (ok) QueueAck({body[0]});
+            else QueueNak(cmd, SYXERR_CHECKSUM);
+            break;
+          }
+          case SYX_SAVE: syx_pending |= PEND_SAVE; break;
+          case SYX_LOAD:
+            if (blen < 1 || body[0] >= kNumSetups) { QueueNak(cmd, SYXERR_VALUE); break; }
+            syx_load_target = body[0];
+            syx_pending |= PEND_LOAD;
+            break;
+          case SYX_FACTORY:
+            if (blen >= 2 && body[0] == 0x21 && body[1] == 0x42)
+                syx_pending |= PEND_FACTORY;
+            else QueueNak(cmd, SYXERR_VALUE);
+            break;
+          case SYX_PANIC:
+            frame.MIDIState.panic_request = true;
+            QueueAck({});
+            break;
+          case SYX_SELECT:
+            if (blen < 1 || body[0] >= kNumSetups) { QueueNak(cmd, SYXERR_VALUE); break; }
+            SelectSetup(body[0]);
+            QueueAck({body[0]});
+            break;
+          default:
+            QueueNak(cmd, SYXERR_CMD);
+            break;
+        }
     }
 
    void ToggleCopyMode() {
