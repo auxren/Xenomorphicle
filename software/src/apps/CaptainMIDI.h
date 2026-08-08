@@ -680,6 +680,18 @@ public:
     // runs in the main loop (not the ISR): drains deferred work
     void DoLoop() {
         auto &hMIDI = frame.MIDIState;
+
+        // surface engine sends in the log display
+        HS::MIDIFrame::OutLogEvent e;
+        while (hMIDI.PopOutLog(e)) {
+            if (e.message == 4) { // bend: reassemble signed value
+                const int bend = ((e.data2 << 7) | e.data1) - 8192;
+                UpdateLog(0, e.port, 4, e.channel, 0, bend);
+            } else {
+                UpdateLog(0, e.port, e.message, e.channel, e.data1, e.data2);
+            }
+        }
+
         if (hMIDI.panic_request) {
             hMIDI.panic_request = false;
             hMIDI.PanicOutputs(); // targeted note-offs for engine notes
@@ -1141,6 +1153,28 @@ private:
         return cv_out_fn_names[o.function < HS::CVFN_COUNT ? o.function : 0];
     }
 
+    // live physical-input state, left of the activity area:
+    // CV rows get a level bar, trigger rows a gate lamp, MIDI-in rows
+    // a bar for the CV they are currently outputting
+    void DrawRowInputState(int pos, int y) const {
+        const int fullscale = HSAPPLICATION_5V * 2; // 10V unipolar
+        if (pos < DAC_CHANNEL_COUNT) {
+            const int out = frame.MIDIState.mapping[pos].ViewOut();
+            const int h = constrain(out * 8 / fullscale, 0, 8);
+            if (h > 0) graphics.drawRect(50, y + 9 - h, 3, h);
+            return;
+        }
+        const int p = pos - DAC_CHANNEL_COUNT;
+        if (p < HS::MIDIFrame::kCVOutPorts) {
+            const int h = constrain(HS::cvmap[p].In() * 8 / fullscale, 0, 8);
+            if (h > 0) graphics.drawRect(50, y + 9 - h, 3, h);
+        } else {
+            const int k = p - HS::MIDIFrame::kCVOutPorts;
+            if (HS::trigmap[k].Gate()) graphics.drawRect(49, y + 2, 5, 6);
+            else graphics.drawFrame(49, y + 3, 5, 5);
+        }
+    }
+
     // draw MIDI activity for a row: icon, or the sounding note name
     void DrawRowActivity(int pos, int y) const {
         if (pos < DAC_CHANNEL_COUNT) {
@@ -1169,6 +1203,7 @@ private:
             const int current = settings_list.Next(list_item);
             if (current >= kNumRows) { list_item.DrawCustom(); continue; }
 
+            DrawRowInputState(current, list_item.y);
             DrawRowActivity(current, list_item.y);
             list_item.SetPrintPos();
             graphics.print(RowLabel(current));

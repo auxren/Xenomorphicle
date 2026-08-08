@@ -828,6 +828,33 @@ struct alignas(32) MIDIFrame {
     // set by TRFN_PANIC hardware trigger; the app's Loop() drains it with a
     // full all-notes-off sweep (too much traffic to send from the ISR)
     bool panic_request = false;
+
+    // outgoing-message monitor: ProcessOutputs (ISR) pushes, the app's
+    // Loop() drains into its log display. Single-producer/single-consumer
+    // ring; events are dropped when full rather than blocking.
+    struct OutLogEvent {
+        uint8_t port;    // outports[] index
+        uint8_t message; // 0 NoteOn, 1 NoteOff, 2 CC, 3 Aftertouch, 4 Bend
+        uint8_t channel;
+        uint8_t data1;
+        uint8_t data2;
+    };
+    OutLogEvent outlog[8];
+    volatile uint8_t outlog_w = 0;
+    uint8_t outlog_r = 0;
+
+    void PushOutLog(uint8_t port, uint8_t message, uint8_t channel,
+                    uint8_t data1, uint8_t data2) {
+        if (uint8_t(outlog_w - outlog_r) >= 8) return; // full: drop
+        outlog[outlog_w & 7] = {port, message, channel, data1, data2};
+        ++outlog_w;
+    }
+    bool PopOutLog(OutLogEvent &e) {
+        if (outlog_r == outlog_w) return false;
+        e = outlog[outlog_r & 7];
+        ++outlog_r;
+        return true;
+    }
 };
 
 // shared IO Frame, updated every tick

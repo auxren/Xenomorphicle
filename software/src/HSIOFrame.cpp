@@ -483,6 +483,7 @@ void HS::MIDIFrame::ProcessOutputs(IOFrame &f) {
                 if (p.gated) SendNoteOff(p.last_channel, p.last_note, 0);
                 SendNoteOn(p.channel, note, vel);
             }
+            PushOutLog(i, 0, p.channel, note, vel);
             p.gated = true;
             p.last_note = note;
             p.last_channel = p.channel;
@@ -494,12 +495,14 @@ void HS::MIDIFrame::ProcessOutputs(IOFrame &f) {
             const bool gate = f.gate_high[OC::DIGITAL_INPUT_LAST + i];
             if (gate && !p.gated) {
                 SendNoteOn(p.channel, p.data1, VelocityForPort(p));
+                PushOutLog(i, 0, p.channel, p.data1, p.data2);
                 p.gated = true;
                 p.last_note = p.data1;
                 p.last_channel = p.channel;
                 p.indicator = kMIDIIndicatorTicks;
             } else if (!gate && p.gated) {
                 SendNoteOff(p.last_channel, p.last_note, 0);
+                PushOutLog(i, 1, p.last_channel, p.last_note, 0);
                 p.gated = false;
                 p.indicator = kMIDIIndicatorTicks;
             }
@@ -515,8 +518,14 @@ void HS::MIDIFrame::ProcessOutputs(IOFrame &f) {
             if (uint16_t(v) == p.last_value) break;
             p.last_value = v;
             switch (CVOutFn(p.function)) {
-              case CVFN_CC7: SendCC(p.channel, p.data1, v); break;
-              case CVFN_AFTERTOUCH: SendAfterTouch(p.channel, v); break;
+              case CVFN_CC7:
+                SendCC(p.channel, p.data1, v);
+                PushOutLog(i, 2, p.channel, p.data1, v);
+                break;
+              case CVFN_AFTERTOUCH:
+                SendAfterTouch(p.channel, v);
+                PushOutLog(i, 3, p.channel, 0, v);
+                break;
               case CVFN_PROGCHANGE: SendProgramChange(p.channel, v); break;
               default: // NRPN7: address (99/98), then 7-bit value (6)
                 SendCC(p.channel, 99, p.data2);
@@ -542,10 +551,14 @@ void HS::MIDIFrame::ProcessOutputs(IOFrame &f) {
             if (uint16_t(v) == p.last_value) break;
             p.last_value = v;
             switch (CVOutFn(p.function)) {
-              case CVFN_BEND: SendPitchBend(p.channel, v); break;
+              case CVFN_BEND:
+                SendPitchBend(p.channel, v);
+                PushOutLog(i, 4, p.channel, v & 0x7f, (v >> 7) & 0x7f);
+                break;
               case CVFN_CC14: // MSB on data1, LSB on data1+32
                 SendCC(p.channel, p.data1, (v >> 7) & 0x7f);
                 SendCC(p.channel, p.data1 + 32, v & 0x7f);
+                PushOutLog(i, 2, p.channel, p.data1, (v >> 7) & 0x7f);
                 break;
               default: // NRPN14
                 SendCC(p.channel, 99, p.data2);
@@ -570,6 +583,7 @@ void HS::MIDIFrame::ProcessOutputs(IOFrame &f) {
         // fixed-length note tail runs regardless of current function
         if (p.trigout_countdown > 0 && --p.trigout_countdown == 0 && p.gated) {
             SendNoteOff(p.last_channel, p.last_note, 0);
+            PushOutLog(kCVOutPorts + k, 1, p.last_channel, p.last_note, 0);
             p.gated = false;
         }
 
@@ -592,7 +606,9 @@ void HS::MIDIFrame::ProcessOutputs(IOFrame &f) {
                     : uint8_t(constrain(p.data1 + p.transpose, 0, 127));
                 if (note >= p.range_low && note <= p.range_high) {
                     if (p.gated) SendNoteOff(p.last_channel, p.last_note, 0);
-                    SendNoteOn(p.channel, note, VelocityForPort(p));
+                    const uint8_t vel = VelocityForPort(p);
+                    SendNoteOn(p.channel, note, vel);
+                    PushOutLog(kCVOutPorts + k, 0, p.channel, note, vel);
                     p.gated = true;
                     p.last_note = note;
                     p.last_channel = p.channel;
@@ -612,6 +628,7 @@ void HS::MIDIFrame::ProcessOutputs(IOFrame &f) {
                         SendNoteOff(p.last_channel, p.last_note, 0);
                         SendNoteOn(p.channel, note, VelocityForPort(p));
                     }
+                    PushOutLog(kCVOutPorts + k, 0, p.channel, note, p.data2);
                     p.last_note = note;
                     p.last_channel = p.channel;
                     p.indicator = kMIDIIndicatorTicks;
@@ -621,6 +638,7 @@ void HS::MIDIFrame::ProcessOutputs(IOFrame &f) {
                 p.lag_count = 0;
                 if (p.gated) {
                     SendNoteOff(p.last_channel, p.last_note, 0);
+                    PushOutLog(kCVOutPorts + k, 1, p.last_channel, p.last_note, 0);
                     p.gated = false;
                     p.indicator = kMIDIIndicatorTicks;
                 }
@@ -632,6 +650,7 @@ void HS::MIDIFrame::ProcessOutputs(IOFrame &f) {
             if (rising) {
                 if (p.gated) SendNoteOff(p.last_channel, p.last_note, 0);
                 SendNoteOn(p.channel, p.data1, VelocityForPort(p));
+                PushOutLog(kCVOutPorts + k, 0, p.channel, p.data1, p.data2);
                 p.gated = true;
                 p.last_note = p.data1;
                 p.last_channel = p.channel;
@@ -645,11 +664,13 @@ void HS::MIDIFrame::ProcessOutputs(IOFrame &f) {
                 p.latch_state = !p.latch_state;
                 if (p.latch_state) {
                     SendNoteOn(p.channel, p.data1, VelocityForPort(p));
+                    PushOutLog(kCVOutPorts + k, 0, p.channel, p.data1, p.data2);
                     p.gated = true;
                     p.last_note = p.data1;
                     p.last_channel = p.channel;
                 } else if (p.gated) {
                     SendNoteOff(p.last_channel, p.last_note, 0);
+                    PushOutLog(kCVOutPorts + k, 1, p.last_channel, p.last_note, 0);
                     p.gated = false;
                 }
                 p.indicator = kMIDIIndicatorTicks;
@@ -657,14 +678,23 @@ void HS::MIDIFrame::ProcessOutputs(IOFrame &f) {
             break;
 
           case TRFN_CC_MOMENTARY:
-            if (rising) { SendCC(p.channel, p.data1, p.data2); p.indicator = kMIDIIndicatorTicks; }
-            if (falling) { SendCC(p.channel, p.data1, 0); p.indicator = kMIDIIndicatorTicks; }
+            if (rising) {
+                SendCC(p.channel, p.data1, p.data2);
+                PushOutLog(kCVOutPorts + k, 2, p.channel, p.data1, p.data2);
+                p.indicator = kMIDIIndicatorTicks;
+            }
+            if (falling) {
+                SendCC(p.channel, p.data1, 0);
+                PushOutLog(kCVOutPorts + k, 2, p.channel, p.data1, 0);
+                p.indicator = kMIDIIndicatorTicks;
+            }
             break;
 
           case TRFN_CC_LATCH:
             if (rising) {
                 p.latch_state = !p.latch_state;
                 SendCC(p.channel, p.data1, p.latch_state ? p.data2 : 0);
+                PushOutLog(kCVOutPorts + k, 2, p.channel, p.data1, p.latch_state ? p.data2 : 0);
                 p.indicator = kMIDIIndicatorTicks;
             }
             break;
