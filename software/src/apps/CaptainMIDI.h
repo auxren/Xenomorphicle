@@ -84,6 +84,9 @@ const char* const captain_off_on[2] = { "Off", "On" };
 const char* const captain_vel_src[9] = {
   "Fixed", "CV1", "CV2", "CV3", "CV4", "CV5", "CV6", "CV7", "CV8"
 };
+const char* const captain_gate_src[9] = {
+  "TRjack", "CV1", "CV2", "CV3", "CV4", "CV5", "CV6", "CV7", "CV8"
+};
 const char* const captain_clkdiv[16] = {
   "x1", "x2", "x3", "x4", "x6", "x8", "x12", "x24", "x48", "x96",
   "x1", "x1", "x1", "x1", "x1", "x1"
@@ -121,6 +124,8 @@ const settings::ValueAttributes CaptainSettings[] = {
   { 0, 0, 15, "", captain_clkdiv, settings::STORAGE_TYPE_U8 },
   // 13: Poly voice
   { 0, 0, DAC_CHANNEL_COUNT - 1, "", NULL, settings::STORAGE_TYPE_U8 },
+  // 14: Trigger gate source (TR jack or a CV input via ADC threshold)
+  { 0, 0, ADC_CHANNEL_COUNT, "", captain_gate_src, settings::STORAGE_TYPE_U8 },
 };
 
 enum CaptainsKeys : uint16_t {
@@ -386,7 +391,7 @@ public:
     int DetailParamCount(int row) const {
         if (row < DAC_CHANNEL_COUNT) return 6;
         const int p = row - DAC_CHANNEL_COUNT;
-        return (p >= HS::MIDIFrame::kCVOutPorts) ? 9 : 10;
+        return (p >= HS::MIDIFrame::kCVOutPorts) ? 10 : 10;
     }
 
     void EnterDetail(int row) {
@@ -401,9 +406,10 @@ public:
         static const char* const cv_labels[10] = {
             "Function", "Channel", "Data 1", "Data 2", "Transpose",
             "Range Low", "Range High", "Quantize", "Legato", "Vel Source" };
-        static const char* const tr_labels[9] = {
+        static const char* const tr_labels[10] = {
             "Function", "Channel", "Data 1", "Data 2", "Transpose",
-            "Range Low", "Range High", "Vel Source", "Clock Mult" };
+            "Range Low", "Range High", "Vel Source", "Clock Mult",
+            "Gate Src" };
         if (row < DAC_CHANNEL_COUNT) return in_labels[par];
         const int p = row - DAC_CHANNEL_COUNT;
         return (p >= HS::MIDIFrame::kCVOutPorts) ? tr_labels[par] : cv_labels[par];
@@ -426,7 +432,7 @@ public:
             return note_d1 ? 7 : 8;
         }
         if (is_trig) {
-            static const uint8_t a[9] = { 2, 3, 8, 9, 4, 5, 6, 11, 12 };
+            static const uint8_t a[10] = { 2, 3, 8, 9, 4, 5, 6, 11, 12, 14 };
             return a[par];
         }
         static const uint8_t a[10] = { 1, 3, 8, 9, 4, 5, 6, 10, 10, 11 };
@@ -461,6 +467,9 @@ public:
         if (is_trig) {
             if (par == 7) return o.velocity_source();
             if (par == 8) return o.clkdiv;
+            if (par == 9) // gate source: 0 = TR jack, 1..N = CV input
+                return (o.flags & HS::MIDIOutSettings::FLAG_CV_GATE)
+                    ? (o.clkdiv % HS::MIDIFrame::kCVOutPorts) + 1 : 0;
         } else {
             if (par == 7) return (o.flags & HS::MIDIOutSettings::FLAG_QUANTIZE) ? 1 : 0;
             if (par == 8) return (o.flags & HS::MIDIOutSettings::FLAG_LEGATO) ? 1 : 0;
@@ -507,6 +516,17 @@ public:
             if (is_trig) {
                 if (par == 7) edit_vel_src(dir);
                 if (par == 8) o.clkdiv = constrain(o.clkdiv + dir, 0, 15);
+                if (par == 9) {
+                    const int cur = (o.flags & HS::MIDIOutSettings::FLAG_CV_GATE)
+                        ? (o.clkdiv % HS::MIDIFrame::kCVOutPorts) + 1 : 0;
+                    const int v = constrain(cur + dir, 0, ADC_CHANNEL_COUNT);
+                    if (v == 0) {
+                        o.flags &= ~HS::MIDIOutSettings::FLAG_CV_GATE;
+                    } else {
+                        o.flags |= HS::MIDIOutSettings::FLAG_CV_GATE;
+                        o.clkdiv = v - 1;
+                    }
+                }
             } else {
                 if (par == 7 && dir) o.flags ^= HS::MIDIOutSettings::FLAG_QUANTIZE;
                 if (par == 8 && dir) o.flags ^= HS::MIDIOutSettings::FLAG_LEGATO;

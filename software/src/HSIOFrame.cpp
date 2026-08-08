@@ -592,7 +592,18 @@ void HS::MIDIFrame::ProcessOutputs(IOFrame &f) {
             p.gated = false;
         }
 
-        const bool gate = trigmap[k].Gate();
+        // Gate source: the TR jack, or — for pulse sources too weak for the
+        // digital input's hardware threshold — any CV input via the ADC's
+        // 1.25V threshold (FLAG_CV_GATE; clkdiv selects the CV jack).
+        // Not available for TRFN_CLOCK, where clkdiv is the multiplier.
+        bool gate;
+        if ((p.flags & MIDIOutSettings::FLAG_CV_GATE)
+             && TrigOutFn(p.function) != TRFN_CLOCK) {
+            const int src = p.clkdiv % kCVOutPorts;
+            gate = f.gate_high[OC::DIGITAL_INPUT_LAST + src];
+        } else {
+            gate = trigmap[k].Gate();
+        }
         const bool rising = gate && !p.prev_gate;
         const bool falling = !gate && p.prev_gate;
         p.prev_gate = gate;

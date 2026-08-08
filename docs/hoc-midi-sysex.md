@@ -161,11 +161,21 @@ length), 3 NoteLatch, 4 CC momentary (data1←data2/0), 5 CC latch,
 6 Start, 7 Stop, 8 Continue, 9 Start/Stop toggle, 10 Clock, 11 Panic.
 
 Flags bitfield (param 7): bit0 quantize pitch CV, bit1 legato (overlap
-instead of retrigger), bit2 CV-threshold gate source, bits3-5 velocity
-source (0 = fixed data2, 1-4 = sample CV port 1-4 at note-on).
+instead of retrigger), bit2 CV gate source (trigger ports only, below),
+bits3-5 velocity source (0 = fixed data2, 1-4 = sample CV port 1-4 at
+note-on).
 
-Clock multiplier table (param 8): index 0-9 → x1 x2 x3 x4 x6 x8 x12 x24
-x48 x96 MIDI clocks per rising edge; 10-15 reserved (= x1).
+Param 8 is dual-purpose on trigger ports:
+- function = Clock: clock multiplier, index 0-9 → x1 x2 x3 x4 x6 x8 x12
+  x24 x48 x96 MIDI clocks per rising edge; 10-15 reserved (= x1).
+- any other function with flags bit2 set: **gate source** — the port
+  takes its gate from CV input (param8 mod n_cv) via the ADC's 1.25V
+  threshold instead of the TR jack. Use this for pulse sources too weak
+  for the digital input's hardware threshold (measured on real Buchla
+  gear: a 281's pulse arrives ~1.8V, a 244's ~2.4V — both below the TR
+  jack's threshold, both comfortably above 1.25V). Pitch still comes
+  from the paired CV port when it is set to Pitch. The on-device "Gate
+  Src" row edits the same bits. Not available when function = Clock.
 
 ## Dump format
 
