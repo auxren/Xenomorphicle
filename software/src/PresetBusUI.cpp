@@ -23,7 +23,15 @@ static constexpr uint16_t kLastTrigKey = (8 << 8) | 0x12;
 
 static bool active = false;
 static uint8_t sel = 0;          // selected preset, 0-29 (shown 1-30)
-static int8_t cursor = 0;        // 0 = preset, 1 = next-trig, 2 = last-trig
+static int8_t cursor = 0;        // 0 preset, 1 name, 2 next-trig, 3 last-trig
+
+// rename edit mode (UXR spec: recursive grammar, L=position R=character)
+static bool edit_mode = false;
+static int8_t edit_pos = 0;
+static char edit_buf[PresetEngine::kNameLen + 1];
+// cycling order: space adjacent to A and (via wrap) to '+'
+static const char kCharset[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-./&+";
+static constexpr int kCharsetLen = sizeof(kCharset) - 1;
 static uint8_t next_trig = 0;    // 0 = off, 1-4 = TR1-4
 static uint8_t last_trig = 0;
 static bool assign_dirty = false;
@@ -59,6 +67,7 @@ FLASHMEM void Enter() {
   const int last = PresetEngine::LastSlot();
   if (last >= 0) sel = (uint8_t)last;
   cursor = 0;
+  edit_mode = false;
   sel_stored = -1;
   active = true;
 }
@@ -73,16 +82,50 @@ FLASHMEM static void recall_selected() {
   HS::PokePopup(HS::MESSAGE_POPUP, "Bus recall...");
 }
 
+FLASHMEM static void commit_name() {
+  // trim trailing spaces; an all-space buffer commits as unnamed
+  char out[PresetEngine::kNameLen + 1];
+  memcpy(out, edit_buf, sizeof(out));
+  for (int i = PresetEngine::kNameLen - 1; i >= 0 && out[i] == ' '; --i)
+    out[i] = 0;
+  PresetEngine::SetSlotName(sel, out);
+}
+
 FLASHMEM bool HandleEvent(const UI::Event &event) {
   if (!active) return false;
 
+  // ---- EDIT mode: the grammar recurses, one char cell is the focus ----
+  if (edit_mode) {
+    if (event.control == CONTROL_ENCODER_L) {
+      edit_pos = constrain(edit_pos + (event.value > 0 ? 1 : -1), 0,
+                           (int)PresetEngine::kNameLen - 1);
+    } else if (event.control == CONTROL_ENCODER_R) {
+      const char *hit = strchr(kCharset, edit_buf[edit_pos]);
+      int idx = hit ? (int)(hit - kCharset) : 0;
+      idx = (idx + (event.value % kCharsetLen) + kCharsetLen) % kCharsetLen;
+      edit_buf[edit_pos] = kCharset[idx];
+    } else if (event.control == CONTROL_BUTTON_L &&
+               event.type == UI::EVENT_BUTTON_PRESS) {
+      commit_name();               // DONE
+      edit_mode = false;
+    } else if ((event.control == CONTROL_BUTTON_UP ||
+                event.control == CONTROL_BUTTON_DOWN) &&
+               event.type == UI::EVENT_BUTTON_PRESS) {
+      edit_mode = false;           // cancel: back out one tier only
+    }
+    // R press / L long / everything else: swallowed. A bus-wide recall
+    // must never fire from a rename gesture.
+    return true;
+  }
+
+  // ---- BROWSE ----
   if (event.control == CONTROL_BUTTON_UP || event.control == CONTROL_BUTTON_DOWN) {
     if (event.type == UI::EVENT_BUTTON_PRESS) Exit();
     return true;
   }
 
   if (event.control == CONTROL_ENCODER_L) {
-    cursor = constrain(cursor + (event.value > 0 ? 1 : -1), 0, 2);
+    cursor = constrain(cursor + (event.value > 0 ? 1 : -1), 0, 3);
     return true;
   }
   if (event.control == CONTROL_ENCODER_R) {
@@ -91,14 +134,27 @@ FLASHMEM bool HandleEvent(const UI::Event &event) {
         sel = (uint8_t)constrain((int)sel + event.value, 0, 29);
         sel_stored = -1;
         break;
-      case 1:
+      case 1: break;  // nothing directly spinnable; EDIT/click legend explains
+      case 2:
         next_trig = (uint8_t)constrain((int)next_trig + event.value, 0, 4);
         assign_dirty = true;
         break;
-      case 2:
+      case 3:
         last_trig = (uint8_t)constrain((int)last_trig + event.value, 0, 4);
         assign_dirty = true;
         break;
+    }
+    return true;
+  }
+  if (event.control == CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_PRESS) {
+    if (cursor == 1 && sel_stored == 1) {   // enter EDIT (stored slots only)
+      memset(edit_buf, ' ', PresetEngine::kNameLen);
+      edit_buf[PresetEngine::kNameLen] = 0;
+      const char *n = PresetEngine::SlotName(sel);
+      for (int i = 0; n[i] && i < (int)PresetEngine::kNameLen; ++i)
+        edit_buf[i] = n[i];
+      edit_pos = 0;
+      edit_mode = true;
     }
     return true;
   }
@@ -107,12 +163,12 @@ FLASHMEM bool HandleEvent(const UI::Event &event) {
     return true;
   }
   if (event.control == CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_LONG_PRESS) {
+    if (cursor == 1 && sel_stored == 1) return true;  // STORE legend hidden here
     PresetBus::BroadcastSave(sel);
-    sel_stored = -1;  // re-check after the save lands
+    sel_stored = -1;
     HS::PokePopup(HS::MESSAGE_POPUP, "Bus store...");
     return true;
   }
-  // swallow everything else (incl. the L short-press release) while active
   return true;
 }
 
@@ -157,30 +213,56 @@ FLASHMEM void Draw() {
   graphics.print("P R E S E T  B U S");         // letterspaced legend
   graphics.drawHLine(1, 11, 126);               // rule
 
-  // LCD window, 225e-style
-  graphics.drawFrame(43, 13, 42, 38);
+  // LCD window (v2: shorter; the status word moved to the name row)
+  graphics.drawFrame(43, 13, 42, 28);
   if (sel_stored < 0) sel_stored = PresetEngine::SlotUsed(sel) ? 1 : 0;
   const uint8_t shown = sel + 1;                // 01-30, zero-padded
   draw_7seg(50, 16, shown / 10);
   draw_7seg(66, 16, shown % 10);
-  graphics.setPrintPos(sel_stored ? 46 : 49, 40);
-  graphics.print(sel_stored ? "STORED" : "EMPTY");
 
-  // edge legends, spatially mapped to the encoders (225e panel order)
-  graphics.setPrintPos(4, 21);
-  graphics.print("STORE");
-  graphics.setPrintPos(7, 31);
-  graphics.print("hold");
-  graphics.setPrintPos(88, 21);
-  graphics.print("RECALL");
-  graphics.setPrintPos(91, 31);
-  graphics.print("press");
+  // edge legends: contextual (turns are unlabeled, presses are labeled)
+  const char *l_top = "STORE", *l_hint = "hold";
+  const char *r_top = "RECALL", *r_hint = "press";
+  if (edit_mode) {
+    l_top = "DONE"; l_hint = "click";
+    r_top = "CHAR"; r_hint = "turn";
+  } else if (cursor == 1 && sel_stored == 1) {
+    l_top = "EDIT"; l_hint = "click";
+  }
+  graphics.setPrintPos(4, 16);
+  graphics.print(l_top);
+  graphics.setPrintPos(7, 26);
+  graphics.print(l_hint);
+  graphics.setPrintPos(88, 16);
+  graphics.print(r_top);
+  graphics.setPrintPos(91, 26);
+  graphics.print(r_hint);
 
   // WPM presence: banana-jack dot, filled = present
-  graphics.drawCircle(92, 43, 2);
-  if (PresetBus::WpmPresent()) graphics.drawRect(91, 42, 3, 3);
-  graphics.setPrintPos(97, 40);
+  graphics.drawCircle(92, 38, 2);
+  if (PresetBus::WpmPresent()) graphics.drawRect(91, 37, 3, 3);
+  graphics.setPrintPos(97, 35);
   graphics.print(PresetBus::WpmPresent() ? "WPM" : "wpm");
+
+  // name row (y=44): edit grid, or the worded state, or the name
+  if (edit_mode) {
+    for (int i = 0; i < (int)PresetEngine::kNameLen; ++i) {
+      graphics.setPrintPos(16 + 6 * i, 44);
+      graphics.print(edit_buf[i] == ' ' ? '_' : edit_buf[i]);
+    }
+  } else {
+    const char *nm = PresetEngine::SlotName(sel);
+    if (!sel_stored) {
+      graphics.setPrintPos(49, 44);
+      graphics.print("EMPTY");
+    } else if (!nm[0]) {
+      graphics.setPrintPos(43, 44);
+      graphics.print("unnamed");
+    } else {
+      graphics.setPrintPos(64 - 3 * (int)strlen(nm), 44);
+      graphics.print(nm);
+    }
+  }
 
   // 225e last/next pulse jacks
   draw_jack(8, 57, next_trig != 0);
@@ -197,11 +279,22 @@ FLASHMEM void Draw() {
   if (last_trig) graphics.printf("TR%d", last_trig);
   else graphics.print("off");
 
-  // one focus grammar: invert what the right encoder will change
-  switch (cursor) {
+  // one focus grammar: invert exactly what the right encoder will change
+  if (edit_mode) {
+    graphics.invertRect(15 + 6 * edit_pos, 43, 8, 10);
+  } else switch (cursor) {
     case 0: graphics.invertRect(48, 14, 32, 26); break;
-    case 1: graphics.invertRect(39, 53, 20, 10); break;
-    case 2: graphics.invertRect(103, 53, 20, 10); break;
+    case 1: {
+      const char *nm = PresetEngine::SlotName(sel);
+      int sx, len;
+      if (!sel_stored) { sx = 49; len = 5; }
+      else if (!nm[0]) { sx = 43; len = 7; }
+      else { len = (int)strlen(nm); sx = 64 - 3 * len; }
+      graphics.invertRect(sx - 2, 43, 6 * len + 4, 10);
+      break;
+    }
+    case 2: graphics.invertRect(39, 53, 20, 10); break;
+    case 3: graphics.invertRect(103, 53, 20, 10); break;
   }
 }
 

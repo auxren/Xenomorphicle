@@ -44,6 +44,12 @@ int ConsumeQuadrantsRecallHint();
 // status for UI / debug
 int8_t LastSlot();            // -1 = none yet
 bool SlotUsed(uint8_t slot);  // slot has a stored preset on disk
+
+// slot names: flat PBNAMES.BIN sidecar (16 chars max, RAM-cached at Init;
+// independent of the slot data so renames never touch preset content)
+static constexpr size_t kNameLen = 16;
+const char *SlotName(uint8_t slot);              // "" when unnamed
+void SetSlotName(uint8_t slot, const char *name);  // persists immediately
 bool LastWasSave();
 bool Busy();
 
@@ -59,6 +65,9 @@ inline bool RecallSlot(uint8_t) { return false; }
 inline int ConsumeQuadrantsRecallHint() { return -1; }
 inline int8_t LastSlot() { return -1; }
 inline bool SlotUsed(uint8_t) { return false; }
+static constexpr size_t kNameLen = 16;
+inline const char *SlotName(uint8_t) { return ""; }
+inline void SetSlotName(uint8_t, const char *) {}
 inline bool LastWasSave() { return false; }
 inline bool Busy() { return false; }
 

@@ -67,6 +67,7 @@ static uint8_t extract_preset;
 // ---- helpers ---------------------------------------------------------------
 
 static FS &slot_fs() { return SDcard_Ready ? (FS &)SD : (FS &)PhzConfig::myfs; }
+static void load_names();  // defined with the name store below
 
 FLASHMEM static void slot_name(char *buf, uint8_t slot, char kind, const char *ext) {
   // PB_NN_K.EXT
@@ -341,6 +342,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
 FLASHMEM void Init() {
   pending_save = pending_recall = -1;
   quad_recall_hint = -1;
+  load_names();
 }
 
 void RequestSave(uint8_t slot) {
@@ -370,6 +372,41 @@ FLASHMEM int ConsumeQuadrantsRecallHint() {
 }
 
 int8_t LastSlot() { return last_slot; }
+
+// ---- slot names --------------------------------------------------------
+// One flat 30x16 byte file, whole thing cached in RAM. Deliberately not a
+// PhzConfig file: reads/writes must never disturb the shared config map.
+static char name_cache[kNumSlots][kNameLen + 1];  // +1: always NUL-safe
+
+FLASHMEM static void load_names() {
+  memset(name_cache, 0, sizeof(name_cache));
+  File f = slot_fs().open("PBNAMES.BIN", FILE_READ);
+  if (!f) return;
+  for (int i = 0; i < kNumSlots; ++i) {
+    if (f.read((uint8_t *)name_cache[i], kNameLen) != kNameLen) break;
+    name_cache[i][kNameLen] = 0;
+  }
+  f.close();
+}
+
+const char *SlotName(uint8_t slot) {
+  return (slot < kNumSlots) ? name_cache[slot] : "";
+}
+
+FLASHMEM void SetSlotName(uint8_t slot, const char *name) {
+  if (slot >= kNumSlots) return;
+  memset(name_cache[slot], 0, sizeof(name_cache[slot]));
+  strncpy(name_cache[slot], name, kNameLen);
+  // trim trailing spaces so "unnamed" stays honest
+  for (int i = (int)strlen(name_cache[slot]) - 1;
+       i >= 0 && name_cache[slot][i] == ' '; --i)
+    name_cache[slot][i] = 0;
+  File f = slot_fs().open("PBNAMES.BIN", FILE_WRITE_BEGIN);
+  if (!f) return;
+  for (int i = 0; i < kNumSlots; ++i)
+    f.write((const uint8_t *)name_cache[i], kNameLen);
+  f.close();
+}
 
 FLASHMEM bool SlotUsed(uint8_t slot) {
   if (slot >= kNumSlots) return false;
