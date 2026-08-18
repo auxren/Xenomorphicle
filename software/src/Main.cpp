@@ -48,6 +48,7 @@
 
 #include "PhzConfig.h"
 #include "PresetEngine.h"
+#include "PresetBus.h"
 
 #if defined(ARDUINO_TEENSY41)
 USBHost thisUSB;
@@ -375,6 +376,7 @@ FLASHMEM void setup() {
   // initialize apps (on T3.x firstrun is detected by the EEPROM load inside)
   firstrun |= !OC::app_switcher.Init(reset_settings || firstrun);
   OC::PresetEngine::Init();
+  OC::PresetBus::Init();  // gated on I2C_Expansion inside
 
   // Welcome splash
   OC::ui.Splashscreen(firstrun, 1);
@@ -439,6 +441,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
     // Take care of queued tasks
     OC::CORE::FlushTasks();
     OC::PresetEngine::Process();
+    OC::PresetBus::Task();
 
     // UI events
     if (UI_MODE_APP_SETTINGS == ui_mode) {
@@ -520,6 +523,11 @@ FLASHMEM __attribute__((noinline)) void loop() {
           case ']': OC::PresetEngine::RequestRecall(0); break;
           case '{': OC::PresetEngine::RequestSave(1); break;
           case '}': OC::PresetEngine::RequestRecall(1); break;
+          case 'b': OC::PresetBus::DebugDump(); break;
+          case 'B':
+            OC::PresetBus::SetVerbose(!OC::PresetBus::Verbose());
+            Serial.printf("PresetBus verbose = %d\n", OC::PresetBus::Verbose());
+            break;
 #endif
           case 'C':
             Serial.println("Resetting Config File!!");
