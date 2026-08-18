@@ -43,6 +43,7 @@ int ConsumeQuadrantsRecallHint();
 
 // status for UI / debug
 int8_t LastSlot();            // -1 = none yet
+bool SlotUsed(uint8_t slot);  // slot has a stored preset on disk
 bool LastWasSave();
 bool Busy();
 
@@ -57,6 +58,7 @@ inline bool SaveSlot(uint8_t) { return false; }
 inline bool RecallSlot(uint8_t) { return false; }
 inline int ConsumeQuadrantsRecallHint() { return -1; }
 inline int8_t LastSlot() { return -1; }
+inline bool SlotUsed(uint8_t) { return false; }
 inline bool LastWasSave() { return false; }
 inline bool Busy() { return false; }
 

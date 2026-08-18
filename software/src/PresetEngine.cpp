@@ -370,6 +370,16 @@ FLASHMEM int ConsumeQuadrantsRecallHint() {
 }
 
 int8_t LastSlot() { return last_slot; }
+
+FLASHMEM bool SlotUsed(uint8_t slot) {
+  if (slot >= kNumSlots) return false;
+  char name[12];
+  slot_name(name, slot, 'G', "CFG");
+  File f = slot_fs().open(name, FILE_READ);
+  const bool used = f && f.size() > 16;
+  if (f) f.close();
+  return used;
+}
 bool LastWasSave() { return last_was_save; }
 bool Busy() { return busy; }
 

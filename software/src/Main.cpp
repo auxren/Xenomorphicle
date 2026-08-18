@@ -49,6 +49,7 @@
 #include "PhzConfig.h"
 #include "PresetEngine.h"
 #include "PresetBus.h"
+#include "PresetBusUI.h"
 
 #if defined(ARDUINO_TEENSY41)
 USBHost thisUSB;
@@ -376,7 +377,8 @@ FLASHMEM void setup() {
   // initialize apps (on T3.x firstrun is detected by the EEPROM load inside)
   firstrun |= !OC::app_switcher.Init(reset_settings || firstrun);
   OC::PresetEngine::Init();
-  OC::PresetBus::Init();  // gated on I2C_Expansion inside
+  OC::PresetBus::Init();
+  OC::PresetBusUI::Init();  // gated on I2C_Expansion inside
 
   // Welcome splash
   OC::ui.Splashscreen(firstrun, 1);
@@ -416,6 +418,8 @@ FLASHMEM __attribute__((noinline)) void loop() {
         // Handle events and process state changes elsewhere.
         ui.AppSettings(true);
 
+      } else if (OC::PresetBusUI::Active()) {
+        OC::PresetBusUI::Draw();
       } else { // if (UI_MODE_MENU == ui_mode) {
         OC_DEBUG_RESET_CYCLES(menu_draw_count, 512, DEBUG::MENU_draw_cycles);
         OC_DEBUG_PROFILE_SCOPE(DEBUG::MENU_draw_cycles);
@@ -442,6 +446,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
     OC::CORE::FlushTasks();
     OC::PresetEngine::Process();
     OC::PresetBus::Task();
+    OC::PresetBusUI::Task();
 
     // UI events
     if (UI_MODE_APP_SETTINGS == ui_mode) {
