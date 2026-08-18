@@ -14,6 +14,7 @@
 #include "OC_io.h"
 #include "HSMIDI.h"
 #include "HSUtils.h"
+#include "PresetBus.h"
 #include "OC_DAC.h"
 #include "OC_ADC.h"
 #include "OC_digital_inputs.h"
@@ -755,6 +756,7 @@ struct alignas(32) MIDIFrame {
       if (~midi_msgtx_disable & mMaskUSBHost)  usbHostMIDI[0].sendAfterTouch(val, midi_ch + 1);
       if (~midi_msgtx_disable & mMaskUSBHost2) usbHostMIDI[1].sendAfterTouch(val, midi_ch + 1);
       if (~midi_msgtx_disable & mMaskSerial)   MIDI1.sendAfterTouch(val, midi_ch + 1);
+      if (~midi_msgtx_disable & mMaskBus)      OC::PresetBus::QueueMidiTx(0xD0, midi_ch + 1, val, 0);
 #else
         usbMIDI.sendAfterTouch(val, midi_ch + 1);
 #endif
@@ -765,6 +767,7 @@ struct alignas(32) MIDIFrame {
       if (~midi_msgtx_disable & mMaskUSBHost)  usbHostMIDI[0].sendPitchBend(bend, midi_ch + 1);
       if (~midi_msgtx_disable & mMaskUSBHost2) usbHostMIDI[1].sendPitchBend(bend, midi_ch + 1);
       if (~midi_msgtx_disable & mMaskSerial)   MIDI1.sendPitchBend(bend, midi_ch + 1);
+      if (~midi_msgtx_disable & mMaskBus)      OC::PresetBus::QueueMidiTx(0xE0, midi_ch + 1, bend & 0x7F, (bend >> 7) & 0x7F);
 #else
       usbMIDI.sendPitchBend(bend, midi_ch + 1);
 #endif
@@ -776,6 +779,7 @@ struct alignas(32) MIDIFrame {
       if (~midi_msgtx_disable & mMaskUSBHost)  usbHostMIDI[0].sendControlChange(ccnum, val, midi_ch + 1);
       if (~midi_msgtx_disable & mMaskUSBHost2) usbHostMIDI[1].sendControlChange(ccnum, val, midi_ch + 1);
       if (~midi_msgtx_disable & mMaskSerial)   MIDI1.sendControlChange(ccnum, val, midi_ch + 1);
+      if (~midi_msgtx_disable & mMaskBus)      OC::PresetBus::QueueMidiTx(0xB0, midi_ch + 1, ccnum, val);
 #else
       usbMIDI.sendControlChange(ccnum, val, midi_ch + 1);
 #endif
@@ -789,6 +793,7 @@ struct alignas(32) MIDIFrame {
       if (~midi_msgtx_disable & mMaskUSBHost)  usbHostMIDI[0].sendNoteOn(note, vel, midi_ch + 1);
       if (~midi_msgtx_disable & mMaskUSBHost2) usbHostMIDI[1].sendNoteOn(note, vel, midi_ch + 1);
       if (~midi_msgtx_disable & mMaskSerial)   MIDI1.sendNoteOn(note, vel, midi_ch + 1);
+      if (~midi_msgtx_disable & mMaskBus)      OC::PresetBus::QueueMidiTx(0x90, midi_ch + 1, note, vel);
 #else
       usbMIDI.sendNoteOn(note, vel, midi_ch + 1);
 #endif
@@ -800,6 +805,7 @@ struct alignas(32) MIDIFrame {
       if (~midi_msgtx_disable & mMaskUSBHost)  usbHostMIDI[0].sendNoteOff(note, vel, midi_ch + 1);
       if (~midi_msgtx_disable & mMaskUSBHost2) usbHostMIDI[1].sendNoteOff(note, vel, midi_ch + 1);
       if (~midi_msgtx_disable & mMaskSerial)   MIDI1.sendNoteOff(note, vel, midi_ch + 1);
+      if (~midi_msgtx_disable & mMaskBus)      OC::PresetBus::QueueMidiTx(0x80, midi_ch + 1, note, vel);
 #else
       usbMIDI.sendNoteOff(note, vel, midi_ch + 1);
 #endif
@@ -810,6 +816,7 @@ struct alignas(32) MIDIFrame {
       if (~midi_msgtx_disable & mMaskUSBHost)  usbHostMIDI[0].sendProgramChange(program, midi_ch + 1);
       if (~midi_msgtx_disable & mMaskUSBHost2) usbHostMIDI[1].sendProgramChange(program, midi_ch + 1);
       if (~midi_msgtx_disable & mMaskSerial)   MIDI1.sendProgramChange(program, midi_ch + 1);
+      if (~midi_msgtx_disable & mMaskBus)      OC::PresetBus::QueueMidiTx(0xC0, midi_ch + 1, program, 0);
 #else
       usbMIDI.sendProgramChange(program, midi_ch + 1);
 #endif
@@ -820,6 +827,7 @@ struct alignas(32) MIDIFrame {
       if (~midi_msgtx_disable & mMaskUSBHost)  usbHostMIDI[0].sendRealTime(type);
       if (~midi_msgtx_disable & mMaskUSBHost2) usbHostMIDI[1].sendRealTime(type);
       if (~midi_msgtx_disable & mMaskSerial)   MIDI1.sendRealTime((midi::MidiType)type);
+      if (~midi_clktx_disable & mMaskBus)      OC::PresetBus::QueueMidiTx(type, 0, 0, 0);
 #else
       usbMIDI.sendRealTime(type);
 #endif

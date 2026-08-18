@@ -62,14 +62,116 @@ static void lpi2c1_slave_isr() {
   }
 }
 
+// ---- bus MIDI rings ---------------------------------------------------------
+// RX: producer = Task() (loop, via parser callback), consumer = the active
+// app's MIDI poll (Quadrants: loop; Captain: app ISR). One producer, one
+// consumer -- plain SPSC.
+// TX: producers = app ISR (engine sends) AND loop (thru), so pushes are
+// briefly IRQ-masked. Consumer = Task() (loop).
+static constexpr uint8_t kMidiRing = 32;  // power of two
+static volatile uint32_t midi_rx_q[kMidiRing];
+static volatile uint8_t midi_rx_w = 0;
+static uint8_t midi_rx_r = 0;
+static volatile uint32_t midi_tx_q[kMidiRing];
+static volatile uint8_t midi_tx_w = 0;
+static uint8_t midi_tx_r = 0;
+static uint8_t midi_tx_fails = 0;
+
 // ---- parser callbacks into the preset engine -------------------------------
 static void cb_save(uint8_t slot) { PresetEngine::RequestSave(slot); }
 static void cb_recall(uint8_t slot) { PresetEngine::RequestRecall(slot); }
 
+static void cb_midi(uint8_t status, uint8_t d1, uint8_t d2) {
+  if (uint8_t(midi_rx_w - midi_rx_r) >= kMidiRing) {
+    stats.midi_rx_ovf++;
+    return;
+  }
+  midi_rx_q[midi_rx_w & (kMidiRing - 1)] =
+      uint32_t(status) | (uint32_t(d1) << 8) | (uint32_t(d2) << 16);
+  midi_rx_w = midi_rx_w + 1;
+  stats.midi_rx++;
+}
+
 static const Bus200eOps kOps = {
   cb_save, cb_recall,
   0, nullptr, nullptr, nullptr, nullptr,  // card transfers: phase 2
+  cb_midi,
 };
+
+// ---- bus MIDI public API ----------------------------------------------------
+
+void QueueMidiTx(uint8_t type, uint8_t channel, uint8_t d1, uint8_t d2) {
+  if (!enabled) return;
+  // channel 1 -> 200e bus A (0x8), 2 -> bus B (0x4), else both (0xF)
+  uint8_t status;
+  if (type >= 0xF8) {
+    status = type;
+    d1 = d2 = 0;
+  } else {
+    const uint8_t mask = (channel == 1) ? 0x8 : (channel == 2) ? 0x4 : 0xF;
+    status = (type & 0xF0) | mask;
+  }
+  // pushes come from both the app ISR and loop: mask IRQs around the ring.
+  // (Unconditional re-enable is fine — ISRs run with PRIMASK clear, and the
+  // loop never calls this with interrupts already masked.)
+  __disable_irq();
+  if (uint8_t(midi_tx_w - midi_tx_r) >= kMidiRing) {
+    stats.midi_tx_drop++;
+  } else {
+    midi_tx_q[midi_tx_w & (kMidiRing - 1)] =
+        uint32_t(status) | (uint32_t(d1) << 8) | (uint32_t(d2) << 16);
+    midi_tx_w = midi_tx_w + 1;
+  }
+  __enable_irq();
+}
+
+bool ReadMidiRx(uint8_t &status, uint8_t &d1, uint8_t &d2) {
+  if (midi_rx_r == midi_rx_w) return false;
+  const uint32_t v = midi_rx_q[midi_rx_r & (kMidiRing - 1)];
+  midi_rx_r = midi_rx_r + 1;
+  status = v & 0xFF;
+  d1 = (v >> 8) & 0xFF;
+  d2 = (v >> 16) & 0xFF;
+  return true;
+}
+
+// master queued MIDI frames onto the bus; quiet-gated like the QUERY reply
+FLASHMEM static void pump_midi_tx() {
+  uint8_t sent = 0;
+  while (midi_tx_r != midi_tx_w && sent < 4) {
+    if (uint8_t(ring_w - ring_r) != 0) return;        // RX in progress
+    if (millis() - last_rx_ms < 2) return;            // too soon after RX
+    if (LPI2C1_MSR & LPI2C_MSR_BBF) return;           // bus busy
+
+    const uint32_t v = midi_tx_q[midi_tx_r & (kMidiRing - 1)];
+    // [08][00][22][0F][status|mask][00][d1][d2][00] -- 2WIRELESS long format
+    uint8_t f[9] = { 0x08, 0x00, 0x22, 0x0F,
+                     uint8_t(v & 0xFF), 0x00,
+                     uint8_t((v >> 8) & 0xFF), uint8_t((v >> 16) & 0xFF),
+                     0x00 };
+
+    LPI2C1_SCR &= ~LPI2C_SCR_SEN;  // suppress self-RX
+    Wire.beginTransmission(0);
+    Wire.write(f, sizeof(f));
+    const uint8_t err = Wire.endTransmission();
+    LPI2C1_SCR |= LPI2C_SCR_SEN;
+
+    if (err == 0) {
+      midi_tx_r = midi_tx_r + 1;
+      midi_tx_fails = 0;
+      stats.midi_tx++;
+      ++sent;
+    } else {
+      // arbitration loss etc: retry next Task() pass; give up eventually
+      if (++midi_tx_fails >= 100) {
+        midi_tx_r = midi_tx_r + 1;
+        midi_tx_fails = 0;
+        stats.midi_tx_drop++;
+      }
+      return;
+    }
+  }
+}
 
 // ---- QUERY reply (we briefly master the bus) -------------------------------
 static uint8_t query_tries = 0;
@@ -164,6 +266,7 @@ void Task() {
   if (got) last_rx_ms = millis();
 
   if (Bus200eQueryPending()) try_query_reply();
+  pump_midi_tx();
 }
 
 bool Enabled() { return enabled; }
@@ -205,6 +308,9 @@ FLASHMEM void DebugDump() {
   const Bus200eStats *ps = Bus200eGetStats();
   Serial.printf("frames=%lu dropped=%lu query_tx=%lu query_retry=%lu\n",
                 ps->frames, ps->dropped, stats.query_replies, stats.query_retries);
+  Serial.printf("midi: rx=%lu rx_ovf=%lu tx=%lu tx_drop=%lu\n",
+                stats.midi_rx, stats.midi_rx_ovf, stats.midi_tx,
+                stats.midi_tx_drop);
   Serial.printf("engine: last_slot=%d was_save=%d busy=%d\n",
                 PresetEngine::LastSlot(), PresetEngine::LastWasSave(),
                 PresetEngine::Busy());

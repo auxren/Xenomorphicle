@@ -95,6 +95,10 @@ typedef struct {
   int (*slot_write)(uint8_t slot, const uint8_t *in, uint32_t n);
   int (*card_write)(uint8_t card7, uint32_t off, const uint8_t *d, uint32_t n);
   int (*card_read)(uint8_t card7, uint32_t off, uint8_t *d, uint32_t n);
+  // Bus MIDI (cmd 0x0F long / status-first short). status keeps the 200e
+  // bus mask in its low nibble (0x8 = bus A, 0x4 = bus B); realtime
+  // (>= 0xF8) arrives with data1 = data2 = 0. NULL = log-only.
+  void (*midi_rx)(uint8_t status, uint8_t data1, uint8_t data2);
 } Bus200eOps;
 
 typedef struct {

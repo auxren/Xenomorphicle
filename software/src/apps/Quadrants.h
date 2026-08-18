@@ -519,6 +519,9 @@ public:
       if (~exclude_mask & mMaskSerial) {
         MIDI1.send((midi::MidiType)msg.message, msg.data1, msg.data2, msg.channel);
       }
+      if (~exclude_mask & mMaskBus) {
+        OC::PresetBus::QueueMidiTx(msg.message, msg.channel, msg.data1, msg.data2);
+      }
     }
 
     template <typename T1>
@@ -582,6 +585,34 @@ public:
         ProcessMIDI(usbHostMIDI[0]);
         ProcessMIDI(usbHostMIDI[1]);
         ProcessMIDI(MIDI1);
+        ProcessBusMIDI();
+    }
+
+    // drain MIDI received over the 200e preset bus. The status low nibble
+    // carries the 200e bus mask (0x8 = bus A -> ch 1, 0x4 = bus B -> ch 2).
+    void ProcessBusMIDI() {
+        HS::IOFrame &f = HS::frame;
+        const bool clkrx = ~midi_clkrx_disable & mMaskBus;
+        const bool msgrx = ~midi_msgrx_disable & mMaskBus;
+
+        uint8_t status, d1, d2;
+        while (OC::PresetBus::ReadMidiRx(status, d1, d2)) {
+          const uint8_t type = (status >= 0xF8) ? status : (status & 0xF0);
+          const uint8_t buses = (status >= 0xF8) ? 0x8 : (status & 0x0C);
+          // deliver once per 200e bus line: A -> channel 1, B -> channel 2
+          for (uint8_t bit = 0; bit < 2; ++bit) {
+            if (!(buses & (0x8 >> bit))) continue;
+            const MIDIMessage msg = { uint8_t(bit + 1), type,
+                                      uint8_t(d1 & 0x7F), uint8_t(d2 & 0x7F) };
+            if (type >= 0xF8) {
+              if (clkrx) f.MIDIState.ProcessMIDIMsg(msg);
+            } else if (msgrx) {
+              f.MIDIState.ProcessMIDIMsg(msg);
+            }
+            SendMIDIThru(msg, mMaskBus);
+            if (type >= 0xF8) break;  // realtime: once is enough
+          }
+        }
     }
     void Controller() {
         // Clock Setup applet handles internal clock duties
@@ -1087,6 +1118,13 @@ private:
         MIDI_MSGTX_USBDEV,
         MIDI_MSGTX_USBHOST1,
         MIDI_MSGTX_USBHOST2,
+        // 200e preset bus as a MIDI source/destination (PRESET_BUS builds;
+        // rows are drawn regardless so the enum stays stable across envs)
+        MIDI_THRU_BUS,
+        MIDI_CLKRX_BUS,
+        MIDI_CLKTX_BUS,
+        MIDI_MSGRX_BUS,
+        MIDI_MSGTX_BUS,
 
         // Input Remapping
         TRIGMAP1, TRIGMAP2, TRIGMAP3, TRIGMAP4,
@@ -1463,6 +1501,22 @@ private:
             break;
           case MIDI_MSGTX_USBHOST2:
             HS::midi_msgtx_disable ^= mMaskUSBHost2;
+            break;
+
+          case MIDI_THRU_BUS:
+            HS::midi_thru_disable ^= mMaskBus;
+            break;
+          case MIDI_CLKRX_BUS:
+            HS::midi_clkrx_disable ^= mMaskBus;
+            break;
+          case MIDI_CLKTX_BUS:
+            HS::midi_clktx_disable ^= mMaskBus;
+            break;
+          case MIDI_MSGRX_BUS:
+            HS::midi_msgrx_disable ^= mMaskBus;
+            break;
+          case MIDI_MSGTX_BUS:
+            HS::midi_msgtx_disable ^= mMaskBus;
             break;
 
           case SHOWHIDELIST:

@@ -361,6 +361,8 @@ public:
         while (budget-- > 0 && poll_midi(usbHostMIDI[1])) {}
         budget = 4;
         while (budget-- > 0 && poll_midi(MIDI1)) {}
+        budget = 4;
+        while (budget-- > 0 && poll_bus_midi()) {}
 #endif
 
         // Convert CV/trigger inputs to outgoing MIDI messages
@@ -1404,6 +1406,28 @@ private:
         if (message == HEM_MIDI_SYSEX) OnReceiveSysEx();
 
         HS::frame.MIDIState.ProcessMIDIMsg({channel, message, data1, data2});
+        return true;
+    }
+
+    // read one message received over the 200e preset bus (PRESET_BUS builds;
+    // the stub ReadMidiRx returns false elsewhere). Status low nibble is the
+    // 200e bus mask: A (0x8) -> channel 1, B (0x4) -> channel 2.
+    bool poll_bus_midi() {
+        uint8_t status, d1, d2;
+        if (!OC::PresetBus::ReadMidiRx(status, d1, d2)) return false;
+
+        const uint8_t type = (status >= 0xF8) ? status : (status & 0xF0);
+        const bool clk = type >= 0xF8;
+        if (clk && (HS::midi_clkrx_disable & mMaskBus)) return true;
+        if (!clk && (HS::midi_msgrx_disable & mMaskBus)) return true;
+
+        const uint8_t buses = clk ? 0x8 : (status & 0x0C);
+        for (uint8_t bit = 0; bit < 2; ++bit) {
+            if (!(buses & (0x8 >> bit))) continue;
+            HS::frame.MIDIState.ProcessMIDIMsg(
+                {uint8_t(bit + 1), type, uint8_t(d1 & 0x7F), uint8_t(d2 & 0x7F)});
+            if (clk) break;
+        }
         return true;
     }
 

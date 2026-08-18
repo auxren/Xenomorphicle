@@ -151,6 +151,18 @@ BUS_CODE static void parse_frame(void) {
       case 0x16: c.op = BUS200E_OP_REMOTE_EN;  break;
       case 0x17: c.op = BUS200E_OP_REMOTE_DIS; break;
       case 0x1A: c.op = BUS200E_OP_QUERY;      break;
+      case 0x0F:  // bus MIDI: [.., status|busmask, 0x00, data1, data2, 0x00]
+        if (n >= 8) {
+          c.op = (f[4] >= 0xF8) ? BUS200E_OP_CLOCK : BUS200E_OP_MIDI;
+          c.arg = f[4];
+          c.card_lo = f[6];             // data1 (field reuse for the log)
+          c.mem_off = f[7];             // data2 (field reuse for the log)
+          if (bus_ops && bus_ops->midi_rx)
+            bus_ops->midi_rx(f[4], f[6], f[7]);
+        } else {
+          c.op = BUS200E_OP_UNKNOWN; c.arg = f[3];
+        }
+        break;
       case 0x04:  // dump presets to card: [.., modAddr, cardLo, memLSB, memMSB]
       case 0x05:  // restore presets from card, same argument order
         if (n >= 8) {
@@ -193,6 +205,8 @@ BUS_CODE static void parse_frame(void) {
         // Bus MIDI (status-first) and realtime clock ride the same bus.
         c.op = (f[0] >= 0xF8) ? BUS200E_OP_CLOCK : BUS200E_OP_MIDI;
         c.arg = f[0];
+        if (bus_ops && bus_ops->midi_rx)
+          bus_ops->midi_rx(f[0], (n > 1) ? f[1] : 0, (n > 2) ? f[2] : 0);
       } else {
         c.op = BUS200E_OP_UNKNOWN; c.arg = f[0];
       }
