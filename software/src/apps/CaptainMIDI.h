@@ -351,19 +351,10 @@ public:
 #endif
 
     void Controller() {
-        // Drain incoming MIDI traffic; cap per-tick work to bound ISR time
-        int budget = 4;
-        while (budget-- > 0 && poll_midi(usbMIDI)) {}
-#ifdef ARDUINO_TEENSY41
-        budget = 4;
-        while (budget-- > 0 && poll_midi(usbHostMIDI[0])) {}
-        budget = 4;
-        while (budget-- > 0 && poll_midi(usbHostMIDI[1])) {}
-        budget = 4;
-        while (budget-- > 0 && poll_midi(MIDI1)) {}
-        budget = 4;
-        while (budget-- > 0 && poll_bus_midi()) {}
-#endif
+        // MIDI polling lives in DoLoop() (loop context): USBHost_t36 is NOT
+        // ISR-safe -- reading usbHostMIDI from this 16.67kHz ISR corrupts
+        // queues shared with the USB host interrupts and locks the module
+        // the moment a real device delivers traffic.
 
         // Convert CV/trigger inputs to outgoing MIDI messages
         frame.MIDIState.ProcessOutputs(frame);
@@ -757,9 +748,42 @@ public:
         return false;
     }
 
+    // forward an incoming message to the other interfaces (source excluded),
+    // honoring the same thru mask Quadrants uses -- the bus included, so a
+    // keyboard on the USB host jack can play bus-MIDI modules (259e etc.)
+    FLASHMEM void midi_thru(const HS::MIDIMessage &msg, uint8_t exclude) {
+        exclude |= HS::midi_thru_disable;
+        if (~exclude & mMaskUSBDev)
+            usbMIDI.send(msg.message, msg.data1, msg.data2, msg.channel, 0);
+#ifdef ARDUINO_TEENSY41
+        if (~exclude & mMaskUSBHost)
+            usbHostMIDI[0].send(msg.message, msg.data1, msg.data2, msg.channel);
+        if (~exclude & mMaskUSBHost2)
+            usbHostMIDI[1].send(msg.message, msg.data1, msg.data2, msg.channel);
+        if (~exclude & mMaskSerial)
+            MIDI1.send((midi::MidiType)msg.message, msg.data1, msg.data2, msg.channel);
+#endif
+        if (~exclude & mMaskBus)
+            OC::PresetBus::QueueMidiTx(msg.message, msg.channel, msg.data1, msg.data2);
+    }
+
     // runs in the main loop (not the ISR): drains deferred work
     FLASHMEM void DoLoop() {
         auto &hMIDI = frame.MIDIState;
+
+        // MIDI input, polled here in loop context (see Controller())
+        int budget = 8;
+        while (budget-- > 0 && poll_midi(usbMIDI, mMaskUSBDev)) {}
+#ifdef ARDUINO_TEENSY41
+        budget = 8;
+        while (budget-- > 0 && poll_midi(usbHostMIDI[0], mMaskUSBHost)) {}
+        budget = 8;
+        while (budget-- > 0 && poll_midi(usbHostMIDI[1], mMaskUSBHost2)) {}
+        budget = 8;
+        while (budget-- > 0 && poll_midi(MIDI1, mMaskSerial)) {}
+        budget = 8;
+        while (budget-- > 0 && poll_bus_midi()) {}
+#endif
 
         if (syx_rx_len) {
             HandleSysEx(syx_rx_buf, syx_rx_len);
@@ -1392,7 +1416,7 @@ private:
     // (HSIOFrame.cpp); the old per-app implementation is gone.
     // read one message from the device; returns whether one was processed
     template <typename T1>
-    bool poll_midi(T1 &device) {
+    bool poll_midi(T1 &device, uint8_t srcmask) {
         if (!device.read()) return false;
 
         uint8_t message = device.getType();
@@ -1403,9 +1427,14 @@ private:
         // Handle system exclusive dump for Setup data.
         // Copy only — parsing runs from Loop() so the whole SysEx stack
         // stays out of the ISR (and out of ITCM on Teensy 4).
-        if (message == HEM_MIDI_SYSEX) OnReceiveSysEx();
+        if (message == HEM_MIDI_SYSEX) {
+            OnReceiveSysEx();
+            return true;   // never thru our own config traffic
+        }
 
-        HS::frame.MIDIState.ProcessMIDIMsg({channel, message, data1, data2});
+        const HS::MIDIMessage msg = {channel, message, data1, data2};
+        HS::frame.MIDIState.ProcessMIDIMsg(msg);
+        midi_thru(msg, srcmask);
         return true;
     }
 
@@ -1424,8 +1453,10 @@ private:
         const uint8_t buses = clk ? 0x8 : (status & 0x0C);
         for (uint8_t bit = 0; bit < 2; ++bit) {
             if (!(buses & (0x8 >> bit))) continue;
-            HS::frame.MIDIState.ProcessMIDIMsg(
-                {uint8_t(bit + 1), type, uint8_t(d1 & 0x7F), uint8_t(d2 & 0x7F)});
+            const HS::MIDIMessage msg =
+                {uint8_t(bit + 1), type, uint8_t(d1 & 0x7F), uint8_t(d2 & 0x7F)};
+            HS::frame.MIDIState.ProcessMIDIMsg(msg);
+            midi_thru(msg, mMaskBus);
             if (clk) break;
         }
         return true;
