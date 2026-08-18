@@ -23,7 +23,13 @@ ConfigMap data_store;
 
 // Specify size to use of onboard Teensy Program Flash chip.
 // the maximum flash available for LittleFS is 960 blocks of 1024 bytes
+#if defined(ARDUINO_TEENSY41)
+// 8MB program flash: give the FS real headroom (30 preset-bus slots at
+// ~12KB each plus banks never fit 512KB once LittleFS block overhead bites)
+static constexpr uint32_t diskSize = 1024 * 1024 * 4;
+#else
 static constexpr uint32_t diskSize = 1024 * 512;
+#endif
 // custom file format header
 static constexpr uint32_t HEADER_SIZE = 12;
 

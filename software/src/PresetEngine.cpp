@@ -168,11 +168,13 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   busy = true;
   serial_printf("PresetEngine: save slot %d\n", slot);
 
-  // free-space guard (LittleFS only; SD is effectively unbounded)
+  // free-space guard (LittleFS only; SD is effectively unbounded).
+  // usedSize() has been observed reporting == totalSize() on a healthy FS,
+  // so treat that state as "unknown" and rely on post-write verification.
   if (!SDcard_Ready) {
     const uint64_t total = PhzConfig::myfs.totalSize();
     const uint64_t used = PhzConfig::myfs.usedSize();
-    if (total - used < 24 * 1024) {
+    if (used < total && total - used < 24 * 1024) {
       HS::PokePopup(HS::MESSAGE_POPUP, "Disk full !!");
       busy = false;
       return false;
@@ -216,7 +218,15 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   PhzConfig::setValue(kSchemaKey, kSchemaVersion);
   PhzConfig::setValue(kFlagsKey, flags);
   slot_name(name, slot, 'G', "CFG");
-  const bool ok = PhzConfig::save_config(name, slot_fs());
+  bool ok = PhzConfig::save_config(name, slot_fs());
+  // verify on disk: LittleFS has produced 0-byte files while save_config
+  // reported success (full/degraded FS) — a slot that can't recall is worse
+  // than a failed save
+  if (ok) {
+    File f = slot_fs().open(name, FILE_READ);
+    ok = f && f.size() > 16;
+    if (f) f.close();
+  }
 
   // 6. app-data chunk stream
   bool ok2 = write_appdata_file(slot);
@@ -252,7 +262,9 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   }
   slot_name(name, slot, 'G', "CFG");
   if (!PhzConfig::load_config(name, slot_fs())) {
-    // map now cleared/partial: give it back to the app before bailing
+    // map now cleared/partial: restore base-map ownership, then let the
+    // app reload its own file so no later writer inherits slot content
+    PhzConfig::load_config();
     app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
     HS::PokePopup(HS::MESSAGE_POPUP, "Bad preset");
     busy = false;
@@ -264,6 +276,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   PhzConfig::getValue((uint16_t)(1 << 8) /* METADATA_KEY */, meta);
   const uint16_t slot_app_id = meta & 0xFFFF;
   if (schema != kSchemaVersion) {
+    PhzConfig::load_config();  // drop slot content, re-own the base map
     app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
     HS::PokePopup(HS::MESSAGE_POPUP, "Bad preset ver");
     busy = false;

@@ -537,6 +537,10 @@ FLASHMEM __attribute__((noinline)) void loop() {
           case ')': OC::PresetEngine::RequestRecall(0); break;
           case '{': OC::PresetEngine::RequestSave(1); break;
           case '}': OC::PresetEngine::RequestRecall(1); break;
+          case 'g':
+            Serial.println("Saving global settings + app data...");
+            OC::SaveAppData();
+            break;
           case 'b': OC::PresetBus::DebugDump(); break;
           case 'B':
             OC::PresetBus::SetVerbose(!OC::PresetBus::Verbose());
