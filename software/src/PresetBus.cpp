@@ -175,6 +175,12 @@ FLASHMEM void SetModuleAddress(uint8_t a) {
   // or accepts that the key rides along in the current map)
   PhzConfig::setValue(kAddrKey, Bus200eModuleAddress());
 }
+
+// live-edit path (Settings UI): takes effect on the bus immediately,
+// caller persists later via SetModuleAddress under the right config map
+FLASHMEM void SetModuleAddressRuntime(uint8_t a) {
+  Bus200eSetModuleAddress(a);
+}
 uint8_t ModuleAddress() { return Bus200eModuleAddress(); }
 const Stats &GetStats() { return stats; }
 void SetVerbose(bool on) { verbose = on; }

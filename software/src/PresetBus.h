@@ -41,6 +41,7 @@ void Task();               // call from loop()
 bool Enabled();            // Init ran (I2C_Expansion hardware present)
 bool RemoteEnabled();      // bus remote-enable state (parser)
 void SetModuleAddress(uint8_t a);  // payload address; persisted by caller
+void SetModuleAddressRuntime(uint8_t a);  // live only, no config write
 uint8_t ModuleAddress();
 const Stats &GetStats();
 void DebugDump();          // print status + decoded-command ring to Serial
@@ -54,6 +55,7 @@ inline void Task() {}
 inline bool Enabled() { return false; }
 inline bool RemoteEnabled() { return false; }
 inline void SetModuleAddress(uint8_t) {}
+inline void SetModuleAddressRuntime(uint8_t) {}
 inline uint8_t ModuleAddress() { return 0; }
 inline const Stats &GetStats() { static Stats s = {}; return s; }
 inline void DebugDump() {}
