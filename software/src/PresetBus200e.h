@@ -103,6 +103,8 @@ typedef struct {
 
 typedef struct {
   uint32_t frames;           // general-call frames parsed
+  uint32_t frames_long;      // long/PRIMO framing seen (v1 dialect)
+  uint32_t frames_short;     // short/V2 framing seen
   uint32_t dropped;          // frames discarded (poisoned/preempted/overlong)
   uint32_t job_errors;       // card transfers aborted on an ops error
   uint32_t restore_rejects;  // restore records rejected by slot_write

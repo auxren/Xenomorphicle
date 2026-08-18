@@ -98,6 +98,93 @@ static const Bus200eOps kOps = {
   cb_midi,
 };
 
+// ---- commander mode: bus-wide preset commands -------------------------------
+// One pending command, last wins (matches the engine's own request model).
+static volatile int16_t pending_bcast = -1;  // (cmd << 8) | slot, cmd 01/02
+static uint8_t bcast_tries = 0;
+static uint32_t bcast_tx = 0, bcast_drop = 0;
+
+FLASHMEM void BroadcastSave(uint8_t slot) {
+  if (slot < 30) pending_bcast = (0x02 << 8) | slot;
+}
+FLASHMEM void BroadcastRecall(uint8_t slot) {
+  if (slot < 30) pending_bcast = (0x01 << 8) | slot;
+}
+
+FLASHMEM static void pump_broadcast() {
+  const int16_t cmd = pending_bcast;
+  if (cmd < 0) return;
+  // quiet gate, same discipline as the QUERY reply: never race live RX
+  if (uint8_t(ring_w - ring_r) != 0) return;
+  if (millis() - last_rx_ms < 2) return;
+  if (LPI2C1_MSR & LPI2C_MSR_BBF) return;
+
+  // same long/PRIMO frame a preset manager sends
+  uint8_t f[5] = { 0x04, 0x00, 0x22, uint8_t(cmd >> 8), uint8_t(cmd & 0x1F) };
+
+  LPI2C1_SCR &= ~LPI2C_SCR_SEN;  // our own broadcast must not echo into RX
+  Wire.beginTransmission(0);
+  Wire.write(f, sizeof(f));
+  const uint8_t err = Wire.endTransmission();
+  LPI2C1_SCR |= LPI2C_SCR_SEN;
+
+  if (err == 0) {
+    pending_bcast = -1;
+    bcast_tries = 0;
+    bcast_tx++;
+    // our slave never hears our own TX: dispatch locally so this module
+    // saves/recalls in lockstep with the rest of the bus
+    if ((cmd >> 8) == 0x02) PresetEngine::RequestSave(cmd & 0x1F);
+    else PresetEngine::RequestRecall(cmd & 0x1F);
+    if (verbose) Serial.printf("PresetBus: broadcast %s %d\n",
+                               (cmd >> 8) == 0x02 ? "SAVE" : "RECALL",
+                               cmd & 0x1F);
+  } else if (++bcast_tries >= 50) {  // persistent contention: give up loudly
+    pending_bcast = -1;
+    bcast_tries = 0;
+    bcast_drop++;
+    Serial.printf("PresetBus: broadcast dropped (err %d)\n", err);
+  }
+}
+
+// ---- WPM / preset-manager presence ------------------------------------------
+// A preset manager is whoever ACKs slave address 0x50. Probe with an empty
+// master write (the WPM's receiveEvent sees howMany==0: harmless) every few
+// seconds when the bus is quiet. Hysteresis on the way out so one lost
+// arbitration doesn't demote a live WPM.
+static bool wpm_present = false;
+static uint8_t wpm_misses = 0;
+static uint32_t wpm_last_probe_ms = 0;
+static uint32_t wpm_probes = 0;
+
+bool WpmPresent() { return wpm_present; }
+
+FLASHMEM static void probe_wpm() {
+  if (millis() - wpm_last_probe_ms < 5000) return;
+  if (uint8_t(ring_w - ring_r) != 0) return;
+  if (millis() - last_rx_ms < 2) return;
+  if (LPI2C1_MSR & LPI2C_MSR_BBF) return;
+  wpm_last_probe_ms = millis();
+  wpm_probes++;
+
+  LPI2C1_SCR &= ~LPI2C_SCR_SEN;
+  Wire.beginTransmission(0x50);
+  const uint8_t err = Wire.endTransmission();  // 0 = ACK, 2 = NACK
+  LPI2C1_SCR |= LPI2C_SCR_SEN;
+
+  if (err == 0) {
+    if (!wpm_present && verbose) Serial.println("PresetBus: WPM detected");
+    wpm_present = true;
+    wpm_misses = 0;
+  } else if (err == 2) {
+    if (wpm_present && ++wpm_misses >= 3) {
+      wpm_present = false;
+      wpm_misses = 0;
+      if (verbose) Serial.println("PresetBus: WPM gone");
+    }
+  }  // arbitration loss etc: no evidence either way, try again later
+}
+
 // ---- bus MIDI public API ----------------------------------------------------
 
 void QueueMidiTx(uint8_t type, uint8_t channel, uint8_t d1, uint8_t d2) {
@@ -266,7 +353,9 @@ void Task() {
   if (got) last_rx_ms = millis();
 
   if (Bus200eQueryPending()) try_query_reply();
+  pump_broadcast();
   pump_midi_tx();
+  probe_wpm();
 }
 
 bool Enabled() { return enabled; }
@@ -302,6 +391,18 @@ FLASHMEM void DebugDump() {
   }
   Serial.printf("enabled=%d remote=%d module_addr=%02X verbose=%d\n",
                 enabled, Bus200eRemoteEnabled(), Bus200eModuleAddress(), verbose);
+  {
+    const Bus200eStats *d = Bus200eGetStats();
+    const char *dialect = (d->frames_long || d->frames_short)
+        ? (d->frames_long >= d->frames_short ? "v1/long" : "v2/short")
+        : "unknown";
+    Serial.printf("wpm=%s owner_0x50=%s dialect=%s (long=%lu short=%lu) probes=%lu\n",
+                  wpm_present ? "present" : "absent",
+                  wpm_present ? "WPM" : "none",
+                  dialect, d->frames_long, d->frames_short, wpm_probes);
+    Serial.printf("bcast: tx=%lu drop=%lu pending=%d\n",
+                  bcast_tx, bcast_drop, pending_bcast);
+  }
   Serial.printf("isr=%lu starts=%lu stops=%lu bytes=%lu ring_ovf=%lu\n",
                 stats.isr_count, stats.starts, stats.stops, stats.bytes,
                 stats.ring_ovf);

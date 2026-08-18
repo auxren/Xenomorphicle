@@ -143,6 +143,7 @@ BUS_CODE static void parse_frame(void) {
   // where nBytes counts the bytes that follow it. No short command collides
   // with this shape.
   if (n >= 4 && f[2] == 0x22 && f[0] == n - 1) {
+    stats.frames_long++;
     c.mod_addr = f[1];
     switch (f[3]) {
       case 0x01: c.op = BUS200E_OP_RECALL; c.arg = (n > 4) ? f[4] : 0; break;
@@ -184,6 +185,7 @@ BUS_CODE static void parse_frame(void) {
 
   // SHORT / V2 (pre-PRIMO) framing: first byte is the command.
   // NOTE the card-op argument order differs from the long framing.
+  stats.frames_short++;
   switch (f[0]) {
     case 0x00: c.op = BUS200E_OP_RECALL; c.arg = (n > 1) ? f[1] : 0; break;
     case 0x01: c.op = BUS200E_OP_SAVE;   c.arg = (n > 1) ? f[1] : 0; break;

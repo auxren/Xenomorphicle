@@ -48,6 +48,18 @@ void SetModuleAddress(uint8_t a);  // payload address; persisted by caller
 void SetModuleAddressRuntime(uint8_t a);  // live only, no config write
 uint8_t ModuleAddress();
 
+// ---- bus-wide preset commands (commander mode) ----
+// Broadcast the same general-call SAVE/RECALL frames a preset manager sends
+// ([04][00][22][02/01][n]); every module on the bus acts, and the local
+// PresetEngine is dispatched too (our own TX is invisible to our slave).
+// Last-wins pending command, mastered from Task() behind the quiet gate.
+void BroadcastSave(uint8_t slot);
+void BroadcastRecall(uint8_t slot);
+
+// WPM / preset-manager presence: probed as a master ACK test on address
+// 0x50 every few seconds when the bus is quiet. Hot plug/unplug is normal.
+bool WpmPresent();
+
 // ---- bus MIDI ----
 // TX: queue a message for mastering onto the bus (ISR-safe; sent from
 // Task() when the bus is quiet). channel 1 -> 200e bus A, 2 -> bus B,
@@ -72,6 +84,9 @@ inline void SetModuleAddressRuntime(uint8_t) {}
 inline uint8_t ModuleAddress() { return 0; }
 inline void QueueMidiTx(uint8_t, uint8_t, uint8_t, uint8_t) {}
 inline bool ReadMidiRx(uint8_t &, uint8_t &, uint8_t &) { return false; }
+inline void BroadcastSave(uint8_t) {}
+inline void BroadcastRecall(uint8_t) {}
+inline bool WpmPresent() { return false; }
 inline const Stats &GetStats() { static Stats s = {}; return s; }
 inline void DebugDump() {}
 inline void SetVerbose(bool) {}

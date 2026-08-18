@@ -178,117 +178,9 @@ public:
     }
     void View();  // out-of-class below: FLASHMEM survives LTO there
 
-    FLASHMEM void OnButtonPress() {
-        if (!EditMode()) { // special cases for toggle buttons
-            if (cursor == PLAY_STOP) PlayStop();
-            else if (cursor >= BOOP1 && cursor <= BOOP8) {
-                clock_m.Boop(cursor-BOOP1);
-                button_ticker = HEMISPHERE_PULSE_ANIMATION_TIME_LONG;
-            }
-            else CursorToggle();
-        }
-        else CursorToggle();
+    void OnButtonPress();  // out-of-class below (FLASHMEM survives LTO there)
 
-        if (cursor == TEMPO) {
-            // Tap Tempo detection
-            if (last_tap_tick) {
-                tap_time[taps] = OC::CORE::ticks - last_tap_tick;
-
-                if (tap_time[taps] > CLOCK_TICKS_MAX) {
-                    taps = 0;
-                    last_tap_tick = 0;
-                }
-                else if (++taps == NR_OF_TAPS)
-                    HS::clock_m.SetTempoFromTaps(tap_time, taps);
-
-                taps %= NR_OF_TAPS;
-            }
-            last_tap_tick = OC::CORE::ticks;
-        }
-    }
-
-    FLASHMEM void OnEncoderMove(int direction) {
-        taps = 0;
-        last_tap_tick = 0;
-        if (!EditMode()) {
-            MoveCursor(cursor, direction, LAST_SETTING);
-            return;
-        }
-
-        switch ((ClockSetupCursor)cursor) {
-        case PLAY_STOP:
-            PlayStop();
-            break;
-
-        case TRIG1:
-        case TRIG2:
-        case TRIG3:
-        case TRIG4:
-        case TRIG5:
-        case TRIG6:
-        case TRIG7:
-        case TRIG8:
-            HS::trigmap[cursor-TRIG1].ChangeSource(direction);
-            break;
-
-        case BOOP1:
-        case BOOP2:
-        case BOOP3:
-        case BOOP4:
-        case BOOP5:
-        case BOOP6:
-        case BOOP7:
-        case BOOP8:
-            HS::clock_m.Boop(cursor-BOOP1);
-            button_ticker = HEMISPHERE_PULSE_ANIMATION_TIME_LONG;
-            break;
-
-        case INSKIP1:
-        case INSKIP2:
-        case INSKIP3:
-        case INSKIP4:
-        case INSKIP5:
-        case INSKIP6:
-        case INSKIP7:
-        case INSKIP8:
-            HS::frame.NudgeInSkip(cursor-INSKIP1, direction);
-            break;
-
-        case OUTSKIP1:
-        case OUTSKIP2:
-        case OUTSKIP3:
-        case OUTSKIP4:
-        case OUTSKIP5:
-        case OUTSKIP6:
-        case OUTSKIP7:
-        case OUTSKIP8:
-            HS::frame.NudgeOutSkip(cursor-OUTSKIP1, direction);
-            break;
-
-        case EXT_PPQN:
-            HS::clock_m.SetClockPPQN(HS::clock_m.GetClockPPQN() + direction);
-            break;
-        case TEMPO:
-            HS::clock_m.SetTempoBPM(HS::clock_m.GetTempo() + direction);
-            break;
-        case SHUFFLE:
-            HS::clock_m.SetShuffle(HS::clock_m.GetShuffle() + direction);
-            break;
-
-        case MULT1:
-        case MULT2:
-        case MULT3:
-        case MULT4:
-        case MULT5:
-        case MULT6:
-        case MULT7:
-        case MULT8:
-            HS::clock_m.SetMultiply(HS::clock_m.GetMultiply(cursor - MULT1) + direction, cursor - MULT1);
-            break;
-
-        default: break;
-        }
-    }
+    void OnEncoderMove(int direction);  // out-of-class below (FLASHMEM survives LTO there)
     void OnLeftEncoderMove(const int direction) {
       if (EditMode() && cursor >= MULT1 && cursor <= MULT8) {
         int mult = clock_m.GetMultiply(cursor - MULT1);
@@ -587,6 +479,118 @@ private:
         }
     }
 };
+
+FLASHMEM void ClockSetup::OnButtonPress() {
+    if (!EditMode()) { // special cases for toggle buttons
+        if (cursor == PLAY_STOP) PlayStop();
+        else if (cursor >= BOOP1 && cursor <= BOOP8) {
+            clock_m.Boop(cursor-BOOP1);
+            button_ticker = HEMISPHERE_PULSE_ANIMATION_TIME_LONG;
+        }
+        else CursorToggle();
+    }
+    else CursorToggle();
+
+    if (cursor == TEMPO) {
+        // Tap Tempo detection
+        if (last_tap_tick) {
+            tap_time[taps] = OC::CORE::ticks - last_tap_tick;
+
+            if (tap_time[taps] > CLOCK_TICKS_MAX) {
+                taps = 0;
+                last_tap_tick = 0;
+            }
+            else if (++taps == NR_OF_TAPS)
+                HS::clock_m.SetTempoFromTaps(tap_time, taps);
+
+            taps %= NR_OF_TAPS;
+        }
+        last_tap_tick = OC::CORE::ticks;
+    }
+}
+
+FLASHMEM void ClockSetup::OnEncoderMove(int direction) {
+    taps = 0;
+    last_tap_tick = 0;
+    if (!EditMode()) {
+        MoveCursor(cursor, direction, LAST_SETTING);
+        return;
+    }
+
+    switch ((ClockSetupCursor)cursor) {
+    case PLAY_STOP:
+        PlayStop();
+        break;
+
+    case TRIG1:
+    case TRIG2:
+    case TRIG3:
+    case TRIG4:
+    case TRIG5:
+    case TRIG6:
+    case TRIG7:
+    case TRIG8:
+        HS::trigmap[cursor-TRIG1].ChangeSource(direction);
+        break;
+
+    case BOOP1:
+    case BOOP2:
+    case BOOP3:
+    case BOOP4:
+    case BOOP5:
+    case BOOP6:
+    case BOOP7:
+    case BOOP8:
+        HS::clock_m.Boop(cursor-BOOP1);
+        button_ticker = HEMISPHERE_PULSE_ANIMATION_TIME_LONG;
+        break;
+
+    case INSKIP1:
+    case INSKIP2:
+    case INSKIP3:
+    case INSKIP4:
+    case INSKIP5:
+    case INSKIP6:
+    case INSKIP7:
+    case INSKIP8:
+        HS::frame.NudgeInSkip(cursor-INSKIP1, direction);
+        break;
+
+    case OUTSKIP1:
+    case OUTSKIP2:
+    case OUTSKIP3:
+    case OUTSKIP4:
+    case OUTSKIP5:
+    case OUTSKIP6:
+    case OUTSKIP7:
+    case OUTSKIP8:
+        HS::frame.NudgeOutSkip(cursor-OUTSKIP1, direction);
+        break;
+
+    case EXT_PPQN:
+        HS::clock_m.SetClockPPQN(HS::clock_m.GetClockPPQN() + direction);
+        break;
+    case TEMPO:
+        HS::clock_m.SetTempoBPM(HS::clock_m.GetTempo() + direction);
+        break;
+    case SHUFFLE:
+        HS::clock_m.SetShuffle(HS::clock_m.GetShuffle() + direction);
+        break;
+
+    case MULT1:
+    case MULT2:
+    case MULT3:
+    case MULT4:
+    case MULT5:
+    case MULT6:
+    case MULT7:
+    case MULT8:
+        HS::clock_m.SetMultiply(HS::clock_m.GetMultiply(cursor - MULT1) + direction, cursor - MULT1);
+        break;
+
+    default: break;
+    }
+}
 
 FLASHMEM void ClockSetup::View() {
   if (OC::CORE::ticks - view_tick > 1000) {

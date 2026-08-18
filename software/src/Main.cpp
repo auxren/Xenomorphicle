@@ -574,6 +574,13 @@ FLASHMEM __attribute__((noinline)) void loop() {
           case ']':
             // simulate Encoder button press
             break;
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+          // commander mode: bus-wide preset ops (every module + local engine)
+          case '<': OC::PresetBus::BroadcastRecall(0); break;
+          case '>': OC::PresetBus::BroadcastSave(0); break;
+          case ',': OC::PresetBus::BroadcastRecall(1); break;
+          case '.': OC::PresetBus::BroadcastSave(1); break;
+#else
           case ',':
           case '.':
             // simulate Left Encoder turn
@@ -581,6 +588,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
           case '<':
           case '>':
             // simulate Right Encoder turn
+#endif
             break;
 #endif
           default:

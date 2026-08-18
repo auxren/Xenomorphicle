@@ -337,9 +337,11 @@ public:
       gfxIcon(0, 45, PhzIcons::frontBack);
       if (OC::PresetBus::Enabled()) {
         // 200e preset bus: address editable with the right encoder
-        gfxPrint(10, 45, "Bus addr:");
-        graphics.printf(" %02X ", OC::PresetBus::ModuleAddress());
-        gfxPrint(OC::PresetBus::RemoteEnabled() ? "(rem ON)" : "(rem off)");
+        gfxPrint(10, 45, "Bus:");
+        graphics.printf(" %02X rem:%s wpm:%s",
+                        OC::PresetBus::ModuleAddress(),
+                        OC::PresetBus::RemoteEnabled() ? "ON" : "off",
+                        OC::PresetBus::WpmPresent() ? "Y" : "n");
       } else {
         gfxPrint(10, 45, "github.com/djphazer");
       }
