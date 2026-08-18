@@ -191,133 +191,7 @@ public:
     }
 
     void StoreToPreset(int id);
-    FLASHMEM void store_to_preset(int id) {
-        preset_id = id;
-        // preset id is upper 5 bits - 32 presets per bank
-        uint16_t preset_key = id << 11;
-
-        // clock data
-        clock_data = ClockSetup_instance.OnDataRequest();
-        PhzConfig::setValue(preset_key | CLOCK_DATA_KEY, clock_data);
-
-        // vague globals
-        global_data = ClockSetup_instance.GetGlobals();
-        PhzConfig::setValue(preset_key | GLOBALS_KEY, global_data);
-
-        uint64_t data = 0;
-        // Input Mappings
-        for (size_t i = 0; i < ADC_CHANNEL_COUNT/4; ++i) {
-          data = PackPackables(HS::trigmap[i*4], HS::trigmap[i*4+1]);
-          PhzConfig::setValue(preset_key | (TRIGMAP_KEY + i*2), data);
-          data = PackPackables(HS::trigmap[i*4+2], HS::trigmap[i*4+3]);
-          PhzConfig::setValue(preset_key | (TRIGMAP_KEY + i*2 + 1), data);
-
-          data = PackPackables(HS::cvmap[i*4], HS::cvmap[i*4+1], HS::cvmap[i*4+2], HS::cvmap[i*4+3]);
-          PhzConfig::setValue(preset_key | (CVMAP_KEY + i), data);
-        }
-        PhzConfig::deleteKey(preset_key | OLD_TRIGMAP_KEY);
-        PhzConfig::deleteKey(preset_key | (OLD_TRIGMAP_KEY + 1));
-
-        data = 0;
-        for (size_t i = 0; i < 8; ++i) {
-          Pack(data, PackLocation{i*8, 8}, HS::frame.clockinskip[i]);
-        }
-        PhzConfig::setValue(preset_key | INSKIP_KEY, data);
-        data = 0;
-        for (size_t i = 0; i < 8; ++i) {
-          Pack(data, PackLocation{i*8, 8}, HS::frame.clockoutskip[i]);
-        }
-        PhzConfig::setValue(preset_key | OUTSKIP_KEY, data);
-        data = 0;
-        for (size_t i = 0; i < 8; ++i) {
-          Pack(data, PackLocation{i*8, 8}, HS::frame.output_slew[i]);
-        }
-        PhzConfig::setValue(preset_key | OUTSLEW_KEY, data);
-        data = 0;
-        for (size_t i = 0; i < 8; ++i) {
-          Pack(data, PackLocation{i*8, 8}, static_cast<uint8_t>(HS::frame.output_atten[i]));
-        }
-        PhzConfig::setValue(preset_key | OUTATTEN_KEY, data);
-
-        data = 0;
-        for (size_t h = 0; h < APPLET_SLOTS; h++)
-        {
-            int index = active_applet_index[h];
-            Pack(data, PackLocation{h*8,8}, HS::appletIds[index]);
-
-            // applet data
-            applet_data[h] = HS::get_applet(index, HEM_SIDE(h))->OnDataRequest();
-            PhzConfig::setValue(preset_key | (APPLET_L1_DATA_KEY + h), applet_data[h]);
-        }
-
-        // applet ids, and maybe some other stuff?
-        PhzConfig::setValue(preset_key | APPLET_METADATA_KEY, data);
-
-        // applet filtering is actually just global
-        PhzConfig::setValue(FILTERMASK1_KEY, HS::hidden_applets[0]);
-        PhzConfig::setValue(FILTERMASK2_KEY, HS::hidden_applets[1]);
-
-        data = PackPackables(
-          HS::frame.MIDIState.pc_channel,
-          HS::frame.MIDIState.bend_range,
-          midi_thru_disable,
-          midi_clkrx_disable,
-          midi_clktx_disable,
-          midi_msgrx_disable,
-          midi_msgtx_disable
-        );
-        PhzConfig::setValue(MIDI_GLOBALS_KEY, data);
-
-        data = PackPackables(jump_trig_);
-        PhzConfig::setValue(PRESET_JUMP_KEY, data);
-
-        // Global quantizer settings
-        for (size_t qslot = 0; qslot < QUANT_CHANNEL_COUNT; ++qslot) {
-          /*
-            // XXX: fine-tuning stuff from Calibr8or that should also be global
-            int8_t offset;
-            int16_t scale_factor; // precision of 0.01% as an offset from 100%
-            int8_t transpose; // in semitones
-          */
-          auto &q = q_engine[qslot];
-          data = PackPackables(
-              q.scale,
-              q.octave,
-              q.root_note,
-              q.mask
-              );
-          PhzConfig::setValue(Q_ENGINE_KEY + qslot, data);
-        }
-
-        // Global MIDI Maps
-        for (size_t midx = 0; midx < MIDIMAP_MAX; ++midx) {
-          data = PackPackables(frame.MIDIState.mapping[midx]);
-          PhzConfig::setValue(MIDI_MAPS_KEY + midx, data);
-        }
-
-        // User Patterns aka Sequences
-        for (size_t i = 0; i < OC::Patterns::PATTERN_USER_COUNT; ++i) {
-          data = 0;
-          for (size_t step = 0; step < ARRAY_SIZE(OC::Pattern::notes); ++step) {
-            Pack(data, PackLocation{(step & 0x3)*16, 16}, (uint16_t)OC::user_patterns[i].notes[step]);
-            if ((step & 0x3) == 0x3) {
-              PhzConfig::setValue(SEQUENCES_KEY + ((i << 2) | (step >> 2)), data);
-              data = 0;
-            }
-          }
-        }
-
-        audio_app.SavePreset(id);
-
-        bool success = false;
-        if (SDcard_Ready)
-          success = PhzConfig::save_config(bank_filename, SD);
-        else
-          success = PhzConfig::save_config(bank_filename);
-
-        if (success)
-          PokePopup(HS::MESSAGE_POPUP, HS::PRESET_SAVED);
-    }
+    void store_to_preset(int id);  // out-of-class (FLASHMEM + LTO)
 
     void LoadFromPreset(int id);
     FLASHMEM void load_from_preset(int id) {
@@ -2070,6 +1944,134 @@ void AppQuadrants::HandleButtonEvent(const UI::Event &event) {
 FLASHMEM
 void AppQuadrants::HandleEncoderEvent(const UI::Event &event) {
     DelegateEncoderMovement(event);
+}
+
+FLASHMEM void AppQuadrants::store_to_preset(int id) {
+    preset_id = id;
+    // preset id is upper 5 bits - 32 presets per bank
+    uint16_t preset_key = id << 11;
+
+    // clock data
+    clock_data = ClockSetup_instance.OnDataRequest();
+    PhzConfig::setValue(preset_key | CLOCK_DATA_KEY, clock_data);
+
+    // vague globals
+    global_data = ClockSetup_instance.GetGlobals();
+    PhzConfig::setValue(preset_key | GLOBALS_KEY, global_data);
+
+    uint64_t data = 0;
+    // Input Mappings
+    for (size_t i = 0; i < ADC_CHANNEL_COUNT/4; ++i) {
+      data = PackPackables(HS::trigmap[i*4], HS::trigmap[i*4+1]);
+      PhzConfig::setValue(preset_key | (TRIGMAP_KEY + i*2), data);
+      data = PackPackables(HS::trigmap[i*4+2], HS::trigmap[i*4+3]);
+      PhzConfig::setValue(preset_key | (TRIGMAP_KEY + i*2 + 1), data);
+
+      data = PackPackables(HS::cvmap[i*4], HS::cvmap[i*4+1], HS::cvmap[i*4+2], HS::cvmap[i*4+3]);
+      PhzConfig::setValue(preset_key | (CVMAP_KEY + i), data);
+    }
+    PhzConfig::deleteKey(preset_key | OLD_TRIGMAP_KEY);
+    PhzConfig::deleteKey(preset_key | (OLD_TRIGMAP_KEY + 1));
+
+    data = 0;
+    for (size_t i = 0; i < 8; ++i) {
+      Pack(data, PackLocation{i*8, 8}, HS::frame.clockinskip[i]);
+    }
+    PhzConfig::setValue(preset_key | INSKIP_KEY, data);
+    data = 0;
+    for (size_t i = 0; i < 8; ++i) {
+      Pack(data, PackLocation{i*8, 8}, HS::frame.clockoutskip[i]);
+    }
+    PhzConfig::setValue(preset_key | OUTSKIP_KEY, data);
+    data = 0;
+    for (size_t i = 0; i < 8; ++i) {
+      Pack(data, PackLocation{i*8, 8}, HS::frame.output_slew[i]);
+    }
+    PhzConfig::setValue(preset_key | OUTSLEW_KEY, data);
+    data = 0;
+    for (size_t i = 0; i < 8; ++i) {
+      Pack(data, PackLocation{i*8, 8}, static_cast<uint8_t>(HS::frame.output_atten[i]));
+    }
+    PhzConfig::setValue(preset_key | OUTATTEN_KEY, data);
+
+    data = 0;
+    for (size_t h = 0; h < APPLET_SLOTS; h++)
+    {
+        int index = active_applet_index[h];
+        Pack(data, PackLocation{h*8,8}, HS::appletIds[index]);
+
+        // applet data
+        applet_data[h] = HS::get_applet(index, HEM_SIDE(h))->OnDataRequest();
+        PhzConfig::setValue(preset_key | (APPLET_L1_DATA_KEY + h), applet_data[h]);
+    }
+
+    // applet ids, and maybe some other stuff?
+    PhzConfig::setValue(preset_key | APPLET_METADATA_KEY, data);
+
+    // applet filtering is actually just global
+    PhzConfig::setValue(FILTERMASK1_KEY, HS::hidden_applets[0]);
+    PhzConfig::setValue(FILTERMASK2_KEY, HS::hidden_applets[1]);
+
+    data = PackPackables(
+      HS::frame.MIDIState.pc_channel,
+      HS::frame.MIDIState.bend_range,
+      midi_thru_disable,
+      midi_clkrx_disable,
+      midi_clktx_disable,
+      midi_msgrx_disable,
+      midi_msgtx_disable
+    );
+    PhzConfig::setValue(MIDI_GLOBALS_KEY, data);
+
+    data = PackPackables(jump_trig_);
+    PhzConfig::setValue(PRESET_JUMP_KEY, data);
+
+    // Global quantizer settings
+    for (size_t qslot = 0; qslot < QUANT_CHANNEL_COUNT; ++qslot) {
+      /*
+        // XXX: fine-tuning stuff from Calibr8or that should also be global
+        int8_t offset;
+        int16_t scale_factor; // precision of 0.01% as an offset from 100%
+        int8_t transpose; // in semitones
+      */
+      auto &q = q_engine[qslot];
+      data = PackPackables(
+          q.scale,
+          q.octave,
+          q.root_note,
+          q.mask
+          );
+      PhzConfig::setValue(Q_ENGINE_KEY + qslot, data);
+    }
+
+    // Global MIDI Maps
+    for (size_t midx = 0; midx < MIDIMAP_MAX; ++midx) {
+      data = PackPackables(frame.MIDIState.mapping[midx]);
+      PhzConfig::setValue(MIDI_MAPS_KEY + midx, data);
+    }
+
+    // User Patterns aka Sequences
+    for (size_t i = 0; i < OC::Patterns::PATTERN_USER_COUNT; ++i) {
+      data = 0;
+      for (size_t step = 0; step < ARRAY_SIZE(OC::Pattern::notes); ++step) {
+        Pack(data, PackLocation{(step & 0x3)*16, 16}, (uint16_t)OC::user_patterns[i].notes[step]);
+        if ((step & 0x3) == 0x3) {
+          PhzConfig::setValue(SEQUENCES_KEY + ((i << 2) | (step >> 2)), data);
+          data = 0;
+        }
+      }
+    }
+
+    audio_app.SavePreset(id);
+
+    bool success = false;
+    if (SDcard_Ready)
+      success = PhzConfig::save_config(bank_filename, SD);
+    else
+      success = PhzConfig::save_config(bank_filename);
+
+    if (success)
+      PokePopup(HS::MESSAGE_POPUP, HS::PRESET_SAVED);
 }
 
 FLASHMEM

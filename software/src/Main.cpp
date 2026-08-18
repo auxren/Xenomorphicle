@@ -546,6 +546,12 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.println("Saving global settings + app data...");
             OC::SaveAppData();
             break;
+          case 'p':  // toggle the preset-bus overlay (remote UI inspection)
+            if (OC::PresetBusUI::Active()) OC::PresetBusUI::Exit();
+            else OC::PresetBusUI::Enter();
+            Serial.printf("PresetBusUI %s\n",
+                          OC::PresetBusUI::Active() ? "open" : "closed");
+            break;
           case 'b': OC::PresetBus::DebugDump(); break;
           case 'B':
             OC::PresetBus::SetVerbose(!OC::PresetBus::Verbose());

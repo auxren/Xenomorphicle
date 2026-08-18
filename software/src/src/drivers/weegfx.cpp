@@ -379,7 +379,7 @@ void Graphics::drawLine(coord_t x0, coord_t y0, coord_t x1, coord_t y1, const ui
   }
 }
 
-void Graphics::drawCircle(coord_t center_x, coord_t center_y, coord_t r)
+FLASHMEM void Graphics::drawCircle(coord_t center_x, coord_t center_y, coord_t r)
 {
   coord_t f = 1 - r;
   coord_t ddF_x = 1;

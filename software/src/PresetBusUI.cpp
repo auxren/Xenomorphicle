@@ -116,43 +116,93 @@ FLASHMEM bool HandleEvent(const UI::Event &event) {
   return true;
 }
 
+// ---- drawing ---------------------------------------------------------------
+// Layout per the Orin_Fun design system review (module border, letterspaced
+// legend + rule, 225e-style 7-segment LCD window, banana-jack presence dots,
+// inversion = focus and nothing else).
+
+// 7-segment digit: cell 12x22, segment thickness 2. Bits: A B C D E F G.
+static const uint8_t kSeg[10] = {
+  0b1111110,  // 0: ABCDEF
+  0b0110000,  // 1: BC
+  0b1101101,  // 2: ABGED
+  0b1111001,  // 3: ABGCD
+  0b0110011,  // 4: FBGC
+  0b1011011,  // 5: AFGCD
+  0b1011111,  // 6: AFGEDC
+  0b1110000,  // 7: ABC
+  0b1111111,  // 8
+  0b1111011,  // 9: ABCDFG
+};
+
+FLASHMEM static void draw_7seg(int dx, int dy, uint8_t digit) {
+  const uint8_t m = kSeg[digit % 10];
+  if (m & 0b1000000) graphics.drawRect(dx + 2, dy,      8, 2);  // A
+  if (m & 0b0100000) graphics.drawRect(dx + 10, dy + 2, 2, 8);  // B
+  if (m & 0b0010000) graphics.drawRect(dx + 10, dy + 12, 2, 8); // C
+  if (m & 0b0001000) graphics.drawRect(dx + 2, dy + 20, 8, 2);  // D
+  if (m & 0b0000100) graphics.drawRect(dx,     dy + 12, 2, 8);  // E
+  if (m & 0b0000010) graphics.drawRect(dx,     dy + 2,  2, 8);  // F
+  if (m & 0b0000001) graphics.drawRect(dx + 2, dy + 10, 8, 2);  // G
+}
+
+FLASHMEM static void draw_jack(int cx, int cy, bool active) {
+  graphics.drawCircle(cx, cy, 3);
+  if (active) graphics.drawRect(cx - 1, cy - 1, 3, 3);
+}
+
 FLASHMEM void Draw() {
-  graphics.setPrintPos(1, 2);
-  graphics.print("Preset Bus");
-  graphics.setPrintPos(92, 2);
-  graphics.printf("wpm:%s", PresetBus::WpmPresent() ? "Y" : "n");
-  graphics.drawLine(0, 10, 127, 10);
+  graphics.drawFrame(0, 0, 128, 64);            // module border
+  graphics.setPrintPos(4, 2);
+  graphics.print("P R E S E T  B U S");         // letterspaced legend
+  graphics.drawHLine(1, 11, 126);               // rule
 
+  // LCD window, 225e-style
+  graphics.drawFrame(43, 13, 42, 38);
   if (sel_stored < 0) sel_stored = PresetEngine::SlotUsed(sel) ? 1 : 0;
+  const uint8_t shown = sel + 1;                // 01-30, zero-padded
+  draw_7seg(50, 16, shown / 10);
+  draw_7seg(66, 16, shown % 10);
+  graphics.setPrintPos(sel_stored ? 46 : 49, 40);
+  graphics.print(sel_stored ? "STORED" : "EMPTY");
 
-  // big current preset number (1-30), 225e-style
-  graphics.setPrintPos(46, 20);
-  graphics.printf("%2d", sel + 1);
-  // chunky: overprint with 1px offsets for a bold look
-  graphics.setPrintPos(47, 20);
-  graphics.printf("%2d", sel + 1);
-  graphics.setPrintPos(70, 20);
-  graphics.print(sel_stored ? "" : "*");
+  // edge legends, spatially mapped to the encoders (225e panel order)
+  graphics.setPrintPos(4, 21);
+  graphics.print("STORE");
+  graphics.setPrintPos(7, 31);
+  graphics.print("hold");
+  graphics.setPrintPos(88, 21);
+  graphics.print("RECALL");
+  graphics.setPrintPos(91, 31);
+  graphics.print("press");
 
-  graphics.setPrintPos(24, 30);
-  graphics.print(sel_stored ? "stored" : "not stored");
+  // WPM presence: banana-jack dot, filled = present
+  graphics.drawCircle(92, 43, 2);
+  if (PresetBus::WpmPresent()) graphics.drawRect(91, 42, 3, 3);
+  graphics.setPrintPos(97, 40);
+  graphics.print(PresetBus::WpmPresent() ? "WPM" : "wpm");
 
-  graphics.setPrintPos(8, 42);
-  if (next_trig) graphics.printf("next:TR%d", next_trig);
-  else graphics.print("next:off");
-  graphics.setPrintPos(72, 42);
-  if (last_trig) graphics.printf("last:TR%d", last_trig);
-  else graphics.print("last:off");
+  // 225e last/next pulse jacks
+  draw_jack(8, 57, next_trig != 0);
+  graphics.setPrintPos(14, 54);
+  graphics.print("NEXT");
+  graphics.setPrintPos(40, 54);
+  if (next_trig) graphics.printf("TR%d", next_trig);
+  else graphics.print("off");
 
-  // cursor
+  draw_jack(72, 57, last_trig != 0);
+  graphics.setPrintPos(78, 54);
+  graphics.print("LAST");
+  graphics.setPrintPos(104, 54);
+  if (last_trig) graphics.printf("TR%d", last_trig);
+  else graphics.print("off");
+
+  // one focus grammar: invert what the right encoder will change
   switch (cursor) {
-    case 0: graphics.drawFrame(42, 16, 24, 12); break;
-    case 1: graphics.drawFrame(6, 40, 58, 11); break;
-    case 2: graphics.drawFrame(70, 40, 56, 11); break;
+    case 0: graphics.invertRect(48, 14, 32, 26); break;
+    case 1: graphics.invertRect(39, 53, 20, 10); break;
+    case 2: graphics.invertRect(103, 53, 20, 10); break;
   }
-
-  graphics.setPrintPos(1, 55);
-  graphics.print("R:recall hold-L:store");
 }
 
 void Task() {
@@ -178,8 +228,14 @@ void Task() {
   }
 
   if (active) {
-    ::MENU_REDRAW = 1;   // keep the overlay live
-    ui.Poke();           // and the screensaver away
+    // Throttled redraw: forcing MENU_REDRAW every pass makes the renderer
+    // race the display DMA and the last-scanned corner visibly tears.
+    static uint32_t last_kick = 0;
+    if (millis() - last_kick >= 66) {   // ~15Hz; events redraw immediately
+      last_kick = millis();
+      ::MENU_REDRAW = 1;
+    }
+    ui.Poke();  // keep the screensaver away
   }
 }
 
