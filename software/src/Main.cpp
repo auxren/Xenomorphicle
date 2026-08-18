@@ -478,8 +478,22 @@ FLASHMEM __attribute__((noinline)) void loop() {
     // check for request from PC to capture the screen
     if (Serial && Serial.available() > 0) {
       bool capreq = false;
+      // Console lock: hosts like the Jetson's ModemManager AT/MBIM-probe every
+      // new CDC port, and that byte soup has hit real commands ('D' froze the
+      // display, '(' fired preset saves, 'i'/'C'/'F' are worse). Ignore all
+      // input until the literal sequence "pew!" arrives.
+      static bool console_unlocked = false;
+      static uint32_t unlock_shift = 0;
       do {
         int cmd = Serial.read();
+        if (!console_unlocked) {
+          unlock_shift = (unlock_shift << 8) | (uint8_t)cmd;
+          if (unlock_shift == 0x70657721) {  // "pew!"
+            console_unlocked = true;
+            Serial.println("-=[ console unlocked ]=-");
+          }
+          continue;
+        }
         switch (cmd) {
 #ifdef PRINT_DEBUG
           case 'z':
