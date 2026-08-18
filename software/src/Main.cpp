@@ -378,7 +378,8 @@ FLASHMEM void setup() {
   firstrun |= !OC::app_switcher.Init(reset_settings || firstrun);
   OC::PresetEngine::Init();
   OC::PresetBus::Init();
-  OC::PresetBusUI::Init();  // gated on I2C_Expansion inside
+  OC::PresetBusUI::Init();
+  OC::PresetEngine::BootRecall();  // gated on I2C_Expansion inside
 
   // Welcome splash
   OC::ui.Splashscreen(firstrun, 1);

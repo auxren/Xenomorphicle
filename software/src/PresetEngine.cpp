@@ -40,6 +40,10 @@ static constexpr uint16_t kManifestKey = 8 << 8;    // == PRESETBUS_KEY
 static constexpr uint16_t kSchemaKey  = kManifestKey | 0;
 static constexpr uint16_t kFlagsKey   = kManifestKey | 1;
 static constexpr uint64_t kSchemaVersion = 1;
+// current bus slot, persisted (debounced) into GLOBALS.CFG so boot can
+// restore the preset the case was on -- 200e power-up semantics
+static constexpr uint16_t kCurSlotKey = kManifestKey | 0x13;
+
 // Quadrants writes its live preset id under this bare (bank-globals) key
 // when handling APP_EVENT_FLUSH, so the extractor knows which preset block
 // to pull out of the bank map. 253 is unused in the bank key map.
@@ -56,6 +60,7 @@ static volatile int8_t pending_save = -1;    // last-wins
 static volatile int8_t pending_recall = -1;
 static int8_t last_slot = -1;
 static bool last_was_save = false;
+static uint32_t cur_slot_dirty_ms = 0;   // 0 = clean
 static bool busy = false;
 static int quad_recall_hint = -1;
 
@@ -237,6 +242,7 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
 
   last_slot = slot;
   last_was_save = true;
+  cur_slot_dirty_ms = millis() | 1;
   busy = false;
   (void)name2;
   HS::PokePopup(HS::MESSAGE_POPUP, (ok && ok2) ? "Bus save OK" : "Bus save ERR");
@@ -331,6 +337,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
 
   last_slot = slot;
   last_was_save = false;
+  cur_slot_dirty_ms = millis() | 1;
   busy = false;
   HS::PokePopup(HS::MESSAGE_POPUP, "Bus recall OK");
   serial_printf("PresetEngine: recall slot %d done (app %04x)\n", slot, slot_app_id);
@@ -352,6 +359,29 @@ void RequestRecall(uint8_t slot) {
   if (slot < kNumSlots) pending_recall = slot;
 }
 
+// persist the current slot ~3s after preset activity settles, so
+// trigger-driven preset cycling never write-hammers GLOBALS.CFG
+FLASHMEM static void persist_cur_slot() {
+  cur_slot_dirty_ms = 0;
+  if (last_slot < 0) return;
+  PhzConfig::load_config();
+  uint64_t v = 0;
+  PhzConfig::getValue(kCurSlotKey, v);
+  if ((int64_t)v == last_slot) return;  // unchanged: skip the flash write
+  PhzConfig::setValue(kCurSlotKey, (uint64_t)last_slot);
+  PhzConfig::save_config();
+}
+
+FLASHMEM void BootRecall() {
+  // GLOBALS.CFG is the loaded map right after boot restore
+  uint64_t v = 0;
+  PhzConfig::load_config();
+  if (!PhzConfig::getValue(kCurSlotKey, v) || v >= kNumSlots) return;
+  if (!SlotUsed((uint8_t)v)) return;
+  serial_printf("PresetEngine: boot recall slot %d\n", (int)v);
+  RequestRecall((uint8_t)v);   // local only: no bus broadcast at power-up
+}
+
 FLASHMEM void Process() {
   const int8_t s = pending_save;
   if (s >= 0) {
@@ -363,6 +393,8 @@ FLASHMEM void Process() {
     pending_recall = -1;
     RecallSlot(r);
   }
+  if (cur_slot_dirty_ms && millis() - cur_slot_dirty_ms > 3000)
+    persist_cur_slot();
 }
 
 FLASHMEM int ConsumeQuadrantsRecallHint() {

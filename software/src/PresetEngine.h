@@ -43,6 +43,10 @@ int ConsumeQuadrantsRecallHint();
 
 // status for UI / debug
 int8_t LastSlot();            // -1 = none yet
+// Boot-time restore of the last bus preset (200e power-up semantics):
+// reads the persisted current slot and queues a local recall if it still
+// validates. Call once from setup(), after the apps have started.
+void BootRecall();
 bool SlotUsed(uint8_t slot);  // slot has a stored preset on disk
 
 // slot names: flat PBNAMES.BIN sidecar (16 chars max, RAM-cached at Init;
@@ -64,6 +68,7 @@ inline bool SaveSlot(uint8_t) { return false; }
 inline bool RecallSlot(uint8_t) { return false; }
 inline int ConsumeQuadrantsRecallHint() { return -1; }
 inline int8_t LastSlot() { return -1; }
+inline void BootRecall() {}
 inline bool SlotUsed(uint8_t) { return false; }
 static constexpr size_t kNameLen = 16;
 inline const char *SlotName(uint8_t) { return ""; }
