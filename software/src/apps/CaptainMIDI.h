@@ -756,8 +756,13 @@ public:
     }
 
     // runs in the main loop (not the ISR): drains deferred work
-    void DoLoop() {
+    FLASHMEM void DoLoop() {
         auto &hMIDI = frame.MIDIState;
+
+        if (syx_rx_len) {
+            HandleSysEx(syx_rx_buf, syx_rx_len);
+            syx_rx_len = 0;
+        }
 
         AutoSaveTick();
 
@@ -1046,11 +1051,17 @@ public:
         syx_pending |= PEND_DUMP;
     }
 
+    // ISR context: stage the frame; DoLoop() parses it.
     void OnReceiveSysEx() {
+        if (syx_rx_len) return;  // one frame in flight; next one re-triggers
         const uint8_t *sx = usbMIDI.getSysExArray();
-        const unsigned len = usbMIDI.getSysExArrayLength();
-        HandleSysEx(sx, len);
+        unsigned len = usbMIDI.getSysExArrayLength();
+        if (len > sizeof(syx_rx_buf)) len = sizeof(syx_rx_buf);
+        memcpy((void *)syx_rx_buf, sx, len);
+        syx_rx_len = len;
     }
+    volatile uint16_t syx_rx_len = 0;
+    uint8_t syx_rx_buf[96];
 
     void HandleSysEx(const uint8_t *sx, unsigned len) {
         // Universal Device Inquiry: F0 7E <dev> 06 01 F7
@@ -1387,7 +1398,9 @@ private:
         uint8_t data1 = device.getData1();
         uint8_t data2 = device.getData2();
 
-        // Handle system exclusive dump for Setup data
+        // Handle system exclusive dump for Setup data.
+        // Copy only — parsing runs from Loop() so the whole SysEx stack
+        // stays out of the ISR (and out of ITCM on Teensy 4).
         if (message == HEM_MIDI_SYSEX) OnReceiveSysEx();
 
         HS::frame.MIDIState.ProcessMIDIMsg({channel, message, data1, data2});
@@ -1432,9 +1445,9 @@ private:
 ////////////////////////////////////////////////////////////////////////////////
 //// App Functions
 ////////////////////////////////////////////////////////////////////////////////
-void AppCaptainMIDI::Init() { BaseStart(); }
+FLASHMEM void AppCaptainMIDI::Init() { BaseStart(); }
 
-size_t AppCaptainMIDI::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
+FLASHMEM size_t AppCaptainMIDI::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
 #ifdef __IMXRT1062__
   return 0; // T4.x persists via PhzConfig (see StoreData)
 #else
@@ -1452,7 +1465,7 @@ size_t AppCaptainMIDI::SaveAppData(util::StreamBufferWriter &stream_buffer) cons
   return stream_buffer.written();
 #endif
 }
-size_t AppCaptainMIDI::RestoreAppData(util::StreamBufferReader &stream_buffer) {
+FLASHMEM size_t AppCaptainMIDI::RestoreAppData(util::StreamBufferReader &stream_buffer) {
 #ifdef __IMXRT1062__
   return 0;
 #else
@@ -1521,7 +1534,7 @@ void AppCaptainMIDI::HandleAppEvent(OC::AppEvent event) {
   }
 }
 
-void AppCaptainMIDI::Loop() { DoLoop(); } // deferred (non-ISR) work
+FLASHMEM void AppCaptainMIDI::Loop() { DoLoop(); } // deferred (non-ISR) work
 
 FLASHMEM
 void AppCaptainMIDI::DrawMenu() const { BaseView(); }
@@ -1529,12 +1542,12 @@ void AppCaptainMIDI::DrawMenu() const { BaseView(); }
 FLASHMEM
 void AppCaptainMIDI::View() const { MainView(); }
 
-void AppCaptainMIDI::DrawScreensaver() const {
+FLASHMEM void AppCaptainMIDI::DrawScreensaver() const {
     BaseScreensaver(true);
 }
 void AppCaptainMIDI::DrawDebugInfo() const { }
 
-void AppCaptainMIDI::HandleButtonEvent(const UI::Event &event) {
+FLASHMEM void AppCaptainMIDI::HandleButtonEvent(const UI::Event &event) {
     if (event.control == OC::CONTROL_BUTTON_R && event.type == UI::EVENT_BUTTON_PRESS)
         ToggleCursor();
     if (event.control == OC::CONTROL_BUTTON_L) {
@@ -1550,7 +1563,7 @@ void AppCaptainMIDI::HandleButtonEvent(const UI::Event &event) {
     }
 }
 
-void AppCaptainMIDI::HandleEncoderEvent(const UI::Event &event) {
+FLASHMEM void AppCaptainMIDI::HandleEncoderEvent(const UI::Event &event) {
     if (event.control == OC::CONTROL_ENCODER_R) {
         if (detail_port < 0) {
             cursor.Scroll(event.value); // overview: pick a port
