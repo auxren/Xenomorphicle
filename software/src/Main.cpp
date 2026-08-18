@@ -519,8 +519,8 @@ FLASHMEM __attribute__((noinline)) void loop() {
             break;
           // preset-engine bench triggers: [ = save, ] = recall (slot 0);
           // { and } use slot 1
-          case '[': OC::PresetEngine::RequestSave(0); break;
-          case ']': OC::PresetEngine::RequestRecall(0); break;
+          case '(': OC::PresetEngine::RequestSave(0); break;
+          case ')': OC::PresetEngine::RequestRecall(0); break;
           case '{': OC::PresetEngine::RequestSave(1); break;
           case '}': OC::PresetEngine::RequestRecall(1); break;
           case 'b': OC::PresetBus::DebugDump(); break;
