@@ -19,6 +19,8 @@
 #include "HSUtils.h"
 #include "src/drivers/FreqMeasure/OC_FreqMeasure.h"
 
+extern uint_fast8_t MENU_REDRAW;  // Main.cpp
+
 namespace OC {
 
 // from OC_apps.cpp
@@ -311,6 +313,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   // 6. run
   CORE::app_isr_enabled = true;
   CORE::app_loop_enabled = true;
+  ::MENU_REDRAW = 1;
 
   last_slot = slot;
   last_was_save = false;

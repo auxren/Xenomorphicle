@@ -9,6 +9,7 @@
 #include "PresetBus200e.h"
 #include "PresetEngine.h"
 #include "OC_gpio.h"
+#include "OC_core.h"
 #include "PhzConfig.h"
 
 namespace OC {
@@ -181,6 +182,15 @@ bool Verbose() { return verbose; }
 
 FLASHMEM void DebugDump() {
   Serial.println("--- PresetBus ---");
+  // CORE ISR liveness: two tick samples 5ms apart (16.67kHz => ~83 delta)
+  {
+    const uint32_t t0 = OC::CORE::ticks;
+    delay(5);
+    Serial.printf("core_ticks=%lu delta5ms=%lu display_en=%d app_isr=%d app_loop=%d\n",
+                  OC::CORE::ticks, OC::CORE::ticks - t0,
+                  OC::CORE::display_update_enabled, OC::CORE::app_isr_enabled,
+                  OC::CORE::app_loop_enabled);
+  }
   Serial.printf("enabled=%d remote=%d module_addr=%02X verbose=%d\n",
                 enabled, Bus200eRemoteEnabled(), Bus200eModuleAddress(), verbose);
   Serial.printf("isr=%lu starts=%lu stops=%lu bytes=%lu ring_ovf=%lu\n",
