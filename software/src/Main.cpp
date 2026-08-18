@@ -47,6 +47,7 @@
 #include "HSMIDI.h"
 
 #include "PhzConfig.h"
+#include "PresetEngine.h"
 
 #if defined(ARDUINO_TEENSY41)
 USBHost thisUSB;
@@ -373,6 +374,7 @@ FLASHMEM void setup() {
 
   // initialize apps (on T3.x firstrun is detected by the EEPROM load inside)
   firstrun |= !OC::app_switcher.Init(reset_settings || firstrun);
+  OC::PresetEngine::Init();
 
   // Welcome splash
   OC::ui.Splashscreen(firstrun, 1);
@@ -387,7 +389,10 @@ FLASHMEM void setup() {
 
 /*  ---------    main loop  --------  */
 
-void FASTRUN loop() {
+// loop() is the slow path (drawing, UI events, deferred work) — all the
+// real-time work happens in the CORE/UI timer ISRs. Run it from cached
+// flash instead of burning ~4KB of ITCM (it gets inlined into main()).
+FLASHMEM __attribute__((noinline)) void loop() {
   using namespace OC;
   CORE::app_isr_enabled = true;
   CORE::display_update_enabled = true;
@@ -433,6 +438,7 @@ void FASTRUN loop() {
 
     // Take care of queued tasks
     OC::CORE::FlushTasks();
+    OC::PresetEngine::Process();
 
     // UI events
     if (UI_MODE_APP_SETTINGS == ui_mode) {
@@ -508,6 +514,12 @@ void FASTRUN loop() {
           case 'i':
             ScanI2C();
             break;
+          // preset-engine bench triggers: [ = save, ] = recall (slot 0);
+          // { and } use slot 1
+          case '[': OC::PresetEngine::RequestSave(0); break;
+          case ']': OC::PresetEngine::RequestRecall(0); break;
+          case '{': OC::PresetEngine::RequestSave(1); break;
+          case '}': OC::PresetEngine::RequestRecall(1); break;
 #endif
           case 'C':
             Serial.println("Resetting Config File!!");

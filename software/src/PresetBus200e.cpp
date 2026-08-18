@@ -8,6 +8,14 @@
 
 #include <string.h>
 
+// On target, keep this cold code out of ITCM; host builds compile it bare.
+#if defined(__IMXRT1062__) || defined(__MK20DX256__)
+#include <Arduino.h>
+#define BUS_CODE FLASHMEM
+#else
+#define BUS_CODE
+#endif
+
 #include "PresetBus200e.h"
 
 // Longest meaningful general-call frame is the 8-byte long-form card command;
@@ -45,9 +53,9 @@ static void log_cmd(const Bus200eCmd *c) {
   log_total++;
 }
 
-uint32_t Bus200eLogTotal(void) { return log_total; }
+BUS_CODE uint32_t Bus200eLogTotal(void) { return log_total; }
 
-int Bus200eLogRead(uint32_t n_back, Bus200eCmd *out) {
+BUS_CODE int Bus200eLogRead(uint32_t n_back, Bus200eCmd *out) {
   if (n_back >= log_total || n_back >= BUS200E_LOG_SIZE) return 0;
   *out = log_ring[(log_total - 1 - n_back) % BUS200E_LOG_SIZE];
   return 1;
@@ -63,7 +71,7 @@ uint8_t Bus200eModuleAddress(void) { return module_addr; }
 int  Bus200eQueryPending(void) { return query_pending; }
 void Bus200eClearQueryPending(void) { query_pending = 0; }
 
-void Bus200eInit(const Bus200eOps *ops) {
+BUS_CODE void Bus200eInit(const Bus200eOps *ops) {
   bus_ops = ops;
   frame_len = 0;
   in_frame = 0;
@@ -78,7 +86,7 @@ void Bus200eInit(const Bus200eOps *ops) {
 
 // ---- dispatch --------------------------------------------------------------
 
-static void dispatch(Bus200eCmd *c) {
+BUS_CODE static void dispatch(Bus200eCmd *c) {
   log_cmd(c);
 
   switch (c->op) {
@@ -124,7 +132,7 @@ static void dispatch(Bus200eCmd *c) {
 
 // ---- frame parsing ---------------------------------------------------------
 
-static void parse_frame(void) {
+BUS_CODE static void parse_frame(void) {
   Bus200eCmd c = { BUS200E_OP_NONE, 0, 0, 0, 0 };
   const uint8_t *f = frame;
   uint8_t n = frame_len;
@@ -193,13 +201,13 @@ static void parse_frame(void) {
   dispatch(&c);
 }
 
-static void drop_frame(uint8_t why_len) {
+BUS_CODE static void drop_frame(uint8_t why_len) {
   Bus200eCmd c = { BUS200E_OP_DROPPED, why_len, 0, 0, 0 };
   log_cmd(&c);
   stats.dropped++;
 }
 
-void Bus200eFeedEvent(uint16_t ev) {
+BUS_CODE void Bus200eFeedEvent(uint16_t ev) {
   if (ev & BUS200E_EV_OVF) {
     frame_poisoned = 1;
     return;
@@ -231,7 +239,7 @@ void Bus200eFeedEvent(uint16_t ev) {
 
 // ---- card transfer job (phase 2: runs only when all hooks are supplied) ----
 
-void Bus200eTask(void) {
+BUS_CODE void Bus200eTask(void) {
   if (!job.active) return;
 
   if (!bus_ops || !bus_ops->record_size ||

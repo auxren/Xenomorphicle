@@ -29,6 +29,12 @@ namespace PhzConfig {
   bool getValue(KEY key, VALUE &value);
   void deleteKey(KEY key);
 
+  // Save a filtered/remapped copy of the currently loaded map to a file,
+  // leaving the live map untouched. Used by the preset engine to extract
+  // one preset's keys out of a bank file. remap may be null (identity).
+  bool save_filtered(const char* filename, FS &fs,
+                     bool (*pred)(KEY), KEY (*remap)(KEY));
+
   void setData(KEY key, VALUE value);
   bool getData(KEY key, VALUE &value);
   void deleteData(KEY key);

@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include "PresetEngine.h"
+
 // per bank file
 static constexpr int QUAD_PRESET_COUNT = 32;
 static constexpr int PRESET_FILE_REVISION = 1;
@@ -65,6 +67,14 @@ public:
     }
 
     void Resume() {
+        // A bus preset recall stages its state as a scratch bank; pick it up
+        // fresh (preset 0) exactly once.
+        const int hint = OC::PresetEngine::ConsumeQuadrantsRecallHint();
+        if (hint >= 0) {
+            bank_num = (uint8_t)hint;
+            preset_id = -1;
+            queued_preset = -1;
+        }
         SetBank(bank_num);
 
         if (preset_id < 0)
@@ -1769,7 +1779,7 @@ void AppQuadrants::GetIOConfig(OC::IOConfig &ioconfig) const
   ioconfig.outputs[7].set("Out H", OUTPUT_MODE_PITCH);
 }
 
-void AppQuadrants::HandleAppEvent(OC::AppEvent event) {
+FLASHMEM void AppQuadrants::HandleAppEvent(OC::AppEvent event) {
     switch (event) {
     case OC::APP_EVENT_RESUME:
         Resume();
@@ -1778,6 +1788,16 @@ void AppQuadrants::HandleAppEvent(OC::AppEvent event) {
     case OC::APP_EVENT_SCREENSAVER_ON:
     case OC::APP_EVENT_SUSPEND:
         Suspend();
+        break;
+
+    case OC::APP_EVENT_FLUSH:
+        // Preset-bus capture: persist regardless of the auto-save toggle,
+        // and leave our live preset id in the map for the extractor
+        // (253 is unused in the bank key space).
+        if (preset_id >= 0) {
+            StoreToPreset(preset_id);
+            PhzConfig::setValue(253, (uint64_t)preset_id);
+        }
         break;
 
     default: break;
@@ -1790,7 +1810,7 @@ void AppQuadrants::Loop() {
 }
 
 FLASHMEM
-void AppQuadrants::DrawMenu() const {
+FLASHMEM void AppQuadrants::DrawMenu() const {
     View();
 }
 
