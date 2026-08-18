@@ -39,6 +39,16 @@ static bool assign_dirty = false;
 // stored/empty indicator cache (checked on selection change only)
 static int8_t sel_stored = -1;
 
+// store/recall feedback: hold-progress while L is held, then a worded
+// confirmation banner once the engine finishes the operation
+static uint32_t hold_start_ms = 0;        // 0 = not holding
+static int8_t pending_slot = -1;          // op we're waiting on
+static bool pending_was_save = false;
+static uint32_t pending_start_ms = 0;
+static uint32_t pending_opcount = 0;
+static char banner[14] = "";
+static uint32_t banner_until_ms = 0;
+
 // trigger edge detection (runs whether or not the overlay is open)
 static bool trig_prev[4] = {false, false, false, false};
 
@@ -160,13 +170,20 @@ FLASHMEM bool HandleEvent(const UI::Event &event) {
   }
   if (event.control == CONTROL_BUTTON_R && event.type == UI::EVENT_BUTTON_PRESS) {
     recall_selected();
+    pending_slot = sel;
+    pending_was_save = false;
+    pending_start_ms = millis();
+    pending_opcount = PresetEngine::OpCount();
     return true;
   }
   if (event.control == CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_LONG_PRESS) {
     if (cursor == 1 && sel_stored == 1) return true;  // STORE legend hidden here
     PresetBus::BroadcastSave(sel);
     sel_stored = -1;
-    HS::PokePopup(HS::MESSAGE_POPUP, "Bus store...");
+    pending_slot = sel;
+    pending_was_save = true;
+    pending_start_ms = millis();
+    pending_opcount = PresetEngine::OpCount();
     return true;
   }
   return true;
@@ -279,6 +296,16 @@ FLASHMEM void Draw() {
   if (last_trig) graphics.printf("TR%d", last_trig);
   else graphics.print("off");
 
+  // hold-progress bar under the STORE column while the left encoder is held
+  if (hold_start_ms && !edit_mode) {
+    const uint32_t held = millis() - hold_start_ms;
+    if (held > 120) {   // don't flicker on ordinary clicks
+      graphics.drawFrame(4, 35, 34, 5);
+      uint32_t w = (held >= 500) ? 30 : (held * 30) / 500;
+      if (w) graphics.drawRect(6, 37, w, 1);
+    }
+  }
+
   // one focus grammar: invert exactly what the right encoder will change
   if (edit_mode) {
     graphics.invertRect(15 + 6 * edit_pos, 43, 8, 10);
@@ -295,6 +322,20 @@ FLASHMEM void Draw() {
     }
     case 2: graphics.invertRect(39, 53, 20, 10); break;
     case 3: graphics.invertRect(103, 53, 20, 10); break;
+  }
+
+  // confirmation banner, drawn over everything: worded, temporary
+  if (banner_until_ms && millis() < banner_until_ms) {
+    const int len = (int)strlen(banner);
+    const int w = 6 * len + 16;
+    const int x = 64 - w / 2;
+    graphics.clearRect(x, 20, w, 20);
+    graphics.drawFrame(x, 20, w, 20);
+    graphics.drawFrame(x + 1, 21, w - 2, 18);   // double frame: this is an event
+    graphics.setPrintPos(64 - 3 * len, 26);
+    graphics.print(banner);
+  } else {
+    banner_until_ms = 0;
   }
 }
 
@@ -321,6 +362,33 @@ void Task() {
   }
 
   if (active) {
+    // hold-progress source: sample the left encoder button directly
+    const bool store_context = !edit_mode && !(cursor == 1 && sel_stored == 1);
+    if (store_context && ui.read_immediate(CONTROL_BUTTON_L)) {
+      if (!hold_start_ms) hold_start_ms = millis() | 1;
+    } else {
+      hold_start_ms = 0;
+    }
+
+    // completion watch: the engine bumps OpCount when the op finishes
+    if (pending_slot >= 0) {
+      if (PresetEngine::OpCount() != pending_opcount) {
+        const uint8_t shown = (uint8_t)pending_slot + 1;
+        if (pending_was_save)
+          snprintf(banner, sizeof(banner),
+                   PresetEngine::LastSaveOk() ? "STORED %d" : "SAVE ERR %d", shown);
+        else
+          snprintf(banner, sizeof(banner), "RECALLED %d", shown);
+        banner_until_ms = millis() + 1600;
+        pending_slot = -1;
+        sel_stored = -1;
+      } else if (millis() - pending_start_ms > 4000) {
+        snprintf(banner, sizeof(banner), "FAILED");  // engine never ran it
+        banner_until_ms = millis() + 1600;
+        pending_slot = -1;
+      }
+    }
+
     // Throttled redraw: forcing MENU_REDRAW every pass makes the renderer
     // race the display DMA and the last-scanned corner visibly tears.
     static uint32_t last_kick = 0;

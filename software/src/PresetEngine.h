@@ -43,6 +43,8 @@ int ConsumeQuadrantsRecallHint();
 
 // status for UI / debug
 int8_t LastSlot();            // -1 = none yet
+uint32_t OpCount();           // bumps when a save/recall finishes
+bool LastSaveOk();            // result of the most recent save
 // Boot-time restore of the last bus preset (200e power-up semantics):
 // reads the persisted current slot and queues a local recall if it still
 // validates. Call once from setup(), after the apps have started.
@@ -68,6 +70,8 @@ inline bool SaveSlot(uint8_t) { return false; }
 inline bool RecallSlot(uint8_t) { return false; }
 inline int ConsumeQuadrantsRecallHint() { return -1; }
 inline int8_t LastSlot() { return -1; }
+inline uint32_t OpCount() { return 0; }
+inline bool LastSaveOk() { return false; }
 inline void BootRecall() {}
 inline bool SlotUsed(uint8_t) { return false; }
 static constexpr size_t kNameLen = 16;

@@ -61,6 +61,8 @@ static volatile int8_t pending_recall = -1;
 static int8_t last_slot = -1;
 static bool last_was_save = false;
 static uint32_t cur_slot_dirty_ms = 0;   // 0 = clean
+static uint32_t op_count = 0;            // completed save/recall operations
+static bool last_save_ok = false;
 static bool busy = false;
 static int quad_recall_hint = -1;
 
@@ -242,7 +244,9 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
 
   last_slot = slot;
   last_was_save = true;
+  last_save_ok = ok && ok2;
   cur_slot_dirty_ms = millis() | 1;
+  op_count++;
   busy = false;
   (void)name2;
   HS::PokePopup(HS::MESSAGE_POPUP, (ok && ok2) ? "Bus save OK" : "Bus save ERR");
@@ -338,6 +342,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   last_slot = slot;
   last_was_save = false;
   cur_slot_dirty_ms = millis() | 1;
+  op_count++;
   busy = false;
   HS::PokePopup(HS::MESSAGE_POPUP, "Bus recall OK");
   serial_printf("PresetEngine: recall slot %d done (app %04x)\n", slot, slot_app_id);
@@ -404,6 +409,8 @@ FLASHMEM int ConsumeQuadrantsRecallHint() {
 }
 
 int8_t LastSlot() { return last_slot; }
+uint32_t OpCount() { return op_count; }
+bool LastSaveOk() { return last_save_ok; }
 
 // ---- slot names --------------------------------------------------------
 // One flat 30x16 byte file, whole thing cached in RAM. Deliberately not a
