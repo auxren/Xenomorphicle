@@ -436,7 +436,7 @@ void midi_monitor() {
 #endif
 }
 
-void Ui::DebugStats() {
+FLASHMEM void Ui::DebugStats() {
   SERIAL_PRINTLN("DEBUG/STATS MENU");
 
   int current_menu_index = 0;

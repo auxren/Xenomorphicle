@@ -945,7 +945,7 @@ void AppCalibr8or::HandleButtonEvent(const UI::Event &event) {
     }
 }
 
-void AppCalibr8or::HandleEncoderEvent(const UI::Event &event) {
+FLASHMEM void AppCalibr8or::HandleEncoderEvent(const UI::Event &event) {
   /*
   if (autotuner.active()) {
     autotuner.HandleEncoderEvent(event);

@@ -57,7 +57,7 @@ size_t AppBase::Restore(util::StreamBufferReader &stream_buffer)
   return stream_buffer.read();
 }
 
-void AppBase::Draw(UiMode ui_mode) const
+FLASHMEM void AppBase::Draw(UiMode ui_mode) const
 {
   if (UI_MODE_MENU == ui_mode) {
     if (!io_settings_menu.active())

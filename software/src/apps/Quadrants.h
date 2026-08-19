@@ -1780,7 +1780,7 @@ FLASHMEM void AppQuadrants::View() const {
     }
 }
 
-void AppQuadrants::DrawScreensaver() const {
+FLASHMEM void AppQuadrants::DrawScreensaver() const {
     switch (HS::screensaver_mode) {
     case SCREEN_ZIPS:
     case SCREEN_STARS:
