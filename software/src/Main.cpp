@@ -159,7 +159,8 @@ extern "C" {
   }
 }
 
-void BootMenu() {
+// boot-time only; noinline so FLASHMEM sticks (free-function LTO rule)
+FLASHMEM __attribute__((noinline)) void BootMenu() {
   bool save = false;
   int choice = -1;
 
@@ -578,6 +579,9 @@ FLASHMEM __attribute__((noinline)) void loop() {
                           OC::PresetBusUI::Active() ? "open" : "closed");
             break;
           case 'b': OC::PresetBus::DebugDump(); break;
+          case 'k':  // toggle 0x50 card serving (WPM-less bus only; hard-gated)
+            OC::PresetBus::CardServeEnable(!OC::PresetBus::CardServing());
+            break;
           case 'B':
             OC::PresetBus::SetVerbose(!OC::PresetBus::Verbose());
             Serial.printf("PresetBus verbose = %d\n", OC::PresetBus::Verbose());

@@ -5,8 +5,11 @@
 #include <Wire.h>
 #include <imxrt.h>
 
+#include <LittleFS.h>
+
 #include "PresetBus.h"
 #include "PresetBus200e.h"
+#include "PresetBusCard.h"
 #include "PresetEngine.h"
 #include "OC_gpio.h"
 #include "OC_core.h"
@@ -45,25 +48,76 @@ static void push_event(uint16_t ev) {
 }
 
 // ---- LPI2C1 slave ISR ------------------------------------------------------
+// Card-serving routing state (see "0x50 card serving" below). While serving,
+// SAMR additionally matches 0x50 and transactions addressed there are routed
+// into the BusCard emulator instead of the general-call event ring. With
+// card_serving false the ISR behaves byte-identically to the GC-only build:
+// SASR is never read and no BusCard entry point is reachable.
+static volatile bool card_serving = false;
+static volatile bool in_card_txn = false;   // current txn targets 0x50
+static volatile bool card_tx_open = false;  // read leg started (stats only)
+static volatile uint16_t staged_addr = 0xFFFF;  // latest SASR RADDR (addr<<1|R)
+
 static void lpi2c1_slave_isr() {
   stats.isr_count++;
   const uint32_t status = LPI2C1_SSR;
   const uint32_t w1c = status & 0xF00;
   if (w1c) LPI2C1_SSR = w1c;
 
+  // Address phase: stage the received address (reading SASR clears AVF).
+  // AVF needs no interrupt of its own: a write txn raises RDF and a read
+  // txn raises TDF before any routing decision is consumed below.
+  if (card_serving && (status & LPI2C_SSR_AVF)) {
+    const uint32_t sasr = LPI2C1_SASR;
+    if (!(sasr & LPI2C_SASR_ANV)) staged_addr = sasr & 0x7FF;
+  }
+
   if (status & LPI2C_SSR_RDF) {
     const uint32_t rx = LPI2C1_SRDR;
-    if (rx & LPI2C_SRDR_SOF) {  // start of frame
-      push_event(BUS200E_EV_START);
-      stats.starts++;
+    if (rx & LPI2C_SRDR_SOF) {  // first byte of a write txn: route it now
+      if (in_card_txn) {        // previous card txn lost its STOP: close it
+        BusCardStop();
+        in_card_txn = false;
+      }
+      if (card_serving && (staged_addr >> 1) == BUS200E_CARD_BASE) {
+        in_card_txn = true;
+        BusCardStart(0);        // SOF byte implies a master write
+      } else {
+        push_event(BUS200E_EV_START);
+        stats.starts++;
+      }
     }
-    push_event(rx & 0xFF);
-    stats.bytes++;
+    if (in_card_txn) {
+      BusCardRxByte(rx & 0xFF);
+    } else {
+      push_event(rx & 0xFF);
+      stats.bytes++;
+    }
   }
   if (status & (LPI2C_SSR_SDF | LPI2C_SSR_RSF)) {  // stop / repeated start
-    push_event(BUS200E_EV_STOP);
-    if (status & LPI2C_SSR_RSF) push_event(BUS200E_EV_START);
+    if (in_card_txn) {
+      BusCardStop();
+      // on RSF the next leg re-routes via SOF (write) or TDF (read)
+      if (status & LPI2C_SSR_SDF) in_card_txn = false;
+    } else {
+      push_event(BUS200E_EV_STOP);
+      if (status & LPI2C_SSR_RSF) push_event(BUS200E_EV_START);
+    }
+    card_tx_open = false;
     stats.stops++;
+  }
+  // Slave transmit: only 0x50 reads ever request TX data (the general call
+  // is write-only), and TDIE is enabled only while serving.
+  if (status & LPI2C_SSR_TDF) {
+    if (card_serving && (staged_addr >> 1) == BUS200E_CARD_BASE
+        && (staged_addr & 1)) {
+      if (!card_tx_open) {   // reads have no SOF: open the txn here
+        card_tx_open = true;
+        in_card_txn = true;
+        BusCardStart(1);
+      }
+      LPI2C1_STDR = BusCardTxByte();
+    }
   }
 }
 
@@ -166,6 +220,7 @@ static uint32_t wpm_probes = 0;
 bool WpmPresent() { return wpm_present; }
 
 FLASHMEM static void probe_wpm() {
+  if (card_serving) return;  // we own 0x50 ourselves: the probe would self-ACK
   if (millis() - wpm_last_probe_ms < 5000) return;
   if (!tx_gate_open()) return;
   wpm_last_probe_ms = millis();
@@ -187,6 +242,129 @@ FLASHMEM static void probe_wpm() {
       if (verbose) Serial.println("PresetBus: WPM gone");
     }
   }  // arbitration loss etc: no evidence either way, try again later
+}
+
+// ---- 0x50 card serving -------------------------------------------------------
+// Serve the storage-card address for WPM-less systems: 200e modules can then
+// BACKUP/RESTORE against our 32K image (PBCARD.BIN on LittleFS) exactly as
+// they would against a WPM or a real card.
+//
+// HARD GATE, in three layers: enabling is REFUSED while a real preset
+// manager ACKs 0x50 (two card slaves on one bus corrupt each other's ACKs);
+// the presence probe is suspended while serving (it would self-ACK and
+// re-trip the gate); and an enable-time self-test (our polled master
+// probing our own slave engine) reverts everything if the address-match
+// hardware ACKs anything but exactly 0x50. Default off, never persisted:
+// every boot starts NOT serving.
+static uint8_t *card_image = nullptr;
+static uint32_t card_flush_arm_ms = 0;
+static uint32_t card_seen_writes = 0;
+static constexpr const char *kCardFile = "PBCARD.BIN";
+
+// SCFGR1/SAMR may only change while the slave engine is disabled.
+FLASHMEM static void slave_reconfig(bool serve) {
+  LPI2C1_SCR = 0;
+  LPI2C1_SIER = 0;
+  uint32_t cfg1 = LPI2C_SCFGR1_GCEN | LPI2C_SCFGR1_RXSTALL;
+  uint32_t samr = LPI2C_SAMR_ADDR0(0);  // belt and braces alongside GCEN
+  uint32_t sier = LPI2C_SIER_RDIE | LPI2C_SIER_SDIE | LPI2C_SIER_RSIE;
+  if (serve) {
+    cfg1 |= LPI2C_SCFGR1_ADDRCFG(2)   // match ADDR0 (7-bit) OR ADDR1 (7-bit)
+          | LPI2C_SCFGR1_TXDSTALL;    // stretch SCL until STDR is fed
+    samr |= LPI2C_SAMR_ADDR1(BUS200E_CARD_BASE);
+    sier |= LPI2C_SIER_TDIE;
+  }
+  LPI2C1_SCFGR1 = cfg1;
+  LPI2C1_SAMR = samr;
+  LPI2C1_SIER = sier;
+  LPI2C1_SCR = LPI2C_SCR_SEN | LPI2C_SCR_FILTEN;
+}
+
+FLASHMEM static void card_image_flush(const char *why) {
+  if (!card_image || !BusCardDirty()) return;
+  File f = PhzConfig::myfs.open(kCardFile, FILE_WRITE_BEGIN);
+  bool ok = false;
+  if (f) {
+    ok = f.write(card_image, BUSCARD_SIZE) == BUSCARD_SIZE;
+    f.close();
+  }
+  if (ok) BusCardClearDirty();
+  Serial.printf("PresetBus: card image %s (%s)\n",
+                ok ? "saved" : "SAVE FAILED", why);
+}
+
+FLASHMEM int CardServeEnable(bool on) {
+  if (!enabled) return -1;
+  if (on == (bool)card_serving) return 0;
+
+  if (!on) {
+    card_serving = false;
+    in_card_txn = false;
+    card_tx_open = false;
+    slave_reconfig(false);
+    card_image_flush("disable");
+    Serial.println("PresetBus: card serving off");
+    return 0;
+  }
+
+  if (wpm_present) {  // THE gate: never contest a live preset manager
+    Serial.println("PresetBus: card serve REFUSED - WPM owns 0x50");
+    return -2;
+  }
+  if (!card_image) card_image = (uint8_t *)malloc(BUSCARD_SIZE);
+  if (!card_image) {
+    Serial.println("PresetBus: card serve failed - no memory");
+    return -3;
+  }
+  memset(card_image, 0xFF, BUSCARD_SIZE);  // blank card = erased EEPROM
+  File f = PhzConfig::myfs.open(kCardFile, FILE_READ);
+  if (f) {
+    f.read(card_image, BUSCARD_SIZE);
+    f.close();
+  }
+  BusCardInit(card_image, BUSCARD_SIZE);
+  card_seen_writes = 0;
+  card_flush_arm_ms = 0;
+  slave_reconfig(true);
+  card_serving = true;
+
+  // Self-test through the wire: the polled Wire master and our slave engine
+  // share the pads, so an empty write to 0x50 must self-ACK and a probe of
+  // an unrelated address must still NACK (a mislaid SAMR ADDR1 field would
+  // ACK the wrong address -- fail safe by reverting).
+  delayMicroseconds(200);
+  Wire.beginTransmission(BUS200E_CARD_BASE);
+  const uint8_t at_card = Wire.endTransmission();
+  Wire.beginTransmission(0x29);
+  const uint8_t at_other = Wire.endTransmission();
+  if (at_card != 0 || at_other == 0) {
+    card_serving = false;
+    in_card_txn = false;
+    card_tx_open = false;
+    slave_reconfig(false);
+    Serial.printf("PresetBus: card serve self-test FAILED (0x50=%u 0x29=%u), reverted\n",
+                  at_card, at_other);
+    return -4;
+  }
+  Serial.println("PresetBus: serving 0x50 (32K card image)");
+  return 0;
+}
+
+bool CardServing() { return card_serving; }
+
+// Flush the image 3s after a write burst goes quiet (a module BACKUP is a
+// stream of write transactions; don't thrash LittleFS mid-transfer).
+static void card_task() {
+  if (!card_serving) return;
+  const BusCardStats *cs = BusCardGetStats();
+  if (cs->bytes_written != card_seen_writes) {
+    card_seen_writes = cs->bytes_written;
+    card_flush_arm_ms = millis();
+  } else if (card_flush_arm_ms && BusCardDirty()
+             && millis() - card_flush_arm_ms > 3000) {
+    card_flush_arm_ms = 0;
+    card_image_flush("write burst done");
+  }
 }
 
 // ---- bus MIDI public API ----------------------------------------------------
@@ -306,20 +484,17 @@ FLASHMEM void Init() {
 
   // LPI2C1 slave engine, alongside the (polled) stock Wire master.
   // Wire.begin() has already gated the peripheral clock and set the pads.
+  // GCEN (set in slave_reconfig): match the general call (0x00) — the bit
+  // neither Wire nor teensy4_i2c ever sets, the whole reason this block
+  // exists. RXSTALL lets the peripheral clock-stretch if we fall behind.
   LPI2C1_SCR = LPI2C_SCR_RST;
   LPI2C1_SCR = 0;
-  // GCEN: match the general call (0x00) — the bit neither Wire nor
-  // teensy4_i2c ever sets, and the whole reason this block exists.
-  // RXSTALL lets the peripheral clock-stretch if we fall behind.
-  LPI2C1_SCFGR1 = LPI2C_SCFGR1_GCEN | LPI2C_SCFGR1_RXSTALL;
   LPI2C1_SCFGR2 = LPI2C_SCFGR2_FILTSDA(2) | LPI2C_SCFGR2_FILTSCL(2)
                 | LPI2C_SCFGR2_DATAVD(3) | LPI2C_SCFGR2_CLKHOLD(2);
-  LPI2C1_SAMR = LPI2C_SAMR_ADDR0(0);  // belt and braces alongside GCEN
   attachInterruptVector(IRQ_LPI2C1, lpi2c1_slave_isr);
   NVIC_SET_PRIORITY(IRQ_LPI2C1, 144);  // below CORE (80) and UI (128)
   NVIC_ENABLE_IRQ(IRQ_LPI2C1);
-  LPI2C1_SIER = LPI2C_SIER_RDIE | LPI2C_SIER_SDIE | LPI2C_SIER_RSIE;
-  LPI2C1_SCR = LPI2C_SCR_SEN | LPI2C_SCR_FILTEN;
+  slave_reconfig(false);  // GC-only; card serving is opt-in per boot
 
   enabled = true;
   Serial.printf("PresetBus: slave listening on general call (module addr %02X)\n",
@@ -383,6 +558,7 @@ void Task() {
   pump_broadcast();
   pump_midi_tx();
   probe_wpm();
+  card_task();
 }
 
 bool Enabled() { return enabled; }
@@ -426,8 +602,16 @@ FLASHMEM void DebugDump() {
         : "unknown";
     Serial.printf("wpm=%s owner_0x50=%s dialect=%s (long=%lu short=%lu) probes=%lu\n",
                   wpm_present ? "present" : "absent",
-                  wpm_present ? "WPM" : "none",
+                  wpm_present ? "WPM" : (card_serving ? "US(card)" : "none"),
                   dialect, d->frames_long, d->frames_short, wpm_probes);
+    if (card_serving || BusCardAttached()) {
+      const BusCardStats *cs = BusCardGetStats();
+      Serial.printf("card: serving=%d dirty=%d ptr=%04lX w_txn=%lu r_txn=%lu wr=%lu rd=%lu\n",
+                    (int)card_serving, BusCardDirty(),
+                    (unsigned long)BusCardPointer(),
+                    cs->txns_write, cs->txns_read,
+                    cs->bytes_written, cs->bytes_read);
+    }
     Serial.printf("bcast: tx=%lu drop=%lu pending=%d\n",
                   bcast_tx, bcast_drop, pending_bcast);
   }

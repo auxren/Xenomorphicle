@@ -60,6 +60,14 @@ void BroadcastRecall(uint8_t slot);
 // 0x50 every few seconds when the bus is quiet. Hot plug/unplug is normal.
 bool WpmPresent();
 
+// ---- 0x50 card serving ----
+// Serve the storage-card address (32K image, PBCARD.BIN) so 200e modules on
+// a WPM-less bus can BACKUP/RESTORE against us. HARD-GATED: refused while a
+// WPM is present, self-tested at enable, never persisted (off every boot).
+// Returns 0 on success; <0 = refused (WPM present / no memory / self-test).
+int CardServeEnable(bool on);
+bool CardServing();
+
 // ---- bus MIDI ----
 // TX: queue a message for mastering onto the bus (ISR-safe; sent from
 // Task() when the bus is quiet). channel 1 -> 200e bus A, 2 -> bus B,
@@ -87,6 +95,8 @@ inline bool ReadMidiRx(uint8_t &, uint8_t &, uint8_t &) { return false; }
 inline void BroadcastSave(uint8_t) {}
 inline void BroadcastRecall(uint8_t) {}
 inline bool WpmPresent() { return false; }
+inline int CardServeEnable(bool) { return -1; }
+inline bool CardServing() { return false; }
 inline const Stats &GetStats() { static Stats s = {}; return s; }
 inline void DebugDump() {}
 inline void SetVerbose(bool) {}

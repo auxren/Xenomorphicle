@@ -420,74 +420,9 @@ private:
                       30, ProportionCV(levels[ch], 34));
     }
 
-    FLASHMEM void DrawDrumBody(byte x, byte tone, byte decay, byte punch, byte pdecay, bool is_snare) {
-        const int8_t wmin = 10;
-        const int8_t wmax = 30;
-        const int8_t hmin = 6;
-        const int8_t hmax = 16;
-
-        int8_t w = Proportion(decay, BNC_MAX_PARAM, wmax - wmin) + wmin;
-        int8_t h = Proportion(punch, BNC_MAX_PARAM, hmax - hmin) + hmin;
-        int8_t body_h = (2*h/hmin - 1) + hmin - 2;
-        int8_t r = Proportion(pdecay, BNC_MAX_PARAM, body_h);
-        int8_t y = 40 - Proportion(tone, BNC_MAX_PARAM, 18);
-
-        int8_t cx = x + wmax/2;
-        int8_t cy = y;
-
-        // Body
-        int dx = w/5;
-        gfxLine(
-            cx - dx + 1, cy - body_h/2,
-            cx + dx - 1, cy - body_h/2);
-        gfxLine(
-            cx - dx + 2, cy - body_h/2-1,
-            cx + dx - 2, cy - body_h/2-1);
-        gfxLine(
-            cx - dx + 1, cy + body_h/2,
-            cx + dx - 1, cy + body_h/2);
-        gfxRect(
-            cx - dx + 1, cy - body_h/2 + 1,
-            2*dx - 1, r - 1);
-
-        // Legs
-        for(int p=-1; p<=1; p+=2) { // parity for both sides
-            int _dx = p*dx;
-            // Front legs
-            gfxLine(
-                cx + _dx, cy - body_h/2,
-                cx + p*w/3, cy - h/2);
-            // Mid legs
-            gfxLine(
-                cx + _dx, cy - 1,
-                cx + _dx + 2*p, cy-1);
-            gfxLine(
-                cx + _dx + 2*p, cy - 1,
-                cx + p*w/2, cy - 2);
-            // Rear legs
-            gfxLine(
-                cx + _dx, cy + 1,
-                cx + p*w/3, cy + hmax/h);
-            gfxLine(
-                cx + p*w/3, cy + hmax/h,
-                cx + p*w/2, cy + h/2);
-            // Body flank
-            gfxLine(
-                cx+_dx, cy-body_h/2+1,
-                cx+_dx, cy+body_h/2-1);
-            if(is_snare) {
-                // Some feelers for snare bug
-                gfxLine(
-                    cx + p, cy - body_h/2 - 2,
-                    cx + 2*p, cy - body_h/2 - 2 - hmax/h);
-            } else {
-                // Some eyes on the kick bug
-                gfxInvert(
-                    cx + _dx - p, cy - body_h/2 + 1,
-                    1, 1);
-            }
-        }
-    }
+    // definition out-of-class below the class: LTO drops FLASHMEM (and thus
+    // the flash placement) on in-class bodies. Single-TU header: no inline.
+    void DrawDrumBody(byte x, byte tone, byte decay, byte punch, byte pdecay, bool is_snare);
 
     void SetEnvDecayKick(int decay) {
         // 100 ms - 1000 ms -> 10 Hz - 1 Hz
@@ -510,6 +445,76 @@ private:
             8000 - Proportion(decay, BNC_MAX_PARAM, 4000));
     }
 };
+
+FLASHMEM void BugCrack::DrawDrumBody(byte x, byte tone, byte decay, byte punch, byte pdecay, bool is_snare) {
+    const int8_t wmin = 10;
+    const int8_t wmax = 30;
+    const int8_t hmin = 6;
+    const int8_t hmax = 16;
+
+    int8_t w = Proportion(decay, BNC_MAX_PARAM, wmax - wmin) + wmin;
+    int8_t h = Proportion(punch, BNC_MAX_PARAM, hmax - hmin) + hmin;
+    int8_t body_h = (2*h/hmin - 1) + hmin - 2;
+    int8_t r = Proportion(pdecay, BNC_MAX_PARAM, body_h);
+    int8_t y = 40 - Proportion(tone, BNC_MAX_PARAM, 18);
+
+    int8_t cx = x + wmax/2;
+    int8_t cy = y;
+
+    // Body
+    int dx = w/5;
+    gfxLine(
+        cx - dx + 1, cy - body_h/2,
+        cx + dx - 1, cy - body_h/2);
+    gfxLine(
+        cx - dx + 2, cy - body_h/2-1,
+        cx + dx - 2, cy - body_h/2-1);
+    gfxLine(
+        cx - dx + 1, cy + body_h/2,
+        cx + dx - 1, cy + body_h/2);
+    gfxRect(
+        cx - dx + 1, cy - body_h/2 + 1,
+        2*dx - 1, r - 1);
+
+    // Legs
+    for(int p=-1; p<=1; p+=2) { // parity for both sides
+        int _dx = p*dx;
+        // Front legs
+        gfxLine(
+            cx + _dx, cy - body_h/2,
+            cx + p*w/3, cy - h/2);
+        // Mid legs
+        gfxLine(
+            cx + _dx, cy - 1,
+            cx + _dx + 2*p, cy-1);
+        gfxLine(
+            cx + _dx + 2*p, cy - 1,
+            cx + p*w/2, cy - 2);
+        // Rear legs
+        gfxLine(
+            cx + _dx, cy + 1,
+            cx + p*w/3, cy + hmax/h);
+        gfxLine(
+            cx + p*w/3, cy + hmax/h,
+            cx + p*w/2, cy + h/2);
+        // Body flank
+        gfxLine(
+            cx+_dx, cy-body_h/2+1,
+            cx+_dx, cy+body_h/2-1);
+        if(is_snare) {
+            // Some feelers for snare bug
+            gfxLine(
+                cx + p, cy - body_h/2 - 2,
+                cx + 2*p, cy - body_h/2 - 2 - hmax/h);
+        } else {
+            // Some eyes on the kick bug
+            gfxInvert(
+                cx + _dx - p, cy - body_h/2 + 1,
+                1, 1);
+        }
+    }
+}
+
 
 FLASHMEM void BugCrack::View() {
   DrawInterface();
