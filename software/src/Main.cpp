@@ -52,6 +52,7 @@
 #include "PresetBusUI.h"
 
 void CaptainDumpProfiles();  // CaptainMIDI.h (global scope)
+void CaptainMidiHealth();    // CaptainMIDI.h (global scope)
 
 #if defined(ARDUINO_TEENSY41)
 USBHost thisUSB;
@@ -225,6 +226,42 @@ FLASHMEM __attribute__((noinline)) void BootMenu() {
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// Crash forensics + hardware watchdog (T4.x)
+// ---------------------------------------------------------------------------
+#if defined(__IMXRT1062__)
+// Capture CrashReport text at boot so it can be appended to CRASH.LOG once
+// LittleFS is mounted (the Serial print is gone if nobody was watching).
+class BufferPrint : public Print {
+public:
+  char buf[1024];
+  size_t len = 0;
+  size_t write(uint8_t c) override {
+    if (len < sizeof(buf) - 1) { buf[len++] = c; buf[len] = 0; return 1; }
+    return 0;
+  }
+};
+static BufferPrint crash_capture;
+
+// WDOG1: 128s timeout, fed only from loop(). Long enough that the slowest
+// legitimate blocking op (a full 4MB LittleFS format, ~45s) never trips it;
+// a hard loop() hang (the K-Board-lockup class of bug) reboots instead of
+// bricking the module until power-cycle, and boot recall restores state.
+// Armed at the END of setup() so interactive boot flows (BootMenu,
+// ConfirmReset) can block indefinitely.
+static bool watchdog_armed = false;
+FLASHMEM static void watchdog_arm() {
+  WDOG1_WCR = (uint16_t)(255u << 8)  // WT: (255+1)*0.5s = 128s
+            | WDOG_WCR_WDE | WDOG_WCR_SRS | WDOG_WCR_WDA
+            | WDOG_WCR_WDBG | WDOG_WCR_WDZST;
+  watchdog_armed = true;
+}
+static inline void watchdog_feed() {
+  WDOG1_WSR = 0x5555;
+  WDOG1_WSR = 0xAAAA;
+}
+#endif
+
 FLASHMEM void setup() {
   delay(50);
   Serial.begin(9600);
@@ -232,6 +269,9 @@ FLASHMEM void setup() {
   if (CrashReport) {
     while (!Serial && millis() < 3000) ; // wait
     Serial.println(CrashReport);
+    // stash the report so it can be appended to CRASH.LOG once the
+    // filesystem is up (console prints vanish when nobody is watching)
+    crash_capture.print(CrashReport);
     delay(1500);
   }
 
@@ -376,6 +416,32 @@ FLASHMEM void setup() {
 #ifdef __IMXRT1062__
   // use default global config file in LFS
   firstrun = !PhzConfig::load_config();
+  if (firstrun) {
+    // GLOBALS.CFG missing/corrupt: try the boot-time backup before the
+    // ConfirmReset flow gets a chance to threaten a factory wipe.
+    if (PhzConfig::load_config(PhzConfig::BACKUP_FILENAME)) {
+      Serial.println("CONFIG: GLOBALS.CFG bad; restored from GLOBALS.BAK");
+      PhzConfig::save_config();  // re-materialize the primary from memory
+      firstrun = false;
+    }
+  } else {
+    PhzConfig::backup_config();  // known-good primary: refresh the backup
+  }
+
+  // append any captured crash report to CRASH.LOG (rotate at 8KB)
+  if (crash_capture.len) {
+    File cl = PhzConfig::myfs.open("CRASH.LOG", FILE_READ);
+    const bool rotate = cl && cl.size() > 8192;
+    if (cl) cl.close();
+    if (rotate) PhzConfig::myfs.remove("CRASH.LOG");
+    cl = PhzConfig::myfs.open("CRASH.LOG", FILE_WRITE);  // append
+    if (cl) {
+      cl.printf("--- boot @ %lu ms ---\n", millis());
+      cl.write((const uint8_t *)crash_capture.buf, crash_capture.len);
+      cl.close();
+      Serial.println("CrashReport appended to CRASH.LOG");
+    }
+  }
 #endif
 
   // initialize apps (on T3.x firstrun is detected by the EEPROM load inside)
@@ -404,6 +470,13 @@ FLASHMEM void setup() {
 
   OC::app_switcher.current_app()->DispatchAppEvent(OC::APP_EVENT_RESUME);
 
+#if defined(__IMXRT1062__)
+  // last: everything interactive that can legitimately block forever is
+  // behind us, and loop() takes over feeding from here
+  watchdog_arm();
+  SERIAL_PRINTLN("* WDOG1 armed (128s, fed from loop)");
+#endif
+
   SERIAL_PRINTLN("[End of setup()]");
 }
 
@@ -412,6 +485,82 @@ FLASHMEM void setup() {
 // loop() is the slow path (drawing, UI events, deferred work) — all the
 // real-time work happens in the CORE/UI timer ISRs. Run it from cached
 // flash instead of burning ~4KB of ITCM (it gets inlined into main()).
+#if defined(__IMXRT1062__)
+// console 't': one-shot system health report
+#ifdef AUDIO_INTERFACE
+#include "extern/f32/AudioStream_F32.h"
+#endif
+extern char _heap_end[], *__brkval;
+FLASHMEM __attribute__((noinline)) static void SelfTest() {
+  Serial.println("=== selftest ===");
+  Serial.printf("uptime=%lus  reset_cause(SRC_SRSR)=%08lX%s\n",
+                millis() / 1000, SRC_SRSR,
+                (SRC_SRSR & (1 << 5)) ? " [WDOG]" : "");
+  Serial.printf("watchdog: %s (128s, fed from loop)\n",
+                watchdog_armed ? "armed" : "OFF");
+  {
+    static uint32_t last_lc = 0, last_ms = 0;
+    const uint32_t lc = loop_counter, ms = millis();
+    if (last_ms && ms != last_ms)
+      Serial.printf("loop rate ~%lu Hz\n", (lc - last_lc) * 1000 / (ms - last_ms));
+    last_lc = lc; last_ms = ms;
+    const uint32_t t0 = OC::CORE::ticks;
+    delay(5);
+    Serial.printf("core delta5ms=%lu (expect ~83)\n", OC::CORE::ticks - t0);
+  }
+  Serial.printf("heap free: %lu bytes (RAM2)\n",
+                (unsigned long)(_heap_end - __brkval));
+#ifdef AUDIO_INTERFACE
+  Serial.printf("audio i16 pool: %u now / %u max   cpu: %.1f%% now / %.1f%% max\n",
+                AudioMemoryUsage(), AudioMemoryUsageMax(),
+                AudioProcessorUsage(), AudioProcessorUsageMax());
+  Serial.printf("audio f32 pool: %u now / %u max\n",
+                AudioStream_F32::f32_memory_used, AudioStream_F32::f32_memory_used_max);
+#endif
+  {
+    Serial.printf("littlefs: %llu/%llu bytes used\n",
+                  (unsigned long long)PhzConfig::myfs.usedSize(),
+                  (unsigned long long)PhzConfig::myfs.totalSize());
+    // write-verify: the failure mode where writes "succeed" as 0-byte files
+    const char *tf = "SELFTST.TMP";
+    uint8_t pat[64], chk[64];
+    for (unsigned i = 0; i < sizeof(pat); ++i) pat[i] = (uint8_t)(i * 37 + 5);
+    PhzConfig::myfs.remove(tf);
+    File f = PhzConfig::myfs.open(tf, FILE_WRITE_BEGIN);
+    bool ok = f && f.write(pat, sizeof(pat)) == sizeof(pat);
+    if (f) f.close();
+    if (ok) {
+      f = PhzConfig::myfs.open(tf, FILE_READ);
+      ok = f && f.read(chk, sizeof(chk)) == sizeof(chk)
+             && memcmp(pat, chk, sizeof(pat)) == 0;
+      if (f) f.close();
+    }
+    PhzConfig::myfs.remove(tf);
+    Serial.printf("fs write-verify: %s\n", ok ? "PASS" : "FAIL");
+    f = PhzConfig::myfs.open("CRASH.LOG", FILE_READ);
+    if (f) {
+      Serial.printf("CRASH.LOG present: %llu bytes (crashes recorded)\n",
+                    (unsigned long long)f.size());
+      f.close();
+    } else {
+      Serial.println("CRASH.LOG: none (no crashes recorded)");
+    }
+  }
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+  {
+    const OC::PresetBus::Stats &s = OC::PresetBus::GetStats();
+    Serial.printf("bus rings hw: ev=%lu midi_rx=%lu midi_tx=%lu  stuck=%lu/%lu\n",
+                  s.ring_hw, s.midi_rx_hw, s.midi_tx_hw,
+                  s.bus_recovered, s.bus_stuck);
+  }
+#endif
+#if defined(ARDUINO_TEENSY41)
+  CaptainMidiHealth();
+#endif
+  Serial.println("=== selftest done ===");
+}
+#endif
+
 FLASHMEM __attribute__((noinline)) void loop() {
   using namespace OC;
   CORE::app_isr_enabled = true;
@@ -422,6 +571,9 @@ FLASHMEM __attribute__((noinline)) void loop() {
 
   while (true) {
     ++loop_counter;
+#if defined(__IMXRT1062__)
+    watchdog_feed();  // a wedged loop() now reboots instead of bricking
+#endif
 #if defined(ARDUINO_TEENSY41)
     thisUSB.Task();
 #endif
@@ -591,6 +743,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.println("Resetting Config File!!");
             PhzConfig::clear_config();
             PhzConfig::save_config();
+          case 't': SelfTest(); break;  // one-shot system health report
           case 'l':
             Serial.println(" -=- LittleFS -=- ");
             PhzConfig::listFiles();

@@ -39,10 +39,12 @@ static bool verbose = false;
 static uint32_t last_rx_ms = 0;
 
 static void push_event(uint16_t ev) {
-  if (uint16_t(uint8_t(ring_w - ring_r)) >= kRingSize) {
+  const uint16_t depth = uint16_t(uint8_t(ring_w - ring_r));
+  if (depth >= kRingSize) {
     ring_ovf = true;  // drop; Task() poisons the frame
     return;
   }
+  if (depth + 1u > stats.ring_hw) stats.ring_hw = depth + 1u;
   ring[ring_w & (kRingSize - 1)] = ev;
   ring_w = ring_w + 1;
 }
@@ -149,6 +151,8 @@ static void cb_midi(uint8_t status, uint8_t d1, uint8_t d2) {
       uint32_t(status) | (uint32_t(d1) << 8) | (uint32_t(d2) << 16);
   midi_rx_w = midi_rx_w + 1;
   stats.midi_rx++;
+  const uint8_t d = uint8_t(midi_rx_w - midi_rx_r);
+  if (d > stats.midi_rx_hw) stats.midi_rx_hw = d;
 }
 
 static const Bus200eOps kOps = {
@@ -367,6 +371,83 @@ static void card_task() {
   }
 }
 
+// ---- bus-stuck watchdog ------------------------------------------------------
+// A multi-master bus eventually gets wedged: a master dies mid-transaction
+// and leaves SDA low, so BBF never clears and every TX gate stays shut.
+// Declare "stuck" only after BBF has been continuously set for 3s with ZERO
+// slave RX in that window (real 200e transfers never hold the bus that long
+// and always produce RX). Recovery is staged: reset our own master engine
+// first (an arbitration-loss wedge on our side is the cheap, likely cause),
+// then the classic 9-SCL-pulse + STOP release, then full re-init.
+static uint32_t bbf_since_ms = 0;
+
+FLASHMEM __attribute__((noinline)) static void bus_stuck_recover() {
+  stats.bus_stuck++;
+  Serial.println("PresetBus: bus stuck (BBF 3s, no RX) - recovering");
+
+  // stage 1: kick our master engine
+  Wire.begin();
+  Wire.setClock(100000);
+  delayMicroseconds(200);
+  if (!(LPI2C1_MSR & LPI2C_MSR_BBF)) {
+    stats.bus_recovered++;
+    bbf_since_ms = 0;
+    Serial.println("PresetBus: recovered (master engine reset)");
+    return;
+  }
+
+  // stage 2: bit-bang 9 SCL pulses with SDA released so a slave stuck
+  // mid-byte can finish shifting, then generate a STOP by hand.
+  // (Pins 18=SDA / 19=SCL run through the level shifter; open-drain only.)
+  pinMode(18, OUTPUT_OPENDRAIN);
+  pinMode(19, OUTPUT_OPENDRAIN);
+  digitalWrite(18, HIGH);
+  for (int i = 0; i < 9; ++i) {
+    digitalWrite(19, LOW);
+    delayMicroseconds(5);
+    digitalWrite(19, HIGH);
+    delayMicroseconds(5);
+    if (digitalRead(18)) break;  // SDA released: done
+  }
+  digitalWrite(18, LOW);   // STOP: SDA low->high while SCL high
+  delayMicroseconds(5);
+  digitalWrite(18, HIGH);
+  delayMicroseconds(5);
+
+  // stage 3: hand the pads back to LPI2C and rebuild both engines
+  Wire.begin();
+  Wire.setClock(100000);
+  slave_reconfig(card_serving);
+  in_card_txn = false;
+  card_tx_open = false;
+  Bus200eFeedEvent(BUS200E_EV_OVF);  // poison anything half-parsed
+  bbf_since_ms = 0;
+  if (!(LPI2C1_MSR & LPI2C_MSR_BBF)) {
+    stats.bus_recovered++;
+    Serial.println("PresetBus: recovered (SCL pulse + STOP)");
+  } else {
+    Serial.println("PresetBus: still stuck after recovery (hardware?)");
+  }
+}
+
+static inline void bus_stuck_check() {
+  if (!(LPI2C1_MSR & LPI2C_MSR_BBF)) {
+    bbf_since_ms = 0;
+    return;
+  }
+  const uint32_t now = millis();
+  if (!bbf_since_ms) {
+    bbf_since_ms = now;
+    return;
+  }
+  if (now - bbf_since_ms < 3000) return;
+  if (now - last_rx_ms < 3000) {  // traffic flowing: busy, not stuck
+    bbf_since_ms = now;
+    return;
+  }
+  bus_stuck_recover();
+}
+
 // ---- bus MIDI public API ----------------------------------------------------
 
 void QueueMidiTx(uint8_t type, uint8_t channel, uint8_t d1, uint8_t d2) {
@@ -391,6 +472,8 @@ void QueueMidiTx(uint8_t type, uint8_t channel, uint8_t d1, uint8_t d2) {
     midi_tx_q[midi_tx_w & (kMidiRing - 1)] =
         uint32_t(status) | (uint32_t(d1) << 8) | (uint32_t(d2) << 16);
     midi_tx_w = midi_tx_w + 1;
+    const uint8_t d = uint8_t(midi_tx_w - midi_tx_r);
+    if (d > stats.midi_tx_hw) stats.midi_tx_hw = d;
   }
   __enable_irq();
 }
@@ -559,6 +642,7 @@ void Task() {
   pump_midi_tx();
   probe_wpm();
   card_task();
+  bus_stuck_check();
 }
 
 bool Enabled() { return enabled; }
@@ -618,6 +702,10 @@ FLASHMEM void DebugDump() {
   Serial.printf("isr=%lu starts=%lu stops=%lu bytes=%lu ring_ovf=%lu\n",
                 stats.isr_count, stats.starts, stats.stops, stats.bytes,
                 stats.ring_ovf);
+  Serial.printf("hw: ring=%lu/%u midi_rx=%lu/%u midi_tx=%lu/%u | stuck=%lu recovered=%lu\n",
+                stats.ring_hw, kRingSize, stats.midi_rx_hw, kMidiRing,
+                stats.midi_tx_hw, kMidiRing, stats.bus_stuck,
+                stats.bus_recovered);
   const Bus200eStats *ps = Bus200eGetStats();
   Serial.printf("frames=%lu dropped=%lu query_tx=%lu query_retry=%lu\n",
                 ps->frames, ps->dropped, stats.query_replies, stats.query_retries);

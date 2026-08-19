@@ -968,6 +968,13 @@ public:
     FLASHMEM void DoLoop() {
         auto &hMIDI = frame.MIDIState;
 
+        {   // worst-case poll cadence, for the selftest latency budget
+            const uint32_t now_us = micros();
+            if (poll_last_us && now_us - poll_last_us > poll_gap_max_us)
+                poll_gap_max_us = now_us - poll_last_us;
+            poll_last_us = now_us;
+        }
+
 #if defined(ARDUINO_TEENSY41)
         PollDeviceProfiles();
         if (profiles_dirty && millis() - profiles_dirty_ms > 1500)
@@ -1076,9 +1083,9 @@ public:
     enum SyxCmd : uint8_t {
       SYX_INFO = 0x01, SYX_GET = 0x02, SYX_SET = 0x03, SYX_GET_DUMP = 0x04,
       SYX_SAVE = 0x06, SYX_LOAD = 0x07, SYX_FACTORY = 0x08, SYX_PANIC = 0x09,
-      SYX_SELECT = 0x0A,
+      SYX_SELECT = 0x0A, SYX_ECHO = 0x0B,
       SYX_ACK = 0x40, SYX_INFO_R = 0x41, SYX_GET_R = 0x42,
-      SYX_DUMP_DATA = 0x44, SYX_DUMP_END = 0x45,
+      SYX_DUMP_DATA = 0x44, SYX_DUMP_END = 0x45, SYX_ECHO_R = 0x4B,
       SYX_NAK = 0x7E,
     };
     enum SyxErr : uint8_t {
@@ -1271,6 +1278,14 @@ public:
         syx_reply_len = n;
         syx_pending |= PEND_REPLY;
     }
+    void QueueReplyBuf(uint8_t cmd, const uint8_t *body, uint8_t n) {
+        syx_reply[0] = cmd;
+        uint8_t m = 1;
+        for (uint8_t i = 0; i < n && m < sizeof(syx_reply); ++i)
+            syx_reply[m++] = body[i];
+        syx_reply_len = m;
+        syx_pending |= PEND_REPLY;
+    }
     void QueueAck(std::initializer_list<uint8_t> echo) { QueueReply(SYX_ACK, echo); }
     void QueueNak(uint8_t cmd, uint8_t err) { QueueReply(SYX_NAK, {cmd, err}); }
 
@@ -1291,6 +1306,12 @@ public:
     }
     volatile uint16_t syx_rx_len = 0;
     uint8_t syx_rx_buf[96];
+
+    // selftest instrumentation: worst gap between MIDI poll passes (the
+    // dominant term in device-side MIDI latency) and echo probes served
+    uint32_t poll_last_us = 0;
+    uint32_t poll_gap_max_us = 0;
+    uint32_t echo_count = 0;
 
     void HandleSysEx(const uint8_t *sx, unsigned len) {
         // Universal Device Inquiry: F0 7E <dev> 06 01 F7
@@ -1389,6 +1410,10 @@ public:
             if (blen < 1 || body[0] >= kNumSetups) { QueueNak(cmd, SYXERR_VALUE); break; }
             SelectSetup(body[0]);
             QueueAck({body[0]});
+            break;
+          case SYX_ECHO:  // latency probe: bounce the caller's token back
+            ++echo_count;
+            QueueReplyBuf(SYX_ECHO_R, body, blen > 8 ? 8 : (uint8_t)blen);
             break;
           default:
             QueueNak(cmd, SYXERR_CMD);
@@ -1810,6 +1835,18 @@ FLASHMEM void CaptainDumpProfiles() {
 #if defined(ARDUINO_TEENSY41)
     if (g_captain_instance) g_captain_instance->DumpProfiles();
 #endif
+}
+
+// selftest hook: MIDI poll cadence + echo probe stats (gap max resets on read)
+FLASHMEM void CaptainMidiHealth() {
+    if (!g_captain_instance) {
+        Serial.println("captain: not initialized");
+        return;
+    }
+    Serial.printf("captain: poll_gap_max=%luus echoes=%lu\n",
+                  (unsigned long)g_captain_instance->poll_gap_max_us,
+                  (unsigned long)g_captain_instance->echo_count);
+    g_captain_instance->poll_gap_max_us = 0;
 }
 
 void AppCaptainMIDI::Init() {

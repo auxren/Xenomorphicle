@@ -62,7 +62,9 @@ Direction H→D = host to device, D→H = device to host.
 | `08` | FACTORY | H→D | `21 42` (magic guard) | `40` ACK `{08}`. All setups reset to defaults. |
 | `09` | PANIC | H→D | — | `40` ACK. Note-offs for tracked notes + CC120/123 sweep on all 16 channels. |
 | `0A` | SELECT_SETUP | H→D | `setup#` | `40` ACK `{0A? no — {setup#}}` — see note. Stores live edits into the current setup, then switches. |
+| `0B` | ECHO | H→D | up to 8 opaque token bytes | `4B` ECHO_R with the same token. Latency probe: the reply rides the normal loop-context path, so send→reply measures real config-protocol round-trip time. |
 | `40` | ACK | D→H | echo bytes (see each cmd) | — |
+| `4B` | ECHO_R | D→H | token bytes from `0B` | — |
 | `41` | INFO_R | D→H | see below | — |
 | `42` | GET_R | D→H | `class idx param value` | — |
 | `7E` | NAK | D→H | `cmd errcode` | — |

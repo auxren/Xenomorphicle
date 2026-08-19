@@ -35,6 +35,14 @@ struct Stats {
   uint32_t midi_rx_ovf;    // dropped: RX ring full
   uint32_t midi_tx;        // bus MIDI frames mastered onto the bus
   uint32_t midi_tx_drop;   // dropped: TX ring full or persistent arb loss
+  // high-water marks (selftest): worst observed ring depths
+  uint32_t ring_hw;
+  uint32_t midi_rx_hw;
+  uint32_t midi_tx_hw;
+  // bus-stuck watchdog: times the bus was declared stuck / times the
+  // recovery sequence brought BBF back down
+  uint32_t bus_stuck;
+  uint32_t bus_recovered;
 };
 
 #if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)

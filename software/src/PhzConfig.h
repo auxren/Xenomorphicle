@@ -39,6 +39,12 @@ namespace PhzConfig {
   bool getData(KEY key, VALUE &value);
   void deleteData(KEY key);
 
+  // Copy GLOBALS.CFG -> GLOBALS.BAK (called once per boot after a good
+  // load, so a corrupt primary can be recovered instead of blocking boot
+  // at the ConfirmReset prompt). Returns false on any I/O failure.
+  bool backup_config();
+  const char * const BACKUP_FILENAME = "GLOBALS.BAK";
+
   void printDirectory(FS &fs = myfs);
   void printDirectory(File dir, int numSpaces);
   void printSpaces(int num);
@@ -57,6 +63,7 @@ namespace PhzConfig {
   inline bool load_config(const char* = nullptr) { return false; }
   inline bool save_config(const char* = nullptr) { return false; }
   inline void clear_config() {}
+  inline bool backup_config() { return false; }
 
   inline void setValue(KEY, VALUE) {}
   inline bool getValue(KEY, VALUE &) { return false; }
