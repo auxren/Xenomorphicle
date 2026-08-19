@@ -7,6 +7,19 @@ previous. Draft PR text below; edit freely.
 Stack: `main` → `pr/teensy4-itcm-console` → `pr/buchla-200e-preset-bus` →
 `pr/captain-midi-sysex`
 
+Branch heads (rebuilt 2026-08-18): PR1 `524453f0`, PR2 `a6c80e65`,
+PR3 `cfd0fee4`.
+
+> **Pending fold-in (2026-08-19):** the hardening commits landed on
+> `preset-bus` after the rebuild — `ad78499b` (0x50 card serving),
+> `568ec7ab` (watchdog / crash log / config backup / selftest /
+> bus-stuck recovery), `d0150f94` (DMAMEM zeroing hook, RAM2 moves, CI),
+> `08123210` (console `a`, selftest printf fixes), `404f6746` (CI header
+> warning) — are **not in any PR branch yet**. Each PR section below has
+> a "Pending fold-in" block assigning its pieces; the draft text already
+> describes the post-fold-in state where marked. Rebuild the branches
+> before opening.
+
 ---
 
 ## PR 1 — `pr/teensy4-itcm-console`
@@ -36,6 +49,22 @@ Results (`teensy_size`, RAM1 free for locals):
 | T41_audio | **−13664 (link failure)** | +20000 |
 | T41 | — | +24896 |
 | T40 | — | +100960 |
+
+> **Pending fold-in (not in `524453f0` yet)** — fork-general T4
+> infrastructure from `568ec7ab`/`d0150f94`/`08123210`:
+> - `startup_middle_hook()` zeroing `.bss.dma`: the core never zeroes
+>   DMAMEM, so C++ objects there boot with garbage (USBHost_t36 state
+>   machines wedge). Root-cause fix, benefits every T4 user.
+> - WDOG1 hardware watchdog (128 s, fed from `loop()`, armed post-setup)
+>   + CrashReport persisted to `CRASH.LOG` (8 KB rotation).
+> - GLOBALS.CFG → GLOBALS.BAK auto-backup; corrupt primary restores from
+>   backup instead of prompting a factory wipe.
+> - Console `t` selftest (health report) and `a` (app switch via the
+>   proper suspend/resume path); selftest printf portability fixes.
+> - `usbHostMIDI` objects moved to RAM2 (8.8 KB of DTCM stack headroom).
+>
+> The `.github/workflows/ci.yml` from `d0150f94` references fork-local
+> host tests — keep fork-side, do not include in the PR.
 
 ---
 
@@ -84,6 +113,16 @@ live, including app switching and audio-graph rebuild.
 Verified against a live 200e system: panel SAVE/RECALL decoded through a
 level shifter (0 drops), save <1 s, recall <1 s including audio rebuild.
 
+> **Pending fold-in (not in `a6c80e65` yet)** — bus robustness from
+> `568ec7ab`/`d0150f94` and `ad78499b`:
+> - Bus-stuck watchdog: BBF held ≥3 s with zero RX triggers staged
+>   recovery (master engine reset → 9 SCL pulses + manual STOP → full
+>   pad/slave re-init); recovered/detected counters surface in selftest.
+> - Ring/MIDI-queue high-water tracking (`bus rings hw` selftest line).
+> - 0x50 card serving (`ad78499b`): slave-TX preset-card emulator for
+>   WPM-less buses, hard-gated off when a live WPM is detected; console
+>   `k` toggle. Plus its host-test suite (buscard, 37 checks).
+
 ---
 
 ## PR 3 — `pr/captain-midi-sysex` (discussion / draft)
@@ -109,6 +148,17 @@ it effectively rewrites the app, so direction buy-in comes first.
   PANIC/SELECT + Universal Device Inquiry. Parsed from Loop(), not the ISR.
 - Bench-validated on NLM hOC (T3.2): 192/192 SysEx conformance checks,
   7-octave CV→MIDI tracking, sequencer round-trips.
+
+> **Pending fold-in (not in `cfd0fee4` yet)** — from `568ec7ab`/
+> `08123210`/`404f6746`:
+> - `SYX_ECHO` (0x0B) latency probe → `SYX_ECHO_R` (0x4B), answered from
+>   the normal loop-context SysEx path; bench RTT over USB MIDI: median
+>   0.17 ms, p95 0.24 ms, max 0.51 ms (200 probes, 0 drops).
+> - Worst-case poll-gap instrumentation + `CaptainMidiHealth()` selftest
+>   hook (`captain:` line — poll_gap_max, echo count).
+> - `-Werror=comment` fix in the host-test headers (Linux gcc).
+> - Doc updates: `docs/hoc-midi-sysex.md` (echo command) and the operator
+>   cheat sheet `docs/bench-console.md`.
 
 Note: T3 targets don't build on upstream main today (pre-existing
 PhzConfig/USBHost rot). Our fork has the fixes — available as a separate PR

@@ -704,19 +704,33 @@ FLASHMEM __attribute__((noinline)) void loop() {
 #ifdef PRINT_DEBUG
           case 'z':
             Serial.println("-=[ PEW PEW NERDS! ]=-");
-            Serial.println("Secret Menu Options:");
-            Serial.printf("'I' = Toggle App ISR [%s]\n", OC::CORE::app_isr_enabled ? "ON" : "OFF");
-            Serial.printf("'D' = Toggle Display Redraw [%s]\n", OC::CORE::display_update_enabled ? "ON" : "OFF");
-            Serial.printf("'L' = Toggle App Loop [%s]\n", OC::CORE::app_loop_enabled ? "ON" : "OFF");
+            Serial.println("-- system --");
+#if defined(__IMXRT1062__)
+            Serial.println("t selftest   a activate Captain MIDI");
+#endif
+            Serial.printf("I app ISR [%s]   D display [%s]   L app loop [%s]\n",
+                          OC::CORE::app_isr_enabled ? "on" : "OFF",
+                          OC::CORE::display_update_enabled ? "on" : "OFF",
+                          OC::CORE::app_loop_enabled ? "on" : "OFF");
 #if defined(__IMXRT1062__)
 #if defined(ARDUINO_TEENSY41)
-            Serial.println("'i' = scan all i2c addresses");
+            Serial.println("i i2c scan   u host devices + MIDI profiles   g save globals+app data");
+            Serial.println("-- preset bus --");
+            Serial.println("local:  ( save0  ) recall0  { save1  } recall1");
+#if defined(PRESET_BUS)
+            Serial.println("bus:    > save0  < recall0  . save1  , recall1  (broadcast!)");
 #endif
-            Serial.println("'l' = list all files in flash (LittleFS)");
-            Serial.println("'s' = list all files on SD card");
-            Serial.println("'C' = clear/reset default Config file");
-            Serial.println("'F' = format/erase all LittleFS files");
+            Serial.printf("p overlay UI [%s]   b bus dump   B verbose [%s]   k card serve [%s]\n",
+                          OC::PresetBusUI::Active() ? "open" : "closed",
+                          OC::PresetBus::Verbose() ? "on" : "off",
+                          OC::PresetBus::CardServing() ? "on" : "off");
 #endif
+            Serial.println("-- files --");
+            Serial.println("l list LittleFS   s list SD");
+            Serial.println("-- DANGER --");
+            Serial.println("C RESET config file   F ERASE ALL LittleFS files");
+#endif
+            Serial.println("(any other key = screen capture)");
             break;
 
           case 'I':
