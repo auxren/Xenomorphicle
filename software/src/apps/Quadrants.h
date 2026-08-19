@@ -472,9 +472,10 @@ public:
         uint8_t status, d1, d2;
         while (OC::PresetBus::ReadMidiRx(status, d1, d2)) {
           const uint8_t type = (status >= 0xF8) ? status : (status & 0xF0);
-          const uint8_t buses = (status >= 0xF8) ? 0x8 : (status & 0x0C);
-          // deliver once per 200e bus line: A -> channel 1, B -> channel 2
-          for (uint8_t bit = 0; bit < 2; ++bit) {
+          const uint8_t buses = (status >= 0xF8) ? 0x8 : (status & 0x0F);
+          // per 200e bus line: A->ch1 B->ch2 C->ch3 D->ch4 (poly spreads
+          // across all four lines with the WPM's default mask)
+          for (uint8_t bit = 0; bit < 4; ++bit) {
             if (!(buses & (0x8 >> bit))) continue;
             const MIDIMessage msg = { uint8_t(bit + 1), type,
                                       uint8_t(d1 & 0x7F), uint8_t(d2 & 0x7F) };
@@ -1101,7 +1102,10 @@ private:
           } else if (config_page == SHOWHIDE_APPLETS) {
             showhide_cursor.Scroll(dir);
           } else { // move cursor
-            config_cursor = constrain(config_cursor + dir, LOAD_PRESET, MAX_CURSOR);
+            int next = (config_cursor >= TRIG_LENGTH && config_cursor < TRIGMAP1)
+                           ? NextConfigRow(config_cursor, dir)
+                           : config_cursor + dir;
+            config_cursor = constrain(next, LOAD_PRESET, MAX_CURSOR);
 
             SetConfigPageFromCursor();
           }
@@ -1489,6 +1493,31 @@ private:
         }
     }
 
+    // General Settings display order: the Bus rows (28-32, appended so the
+    // stored enum stays stable) render and NAVIGATE inside their function
+    // groups. Shared by DrawConfigMenu and the encoder handler.
+    static constexpr uint8_t kCfgRowOrder[] = {
+        0, 1, 2, 3, 4, 5, 6, 7,
+        8, 9, 10, 11, 28,        // Thru: Serial..Host2, Bus
+        12, 13, 14, 15, 29,      // ClkRx
+        16, 17, 18, 19, 30,      // ClkTx
+        20, 21, 22, 23, 31,      // MsgRx
+        24, 25, 26, 27, 32,      // MsgTx
+    };
+    static constexpr int kCfgRows = sizeof(kCfgRowOrder);
+
+    // step config_cursor one row in DISPLAY order within General Settings;
+    // stepping past either end leaves the section like a plain +-1 would
+    int NextConfigRow(int cursor, int dir) const {
+        int pos = 0;
+        for (int i = 0; i < kCfgRows; ++i)
+            if (kCfgRowOrder[i] == cursor - TRIG_LENGTH) { pos = i; break; }
+        pos += dir;
+        if (pos < 0) return TRIG_LENGTH - 1;
+        if (pos >= kCfgRows) return TRIGMAP1;
+        return TRIG_LENGTH + kCfgRowOrder[pos];
+    }
+
     void DrawConfigMenu() const {
         // --- Config Selection
         gfxHeader("< General Settings  >");
@@ -1496,12 +1525,17 @@ private:
         const int SHOW_ROWS = 6; // originally 5
         const int ROW_HEIGHT = 8; // originally 10
 
-        int scroll_top = config_cursor - TRIG_LENGTH - 2;
+        // cursor position within the display order
+        int cur_pos = 0;
+        for (int i = 0; i < kCfgRows; ++i)
+            if (kCfgRowOrder[i] == config_cursor - TRIG_LENGTH) { cur_pos = i; break; }
+
+        int scroll_top = cur_pos - 2;
         CONSTRAIN(scroll_top, 0, NUM_ROWS - SHOW_ROWS);
 
         // Draw 6 visible rows from scroll_top (scroll_top is a row index)
         for (int i = 0; i < SHOW_ROWS; ++i) {
-            int row = scroll_top + i;
+            int row = kCfgRowOrder[scroll_top + i];
             if (row >= NUM_ROWS) break;
             HS::DrawConfigRow(
               row,

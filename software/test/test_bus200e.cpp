@@ -361,6 +361,36 @@ static void test_bus_midi(void) {
   FRAME(0x05, 0x00, 0x22, 0x0F, 0x98, 0x00);
   CHECK(n_midi == 3);
 
+  // self-echo suppression: registered frame dropped exactly once
+  reset(&fake_ops);
+  const uint8_t echo[] = { 0x04, 0x00, 0x22, 0x01, 0x03 };
+  Bus200eSuppressFrame(echo, sizeof(echo));
+  FRAME(0x04, 0x00, 0x22, 0x01, 0x03);   // our own echo: swallowed
+  CHECK(n_recall == 0);
+  FRAME(0x04, 0x00, 0x22, 0x01, 0x03);   // a real frame with the same bytes
+  CHECK(n_recall == 1);
+
+  // a different frame does NOT clear someone else's suppression... it does
+  // by design (arbitration winner processed, ours already gone). Register,
+  // let a different frame through, then confirm ours is no longer eaten.
+  Bus200eSuppressFrame(echo, sizeof(echo));
+  FRAME(0x04, 0x00, 0x22, 0x02, 0x05);   // different frame: processed
+  CHECK(n_save == 1);
+
+  // expired suppression never eats a genuine identical frame
+  reset(&fake_ops);
+  Bus200eSetNow(1000);
+  Bus200eSuppressFrame(echo, sizeof(echo));
+  Bus200eSetNow(1100);                   // 100ms later: expired
+  FRAME(0x04, 0x00, 0x22, 0x01, 0x03);
+  CHECK(n_recall == 1);
+
+  // card ops for ANY module stamp the transfer clock
+  reset(&fake_ops);
+  Bus200eSetNow(1234);
+  FRAME(0x07, 0x00, 0x22, 0x04, 0x66, 0x00, 0x00, 0x00);  // foreign module
+  CHECK(Bus200eLastTransferMs() != 0);
+
   // hookless init still parses/logs without crashing
   Bus200eOps no_midi = fake_ops;
   no_midi.midi_rx = 0;

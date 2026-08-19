@@ -31,6 +31,11 @@ static uint8_t  in_frame;
 static uint8_t  frame_poisoned;   // OVF or overlong: drop at STOP
 
 static uint8_t  remote_enabled;
+static uint32_t now_ms;
+static uint32_t last_transfer_ms;
+static uint8_t  suppress_len;
+static uint8_t  suppress_buf[FRAME_MAX];
+static uint32_t suppress_at_ms;
 static uint8_t  module_addr = BUS200E_DEFAULT_MODULE_ADDR;
 static uint8_t  query_pending;
 
@@ -62,6 +67,15 @@ BUS_CODE int Bus200eLogRead(uint32_t n_back, Bus200eCmd *out) {
 }
 
 int Bus200eRemoteEnabled(void) { return remote_enabled; }
+uint32_t Bus200eLastTransferMs(void) { return last_transfer_ms; }
+void Bus200eSetNow(uint32_t ms) { now_ms = ms; }
+
+BUS_CODE void Bus200eSuppressFrame(const uint8_t *bytes, uint8_t n) {
+  if (n > FRAME_MAX) { suppress_len = 0; return; }
+  memcpy(suppress_buf, bytes, n);
+  suppress_len = n;
+  suppress_at_ms = now_ms;
+}
 int Bus200eJobActive(void) { return job.active; }
 const Bus200eStats *Bus200eGetStats(void) { return &stats; }
 
@@ -77,6 +91,8 @@ BUS_CODE void Bus200eInit(const Bus200eOps *ops) {
   in_frame = 0;
   frame_poisoned = 0;
   remote_enabled = BUS200E_REMOTE_DEFAULT;
+  last_transfer_ms = 0;
+  suppress_len = 0;
   query_pending = 0;
   memset(&job, 0, sizeof(job));
   memset(&stats, 0, sizeof(stats));
@@ -111,6 +127,7 @@ BUS_CODE static void dispatch(Bus200eCmd *c) {
 
     case BUS200E_OP_BACKUP:
     case BUS200E_OP_RESTORE:
+      last_transfer_ms = now_ms | 1;   // any module: the card window is open
       if (c->mod_addr != module_addr) break;
       if (job.active) {   // one transfer at a time; a second request is dropped
         Bus200eCmd d = { BUS200E_OP_DROPPED, c->op, 0, 0, 0 };
@@ -138,6 +155,15 @@ BUS_CODE static void parse_frame(void) {
   uint8_t n = frame_len;
 
   stats.frames++;
+
+  // self-echo: our own mastered frame arrives back through our slave.
+  // Expired suppressions are discarded so a stale registration can never
+  // eat a genuine identical frame later (e.g. the manager's own recall).
+  if (suppress_len && now_ms - suppress_at_ms > 50) suppress_len = 0;
+  if (suppress_len && suppress_len == n && !memcmp(suppress_buf, f, n)) {
+    suppress_len = 0;
+    return;
+  }
 
   // LONG / PRIMO framing: [nBytes, destAddr, srcAddr=0x22, cmd, args...],
   // where nBytes counts the bytes that follow it. No short command collides

@@ -7,6 +7,8 @@
 #include "PresetBus.h"
 #include "PresetEngine.h"
 #include "OC_ui.h"
+#include "OC_app_switcher.h"
+#include "OC_apps.h"
 #include "OC_menus.h"
 #include "OC_digital_inputs.h"
 #include "PhzConfig.h"
@@ -66,11 +68,12 @@ FLASHMEM void Init() {
 FLASHMEM static void persist_assignments() {
   if (!assign_dirty) return;
   assign_dirty = false;
-  // own the globals map for the write; any later writer reloads its own file
   PhzConfig::load_config();
   PhzConfig::setValue(kNextTrigKey, next_trig);
   PhzConfig::setValue(kLastTrigKey, last_trig);
   PhzConfig::save_config();
+  // hand the shared map back to the active app (see persist_cur_slot)
+  app_switcher.current_app()->DispatchAppEvent(OC::APP_EVENT_RESUME);
 }
 
 FLASHMEM void Enter() {
@@ -89,7 +92,9 @@ FLASHMEM void Exit() {
 
 FLASHMEM static void recall_selected() {
   PresetBus::BroadcastRecall(sel);
-  HS::PokePopup(HS::MESSAGE_POPUP, "Bus recall...");
+  // overlay open: the confirmation banner owns feedback; the popup serves
+  // trigger-driven recalls that happen with the overlay closed
+  if (!active) HS::PokePopup(HS::MESSAGE_POPUP, "Bus recall...");
 }
 
 FLASHMEM static void commit_name() {
@@ -103,6 +108,7 @@ FLASHMEM static void commit_name() {
 
 FLASHMEM bool HandleEvent(const UI::Event &event) {
   if (!active) return false;
+  if (sel_stored < 0) sel_stored = PresetEngine::SlotUsed(sel) ? 1 : 0;
 
   // ---- EDIT mode: the grammar recurses, one char cell is the focus ----
   if (edit_mode) {
@@ -301,8 +307,8 @@ FLASHMEM void Draw() {
     const uint32_t held = millis() - hold_start_ms;
     if (held > 120) {   // don't flicker on ordinary clicks
       graphics.drawFrame(4, 35, 34, 5);
-      uint32_t w = (held >= 500) ? 30 : (held * 30) / 500;
-      if (w) graphics.drawRect(6, 37, w, 1);
+      uint32_t w = (held >= 500) ? 32 : ((held - 120) * 32) / 380;
+      if (w) graphics.drawRect(5, 36, w, 3);
     }
   }
 
@@ -340,24 +346,34 @@ FLASHMEM void Draw() {
 }
 
 void Task() {
+  // follow externally-driven preset changes (WPM/225e recall, boot recall)
+  // so trigger cycling always steps from the CURRENT preset, 225e-style
+  static uint32_t seen_opcount = 0;
+  if (pending_slot < 0 && PresetEngine::OpCount() != seen_opcount) {
+    seen_opcount = PresetEngine::OpCount();
+    const int last = PresetEngine::LastSlot();
+    if (last >= 0 && (uint8_t)last != sel) {
+      sel = (uint8_t)last;
+      sel_stored = -1;
+    }
+  }
+
   // 225e last/next pulse inputs: rising edge cycles + recalls bus-wide.
-  // Level-sampled here in loop context so the app's own edge consumption
-  // is untouched; preset changes are slow relative to the loop rate.
-  if (next_trig || last_trig) {
-    for (uint8_t t = 0; t < 4; ++t) {
-      const bool level = DigitalInputs::read_immediate((DigitalInput)t);
-      const bool rising = level && !trig_prev[t];
-      trig_prev[t] = level;
-      if (!rising) continue;
-      if (next_trig == t + 1) {
-        sel = (sel + 1) % 30;
-        sel_stored = -1;
-        recall_selected();
-      } else if (last_trig == t + 1) {
-        sel = (sel + 29) % 30;
-        sel_stored = -1;
-        recall_selected();
-      }
+  // Levels are sampled EVERY pass (assigned or not) so enabling an
+  // assignment while a line sits high can never fire a spurious recall.
+  for (uint8_t t = 0; t < 4; ++t) {
+    const bool level = DigitalInputs::read_immediate((DigitalInput)t);
+    const bool rising = level && !trig_prev[t];
+    trig_prev[t] = level;
+    if (!rising) continue;
+    if (next_trig == t + 1) {
+      sel = (sel + 1) % 30;
+      sel_stored = -1;
+      recall_selected();
+    } else if (last_trig == t + 1) {
+      sel = (sel + 29) % 30;
+      sel_stored = -1;
+      recall_selected();
     }
   }
 
@@ -376,14 +392,15 @@ void Task() {
         const uint8_t shown = (uint8_t)pending_slot + 1;
         if (pending_was_save)
           snprintf(banner, sizeof(banner),
-                   PresetEngine::LastSaveOk() ? "STORED %d" : "SAVE ERR %d", shown);
+                   PresetEngine::LastSaveOk() ? "STORED %d" : "STORE ERR %d", shown);
         else
           snprintf(banner, sizeof(banner), "RECALLED %d", shown);
         banner_until_ms = millis() + 1600;
         pending_slot = -1;
         sel_stored = -1;
       } else if (millis() - pending_start_ms > 4000) {
-        snprintf(banner, sizeof(banner), "FAILED");  // engine never ran it
+        snprintf(banner, sizeof(banner),
+                 pending_was_save ? "STORE FAILED" : "RECALL FAILED");
         banner_until_ms = millis() + 1600;
         pending_slot = -1;
       }

@@ -117,6 +117,19 @@ void Bus200eInit(const Bus200eOps *ops);
 // Feed one transport event. Call from the main loop, never from an ISR.
 void Bus200eFeedEvent(uint16_t ev);
 
+// Millisecond timestamp (via Bus200eSetNow) of the most recent card
+// BACKUP/RESTORE command seen for ANY module. A preset manager's FRAM
+// window swallows every byte on the bus, so masters must hold off.
+uint32_t Bus200eLastTransferMs(void);
+void Bus200eSetNow(uint32_t now_ms);  // parser has no clock of its own
+
+// Self-echo suppression: when the transport masters a frame with its own
+// slave engine still listening, register the frame here; the next parsed
+// frame that byte-matches is dropped once (we won arbitration and heard
+// ourselves). On arbitration loss do NOT register - the winner's frame
+// must be processed.
+void Bus200eSuppressFrame(const uint8_t *bytes, uint8_t n);
+
 // Run pending card backup/restore work: one slot record per call.
 void Bus200eTask(void);
 

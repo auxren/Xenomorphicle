@@ -372,9 +372,15 @@ FLASHMEM static void persist_cur_slot() {
   PhzConfig::load_config();
   uint64_t v = 0;
   PhzConfig::getValue(kCurSlotKey, v);
-  if ((int64_t)v == last_slot) return;  // unchanged: skip the flash write
-  PhzConfig::setValue(kCurSlotKey, (uint64_t)last_slot);
-  PhzConfig::save_config();
+  const bool changed = (int64_t)v != last_slot;
+  if (changed) {
+    PhzConfig::setValue(kCurSlotKey, (uint64_t)last_slot);
+    PhzConfig::save_config();
+  }
+  // CRITICAL: hand the shared map back to the active app. Quadrants
+  // assumes bank-map residency; leaving GLOBALS loaded here would make
+  // its next preset save overwrite the bank file with the wrong map.
+  app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
 }
 
 FLASHMEM void BootRecall() {

@@ -144,11 +144,15 @@ static_assert(decltype(app_container)::TotalAppDataStorageSize() < AppData::kApp
 #if defined(NLM_hOC) && defined(ENABLE_APP_MIDI)
 // hOC MIDI build boots into Captain MIDI: [0]=AppSettings, [1]=Calibr8or, [2]=CaptainMIDI
 static constexpr int DEFAULT_APP_INDEX = 2;
+#elif defined(DEFAULT_APP_MIDI) && defined(ENABLE_APP_MIDI) && defined(ARDUINO_TEENSY41) && !defined(NO_HEMISPHERE)
+// T41 boots into Captain MIDI:
+// [0]=AppSettings, [1]=Quadrants, [2]=Calibr8or, [3]=Scenery, [4]=CaptainMIDI
+static constexpr int DEFAULT_APP_INDEX = 4;
 #else
 static constexpr int DEFAULT_APP_INDEX = 1;
 #endif
 static constexpr uint16_t DEFAULT_APP_ID = decltype(app_container)::GetAppIDAtIndex<DEFAULT_APP_INDEX>();
-#if defined(NLM_hOC) && defined(ENABLE_APP_MIDI)
+#if defined(ENABLE_APP_MIDI) && (defined(NLM_hOC) || defined(DEFAULT_APP_MIDI))
 static_assert(DEFAULT_APP_ID == AppCaptainMIDI::kAppId, "DEFAULT_APP_INDEX must select Captain MIDI");
 #endif
 

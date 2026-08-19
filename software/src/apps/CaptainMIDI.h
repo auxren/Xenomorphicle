@@ -134,7 +134,11 @@ enum CaptainsKeys : uint16_t {
   // upper 7 bits of mapping key
   INPUT_MAP_KEY = 1 << 9,
   OUTPUT_MAP_KEY = 2 << 9,
+  // USB device profiles: plug a known MIDI device into the host jack and
+  // its bound setup loads automatically. Value: vid<<32 | pid<<16 | setup.
+  DEVICE_PROFILE_KEY = 3 << 9,
 };
+static constexpr int kDeviceProfiles = 8;
 
 const char* const midi_messages[7] = {
     "Note", "Off", "CC#", "Aft", "Bend", "SysEx", "Diag"
@@ -241,7 +245,14 @@ public:
     OC::menu::ScreenCursor<OC::menu::kScreenLines> cursor;       // overview rows
     OC::menu::ScreenCursor<OC::menu::kScreenLines> param_cursor; // detail rows
 
-    static constexpr int kNumRows = DAC_CHANNEL_COUNT + HS::MIDIFrame::kOutPorts;
+#if defined(ARDUINO_TEENSY41)
+    static constexpr int kHostRows = 2;   // Host1/Host2 device-profile rows
+#else
+    static constexpr int kHostRows = 0;
+#endif
+    static constexpr int kNumRows =
+        DAC_CHANNEL_COUNT + HS::MIDIFrame::kOutPorts + kHostRows;
+    static constexpr int kFirstHostRow = kNumRows - kHostRows;
 
     void Start() {
         detail_port = -1;
@@ -315,7 +326,18 @@ public:
 
 #ifdef __IMXRT1062__
     void StoreData() {
+        PhzConfig::load_config("CAPTAIN.DAT");  // own the map before writing
         PhzConfig::setValue(SETUP_KEY, active_setup);
+#if defined(ARDUINO_TEENSY41)
+        for (int i = 0; i < kDeviceProfiles; ++i) {
+            PhzConfig::setValue(DEVICE_PROFILE_KEY + i,
+                (uint64_t(profiles[i].vid) << 32) |
+                (uint64_t(profiles[i].pid) << 16) | profiles[i].setup);
+            uint64_t nm = 0;
+            memcpy(&nm, profiles[i].name, 8);
+            PhzConfig::setValue(DEVICE_PROFILE_KEY + 16 + i, nm);
+        }
+#endif
         for (int s = 0; s < kNumSetups; ++s) {
           for (int i = 0; i < MIDIMAP_MAX; ++i)
             PhzConfig::setValue(INPUT_MAP_KEY + i + s*MIDIMAP_MAX, setups[s].inmaps[i]);
@@ -337,6 +359,19 @@ public:
             if (PhzConfig::getValue(OUTPUT_MAP_KEY + i + s*HS::MIDIFrame::kOutPorts, data))
               setups[s].outports[i] = data;
         }
+#if defined(ARDUINO_TEENSY41)
+        for (int i = 0; i < kDeviceProfiles; ++i) {
+          if (PhzConfig::getValue(DEVICE_PROFILE_KEY + i, data)) {
+            profiles[i].vid = (data >> 32) & 0xFFFF;
+            profiles[i].pid = (data >> 16) & 0xFFFF;
+            profiles[i].setup = constrain((int)(data & 0xFF), 0, kNumSetups - 1);
+          }
+          if (PhzConfig::getValue(DEVICE_PROFILE_KEY + 16 + i, data)) {
+            memcpy(profiles[i].name, &data, 8);
+            profiles[i].name[8] = 0;
+          }
+        }
+#endif
         UnpackSetup(active_setup);
         LeaveDetail();
         saved_checksum = live_checksum_prev = LiveChecksum();
@@ -386,6 +421,9 @@ public:
     // (detail) / scroll (log view).
 
     int DetailParamCount(int row) const {
+#if defined(ARDUINO_TEENSY41)
+        if (row >= kFirstHostRow) return 3 + kDeviceProfiles;
+#endif
         if (row < DAC_CHANNEL_COUNT) return 6;
         const int p = row - DAC_CHANNEL_COUNT;
         return (p >= HS::MIDIFrame::kCVOutPorts) ? 10 : 10;
@@ -398,6 +436,15 @@ public:
     void LeaveDetail() { detail_port = -1; }
 
     const char* DetailParamLabel(int row, int par) const {
+#if defined(ARDUINO_TEENSY41)
+        if (row >= kFirstHostRow) {
+            static const char* const host_labels[3] = { "Device", "Id", "Bind" };
+            if (par < 3) return host_labels[par];
+            // stored-profile rows: the captured device name (or empty slot)
+            const DeviceProfile &pr = profiles[par - 3];
+            return pr.vid ? pr.name : "-";
+        }
+#endif
         static const char* const in_labels[6] = {
             "Assign", "Channel", "Transpose", "Range Low", "Range High", "Voice" };
         static const char* const cv_labels[10] = {
@@ -414,6 +461,9 @@ public:
 
     // attr index into CaptainSettings for the value column / edit icon
     int DetailParamAttr(int row, int par) const {
+#if defined(ARDUINO_TEENSY41)
+        if (row >= kFirstHostRow) return 0;
+#endif
         if (row < DAC_CHANNEL_COUNT) {
             static const uint8_t a[6] = { 0, 3, 4, 5, 6, 13 };
             return a[par];
@@ -437,6 +487,9 @@ public:
     }
 
     int DetailParamValue(int row, int par) const {
+#if defined(ARDUINO_TEENSY41)
+        if (row >= kFirstHostRow) return 0;   // custom-drawn in DrawDetail
+#endif
         if (row < DAC_CHANNEL_COUNT) {
             MIDIMapping &m = frame.MIDIState.mapping[row];
             switch (par) {
@@ -476,6 +529,27 @@ public:
     }
 
     void EditDetailParam(int row, int par, int dir) {
+#if defined(ARDUINO_TEENSY41)
+        if (row >= kFirstHostRow) {
+            const int port = row - kFirstHostRow;
+            if (par == 2) {                     // Bind: off / Setup 1..4
+                const int cur = PortBinding(port);
+                int next = constrain(cur + dir, 0, kNumSetups);
+                if (cur == 0 && dir > 0)        // first detent: bind to what
+                    next = active_setup + 1;    // you're hearing right now
+                if (next == 0) UnbindPort(port);
+                else BindPort(port, uint8_t(next - 1));
+            } else if (par >= 3) {              // stored profiles: retarget/delete
+                DeviceProfile &pr = profiles[par - 3];
+                if (!pr.vid) return;
+                const int next = constrain(pr.setup + 1 + dir, 0, kNumSetups);
+                if (next == 0) pr = {};         // off = delete, worded not hidden
+                else pr.setup = uint8_t(next - 1);
+                StoreData();
+            }
+            return;                             // Device/Id are read-only
+        }
+#endif
         if (row < DAC_CHANNEL_COUNT) {
             MIDIMapping &m = frame.MIDIState.mapping[row];
             switch (par) {
@@ -748,6 +822,89 @@ public:
         return false;
     }
 
+#if defined(ARDUINO_TEENSY41)
+    // ---- USB device profiles -------------------------------------------
+    struct DeviceProfile {
+        uint16_t vid = 0, pid = 0;
+        uint8_t setup = 0;
+        char name[9] = "";   // 8 chars from the USB product string
+    };
+    DeviceProfile profiles[kDeviceProfiles];
+    uint16_t seen_vid[2] = {0, 0}, seen_pid[2] = {0, 0};
+    uint32_t next_dev_poll_ms = 0;
+
+    int FindProfile(uint16_t vid, uint16_t pid) const {
+        for (int i = 0; i < kDeviceProfiles; ++i)
+            if (profiles[i].vid == vid && profiles[i].pid == pid && vid) return i;
+        return -1;
+    }
+    // bind the device on a host port to a setup; creates or updates the
+    // profile (name captured from the USB product string). -1 = no device
+    // or table full.
+    FLASHMEM int BindPort(int port, uint8_t setup) {
+        const uint16_t vid = usbHostMIDI[port].idVendor();
+        const uint16_t pid = usbHostMIDI[port].idProduct();
+        if (!vid) return -1;
+        int slot = FindProfile(vid, pid);
+        if (slot < 0)
+            for (int i = 0; i < kDeviceProfiles && slot < 0; ++i)
+                if (!profiles[i].vid) slot = i;
+        if (slot < 0) return -1;   // table full: worded as 'full' in the UI
+        profiles[slot] = { vid, pid, uint8_t(setup % kNumSetups), "" };
+        const uint8_t *pn = usbHostMIDI[port].product();
+        for (int c = 0; pn && pn[c] && c < 8; ++c)
+            profiles[slot].name[c] = (char)pn[c];
+        StoreData();
+        return slot;
+    }
+    FLASHMEM void UnbindPort(int port) {
+        const int i = FindProfile(usbHostMIDI[port].idVendor(),
+                                  usbHostMIDI[port].idProduct());
+        if (i >= 0) {
+            profiles[i] = {};
+            StoreData();
+        }
+    }
+    // bind state of the device on a host port: 0 = unbound, 1..4 = setup+1
+    int PortBinding(int port) const {
+        const int i = FindProfile(usbHostMIDI[port].idVendor(),
+                                  usbHostMIDI[port].idProduct());
+        return (i >= 0) ? profiles[i].setup + 1 : 0;
+    }
+
+    // loop context: watch the host ports; a newly arrived known device
+    // switches to its bound setup
+    FLASHMEM void PollDeviceProfiles() {
+        if (millis() < next_dev_poll_ms) return;
+        next_dev_poll_ms = millis() + 500;   // let the product string arrive
+        for (int port = 0; port < 2; ++port) {
+            const uint16_t vid = usbHostMIDI[port].idVendor();
+            const uint16_t pid = usbHostMIDI[port].idProduct();
+            if (vid == seen_vid[port] && pid == seen_pid[port]) continue;
+            seen_vid[port] = vid;
+            seen_pid[port] = pid;
+            if (!vid) continue;                    // departure
+            const int i = FindProfile(vid, pid);
+            if (i < 0) {
+                // recognition feedback only, no action implied
+                HS::PokePopup(HS::MESSAGE_POPUP, RowFunctionName(kFirstHostRow + port));
+            } else if (profiles[i].setup == active_setup) {
+                HS::PokePopup(HS::MESSAGE_POPUP, "Setup active");
+            } else if (LiveConfigDirty()) {
+                // auto-anything must never eat unsaved edits
+                HS::PokePopup(HS::MESSAGE_POPUP, "Held: unsaved");
+            } else {
+                SelectSetup(profiles[i].setup);
+                char msg[16];
+                snprintf(msg, sizeof(msg), "%s>Set%d",
+                         profiles[i].name[0] ? profiles[i].name : "Device",
+                         profiles[i].setup + 1);
+                HS::PokePopup(HS::MESSAGE_POPUP, msg);
+            }
+        }
+    }
+#endif  // ARDUINO_TEENSY41
+
     // forward an incoming message to the other interfaces (source excluded),
     // honoring the same thru mask Quadrants uses -- the bus included, so a
     // keyboard on the USB host jack can play bus-MIDI modules (259e etc.)
@@ -770,6 +927,10 @@ public:
     // runs in the main loop (not the ISR): drains deferred work
     FLASHMEM void DoLoop() {
         auto &hMIDI = frame.MIDIState;
+
+#if defined(ARDUINO_TEENSY41)
+        PollDeviceProfiles();
+#endif
 
         // MIDI input, polled here in loop context (see Controller())
         int budget = 8;
@@ -1248,6 +1409,9 @@ private:
 
     // 8-char port names for the overview rows
     const char* RowLabel(int pos) const {
+#if defined(ARDUINO_TEENSY41)
+        if (pos >= kFirstHostRow) return (pos - kFirstHostRow) ? "Host2" : "Host1";
+#endif
         if (pos < DAC_CHANNEL_COUNT) return midi2cv_label[pos];
         const int p = pos - DAC_CHANNEL_COUNT;
         if (p < HS::MIDIFrame::kCVOutPorts) return cv2midi_label[p];
@@ -1256,6 +1420,21 @@ private:
 
     // the function currently assigned to a row, as a safe display string
     const char* RowFunctionName(int pos) const {
+#if defined(ARDUINO_TEENSY41)
+        if (pos >= kFirstHostRow) {
+            const int port = pos - kFirstHostRow;
+            if (!usbHostMIDI[port].idVendor()) return "none";
+            const uint8_t *pn = usbHostMIDI[port].product();
+            if (pn && pn[0]) {
+                static char nm[2][9];
+                int c = 0;
+                for (; pn[c] && c < 8; ++c) nm[port][c] = (char)pn[c];
+                nm[port][c] = 0;
+                return nm[port];
+            }
+            return "device";
+        }
+#endif
         if (pos < DAC_CHANNEL_COUNT)
             return frame.MIDIState.mapping[pos].get_label();
         const int p = pos - DAC_CHANNEL_COUNT;
@@ -1303,15 +1482,14 @@ private:
         }
     }
 
-    // header badge: inverted USB = host connected, struck through = not
+    // header: presence dot (filled = computer connected) + caps when active.
+    // Inversion stays reserved for focus (design-system: one mark, one
+    // meaning); this is the same dot idiom as the bus WPM indicator.
     void DrawUSBStatus(int x) const {
-        graphics.setPrintPos(x, 1);
-        graphics.print("USB");
-        if (usb_configuration) {
-            graphics.invertRect(x - 2, 0, 21, 9);
-        } else {
-            graphics.drawLine(x - 2, 9, x + 18, 0);
-        }
+        graphics.drawCircle(x + 1, 4, 2);
+        if (usb_configuration) graphics.drawRect(x, 3, 3, 3);
+        graphics.setPrintPos(x + 6, 1);
+        graphics.print(usb_configuration ? "USB" : "usb");
     }
 
     void DrawOverview() const {
@@ -1356,6 +1534,33 @@ private:
             graphics.print(DetailParamLabel(row, current));
             const int value = DetailParamValue(row, current);
             const auto &attr = CaptainSettings[DetailParamAttr(row, current)];
+#if defined(ARDUINO_TEENSY41)
+            if (row >= kFirstHostRow) {
+                const int port = row - kFirstHostRow;
+                char buf[12];
+                const char *v = buf;
+                if (current == 0) {             // Device
+                    v = RowFunctionName(row);
+                } else if (current == 1) {      // Id
+                    if (usbHostMIDI[port].idVendor())
+                        snprintf(buf, sizeof(buf), "%04X:%04X",
+                                 usbHostMIDI[port].idVendor(),
+                                 usbHostMIDI[port].idProduct());
+                    else v = "-";
+                } else if (current == 2) {      // Bind
+                    const int b = PortBinding(port);
+                    if (!usbHostMIDI[port].idVendor()) v = "-";
+                    else if (b) snprintf(buf, sizeof(buf), "Setup %d", b);
+                    else v = "off";
+                } else {                        // stored profile rows
+                    const DeviceProfile &pr = profiles[current - 3];
+                    if (pr.vid) snprintf(buf, sizeof(buf), "Setup %d", pr.setup + 1);
+                    else v = "";
+                }
+                list_item.DrawDefault(v, 0, attr);
+                continue;
+            }
+#endif
             if (row < DAC_CHANNEL_COUNT && current == 0) {
                 // in-map Assign: composite value; print its label string
                 list_item.DrawDefault(frame.MIDIState.mapping[row].get_label(), value, attr);
@@ -1420,6 +1625,12 @@ private:
         if (!device.read()) return false;
 
         uint8_t message = device.getType();
+        // per-interface RX filters (same gates Quadrants applies)
+        if (message >= 0xF8) {
+            if (HS::midi_clkrx_disable & srcmask) return true;
+        } else if (message != HEM_MIDI_SYSEX) {
+            if (HS::midi_msgrx_disable & srcmask) return true;
+        }
         uint8_t channel = device.getChannel();
         uint8_t data1 = device.getData1();
         uint8_t data2 = device.getData2();
@@ -1450,8 +1661,8 @@ private:
         if (clk && (HS::midi_clkrx_disable & mMaskBus)) return true;
         if (!clk && (HS::midi_msgrx_disable & mMaskBus)) return true;
 
-        const uint8_t buses = clk ? 0x8 : (status & 0x0C);
-        for (uint8_t bit = 0; bit < 2; ++bit) {
+        const uint8_t buses = clk ? 0x8 : (status & 0x0F);
+        for (uint8_t bit = 0; bit < 4; ++bit) {
             if (!(buses & (0x8 >> bit))) continue;
             const HS::MIDIMessage msg =
                 {uint8_t(bit + 1), type, uint8_t(d1 & 0x7F), uint8_t(d2 & 0x7F)};

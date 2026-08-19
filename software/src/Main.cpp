@@ -379,6 +379,8 @@ FLASHMEM void setup() {
   OC::PresetEngine::Init();
   OC::PresetBus::Init();
   OC::PresetBusUI::Init();
+  // restores the last bus preset on any T4.1 (bench units included);
+  // no bus traffic is emitted, so non-bus hardware is unaffected
   OC::PresetEngine::BootRecall();  // gated on I2C_Expansion inside
 
   // Welcome splash

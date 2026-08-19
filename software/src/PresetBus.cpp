@@ -19,7 +19,10 @@ namespace PresetBus {
 static constexpr uint16_t kAddrKey = (8 << 8) | 0x10;
 
 // ---- SPSC event ring: ISR producer, Task() consumer ------------------------
-static constexpr uint8_t kRingSize = 64;  // power of two
+// 256 events (uint8 indices wrap exactly): a save/recall blocks Task()
+// for 100s of ms of file I/O while the ISR keeps filling this - 64 was
+// only ~6 frames of headroom against a chatty preset manager.
+static constexpr uint16_t kRingSize = 256;  // power of two, max for uint8 idx
 static volatile uint16_t ring[kRingSize];
 static volatile uint8_t ring_w = 0;
 static uint8_t ring_r = 0;
@@ -31,7 +34,7 @@ static bool verbose = false;
 static uint32_t last_rx_ms = 0;
 
 static void push_event(uint16_t ev) {
-  if (uint8_t(ring_w - ring_r) >= kRingSize) {
+  if (uint16_t(uint8_t(ring_w - ring_r)) >= kRingSize) {
     ring_ovf = true;  // drop; Task() poisons the frame
     return;
   }
@@ -98,6 +101,8 @@ static const Bus200eOps kOps = {
   cb_midi,
 };
 
+static bool tx_gate_open();  // defined with Task() below
+
 // ---- commander mode: bus-wide preset commands -------------------------------
 // One pending command, last wins (matches the engine's own request model).
 static volatile int16_t pending_bcast = -1;  // (cmd << 8) | slot, cmd 01/02
@@ -114,19 +119,18 @@ FLASHMEM void BroadcastRecall(uint8_t slot) {
 FLASHMEM static void pump_broadcast() {
   const int16_t cmd = pending_bcast;
   if (cmd < 0) return;
-  // quiet gate, same discipline as the QUERY reply: never race live RX
-  if (uint8_t(ring_w - ring_r) != 0) return;
-  if (millis() - last_rx_ms < 2) return;
-  if (LPI2C1_MSR & LPI2C_MSR_BBF) return;
+  if (!tx_gate_open()) return;
 
-  // same long/PRIMO frame a preset manager sends
+  // same long/PRIMO frame a preset manager sends. The slave stays ENABLED
+  // during TX: if we lose arbitration the winner's frame (maybe the WPM's
+  // one-shot recall) must still be heard; on success the parser drops our
+  // own echo via Bus200eSuppressFrame.
   uint8_t f[5] = { 0x04, 0x00, 0x22, uint8_t(cmd >> 8), uint8_t(cmd & 0x1F) };
 
-  LPI2C1_SCR &= ~LPI2C_SCR_SEN;  // our own broadcast must not echo into RX
   Wire.beginTransmission(0);
   Wire.write(f, sizeof(f));
   const uint8_t err = Wire.endTransmission();
-  LPI2C1_SCR |= LPI2C_SCR_SEN;
+  if (err == 0) Bus200eSuppressFrame(f, sizeof(f));
 
   if (err == 0) {
     pending_bcast = -1;
@@ -161,16 +165,14 @@ bool WpmPresent() { return wpm_present; }
 
 FLASHMEM static void probe_wpm() {
   if (millis() - wpm_last_probe_ms < 5000) return;
-  if (uint8_t(ring_w - ring_r) != 0) return;
-  if (millis() - last_rx_ms < 2) return;
-  if (LPI2C1_MSR & LPI2C_MSR_BBF) return;
+  if (!tx_gate_open()) return;
   wpm_last_probe_ms = millis();
   wpm_probes++;
 
-  LPI2C1_SCR &= ~LPI2C_SCR_SEN;
+  // addressed to 0x50: our general-call slave never matches it, so the
+  // slave can stay enabled with no echo concern
   Wire.beginTransmission(0x50);
   const uint8_t err = Wire.endTransmission();  // 0 = ACK, 2 = NACK
-  LPI2C1_SCR |= LPI2C_SCR_SEN;
 
   if (err == 0) {
     if (!wpm_present && verbose) Serial.println("PresetBus: WPM detected");
@@ -189,13 +191,14 @@ FLASHMEM static void probe_wpm() {
 
 void QueueMidiTx(uint8_t type, uint8_t channel, uint8_t d1, uint8_t d2) {
   if (!enabled) return;
-  // channel 1 -> 200e bus A (0x8), 2 -> bus B (0x4), else both (0xF)
+  // channel 1-4 -> 200e bus lines A(0x8) B(0x4) C(0x2) D(0x1), else all
   uint8_t status;
   if (type >= 0xF8) {
     status = type;
     d1 = d2 = 0;
   } else {
-    const uint8_t mask = (channel == 1) ? 0x8 : (channel == 2) ? 0x4 : 0xF;
+    const uint8_t mask = (channel >= 1 && channel <= 4)
+                             ? uint8_t(0x8 >> (channel - 1)) : uint8_t(0xF);
     status = (type & 0xF0) | mask;
   }
   // pushes come from both the app ISR and loop: mask IRQs around the ring.
@@ -226,9 +229,7 @@ bool ReadMidiRx(uint8_t &status, uint8_t &d1, uint8_t &d2) {
 FLASHMEM static void pump_midi_tx() {
   uint8_t sent = 0;
   while (midi_tx_r != midi_tx_w && sent < 4) {
-    if (uint8_t(ring_w - ring_r) != 0) return;        // RX in progress
-    if (millis() - last_rx_ms < 2) return;            // too soon after RX
-    if (LPI2C1_MSR & LPI2C_MSR_BBF) return;           // bus busy
+    if (!tx_gate_open()) return;
 
     const uint32_t v = midi_tx_q[midi_tx_r & (kMidiRing - 1)];
     // [08][00][22][0F][status|mask][00][d1][d2][00] -- 2WIRELESS long format
@@ -237,11 +238,10 @@ FLASHMEM static void pump_midi_tx() {
                      uint8_t((v >> 8) & 0xFF), uint8_t((v >> 16) & 0xFF),
                      0x00 };
 
-    LPI2C1_SCR &= ~LPI2C_SCR_SEN;  // suppress self-RX
     Wire.beginTransmission(0);
     Wire.write(f, sizeof(f));
     const uint8_t err = Wire.endTransmission();
-    LPI2C1_SCR |= LPI2C_SCR_SEN;
+    if (err == 0) Bus200eSuppressFrame(f, sizeof(f));
 
     if (err == 0) {
       midi_tx_r = midi_tx_r + 1;
@@ -264,21 +264,16 @@ FLASHMEM static void pump_midi_tx() {
 static uint8_t query_tries = 0;
 
 FLASHMEM static void try_query_reply() {
-  // only with a quiet bus: not mid-frame, controller idle, >=2ms since RX
-  if (uint8_t(ring_w - ring_r) != 0) return;
-  if (millis() - last_rx_ms < 2) return;
-  if (LPI2C1_MSR & LPI2C_MSR_BBF) return;  // bus busy
+  if (!tx_gate_open()) return;
 
   // [0A][22][ourAddr][13]["30.6"+3 spaces] — module identity / fw version
   uint8_t f[11] = { 0x0A, 0x22, Bus200eModuleAddress(), 0x13,
                     '3', '0', '.', '6', ' ', ' ', ' ' };
 
-  // suppress self-RX while we hold the bus
-  LPI2C1_SCR &= ~LPI2C_SCR_SEN;
   Wire.beginTransmission(0);  // general call
   Wire.write(f, sizeof(f));
   const uint8_t err = Wire.endTransmission();
-  LPI2C1_SCR |= LPI2C_SCR_SEN;
+  if (err == 0) Bus200eSuppressFrame(f, sizeof(f));
 
   if (err == 0) {
     Bus200eClearQueryPending();
@@ -329,8 +324,22 @@ FLASHMEM void Init() {
                 Bus200eModuleAddress());
 }
 
+// Master-TX gate shared by every pump: quiet bus AND no card-transfer
+// window open. A preset manager's FRAM backup/restore swallows every byte
+// on the bus (receiveEvent in fram mode), so any TX during the window
+// corrupts the user's backup; hold off until well past its 1s done-detect.
+static bool tx_gate_open() {
+  if (uint8_t(ring_w - ring_r) != 0) return false;
+  if (millis() - last_rx_ms < 2) return false;
+  const uint32_t t = Bus200eLastTransferMs();
+  if (t && millis() - t < 1500) return false;
+  if (LPI2C1_MSR & LPI2C_MSR_BBF) return false;
+  return true;
+}
+
 void Task() {
   if (!enabled) return;
+  Bus200eSetNow(millis());
 
   if (ring_ovf) {
     ring_ovf = false;
@@ -340,6 +349,11 @@ void Task() {
 
   bool got = false;
   while (ring_r != ring_w) {
+    if (ring_ovf) {  // overflow mid-drain: poison before the gap parses
+      ring_ovf = false;
+      stats.ring_ovf++;
+      Bus200eFeedEvent(BUS200E_EV_OVF);
+    }
     const uint16_t ev = ring[ring_r & (kRingSize - 1)];
     ring_r = ring_r + 1;
     got = true;
@@ -353,6 +367,7 @@ void Task() {
   if (got) last_rx_ms = millis();
 
   if (Bus200eQueryPending()) try_query_reply();
+  Bus200eTask();   // card-transfer job engine (self-clears with null hooks)
   pump_broadcast();
   pump_midi_tx();
   probe_wpm();
