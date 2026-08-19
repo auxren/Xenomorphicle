@@ -158,6 +158,11 @@ void AudioOutputI2S2_F32::isr(void)
 	else
 	{
 		memset(dest, 0, audio_block_samples * 4);
+		// The zeros must reach RAM: without this flush the DMA keeps
+		// replaying the stale cache-shadowed buffer - a frozen 128-sample
+		// loop at the DAC whenever the source stops (heard as a steady
+		// 375Hz-harmonic drone that survives everything but power-off).
+		arm_dcache_flush_delete(dest, sizeof(i2s2_tx_buffer) / 2);
 		return;
 	}
 

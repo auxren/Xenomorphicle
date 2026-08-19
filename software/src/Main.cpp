@@ -379,6 +379,15 @@ FLASHMEM void setup() {
 
   // initialize apps (on T3.x firstrun is detected by the EEPROM load inside)
   firstrun |= !OC::app_switcher.Init(reset_settings || firstrun);
+#if defined(ARDUINO_TEENSY41) && defined(AUDIO_INTERFACE)
+  // Force the audio output path (I2S codec out + host-playback monitor mix)
+  // into existence. It is lazily built and was only ever constructed when an
+  // audio applet wired up the chain - an appletless boot had DEAD panel outs
+  // and no USB monitoring. Called here so it is created after every other
+  // stream (its documented ordering requirement).
+  OC::AudioIO::OutputStream();
+#endif
+
   OC::PresetEngine::Init();
   OC::PresetBus::Init();
   OC::PresetBusUI::Init();
