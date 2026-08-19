@@ -549,9 +549,10 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
                 AudioStream_F32::f32_memory_used, AudioStream_F32::f32_memory_used_max);
 #endif
   {
-    Serial.printf("littlefs: %llu/%llu bytes used\n",
-                  (unsigned long long)PhzConfig::myfs.usedSize(),
-                  (unsigned long long)PhzConfig::myfs.totalSize());
+    // %llu is unsupported by Print::printf (prints literal "lu")
+    Serial.printf("littlefs: %luKB/%luKB used\n",
+                  (unsigned long)(PhzConfig::myfs.usedSize() >> 10),
+                  (unsigned long)(PhzConfig::myfs.totalSize() >> 10));
     // write-verify: the failure mode where writes "succeed" as 0-byte files
     const char *tf = "SELFTST.TMP";
     uint8_t pat[64], chk[64];
@@ -570,8 +571,8 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
     Serial.printf("fs write-verify: %s\n", ok ? "PASS" : "FAIL");
     f = PhzConfig::myfs.open("CRASH.LOG", FILE_READ);
     if (f) {
-      Serial.printf("CRASH.LOG present: %llu bytes (crashes recorded)\n",
-                    (unsigned long long)f.size());
+      Serial.printf("CRASH.LOG present: %lu bytes (crashes recorded)\n",
+                    (unsigned long)f.size());
       f.close();
     } else {
       Serial.println("CRASH.LOG: none (no crashes recorded)");
@@ -775,6 +776,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
             PhzConfig::clear_config();
             PhzConfig::save_config();
           case 't': SelfTest(); break;  // one-shot system health report
+          case 'a': OC::SwitchToDefaultApp(); break;  // remote: activate Captain
           case 'l':
             Serial.println(" -=- LittleFS -=- ");
             PhzConfig::listFiles();
