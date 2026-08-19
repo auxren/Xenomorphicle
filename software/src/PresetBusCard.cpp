@@ -62,6 +62,12 @@ uint8_t BusCardTxByte(void) {
   return b;
 }
 
+void BusCardTxRewind(void) {
+  if (!card) return;
+  ptr = (ptr - 1) & card_mask;
+  if (stats.bytes_read) stats.bytes_read--;
+}
+
 void BusCardStop(void) {
   // A 1-byte write moved only the staged hi byte: commit it with lo = 0,
   // 24xx-style (the pointer write is what the master asked for; losing it

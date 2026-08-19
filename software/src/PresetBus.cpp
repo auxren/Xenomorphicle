@@ -62,7 +62,7 @@ static volatile uint16_t staged_addr = 0xFFFF;  // latest SASR RADDR (addr<<1|R)
 
 static void lpi2c1_slave_isr() {
   stats.isr_count++;
-  const uint32_t status = LPI2C1_SSR;
+  uint32_t status = LPI2C1_SSR;
   const uint32_t w1c = status & 0xF00;
   if (w1c) LPI2C1_SSR = w1c;
 
@@ -77,9 +77,25 @@ static void lpi2c1_slave_isr() {
   if (status & LPI2C_SSR_RDF) {
     const uint32_t rx = LPI2C1_SRDR;
     if (rx & LPI2C_SRDR_SOF) {  // first byte of a write txn: route it now
-      if (in_card_txn) {        // previous card txn lost its STOP: close it
+      // A STOP/repeated-start pending in this same pass belongs to the
+      // PREVIOUS transaction (wire order: ...data STOP START addr SOF-byte).
+      // Close the old one here and consume the flags, or the block below
+      // would tear down the freshly opened transaction.
+      if (status & (LPI2C_SSR_SDF | LPI2C_SSR_RSF)) {
+        if (in_card_txn) {
+          if (card_tx_open) BusCardTxRewind();  // unsent TDF prefetch
+          BusCardStop();
+          in_card_txn = false;
+          card_tx_open = false;
+        } else {
+          push_event(BUS200E_EV_STOP);
+        }
+        stats.stops++;
+        status &= ~(uint32_t)(LPI2C_SSR_SDF | LPI2C_SSR_RSF);
+      } else if (in_card_txn) {  // lost STOP entirely: close the stale txn
         BusCardStop();
         in_card_txn = false;
+        card_tx_open = false;
       }
       if (card_serving && (staged_addr >> 1) == BUS200E_CARD_BASE) {
         in_card_txn = true;
@@ -98,6 +114,10 @@ static void lpi2c1_slave_isr() {
   }
   if (status & (LPI2C_SSR_SDF | LPI2C_SSR_RSF)) {  // stop / repeated start
     if (in_card_txn) {
+      // a read leg always has one unsent byte prefetched into STDR by the
+      // TDF feeder; rewind so current-address chunked reads stay aligned
+      // with a real 24xx address counter
+      if (card_tx_open) BusCardTxRewind();
       BusCardStop();
       // on RSF the next leg re-routes via SOF (write) or TDF (read)
       if (status & LPI2C_SSR_SDF) in_card_txn = false;
@@ -108,8 +128,10 @@ static void lpi2c1_slave_isr() {
     card_tx_open = false;
     stats.stops++;
   }
-  // Slave transmit: only 0x50 reads ever request TX data (the general call
-  // is write-only), and TDIE is enabled only while serving.
+  // Slave transmit: normally only 0x50 reads request TX data, but a
+  // malformed/glitched read at another matched address would leave TDF
+  // pending with TXDSTALL stretching SCL forever and TDIE storming this
+  // ISR - so an unroutable TDF is fed 0xFF (floating-bus semantics).
   if (status & LPI2C_SSR_TDF) {
     if (card_serving && (staged_addr >> 1) == BUS200E_CARD_BASE
         && (staged_addr & 1)) {
@@ -119,6 +141,8 @@ static void lpi2c1_slave_isr() {
         BusCardStart(1);
       }
       LPI2C1_STDR = BusCardTxByte();
+    } else if (card_serving) {
+      LPI2C1_STDR = 0xFF;    // release the stretch, advance no state
     }
   }
 }
@@ -441,8 +465,19 @@ static inline void bus_stuck_check() {
     return;
   }
   if (now - bbf_since_ms < 3000) return;
-  if (now - last_rx_ms < 3000) {  // traffic flowing: busy, not stuck
-    bbf_since_ms = now;
+  // "Stuck" must mean NO activity of any kind, or we'd fire mid-transfer:
+  // - GC frames drain through the ring (last_rx_ms)
+  // - card-serving traffic hits only the ISR (isr_count), never the ring
+  // - a WPM<->third-party 0x50 transfer is invisible to our slave, but the
+  //   GC command that opened it is parsed: honor the card-transfer holdoff
+  static uint32_t seen_isr = 0;
+  const uint32_t isr_now = stats.isr_count;
+  const bool slave_active = (isr_now != seen_isr);
+  seen_isr = isr_now;
+  const uint32_t xfer = Bus200eLastTransferMs();
+  if (slave_active || now - last_rx_ms < 3000
+      || (xfer && now - xfer < 5000)) {
+    bbf_since_ms = now;  // busy, not stuck
     return;
   }
   bus_stuck_recover();

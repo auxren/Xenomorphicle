@@ -59,7 +59,10 @@ namespace OC {
 // Any type not listed here should not exist, i.e. the linker should be able to
 // triage all code (minus any dangling static parts).
 
-static AppContainer<void // this space intentionally left blank
+// RAM2 (needs the startup .bss.dma zeroing hook): 5.9KB of app instances,
+// CPU-only access (no DMA), buys DTCM stack headroom so the USB host MIDI
+// objects can live in non-cacheable DTCM where EHCI DMA needs them.
+static DMAMEM AppContainer<void // this space intentionally left blank
   , AppSettings
 #ifndef NO_HEMISPHERE
   #ifdef ARDUINO_TEENSY41

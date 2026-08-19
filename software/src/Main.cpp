@@ -57,11 +57,12 @@ void CaptainMidiHealth();    // CaptainMIDI.h (global scope)
 #if defined(ARDUINO_TEENSY41)
 USBHost thisUSB;
 USBHub hub1(thisUSB);
-// RAM2: these two objects (with their 2K rx/tx rings) are 8.8KB that was
-// squeezing DTCM stack headroom below the overflow line in the dbg env.
-// They are polled from loop context and USBHost_t36 handles its own cache
-// maintenance, so OCRAM placement is the standard, safe home for them.
-DMAMEM MIDIDevice_BigBuffer usbHostMIDI[2] {
+// These MUST stay in DTCM: their member arrays are the EHCI DMA buffers,
+// and USBHost_t36's midi/ehci paths do NO cache maintenance - DTCM is
+// non-cacheable (EHCI reaches it via the CM7 AHBS backdoor), while RAM2 is
+// write-back cached and silently corrupts host MIDI both directions.
+// (Stack headroom is bought by app_container living in RAM2 instead.)
+MIDIDevice_BigBuffer usbHostMIDI[2] {
   MIDIDevice_BigBuffer(thisUSB),
   MIDIDevice_BigBuffer(thisUSB)
 };
@@ -262,6 +263,10 @@ public:
 };
 static BufferPrint crash_capture;
 
+// Reset cause, captured then cleared at boot: SRSR bits are sticky w1c and
+// would otherwise show every cause since the last power-on, forever.
+static uint32_t boot_srsr = 0;
+
 // WDOG1: 128s timeout, fed only from loop(). Long enough that the slowest
 // legitimate blocking op (a full 4MB LittleFS format, ~45s) never trips it;
 // a hard loop() hang (the K-Board-lockup class of bug) reboots instead of
@@ -287,10 +292,25 @@ static inline void watchdog_feed() {
   WDOG1_WSR = 0x5555;
   WDOG1_WSR = 0xAAAA;
 }
+
+// A full 4MB LittleFS format can exceed 128s worst-case (flash sector
+// erase is 400ms MAX, ~1024 sectors) - the one legitimate loop-blocking
+// op longer than the watchdog. Feed from a timer for its duration only.
+static IntervalTimer wdog_format_feeder;
+static void watchdog_feed_isr() { watchdog_feed(); }  // ISR: stays in ITCM
+FLASHMEM static void watchdog_feed_during(void (*op)()) {
+  wdog_format_feeder.begin(watchdog_feed_isr, 1000000);  // 1s
+  op();
+  wdog_format_feeder.end();
+}
 #endif
 
 FLASHMEM void setup() {
   delay(50);
+#if defined(__IMXRT1062__)
+  boot_srsr = SRC_SRSR;
+  SRC_SRSR = boot_srsr;  // w1c: next boot reports only its own cause
+#endif
   Serial.begin(9600);
 
   if (CrashReport) {
@@ -460,7 +480,10 @@ FLASHMEM void setup() {
     File cl = PhzConfig::myfs.open("CRASH.LOG", FILE_READ);
     const bool rotate = cl && cl.size() > 8192;
     if (cl) cl.close();
-    if (rotate) PhzConfig::myfs.remove("CRASH.LOG");
+    if (rotate) {  // keep one generation of history instead of deleting
+      PhzConfig::myfs.remove("CRASH.OLD");
+      PhzConfig::myfs.rename("CRASH.LOG", "CRASH.OLD");
+    }
     cl = PhzConfig::myfs.open("CRASH.LOG", FILE_WRITE);  // append
     if (cl) {
       cl.printf("--- boot @ %lu ms ---\n", millis());
@@ -520,9 +543,10 @@ FLASHMEM void setup() {
 extern char _heap_end[], *__brkval;
 FLASHMEM __attribute__((noinline)) static void SelfTest() {
   Serial.println("=== selftest ===");
-  Serial.printf("uptime=%lus  reset_cause(SRC_SRSR)=%08lX%s\n",
-                millis() / 1000, SRC_SRSR,
-                (SRC_SRSR & (1 << 5)) ? " [WDOG]" : "");
+  // bit 4 = wdog_rst_b (bit 5 is JTAG). Captured+cleared at boot.
+  Serial.printf("uptime=%lus  reset_cause(SRC_SRSR@boot)=%08lX%s\n",
+                millis() / 1000, boot_srsr,
+                (boot_srsr & (1 << 4)) ? " [WDOG]" : "");
   Serial.printf("watchdog: %s (128s, fed from loop)\n",
                 watchdog_armed ? "armed" : "OFF");
   {
@@ -820,7 +844,8 @@ FLASHMEM __attribute__((noinline)) void loop() {
             }
             destructive_arm_ms = 0;
             Serial.println("!! ERASING ALL FILES on LittleFS !!");
-            PhzConfig::eraseFiles();
+            // worst-case format outlives the 128s watchdog: timer-fed
+            watchdog_feed_during([] { PhzConfig::eraseFiles(); });
             break;
 #endif
 

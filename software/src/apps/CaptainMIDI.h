@@ -968,10 +968,13 @@ public:
     FLASHMEM void DoLoop() {
         auto &hMIDI = frame.MIDIState;
 
-        {   // worst-case poll cadence, for the selftest latency budget
+        {   // worst-case poll cadence, for the selftest latency budget.
+            // Gaps over 1s are app-suspension time (menu, other app), not
+            // poll latency - skip them so the metric stays meaningful.
             const uint32_t now_us = micros();
-            if (poll_last_us && now_us - poll_last_us > poll_gap_max_us)
-                poll_gap_max_us = now_us - poll_last_us;
+            const uint32_t gap = now_us - poll_last_us;
+            if (poll_last_us && gap < 1000000 && gap > poll_gap_max_us)
+                poll_gap_max_us = gap;
             poll_last_us = now_us;
         }
 
@@ -1413,7 +1416,9 @@ public:
             break;
           case SYX_ECHO:  // latency probe: bounce the caller's token back
             ++echo_count;
-            QueueReplyBuf(SYX_ECHO_R, body, blen > 8 ? 8 : (uint8_t)blen);
+            // syx_reply holds cmd + 7 body bytes: cap at 7 so a max-size
+            // token comes back whole instead of silently short
+            QueueReplyBuf(SYX_ECHO_R, body, blen > 7 ? 7 : (uint8_t)blen);
             break;
           default:
             QueueNak(cmd, SYXERR_CMD);

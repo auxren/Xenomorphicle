@@ -55,6 +55,13 @@ uint8_t BusCardTxByte(void);
 // STOP or repeated-START: close the open transaction.
 void BusCardStop(void);
 
+// Transport prefetch correction: a hardware TX register is one byte deep,
+// so the transport feeds byte N+1 while N shifts out; when the master NAKs,
+// that prefetched byte was never sent. Rewinding once on read-leg close
+// keeps the pointer identical to a real 24xx address counter, so chunked
+// current-address reads (no pointer rewrite per chunk) stay aligned.
+void BusCardTxRewind(void);
+
 int  BusCardAttached(void);
 int  BusCardDirty(void);        // image modified since last ClearDirty
 void BusCardClearDirty(void);

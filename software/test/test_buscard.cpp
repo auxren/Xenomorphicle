@@ -154,6 +154,38 @@ static void test_lost_stop_recovery() {
   CHECK(img[0x3000] == 0 && img[0x3010] == 0);
 }
 
+static void test_tx_prefetch_rewind() {
+  // The transport's TDF feeder always has one unsent byte in the TX
+  // register when the master NAKs; BusCardTxRewind() on read-leg close
+  // must land the pointer exactly where a real 24xx counter would.
+  BusCardInit(img, BUSCARD_SIZE);
+  for (uint32_t i = 0; i < 12; ++i) img[0x0200 + i] = (uint8_t)(0xC0 + i);
+
+  // master chunk-reads 4 bytes; transport fed 5 (one prefetched)
+  BusCardStart(0);
+  BusCardRxByte(0x02);
+  BusCardRxByte(0x00);
+  BusCardStart(1);
+  uint8_t r[5];
+  for (int i = 0; i < 5; ++i) r[i] = BusCardTxByte();  // 5th = prefetch
+  BusCardTxRewind();   // transport: NAK'd byte never left the wire
+  BusCardStop();
+  CHECK(r[3] == 0xC3);
+  CHECK(BusCardPointer() == 0x0204);  // == start + 4, 24xx-compatible
+
+  // next chunk via current-address read continues seamlessly: master takes
+  // 4 more bytes, transport again fed one extra before the NAK
+  BusCardStart(1);
+  for (int i = 0; i < 5; ++i) r[i % 5] = BusCardTxByte();
+  BusCardTxRewind();
+  BusCardStop();
+  CHECK(BusCardPointer() == 0x0208);
+
+  BusCardStart(1);
+  CHECK(BusCardTxByte() == 0xC8);  // exactly where a 24xx would be
+  BusCardStop();
+}
+
 static void test_detached() {
   BusCardInit(NULL, 0);
   BusCardStart(1);
@@ -176,6 +208,7 @@ int main() {
   test_probe_is_side_effect_free();
   test_short_writes();
   test_lost_stop_recovery();
+  test_tx_prefetch_rewind();
   test_detached();
   printf("test_buscard: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
