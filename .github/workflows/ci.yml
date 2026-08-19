@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [preset-bus, main, hoc-midi]
+  pull_request:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run host test suites
+        working-directory: software/test
+        run: |
+          mkdir -p build
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_bus200e \
+              test_bus200e.cpp ../src/PresetBus200e.cpp
+          ./build/test_bus200e
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_buscard \
+              test_buscard.cpp ../src/PresetBusCard.cpp
+          ./build/test_buscard
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_midi_types \
+              test_midi_types.cpp
+          ./build/test_midi_types
+
+  firmware:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [T41, T41_audio, T41_audio_dbg, T40]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ runner.os }}-${{ hashFiles('software/platformio.ini') }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Build ${{ matrix.env }}
+        working-directory: software
+        run: pio run -e ${{ matrix.env }}

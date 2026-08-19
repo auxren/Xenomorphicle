@@ -57,7 +57,11 @@ void CaptainMidiHealth();    // CaptainMIDI.h (global scope)
 #if defined(ARDUINO_TEENSY41)
 USBHost thisUSB;
 USBHub hub1(thisUSB);
-MIDIDevice_BigBuffer usbHostMIDI[2] {
+// RAM2: these two objects (with their 2K rx/tx rings) are 8.8KB that was
+// squeezing DTCM stack headroom below the overflow line in the dbg env.
+// They are polled from loop context and USBHost_t36 handles its own cache
+// maintenance, so OCRAM placement is the standard, safe home for them.
+DMAMEM MIDIDevice_BigBuffer usbHostMIDI[2] {
   MIDIDevice_BigBuffer(thisUSB),
   MIDIDevice_BigBuffer(thisUSB)
 };
@@ -230,14 +234,29 @@ FLASHMEM __attribute__((noinline)) void BootMenu() {
 // Crash forensics + hardware watchdog (T4.x)
 // ---------------------------------------------------------------------------
 #if defined(__IMXRT1062__)
+// The core never zeroes .bss.dma (DMAMEM is documented as uninitialized), so
+// C++ objects placed there boot with garbage in any member their constructor
+// doesn't touch - USBHost_t36 state machines rely on bss-zero and lock up.
+// Zero the section here: ResetHandler calls this hook after the DTCM bss
+// clear and BEFORE __libc_init_array (C++ ctors). .bss.dma is the first
+// section in RAM2 (origin 0x20200000) and ends at _heap_start per the .ld.
+extern unsigned long _heap_start;
+extern "C" FLASHMEM void startup_middle_hook(void) {
+  memset((void *)0x20200000, 0, (uint32_t)&_heap_start - 0x20200000u);
+}
+
 // Capture CrashReport text at boot so it can be appended to CRASH.LOG once
 // LittleFS is mounted (the Serial print is gone if nobody was watching).
+// buffer lives in RAM2 (DMAMEM) - DTCM stack headroom is precious,
+// especially in the dbg env (a 1KB DTCM buffer here caused a real stack
+// overflow into the MPU guard: DACCVIOL at the exact end of variables)
+static DMAMEM char crash_buf[1024];
 class BufferPrint : public Print {
 public:
-  char buf[1024];
+  char *buf = crash_buf;
   size_t len = 0;
   size_t write(uint8_t c) override {
-    if (len < sizeof(buf) - 1) { buf[len++] = c; buf[len] = 0; return 1; }
+    if (len < sizeof(crash_buf) - 1) { buf[len++] = c; buf[len] = 0; return 1; }
     return 0;
   }
 };
@@ -251,6 +270,14 @@ static BufferPrint crash_capture;
 // ConfirmReset) can block indefinitely.
 static bool watchdog_armed = false;
 FLASHMEM static void watchdog_arm() {
+  // the core never ungates WDOG1's clock ("WDOG1 requires CCM_CCGR3_WDOG1"
+  // per imxrt.h) - touching its registers without this bus-faults
+  CCM_CCGR3 |= CCM_CCGR3_WDOG1(CCM_CCGR_ON);
+  asm volatile("dsb");
+  // PDE (set at reset) is a one-shot 16s power-down counter that asserts
+  // reset unless cleared - with the clock just ungated it would fire ~16s
+  // after arming and masquerade as a watchdog timeout
+  WDOG1_WMCR = 0;
   WDOG1_WCR = (uint16_t)(255u << 8)  // WT: (255+1)*0.5s = 128s
             | WDOG_WCR_WDE | WDOG_WCR_SRS | WDOG_WCR_WDA
             | WDOG_WCR_WDBG | WDOG_WCR_WDZST;
@@ -511,9 +538,13 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
   Serial.printf("heap free: %lu bytes (RAM2)\n",
                 (unsigned long)(_heap_end - __brkval));
 #ifdef AUDIO_INTERFACE
-  Serial.printf("audio i16 pool: %u now / %u max   cpu: %.1f%% now / %.1f%% max\n",
+  // integer tenths: %f would drag the float-printf tables into DTCM
+  Serial.printf("audio i16 pool: %u now / %u max   cpu: %lu.%lu%% now / %lu.%lu%% max\n",
                 AudioMemoryUsage(), AudioMemoryUsageMax(),
-                AudioProcessorUsage(), AudioProcessorUsageMax());
+                (unsigned long)(AudioProcessorUsage() * 10) / 10,
+                (unsigned long)(AudioProcessorUsage() * 10) % 10,
+                (unsigned long)(AudioProcessorUsageMax() * 10) / 10,
+                (unsigned long)(AudioProcessorUsageMax() * 10) % 10);
   Serial.printf("audio f32 pool: %u now / %u max\n",
                 AudioStream_F32::f32_memory_used, AudioStream_F32::f32_memory_used_max);
 #endif
