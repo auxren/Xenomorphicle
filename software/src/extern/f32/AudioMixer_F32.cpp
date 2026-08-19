@@ -28,11 +28,13 @@ void AudioMixer4_F32::update(void) {
     in = receiveReadOnly_f32(channel);
     if (in) {
 		audio_block_f32_t *tmp = allocate_f32();
-
-		arm_scale_f32(in->data, multiplier[channel], tmp->data, tmp->length);
-		arm_add_f32(out->data, tmp->data, out->data, tmp->length);
-
-		AudioStream_F32::release(tmp);
+		// pool exhaustion must not hard-fault the audio ISR: skip the
+		// channel this update rather than dereference NULL
+		if (tmp) {
+			arm_scale_f32(in->data, multiplier[channel], tmp->data, tmp->length);
+			arm_add_f32(out->data, tmp->data, out->data, tmp->length);
+			AudioStream_F32::release(tmp);
+		}
 		AudioStream_F32::release(in);
 	} else {
 		//do nothing, this vector is empty
@@ -62,11 +64,13 @@ void AudioMixer8_F32::update(void) {
     in = receiveReadOnly_f32(channel);
     if (in) {
 		audio_block_f32_t *tmp = allocate_f32();
-
-		arm_scale_f32(in->data, multiplier[channel], tmp->data, tmp->length);
-		arm_add_f32(out->data, tmp->data, out->data, tmp->length);
-
-		AudioStream_F32::release(tmp);
+		// pool exhaustion must not hard-fault the audio ISR: skip the
+		// channel this update rather than dereference NULL
+		if (tmp) {
+			arm_scale_f32(in->data, multiplier[channel], tmp->data, tmp->length);
+			arm_add_f32(out->data, tmp->data, out->data, tmp->length);
+			AudioStream_F32::release(tmp);
+		}
 		AudioStream_F32::release(in);
 	} else {
 		//do nothing, this vector is empty

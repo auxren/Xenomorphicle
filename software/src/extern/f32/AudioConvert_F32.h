@@ -67,7 +67,7 @@ class AudioConvert_I16x2toF32 : public AudioStream_F32 //receive Int and transmi
       audio_block_f32_t *float_block = AudioStream_F32::allocate_f32(); 
 
       // process, as long as we have all blocks
-      if (nullptr != int_blockH && nullptr != int_blockH && nullptr != float_block) 
+      if (nullptr != int_blockH && nullptr != int_blockL && nullptr != float_block) 
       {
         //convert to float
         convertAudio_I16x2toF32(int_blockH, int_blockL, float_block, float_block->length);

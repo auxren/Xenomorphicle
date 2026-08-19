@@ -94,6 +94,10 @@ void AudioOutputI2S2_F32::begin(bool mclk_enable)
 #endif
 	update_responsibility = update_setup();
 	dma.attachInterrupt(AudioOutputI2S2_F32::isr);
+	// the buffer is uninitialized DMAMEM: without this, the first ~1.5ms
+	// after enable plays garbage at the DAC
+	memset(i2s2_tx_buffer, 0, sizeof(i2s2_tx_buffer));
+	arm_dcache_flush_delete(i2s2_tx_buffer, sizeof(i2s2_tx_buffer));
 	enabled = 1;
 }
 //  --------------------------------------------------------------------------------
@@ -139,6 +143,9 @@ void AudioOutputI2S2_F32::isr(void)
 	}
 	else if (blockL)
 	{
+		// zero the half first: the untouched right slots would otherwise
+		// replay stale cache/RAM data (same class as the silence-path bug)
+		memset(dest, 0, audio_block_samples * 4);
 		float32_t *pL = blockL->data + offsetL;
 		for (int i = 0; i < audio_block_samples; i += 2)
 		{
@@ -148,10 +155,13 @@ void AudioOutputI2S2_F32::isr(void)
 	}
 	else if (blockR)
 	{
+		memset(dest, 0, audio_block_samples * 4);
 		float32_t *pR = blockR->data + offsetR;
 		for (int i = 0; i < audio_block_samples; i += 2)
 		{
-			*(d + i) = (int32_t)*pR++;
+			// odd slots are the RIGHT channel of the interleave; this
+			// branch used to write the even (left) slots
+			*(d + i + 1) = (int32_t)*pR++;
 		} 
 		offsetR += audio_block_samples / 2;
 	}
