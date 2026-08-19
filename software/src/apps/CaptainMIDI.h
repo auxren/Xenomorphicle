@@ -309,6 +309,9 @@ public:
         // every app-menu entry, and an unconditional CAPTAIN.DAT rewrite
         // (sector erases included) made the menu gesture take seconds.
         if (dirty || LiveChecksum() != saved_checksum) StoreData();
+#endif
+#if defined(ARDUINO_TEENSY41)
+        // T41 only: device profiles need the USB host ports
         if (profiles_dirty) PersistProfiles();  // debounce dies with DoLoop
 #endif
         // dump-to-host on suspend is the Orin workflow contract, but only

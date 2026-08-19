@@ -52,7 +52,7 @@ live, including app switching and audio-graph rebuild.
   multi-master I2C @100 kHz, everything broadcast on general call 0x00; both
   frame formats (long/PRIMO, short/V2); RECALL/SAVE/remote-enable/QUERY
   (identity reply as temporary master). `src/PresetBus200e.{h,cpp}` is a
-  BSP-free parser with 71 host-side checks (`test/test_bus200e.cpp`).
+  BSP-free parser with 88 host-side checks (`test/test_bus200e.cpp`).
 - **Transport**: neither stock Wire nor teensy4_i2c can ACK the general call
   (`SCFGR1[GCEN]` unset in both), so a ~120-line direct-register LPI2C1
   slave coexists with the polled stock Wire master. ISR → SPSC ring →
@@ -62,6 +62,20 @@ live, including app switching and audio-graph rebuild.
   `APP_EVENT_FLUSH`; recall validates first, restores through the same code
   paths boot uses, hot-switches apps. Failure paths can't leave the shared
   PhzConfig map owned by slot content; saves verify files landed on disk.
+- **MIDI over the bus**: the bus doubles as a MIDI interface (the WPM
+  dialect) — a new `mMaskBus` interface bit makes it selectable as MIDI
+  source/destination everywhere the other interfaces are (thru, clock
+  RX/TX, msg RX/TX); 200e bus lines A–D map to MIDI channels 1–4. Echo
+  suppression and transfer holdoff keep preset traffic and MIDI from
+  stepping on each other; WPM coexistence (presence detection, commander
+  mode, dialect reporting).
+- **Front-panel preset manager**: 225e-style overlay (`PresetBusUI`),
+  opened by holding both encoder buttons — save/recall any slot locally
+  or bus-wide, 16-char slot rename, hold-progress store feedback,
+  last/next trigger inputs, boot recall of the last bus preset.
+- Captain MIDI (upstream version): MIDI polling moved from the 16.67 kHz
+  app ISR to `Loop()` — USBHost_t36 is not interrupt-safe, and a keyboard
+  on the T4.1 host jack locked the module.
 - Everything behind `-DPRESET_BUS` (T41 env) + runtime I2C-header check;
   other targets compile inert stubs. Includes a T3 boot-order fix
   (settings loaded before the validity check — stops ConfirmReset showing
@@ -83,7 +97,13 @@ it effectively rewrites the app, so direction buy-in comes first.
 - `HSIOFrame::ProcessOutputs()`: 4 CV + 4 trigger ports, VCMC-grade function
   sets, paired pitch+gate, ADC lag, rate-limited continuous sends, deferred
   panic.
-- Two-level UI, live activity indicators, 4 setups, auto-save.
+- Two-level UI, live activity indicators, 4 setups, auto-save (Suspend
+  only touches flash when the live config is dirty — the unconditional
+  rewrite made the app-menu gesture take seconds).
+- USB-host device profiles: remembered per VID/PID across reboots, humane
+  binding UI, lean host-port menu; console `u` dumps port identities +
+  the profile table. MIDI thru (including the 200e bus) so a host-port
+  keyboard reaches the bus without switching apps.
 - SysEx protocol v1 (`docs/hoc-midi-sysex.md`) + reference CLI
   (`tools/hoc_sysex.py`): INFO/GET/SET/dump+restore/SAVE/LOAD/FACTORY/
   PANIC/SELECT + Universal Device Inquiry. Parsed from Loop(), not the ISR.
