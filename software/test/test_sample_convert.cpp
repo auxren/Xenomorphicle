@@ -1,5 +1,5 @@
 // Host-side tests for the USB/F32 sample conversion math.
-// Standalone (no gtest): g++ -std=c++17 -Wall -Werror -O2 \
+// Standalone (no gtest): g++ -std=c++17 -Wall -Werror -O2 (one line:)
 //   -o build/test_sample_convert test_sample_convert.cpp && ./build/test_sample_convert
 #include "../src/Audio/sample_convert.h"
 #include <cassert>

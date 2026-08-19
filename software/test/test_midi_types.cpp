@@ -1,5 +1,5 @@
 // Host-side tests for the MIDI note stack and output-port serialization.
-// Standalone (no gtest): g++ -std=c++17 -Wall -Werror -O2 \
+// Standalone (no gtest): g++ -std=c++17 -Wall -Werror -O2 (one line:)
 //   -o build/test_midi_types test_midi_types.cpp && ./build/test_midi_types
 #include "../src/HSMIDITypes.h"
 #include <cassert>

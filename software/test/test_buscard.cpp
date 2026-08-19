@@ -2,7 +2,7 @@
 // 24xx/FRAM wire protocol -- pointer writes, sequential/wrapping reads and
 // writes, pointer persistence across transactions, the WPM empty-probe
 // no-op, lost-STOP recovery, and detached-card behaviour.
-// Standalone (no gtest): g++ -std=c++17 -Wall -Werror -O2 \
+// Standalone (no gtest): g++ -std=c++17 -Wall -Werror -O2 (one line:)
 //   -o build/test_buscard test_buscard.cpp ../src/PresetBusCard.cpp && ./build/test_buscard
 #include <cassert>
 #include <cstdio>
