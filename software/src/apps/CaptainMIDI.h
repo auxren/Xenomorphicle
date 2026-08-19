@@ -59,20 +59,12 @@ using Type = MIDIMapSettings::Type;
 using PitchType = MIDIMapSettings::PitchType;
 using GateType = MIDIMapSettings::GateType;
 
-enum MIDI_OUT_FUNCTION : uint8_t {
-    MIDI_OUT_OFF,
-    MIDI_OUT_NOTE,
-    MIDI_OUT_LEGATO,
-    MIDI_OUT_VELOCITY,
-    MIDI_OUT_MOD,
-    MIDI_OUT_AFTERTOUCH,
-    MIDI_OUT_PITCHBEND,
-
-    MIDI_OUT_FUNCTION_COUNT
+// labels for the CV/trigger -> MIDI engine functions (HSMIDITypes.h)
+const char* const cv_out_fn_names[HS::CVFN_COUNT] = {
+    "--", "Pitch", "FreeN", "CC", "CC14", "Veloc", "Bend", "Aft", "NRPN", "NRP14", "PgmC", "GateN"
 };
-
-const char* const midi_out_functions[MIDI_OUT_FUNCTION_COUNT] = {
-    "--", "Note", "Leg.", "Veloc", "CC", "Aft", "Bend"
+const char* const trig_out_fn_names[HS::TRFN_COUNT] = {
+    "--", "Note", "Trig", "Latch", "CC", "CCLat", "Start", "Stop", "Cont", "Run", "Clock", "Panic"
 };
 
 const char* const midi2cv_label[] = {
@@ -80,26 +72,60 @@ const char* const midi2cv_label[] = {
   "MIDI > E", "MIDI > F", "MIDI > G", "MIDI > H",
 };
 const char* const cv2midi_label[] = {
-  "1 > MIDI", "2 > MIDI", "3 > MIDI", "4 > MIDI",
-  "5 > MIDI", "6 > MIDI", "7 > MIDI", "8 > MIDI",
+  "CV1>MIDI", "CV2>MIDI", "CV3>MIDI", "CV4>MIDI",
+  "CV5>MIDI", "CV6>MIDI", "CV7>MIDI", "CV8>MIDI",
+};
+const char* const trig2midi_label[] = {
+  "TR1>MIDI", "TR2>MIDI", "TR3>MIDI", "TR4>MIDI",
+  "TR5>MIDI", "TR6>MIDI", "TR7>MIDI", "TR8>MIDI",
+};
+
+const char* const captain_off_on[2] = { "Off", "On" };
+const char* const captain_vel_src[9] = {
+  "Fixed", "CV1", "CV2", "CV3", "CV4", "CV5", "CV6", "CV7", "CV8"
+};
+const char* const captain_gate_src[9] = {
+  "TRjack", "CV1", "CV2", "CV3", "CV4", "CV5", "CV6", "CV7", "CV8"
+};
+const char* const captain_clkdiv[16] = {
+  "x1", "x2", "x3", "x4", "x6", "x8", "x12", "x24", "x48", "x96",
+  "x1", "x1", "x1", "x1", "x1", "x1"
 };
 
 // per channel
 const settings::ValueAttributes CaptainSettings[] = {
-  // Assigned function
-  // MIDI-to-CV
+  // 0: Assigned function, MIDI-to-CV
   { 0, 0, HEM_MIDI_MAX_FUNCTION, "", midi_fn_name, settings::STORAGE_TYPE_U8 },
-  // CV-to-MIDI
-  { 0, 0, MIDI_OUT_FUNCTION_COUNT-1, "", midi_out_functions, settings::STORAGE_TYPE_U8 },
+  // 1: CV-to-MIDI
+  { 0, 0, HS::CVFN_COUNT-1, "", cv_out_fn_names, settings::STORAGE_TYPE_U8 },
+  // 2: Trigger-to-MIDI
+  { 0, 0, HS::TRFN_COUNT-1, "", trig_out_fn_names, settings::STORAGE_TYPE_U8 },
 
-  // Channel
+  // 3: Channel
   { 0, 0, 16, "", midi_channels, settings::STORAGE_TYPE_U8 },
-  // Transpose
-  { 0, -24, 24, "", NULL, settings::STORAGE_TYPE_I8 },
-  // Range Low
+  // 4: Transpose
+  { 0, -48, 48, "", NULL, settings::STORAGE_TYPE_I8 },
+  // 5: Range Low
   { 0, 0, 127, "", midi_note_numbers, settings::STORAGE_TYPE_U8 },
-  // Range High
+  // 6: Range High
   { 0, 0, 127, "", midi_note_numbers, settings::STORAGE_TYPE_U8 },
+
+  // 7: Data 1 as note number
+  { 0, 0, 127, "", midi_note_numbers, settings::STORAGE_TYPE_U8 },
+  // 8: Data 1 as plain number (CC#/NRPN LSB)
+  { 0, 0, 127, "", NULL, settings::STORAGE_TYPE_U8 },
+  // 9: Data 2 (on-value / velocity / NRPN MSB)
+  { 0, 0, 127, "", NULL, settings::STORAGE_TYPE_U8 },
+  // 10: Off/On (quantize, legato)
+  { 0, 0, 1, "", captain_off_on, settings::STORAGE_TYPE_U8 },
+  // 11: Velocity source
+  { 0, 0, ADC_CHANNEL_COUNT < 7 ? ADC_CHANNEL_COUNT : 7, "", captain_vel_src, settings::STORAGE_TYPE_U8 },
+  // 12: Clock multiplier
+  { 0, 0, 15, "", captain_clkdiv, settings::STORAGE_TYPE_U8 },
+  // 13: Poly voice
+  { 0, 0, DAC_CHANNEL_COUNT - 1, "", NULL, settings::STORAGE_TYPE_U8 },
+  // 14: Trigger gate source (TR jack or a CV input via ADC threshold)
+  { 0, 0, ADC_CHANNEL_COUNT, "", captain_gate_src, settings::STORAGE_TYPE_U8 },
 };
 
 enum CaptainsKeys : uint16_t {
@@ -109,10 +135,22 @@ enum CaptainsKeys : uint16_t {
   INPUT_MAP_KEY = 1 << 9,
   OUTPUT_MAP_KEY = 2 << 9,
 };
+// USB device profiles are MODULE-level config, not preset state: they live
+// in GLOBALS.CFG ((9<<8) namespace). CAPTAIN.DAT is captured into preset
+// slots and restored by recalls (including boot recall), which would wipe
+// anything stored there. Values signed with 0xA5<<48 so stale or foreign
+// keys can never parse as profiles. Names at +16.
+static constexpr uint16_t DEVICE_PROFILE_KEY = 9 << 8;
+static constexpr uint64_t kProfileMagic = 0xA5ULL << 48;
+static constexpr int kDeviceProfiles = 8;
 
 const char* const midi_messages[7] = {
     "Note", "Off", "CC#", "Aft", "Bend", "SysEx", "Diag"
 };
+
+// Teensy USB device state: nonzero once a host has configured us,
+// cleared on bus reset. The closest thing to "is the computer there".
+extern "C" volatile uint8_t usb_configuration;
 
 //#define MIDI_DIAGNOSTIC
 struct CaptainMIDILog {
@@ -184,52 +222,155 @@ OC_APP_CLASS(AppCaptainMIDI, TWOCCS("MI"), "Captain MIDI", "MIDI I/O"),
   public HSApplication, public SystemExclusiveHandler
 {
 public:
-  OC_APP_INTERFACE_DECLARE(AppCaptainMIDI, 0); // TODO
+    // number of stored setups, and the serialized size of one setup:
+    // all in-maps + all out-ports, one packed uint64 each.
+    // T3 EEPROM cost scales with this — builds with many apps sharing the
+    // pool override it (see platformio.ini; the static_assert in
+    // apps/_config.h is the budget gate)
+#ifndef CAPTAIN_SETUP_COUNT
+#define CAPTAIN_SETUP_COUNT 1
+#endif
+    static constexpr int kNumSetups = CAPTAIN_SETUP_COUNT;
+    static constexpr size_t kSetupBlobWords =
+        MIDIMAP_MAX + HS::MIDIFrame::kOutPorts;
+    // version/active/reserved header + setups (see SaveAppData)
+    static constexpr size_t kCaptainStorageSize =
+        4 + kNumSetups * kSetupBlobWords * sizeof(uint64_t);
+
+#ifdef __IMXRT1062__
+  // T4.x persists to PhzConfig (LittleFS) instead of the EEPROM pool
+  OC_APP_INTERFACE_DECLARE(AppCaptainMIDI, 0);
+#else
+  OC_APP_INTERFACE_DECLARE(AppCaptainMIDI, AppCaptainMIDI::kCaptainStorageSize);
+#endif
 
     static constexpr int MIDI_INDICATOR_COUNTDOWN = 2000;
 
-    OC::menu::ScreenCursor<OC::menu::kScreenLines> cursor;
+    OC::menu::ScreenCursor<OC::menu::kScreenLines> cursor;       // overview rows
+    OC::menu::ScreenCursor<OC::menu::kScreenLines> param_cursor; // detail rows
+
+#if defined(ARDUINO_TEENSY41)
+    static constexpr int kHostRows = 2;   // Host1/Host2 device-profile rows
+#else
+    static constexpr int kHostRows = 0;
+#endif
+    static constexpr int kNumRows =
+        DAC_CHANNEL_COUNT + HS::MIDIFrame::kOutPorts + kHostRows;
+    static constexpr int kFirstHostRow = kNumRows - kHostRows;
 
     void Start() {
-        screen = 0;
+        detail_port = -1;
         display = 0;
-        cursor.Init(0, ADC_CHANNEL_COUNT + DAC_CHANNEL_COUNT - 1);
+        cursor.Init(0, kNumRows - 1);
+        param_cursor.Init(0, 0);
         log_index = 0;
         log_view = 0;
+        active_setup = 0;
+        // seed all setups from the freshly-initialized live state
+        for (int s = 0; s < kNumSetups; ++s) PackSetup(s);
         Reset();
     }
 
-    void Suspend() {
-        StoreData();
-        OnSendSysEx();
+    // pack the live mapping/outports state into setups[s]
+    void PackSetup(int s);  // out-of-class (FLASHMEM + LTO)
+
+    // Clamp a packed in-map blob so stale/garbage EEPROM data can never
+    // index a name table out of bounds (that reads a wild pointer:
+    // garbled draws at best, a hard fault at worst).
+    static uint64_t SanitizeInMapPacked(uint64_t d) {
+        auto byte = [&d](int n) { return uint8_t((d >> (n * 8)) & 0xff); };
+        auto setbyte = [&d](int n, uint8_t v) {
+            d = (d & ~(uint64_t(0xff) << (n * 8))) | (uint64_t(v) << (n * 8));
+        };
+        // function: type in upper 3 bits, CCONTROL (5) is the highest
+        if ((byte(1) >> 5) > 5) setbyte(1, 0);
+        if (byte(2) > 16) setbyte(2, 16);                       // channel
+        const int8_t t = int8_t(byte(4));                       // transpose
+        if (t < -48 || t > 48) setbyte(4, 0);
+        if (byte(5) > 127) setbyte(5, 0);                       // range_low
+        if (byte(6) > 127) setbyte(6, 127);                     // range_high
+        if (byte(3) >= DAC_CHANNEL_COUNT) setbyte(3, 0);        // polyvoice
+        return d;
     }
+
+    // apply setups[s] to the live state
+    void UnpackSetup(int s);  // out-of-class (FLASHMEM + LTO)
+
+    void Suspend() {
+        // Capture dirtiness BEFORE PackSetup: packing copies the live frame
+        // into setups[] which is exactly what LiveConfigDirty compares, so
+        // checking after packing is always-false (review C1 - edits were
+        // silently revertible via menu round-trips). The checksum term also
+        // covers setup switches and SysEx edits to non-active setups.
+        const bool dirty = LiveConfigDirty();
+        PackSetup(active_setup);
+#ifdef __IMXRT1062__
+        // Only hit flash when something is actually unsaved: this runs on
+        // every app-menu entry, and an unconditional CAPTAIN.DAT rewrite
+        // (sector erases included) made the menu gesture take seconds.
+        if (dirty || LiveChecksum() != saved_checksum) StoreData();
+#endif
+#if defined(ARDUINO_TEENSY41)
+        // T41 only: device profiles need the USB host ports
+        if (profiles_dirty) PersistProfiles();  // debounce dies with DoLoop
+#endif
+        // dump-to-host on suspend is the Orin workflow contract, but only
+        // when a host is actually configured to hear it
+        if (usb_configuration) OnSendSysEx();
+    }
+
+#ifdef __IMXRT1062__
     void StoreData() {
+        PhzConfig::load_config("CAPTAIN.DAT");  // own the map before writing
         PhzConfig::setValue(SETUP_KEY, active_setup);
-        StoreSetup();
+        for (int s = 0; s < kNumSetups; ++s) {
+          for (int i = 0; i < MIDIMAP_MAX; ++i)
+            PhzConfig::setValue(INPUT_MAP_KEY + i + s*MIDIMAP_MAX, setups[s].inmaps[i]);
+          for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+            PhzConfig::setValue(OUTPUT_MAP_KEY + i + s*HS::MIDIFrame::kOutPorts, setups[s].outports[i]);
+        }
         PhzConfig::save_config("CAPTAIN.DAT");
     }
     void Resume() {
         PhzConfig::load_config("CAPTAIN.DAT");
         uint64_t data = 0;
         PhzConfig::getValue(SETUP_KEY, data);
-        active_setup = data;
-        SelectSetup(get_setup_number(), 0);
+        active_setup = constrain((int)data, 0, kNumSetups - 1);
+        for (int s = 0; s < kNumSetups; ++s) {
+          for (int i = 0; i < MIDIMAP_MAX; ++i)
+            if (PhzConfig::getValue(INPUT_MAP_KEY + i + s*MIDIMAP_MAX, data))
+              setups[s].inmaps[i] = data;
+          for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+            if (PhzConfig::getValue(OUTPUT_MAP_KEY + i + s*HS::MIDIFrame::kOutPorts, data))
+              setups[s].outports[i] = data;
+        }
+        UnpackSetup(active_setup);
+        LeaveDetail();
+        saved_checksum = live_checksum_prev = LiveChecksum();
     }
+#else
+    // T3.x: setups[] persist via SaveAppData/RestoreAppData (EEPROM pool)
+    void Resume() {
+        UnpackSetup(active_setup);
+        LeaveDetail();
+        saved_checksum = live_checksum_prev = LiveChecksum();
+    }
+#endif
 
     void Controller() {
-        // Incoming MIDI is polled from Loop() (main-loop context), not here:
-        // this runs in the 16.67kHz app ISR, and USBHost_t36 is not
-        // interrupt-safe — polling the host port from here locks the module.
+        // MIDI polling lives in DoLoop() (loop context): USBHost_t36 is NOT
+        // ISR-safe -- reading usbHostMIDI from this 16.67kHz ISR corrupts
+        // queues shared with the USB host interrupts and locks the module
+        // the moment a real device delivers traffic.
 
-        // Convert CV inputs to outgoing MIDI messages
-        process_midi_out();
+        // Convert CV/trigger inputs to outgoing MIDI messages
+        frame.MIDIState.ProcessOutputs(frame);
 
         // set CV outputs from MIDI mappings
         for (int ch = 0; ch < DAC_CHANNEL_COUNT; ch++)
         {
             // Handle clock timing
             if (indicator_in[ch] > 0) --indicator_in[ch];
-            if (indicator_out[ch] > 0) --indicator_out[ch];
 
             MIDIMapping &map = frame.MIDIState.mapping[ch];
 
@@ -240,110 +381,256 @@ public:
     void View() const;
     void MainView() const {
         if (copy_mode) DrawCopyScreen();
-        else if (display == 0) DrawSetupScreens();
-        else DrawLogScreen();
+        else if (display) DrawLogScreen();
+        else if (detail_port >= 0) DrawDetail();
+        else DrawOverview();
+        // popups poked from this app (device recognition, preset engine)
+        // must be drawn here too - only Quadrants drew them before, so
+        // they fired invisibly with Captain active
+        if (OC::CORE::ticks - HS::popup_tick < HEMISPHERE_CURSOR_TICKS * 4)
+            HS::DrawPopup(0, 0, CursorBlink());
     }
 
-    void EncoderEdit(int dir) {
-      int pos = cursor.cursor_pos();
-      bool input = pos < DAC_CHANNEL_COUNT;
-      MIDIMapping &m = input ?
-          frame.MIDIState.mapping[pos] :
-          frame.MIDIState.outmap[pos - DAC_CHANNEL_COUNT];
+    // ---- two-level navigation ----
+    // Overview: one row per port; turn R to scroll, press R to open the port.
+    // Detail: all parameters of one port; turn R scrolls, press R edits,
+    // press L goes back. Turn L: switch setup (overview) / switch port
+    // (detail) / scroll (log view).
 
-        switch (screen) {
+    int DetailParamCount(int row) const {
+#if defined(ARDUINO_TEENSY41)
+        // Device / Id / Bind + one row per STORED profile (no empty clutter)
+        if (row >= kFirstHostRow) return 3 + StoredProfileCount();
+#endif
+        if (row < DAC_CHANNEL_COUNT) return 6;
+        const int p = row - DAC_CHANNEL_COUNT;
+        return (p >= HS::MIDIFrame::kCVOutPorts) ? 10 : 10;
+    }
+
+    void EnterDetail(int row) {
+        detail_port = row;
+        param_cursor.Init(0, DetailParamCount(row) - 1);
+    }
+    void LeaveDetail() { detail_port = -1; }
+
+    const char* DetailParamLabel(int row, int par) const {
+#if defined(ARDUINO_TEENSY41)
+        if (row >= kFirstHostRow) {
+            static const char* const host_labels[3] = { "Device", "Id", "Bind" };
+            if (par < 3) return host_labels[par];
+            // stored-profile rows: the captured device name
+            const DeviceProfile &pr = profiles[NthProfile(par - 3)];
+            return pr.name[0] ? pr.name : "device";
+        }
+#endif
+        static const char* const in_labels[6] = {
+            "Assign", "Channel", "Transpose", "Range Low", "Range High", "Voice" };
+        static const char* const cv_labels[10] = {
+            "Function", "Channel", "Data 1", "Data 2", "Transpose",
+            "Range Low", "Range High", "Quantize", "Legato", "Vel Source" };
+        static const char* const tr_labels[10] = {
+            "Function", "Channel", "Data 1", "Data 2", "Transpose",
+            "Range Low", "Range High", "Vel Source", "Clock Mult",
+            "Gate Src" };
+        if (row < DAC_CHANNEL_COUNT) return in_labels[par];
+        const int p = row - DAC_CHANNEL_COUNT;
+        return (p >= HS::MIDIFrame::kCVOutPorts) ? tr_labels[par] : cv_labels[par];
+    }
+
+    // attr index into CaptainSettings for the value column / edit icon
+    int DetailParamAttr(int row, int par) const {
+#if defined(ARDUINO_TEENSY41)
+        if (row >= kFirstHostRow) return 0;
+#endif
+        if (row < DAC_CHANNEL_COUNT) {
+            static const uint8_t a[6] = { 0, 3, 4, 5, 6, 13 };
+            return a[par];
+        }
+        const int p = row - DAC_CHANNEL_COUNT;
+        const bool is_trig = p >= HS::MIDIFrame::kCVOutPorts;
+        const HS::MIDIOutPort &o = frame.MIDIState.outports[p];
+        if (par == 0) return is_trig ? 2 : 1;
+        if (par == 2) { // data1: note names when it denotes a note
+            const bool note_d1 = is_trig
+                ? (o.function >= HS::TRFN_NOTE && o.function <= HS::TRFN_NOTE_LATCH)
+                : (o.function == HS::CVFN_GATE_NOTE);
+            return note_d1 ? 7 : 8;
+        }
+        if (is_trig) {
+            static const uint8_t a[10] = { 2, 3, 8, 9, 4, 5, 6, 11, 12, 14 };
+            return a[par];
+        }
+        static const uint8_t a[10] = { 1, 3, 8, 9, 4, 5, 6, 10, 10, 11 };
+        return a[par];
+    }
+
+    int DetailParamValue(int row, int par) const {
+#if defined(ARDUINO_TEENSY41)
+        if (row >= kFirstHostRow) return 0;   // custom-drawn in DrawDetail
+#endif
+        if (row < DAC_CHANNEL_COUNT) {
+            MIDIMapping &m = frame.MIDIState.mapping[row];
+            switch (par) {
+              case 0: return m.get_type() | m.get_subtype();
+              case 1: return m.get_channel();
+              case 2: return m.get_transpose();
+              case 3: return m.get_low();
+              case 4: return m.get_high();
+              case 5: return m.get_voice();
+            }
+            return 0;
+        }
+        const int p = row - DAC_CHANNEL_COUNT;
+        const bool is_trig = p >= HS::MIDIFrame::kCVOutPorts;
+        const HS::MIDIOutPort &o = frame.MIDIState.outports[p];
+        switch (par) {
+          case 0: return o.function;
+          case 1: return o.channel;
+          case 2: return o.data1;
+          case 3: return o.data2;
+          case 4: return o.transpose;
+          case 5: return o.range_low;
+          case 6: return o.range_high;
+        }
+        if (is_trig) {
+            if (par == 7) return o.velocity_source();
+            if (par == 8) return o.clkdiv;
+            if (par == 9) // gate source: 0 = TR jack, 1..N = CV input
+                return (o.flags & HS::MIDIOutSettings::FLAG_CV_GATE)
+                    ? (o.clkdiv % HS::MIDIFrame::kCVOutPorts) + 1 : 0;
+        } else {
+            if (par == 7) return (o.flags & HS::MIDIOutSettings::FLAG_QUANTIZE) ? 1 : 0;
+            if (par == 8) return (o.flags & HS::MIDIOutSettings::FLAG_LEGATO) ? 1 : 0;
+            if (par == 9) return o.velocity_source();
+        }
+        return 0;
+    }
+
+    void EditDetailParam(int row, int par, int dir) {
+#if defined(ARDUINO_TEENSY41)
+        if (row >= kFirstHostRow) {
+            const int port = row - kFirstHostRow;
+            if (par == 2) {                     // Bind: off / Setup 1..4
+                const int cur = PortBinding(port);
+                int next = constrain(cur + dir, 0, kNumSetups);
+                if (cur == 0 && dir != 0)       // first detent, either way:
+                    next = active_setup + 1;    // bind to what you're hearing
+                if (next == 0) {
+                    UnbindPort(port);
+                    EnterDetail(row);   // list shrank: re-seat the cursor
+                } else {
+                    BindPort(port, uint8_t(next - 1));
+                    char msg[16];
+                    snprintf(msg, sizeof(msg), "Bound: Set %d", next);
+                    HS::PokePopup(HS::MESSAGE_POPUP, msg);
+                }
+            } else if (par >= 3 && par - 3 < StoredProfileCount()) {
+                DeviceProfile &pr = profiles[NthProfile(par - 3)];
+                const int next = constrain(pr.setup + 1 + dir, 0, kNumSetups);
+                if (next == 0) {                // off = delete, worded not hidden
+                    pr = {};
+                    MarkProfilesDirty();
+                    EnterDetail(row);           // list shrank: re-seat cursor
+                } else {
+                    pr.setup = uint8_t(next - 1);
+                    MarkProfilesDirty();
+                }
+            }
+            return;                             // Device/Id are read-only
+        }
+#endif
+        if (row < DAC_CHANNEL_COUNT) {
+            MIDIMapping &m = frame.MIDIState.mapping[row];
+            switch (par) {
+              case 0: m.AdjustFunction(dir); break;
+              case 1: m.AdjustChannel(dir); break;
+              case 2: m.AdjustTranspose(dir); break;
+              case 3: m.AdjustRangeLow(dir); break;
+              case 4: m.AdjustRangeHigh(dir); break;
+              case 5: m.AdjustVoice(dir); break;
+            }
+            return;
+        }
+        const int p = row - DAC_CHANNEL_COUNT;
+        const bool is_trig = p >= HS::MIDIFrame::kCVOutPorts;
+        HS::MIDIOutPort &o = frame.MIDIState.outports[p];
+        const int fn_count = is_trig ? HS::TRFN_COUNT : HS::CVFN_COUNT;
+        const int max_vel_src = ADC_CHANNEL_COUNT < 7 ? ADC_CHANNEL_COUNT : 7;
+        auto edit_vel_src = [&](int d) {
+            int src = constrain(int(o.velocity_source()) + d, 0, max_vel_src);
+            o.flags = (o.flags & ~HS::MIDIOutSettings::VEL_SOURCE_MASK)
+                    | (src << HS::MIDIOutSettings::VEL_SOURCE_SHIFT);
+        };
+        switch (par) {
           case 0:
-            if (input)
-              m.AdjustFunction(dir);
-            else
-              m.AdjustType(dir); // TODO
+            o.function = constrain(o.function + dir, 0, fn_count - 1);
+            o.ResetRuntime();
+            break;
+          case 1: o.channel = constrain(o.channel + dir, 0, 15); break;
+          case 2: o.data1 = constrain(o.data1 + dir, 0, 127); break;
+          case 3: o.data2 = constrain(o.data2 + dir, 0, 127); break;
+          case 4: o.transpose = constrain(o.transpose + dir, -48, 48); break;
+          case 5: o.range_low = constrain(o.range_low + dir, 0, o.range_high); break;
+          case 6: o.range_high = constrain(o.range_high + dir, o.range_low, 127); break;
+          default:
+            if (is_trig) {
+                if (par == 7) edit_vel_src(dir);
+                if (par == 8) o.clkdiv = constrain(o.clkdiv + dir, 0, 15);
+                if (par == 9) {
+                    const int cur = (o.flags & HS::MIDIOutSettings::FLAG_CV_GATE)
+                        ? (o.clkdiv % HS::MIDIFrame::kCVOutPorts) + 1 : 0;
+                    const int v = constrain(cur + dir, 0, ADC_CHANNEL_COUNT);
+                    if (v == 0) {
+                        o.flags &= ~HS::MIDIOutSettings::FLAG_CV_GATE;
+                    } else {
+                        o.flags |= HS::MIDIOutSettings::FLAG_CV_GATE;
+                        o.clkdiv = v - 1;
+                    }
+                }
+            } else {
+                if (par == 7 && dir) o.flags ^= HS::MIDIOutSettings::FLAG_QUANTIZE;
+                if (par == 8 && dir) o.flags ^= HS::MIDIOutSettings::FLAG_LEGATO;
+                if (par == 9) edit_vel_src(dir);
+            }
+            break;
+        }
+    }
 
-            // if (input && m.IsCC())
-            //   m.AutoLearn(); // learn
-            break;
-          case 1:
-            m.AdjustChannel(dir);
-            break;
-          case 2:
-            m.AdjustTranspose(dir);
-            break;
-          case 3:
-            m.AdjustRangeLow(dir);
-            break;
-          case 4:
-            m.AdjustRangeHigh(dir);
-            break;
-          default: break;
-        }
-    }
-    void MoveCursor(int dir) {
-        cursor.Scroll(dir);
-    }
-
-    void StoreSetup() {
-        for (int i = 0; i < MIDIMAP_MAX; ++i) {
-          PhzConfig::setValue(INPUT_MAP_KEY + i + active_setup*MIDIMAP_MAX,
-              PackPackables(frame.MIDIState.mapping[i]));
-        }
-        for (int i = 0; i < ADC_CHANNEL_COUNT; ++i) {
-          PhzConfig::setValue(OUTPUT_MAP_KEY + i + active_setup*ADC_CHANNEL_COUNT,
-              PackPackables(frame.MIDIState.outmap[i]));
-        }
-    }
-    void SelectSetup(int setup_number, int new_screen = -1) {
+    void SelectSetup(int setup_number) {
         // moving to another setup?
         if (setup_number != get_setup_number()) {
-          // store current settings
-          StoreSetup();
-
-          // Load from config file
+          PackSetup(active_setup); // store current settings
           active_setup = setup_number;
-          uint64_t data = 0;
-          for (int i = 0; i < MIDIMAP_MAX; ++i) {
-            if (!PhzConfig::getValue(INPUT_MAP_KEY + i + active_setup*MIDIMAP_MAX, data)) {
-              frame.MIDIState.Init();
-              break;
-            }
-            UnpackPackables(data, frame.MIDIState.mapping[i]);
-          }
-          for (int i = 0; i < ADC_CHANNEL_COUNT; ++i) {
-            if (!PhzConfig::getValue(OUTPUT_MAP_KEY + i + active_setup*ADC_CHANNEL_COUNT, data)) {
-              frame.MIDIState.Init();
-              break;
-            }
-            UnpackPackables(data, frame.MIDIState.outmap[i]);
-          }
+          UnpackSetup(active_setup);
           Reset();
         }
-
-        // Screen switching, default to same
-        if (new_screen == -1) new_screen = screen;
-
-        screen = new_screen;
     }
 
-    void SwitchScreenOrLogView(int dir) {
-        if (display == 0) {
-            // Switch screen
-            int new_screen = constrain(screen + dir, 0, 4);
-            SelectSetup(get_setup_number(), new_screen);
-        } else {
+    void LeftEncoderTurn(int dir) {
+        if (display) {
             // Scroll Log view
             if (log_index > 6) log_view = constrain(log_view + dir, 0, log_index - 6);
+        } else if (detail_port >= 0) {
+            // browse adjacent ports without leaving the editor
+            const int row = constrain(detail_port + dir, 0, kNumRows - 1);
+            if (row != detail_port) EnterDetail(row);
+        } else {
+            SwitchSetup(dir);
         }
     }
 
     void SwitchSetup(int dir) {
         if (copy_mode) {
-            copy_setup_target = constrain(copy_setup_target + dir, 0, 3);
+            copy_setup_target = constrain(copy_setup_target + dir, 0, kNumSetups - 1);
         } else {
-            int new_setup = constrain(get_setup_number() + dir, 0, 3);
+            int new_setup = constrain(get_setup_number() + dir, 0, kNumSetups - 1);
             SelectSetup(new_setup);
         }
     }
 
     void ToggleDisplay() {
         if (copy_mode) copy_mode = 0;
+        else if (detail_port >= 0) LeaveDetail(); // back to overview
         else display = 1 - display;
     }
 
@@ -352,70 +639,761 @@ public:
         for (int ch = 0; ch < DAC_CHANNEL_COUNT; ch++)
         {
             note_in[ch] = -1;
-            note_out[ch] = -1;
             indicator_in[ch] = 0;
-            indicator_out[ch] = 0;
             Out(ch, 0);
         }
         frame.MIDIState.clock_count = 0;
     }
 
+    // Queue a panic; the MIDI traffic is sent from Loop(), not the ISR/UI
     void Panic() {
         Reset();
-        auto &hMIDI = HS::frame.MIDIState;
+        frame.MIDIState.panic_request = true;
+    }
 
-        // Send all notes off on every channel
-        for (int note = 0; note < 128; note++)
-        {
-            for (int channel = 0; channel < 16; channel++)
-            {
-                hMIDI.SendNoteOff(channel, note);
+    // build+send one protocol frame: F0 7D 62 4D <ver> <cmd> <payload> F7
+    void SendSyxFrame(uint8_t cmd, const uint8_t *payload, uint8_t plen) {
+        uint8_t buf[64];
+        uint8_t n = 0;
+        buf[n++] = 0xF0; buf[n++] = 0x7D; buf[n++] = 0x62; buf[n++] = 'M';
+        buf[n++] = SYX_PROTO_VERSION;
+        buf[n++] = cmd;
+        for (uint8_t i = 0; i < plen && n < 62; ++i) buf[n++] = payload[i] & 0x7f;
+        buf[n++] = 0xF7;
+        usbMIDI.sendSysEx(n, buf, true);
+    }
+
+    // the 7 in-map / 9 out-port parameter values from a packed blob,
+    // encoded exactly as GET_PARAM returns them
+    static void InMapParams(uint64_t d, uint8_t out[7]) {
+        const uint8_t fcc = d & 0xff;
+        out[0] = uint8_t((d >> 8) & 0xff) >> 5;              // type
+        out[1] = (fcc == 0xff) ? 127 : (fcc & 0x7f);         // subtype/CC
+        out[2] = (d >> 16) & 0xff;                           // channel
+        out[3] = uint8_t(int8_t((d >> 32) & 0xff) + 64);     // transpose+64
+        out[4] = (d >> 40) & 0x7f;                           // range_low
+        out[5] = (d >> 48) & 0x7f;                           // range_high
+        out[6] = (d >> 24) & 0xff;                           // polyvoice
+    }
+    static void OutPortParams(uint64_t d, uint8_t out[9]) {
+        HS::MIDIOutSettings tmp;
+        tmp.Unpack(d);
+        out[0] = tmp.function; out[1] = tmp.channel;
+        out[2] = tmp.data1; out[3] = tmp.data2;
+        out[4] = uint8_t(tmp.transpose + 64);
+        out[5] = tmp.range_low; out[6] = tmp.range_high;
+        out[7] = tmp.flags; out[8] = tmp.clkdiv;
+    }
+
+    // full-setup dump as a stream of DUMP_DATA packets + DUMP_END
+    void SendDump(uint8_t s) {
+        if (s == active_setup) PackSetup(s); // canonicalize live edits
+        constexpr int kRecBytes =
+            (2 + kGlobalParamCount) + MIDIMAP_MAX * (2 + kInParamCount)
+            + HS::MIDIFrame::kOutPorts * (2 + kOutParamCount);
+        uint8_t rec[kRecBytes];
+        int rn = 0;
+
+        rec[rn++] = CLS_GLOBAL; rec[rn++] = 0;
+        for (uint8_t par = 0; par < kGlobalParamCount; ++par) {
+            uint8_t v = 0;
+            get_param(CLS_GLOBAL, 0, par, v);
+            rec[rn++] = v;
+        }
+        for (int i = 0; i < MIDIMAP_MAX; ++i) {
+            rec[rn++] = CLS_IN; rec[rn++] = i;
+            InMapParams(setups[s].inmaps[i], &rec[rn]);
+            rn += kInParamCount;
+        }
+        for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) {
+            const bool trig = i >= HS::MIDIFrame::kCVOutPorts;
+            rec[rn++] = trig ? CLS_TR : CLS_CV;
+            rec[rn++] = trig ? (i - HS::MIDIFrame::kCVOutPorts) : i;
+            OutPortParams(setups[s].outports[i], &rec[rn]);
+            rn += kOutParamCount;
+        }
+
+        // chunk whole records into <=49-byte packet payloads
+        uint8_t xorsum = 0;
+        for (int i = 0; i < rn; ++i) xorsum ^= rec[i];
+        // pre-count packets
+        uint8_t total = 0;
+        for (int i = 0; i < rn; ) {
+            int take = 0;
+            while (i + take < rn) {
+                const uint8_t cls = rec[i + take];
+                const int rlen = 2 + ((cls == CLS_GLOBAL) ? kGlobalParamCount
+                               : (cls == CLS_IN) ? kInParamCount : kOutParamCount);
+                if (take + rlen > 49) break;
+                take += rlen;
+            }
+            i += take;
+            ++total;
+        }
+        uint8_t seq = 0;
+        for (int i = 0; i < rn; ) {
+            uint8_t pkt[52];
+            int n = 0;
+            pkt[n++] = s; pkt[n++] = seq; pkt[n++] = total;
+            while (i < rn) {
+                const uint8_t cls = rec[i];
+                const int rlen = 2 + ((cls == CLS_GLOBAL) ? kGlobalParamCount
+                               : (cls == CLS_IN) ? kInParamCount : kOutParamCount);
+                if (n - 3 + rlen > 49) break;
+                memcpy(&pkt[n], &rec[i], rlen);
+                n += rlen;
+                i += rlen;
+            }
+            SendSyxFrame(SYX_DUMP_DATA, pkt, n);
+            ++seq;
+        }
+        const uint8_t endpkt[3] = {s, seq, uint8_t(xorsum & 0x7f)};
+        SendSyxFrame(SYX_DUMP_END, endpkt, 3);
+    }
+
+    // ---- auto-save ----
+    // Persist every change (UI or SysEx) once edits settle for a few
+    // seconds. Debounced so encoder sweeps don't hammer the EEPROM.
+    static constexpr uint8_t kAutoSaveSettleSecs = 3;
+    uint32_t autosave_last_check = 0;
+    uint32_t live_checksum_prev = 0;
+    uint32_t saved_checksum = 0;
+    uint8_t settle_seconds = 0;
+
+    uint32_t LiveChecksum() const;  // out-of-class (FLASHMEM + LTO)
+
+    void PersistNow() {
+        PackSetup(active_setup);
+#ifdef __IMXRT1062__
+        StoreData();
+#else
+        OC::save_app_data(); // global settings + every app's EEPROM chunk
+#endif
+        saved_checksum = live_checksum_prev = LiveChecksum();
+        settle_seconds = 0;
+    }
+
+    void AutoSaveTick() {
+        const uint32_t now = millis();
+        if (now - autosave_last_check < 1000) return;
+        autosave_last_check = now;
+        const uint32_t cs = LiveChecksum();
+        if (cs != live_checksum_prev) {
+            live_checksum_prev = cs; // still being edited; restart settle timer
+            settle_seconds = 0;
+        } else if (cs != saved_checksum && ++settle_seconds >= kAutoSaveSettleSecs) {
+            PersistNow();
+        }
+    }
+
+    bool LiveConfigDirty() const {
+        for (int i = 0; i < MIDIMAP_MAX; ++i)
+            if (frame.MIDIState.mapping[i].Pack() != setups[active_setup].inmaps[i]) return true;
+        for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+            if (frame.MIDIState.outports[i].Pack() != setups[active_setup].outports[i]) return true;
+        return false;
+    }
+
+#if defined(ARDUINO_TEENSY41)
+    // ---- USB device profiles -------------------------------------------
+    struct DeviceProfile {
+        uint16_t vid = 0, pid = 0;
+        uint8_t setup = 0;
+        char name[9] = "";   // 8 chars from the USB product string
+    };
+    DeviceProfile profiles[kDeviceProfiles];
+    uint16_t seen_vid[2] = {0, 0}, seen_pid[2] = {0, 0};
+    uint32_t next_dev_poll_ms = 0;
+
+    // profiles persist in GLOBALS.CFG; after writing, CAPTAIN.DAT is
+    // reloaded so this app's expected map residency is restored.
+    // Deferred: edits mark dirty, DoLoop persists after they settle, so
+    // Bind detents never do file I/O in the UI path.
+    bool profiles_dirty = false;
+    uint32_t profiles_dirty_ms = 0;
+    void MarkProfilesDirty() {
+        profiles_dirty = true;
+        profiles_dirty_ms = millis();
+    }
+    FLASHMEM void PersistProfiles() {
+        profiles_dirty = false;
+        PhzConfig::load_config();
+        for (int i = 0; i < kDeviceProfiles; ++i) {
+            uint64_t v = 0;
+            if (profiles[i].vid)
+                v = kProfileMagic | (uint64_t(profiles[i].vid) << 32) |
+                    (uint64_t(profiles[i].pid) << 16) | profiles[i].setup;
+            PhzConfig::setValue(DEVICE_PROFILE_KEY + i, v);
+            uint64_t nm = 0;
+            memcpy(&nm, profiles[i].name, 8);
+            PhzConfig::setValue(DEVICE_PROFILE_KEY + 16 + i, nm);
+        }
+        PhzConfig::save_config();
+        PhzConfig::load_config("CAPTAIN.DAT");
+    }
+    // boot-time: other apps' Init may have loaded their own files first,
+    // so take the GLOBALS map explicitly rather than assuming residency
+    FLASHMEM void LoadProfiles() {
+        PhzConfig::load_config();
+        uint64_t data = 0;
+        for (int i = 0; i < kDeviceProfiles; ++i) {
+            profiles[i] = {};
+            if (PhzConfig::getValue(DEVICE_PROFILE_KEY + i, data) &&
+                (data >> 48) == 0xA5) {
+                profiles[i].vid = (data >> 32) & 0xFFFF;
+                profiles[i].pid = (data >> 16) & 0xFFFF;
+                profiles[i].setup = constrain((int)(data & 0xFF), 0, kNumSetups - 1);
+                if (PhzConfig::getValue(DEVICE_PROFILE_KEY + 16 + i, data)) {
+                    memcpy(profiles[i].name, &data, 8);
+                    profiles[i].name[8] = 0;
+                }
             }
         }
     }
 
-    /* When the app is suspended, it sends out a system exclusive dump, generated here */
+    int StoredProfileCount() const {
+        int n = 0;
+        for (int i = 0; i < kDeviceProfiles; ++i)
+            if (profiles[i].vid) ++n;
+        return n;
+    }
+    int NthProfile(int n) const {   // index of the nth stored profile
+        for (int i = 0; i < kDeviceProfiles; ++i)
+            if (profiles[i].vid && n-- == 0) return i;
+        return 0;
+    }
+
+    int FindProfile(uint16_t vid, uint16_t pid) const {
+        for (int i = 0; i < kDeviceProfiles; ++i)
+            if (profiles[i].vid == vid && profiles[i].pid == pid && vid) return i;
+        return -1;
+    }
+    // bind the device on a host port to a setup; creates or updates the
+    // profile (name captured from the USB product string). -1 = no device
+    // or table full.
+    FLASHMEM int BindPort(int port, uint8_t setup) {
+        const uint16_t vid = usbHostMIDI[port].idVendor();
+        const uint16_t pid = usbHostMIDI[port].idProduct();
+        if (!vid) return -1;
+        int slot = FindProfile(vid, pid);
+        if (slot < 0)
+            for (int i = 0; i < kDeviceProfiles && slot < 0; ++i)
+                if (!profiles[i].vid) slot = i;
+        if (slot < 0) return -1;   // table full: worded as 'full' in the UI
+        profiles[slot] = { vid, pid, uint8_t(setup % kNumSetups), "" };
+        const uint8_t *pn = usbHostMIDI[port].product();
+        for (int c = 0; pn && pn[c] && c < 8; ++c)
+            profiles[slot].name[c] = (char)pn[c];
+        MarkProfilesDirty();
+        return slot;
+    }
+    FLASHMEM void UnbindPort(int port) {
+        const int i = FindProfile(usbHostMIDI[port].idVendor(),
+                                  usbHostMIDI[port].idProduct());
+        if (i >= 0) {
+            profiles[i] = {};
+            MarkProfilesDirty();
+        }
+    }
+    // bind state of the device on a host port: 0 = unbound, 1..4 = setup+1
+    int PortBinding(int port) const {
+        const int i = FindProfile(usbHostMIDI[port].idVendor(),
+                                  usbHostMIDI[port].idProduct());
+        return (i >= 0) ? profiles[i].setup + 1 : 0;
+    }
+
+    FLASHMEM void DumpProfiles() {
+        for (int i = 0; i < kDeviceProfiles; ++i)
+            if (profiles[i].vid)
+                serial_printf("profile %d: %04X:%04X setup=%d name=%s\n", i,
+                              profiles[i].vid, profiles[i].pid,
+                              profiles[i].setup, profiles[i].name);
+        serial_printf("PortBinding(0)=%d PortBinding(1)=%d active_setup=%d\n",
+                      PortBinding(0), PortBinding(1), active_setup);
+    }
+
+    // loop context: watch the host ports; a newly arrived known device
+    // switches to its bound setup
+    FLASHMEM void PollDeviceProfiles() {
+        if (millis() < next_dev_poll_ms) return;
+        next_dev_poll_ms = millis() + 500;   // let the product string arrive
+        for (int port = 0; port < 2; ++port) {
+            const uint16_t vid = usbHostMIDI[port].idVendor();
+            const uint16_t pid = usbHostMIDI[port].idProduct();
+            if (vid == seen_vid[port] && pid == seen_pid[port]) continue;
+            seen_vid[port] = vid;
+            seen_pid[port] = pid;
+            if (!vid) continue;                    // departure
+            const int i = FindProfile(vid, pid);
+            if (i < 0) {
+                // recognition feedback only, no action implied
+                HS::PokePopup(HS::MESSAGE_POPUP, RowFunctionName(kFirstHostRow + port));
+            } else if (profiles[i].setup == active_setup) {
+                HS::PokePopup(HS::MESSAGE_POPUP, "Setup active");
+            } else if (LiveConfigDirty()) {
+                // auto-anything must never eat unsaved edits
+                HS::PokePopup(HS::MESSAGE_POPUP, "Held: unsaved");
+            } else {
+                SelectSetup(profiles[i].setup);
+                char msg[16];
+                snprintf(msg, sizeof(msg), "%s>Set%d",
+                         profiles[i].name[0] ? profiles[i].name : "Device",
+                         profiles[i].setup + 1);
+                HS::PokePopup(HS::MESSAGE_POPUP, msg);
+            }
+        }
+    }
+#endif  // ARDUINO_TEENSY41
+
+    // forward an incoming message to the other interfaces (source excluded),
+    // honoring the same thru mask Quadrants uses -- the bus included, so a
+    // keyboard on the USB host jack can play bus-MIDI modules (259e etc.)
+    FLASHMEM void midi_thru(const HS::MIDIMessage &msg, uint8_t exclude) {
+        exclude |= HS::midi_thru_disable;
+        if (~exclude & mMaskUSBDev)
+            usbMIDI.send(msg.message, msg.data1, msg.data2, msg.channel, 0);
+#ifdef ARDUINO_TEENSY41
+        if (~exclude & mMaskUSBHost)
+            usbHostMIDI[0].send(msg.message, msg.data1, msg.data2, msg.channel);
+        if (~exclude & mMaskUSBHost2)
+            usbHostMIDI[1].send(msg.message, msg.data1, msg.data2, msg.channel);
+        if (~exclude & mMaskSerial)
+            MIDI1.send((midi::MidiType)msg.message, msg.data1, msg.data2, msg.channel);
+#endif
+        if (~exclude & mMaskBus)
+            OC::PresetBus::QueueMidiTx(msg.message, msg.channel, msg.data1, msg.data2);
+    }
+
+    // runs in the main loop (not the ISR): drains deferred work
+    FLASHMEM void DoLoop() {
+        auto &hMIDI = frame.MIDIState;
+
+#if defined(ARDUINO_TEENSY41)
+        PollDeviceProfiles();
+        if (profiles_dirty && millis() - profiles_dirty_ms > 1500)
+            PersistProfiles();
+#endif
+
+        // MIDI input, polled here in loop context (see Controller())
+        int budget = 8;
+        while (budget-- > 0 && poll_midi(usbMIDI, mMaskUSBDev)) {}
+#ifdef ARDUINO_TEENSY41
+        budget = 8;
+        while (budget-- > 0 && poll_midi(usbHostMIDI[0], mMaskUSBHost)) {}
+        budget = 8;
+        while (budget-- > 0 && poll_midi(usbHostMIDI[1], mMaskUSBHost2)) {}
+        budget = 8;
+        while (budget-- > 0 && poll_midi(MIDI1, mMaskSerial)) {}
+        budget = 8;
+        while (budget-- > 0 && poll_bus_midi()) {}
+#endif
+
+        if (syx_rx_len) {
+            HandleSysEx(syx_rx_buf, syx_rx_len);
+            syx_rx_len = 0;
+        }
+
+        AutoSaveTick();
+
+        // surface engine sends in the log display
+        HS::MIDIFrame::OutLogEvent e;
+        while (hMIDI.PopOutLog(e)) {
+            if (e.message == 4) { // bend: reassemble signed value
+                const int bend = ((e.data2 << 7) | e.data1) - 8192;
+                UpdateLog(0, e.port, 4, e.channel, 0, bend);
+            } else {
+                UpdateLog(0, e.port, e.message, e.channel, e.data1, e.data2);
+            }
+        }
+
+        if (hMIDI.panic_request) {
+            hMIDI.panic_request = false;
+            hMIDI.PanicOutputs(); // targeted note-offs for engine notes
+            for (int ch = 0; ch < 16; ++ch) {
+                hMIDI.SendCC(ch, 120, 0); // All Sound Off
+                hMIDI.SendCC(ch, 123, 0); // All Notes Off
+            }
+        }
+
+        if (!syx_pending) return;
+        const uint8_t pending = syx_pending;
+        syx_pending = 0;
+
+        if (pending & PEND_REPLY) {
+            SendSyxFrame(syx_reply[0], &syx_reply[1], syx_reply_len - 1);
+        }
+        if (pending & PEND_IDENTITY) {
+            // Universal Device Inquiry reply: mfr 7D, family "hOC", fw version
+            const uint8_t reply[] = {
+                0xF0, 0x7E, 0x7F, 0x06, 0x02,
+                0x7D, 'h', 'O', 'C', SYX_PROTO_VERSION,
+                2, 0, 1, 0, 0xF7,
+            };
+            usbMIDI.sendSysEx(sizeof(reply), reply, true);
+        }
+        if (pending & PEND_INFO) {
+            const uint8_t info[] = {
+                1, // schema
+                2, 0, 1, // firmware version
+                MIDIMAP_MAX,
+                HS::MIDIFrame::kCVOutPorts, HS::MIDIFrame::kTrigOutPorts,
+                kNumSetups, uint8_t(active_setup),
+                uint8_t(LiveConfigDirty() ? 1 : 0),
+            };
+            SendSyxFrame(SYX_INFO_R, info, sizeof(info));
+        }
+        if (pending & PEND_DUMP) {
+            SendDump(syx_dump_setup);
+        }
+        if (pending & PEND_SAVE) {
+            PersistNow();
+            const uint8_t echo = SYX_SAVE;
+            SendSyxFrame(SYX_ACK, &echo, 1);
+        }
+        if (pending & PEND_LOAD) {
+            // revert to the stored blob, discarding live edits
+            active_setup = syx_load_target;
+            UnpackSetup(active_setup);
+            Reset();
+            const uint8_t echo[2] = {SYX_LOAD, syx_load_target};
+            SendSyxFrame(SYX_ACK, echo, 2);
+        }
+        if (pending & PEND_FACTORY) {
+            hMIDI.Init();
+            for (int s = 0; s < kNumSetups; ++s) PackSetup(s);
+            active_setup = 0;
+            Reset();
+            const uint8_t echo = SYX_FACTORY;
+            SendSyxFrame(SYX_ACK, &echo, 1);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // SysEx protocol v1 — see docs/hoc-midi-sysex.md
+    // Frame: F0 7D 62 4D <ver> <cmd> <body...> F7, all bytes 7-bit, <=60 total
+    // ------------------------------------------------------------------
+    static constexpr uint8_t SYX_PROTO_VERSION = 1;
+    enum SyxCmd : uint8_t {
+      SYX_INFO = 0x01, SYX_GET = 0x02, SYX_SET = 0x03, SYX_GET_DUMP = 0x04,
+      SYX_SAVE = 0x06, SYX_LOAD = 0x07, SYX_FACTORY = 0x08, SYX_PANIC = 0x09,
+      SYX_SELECT = 0x0A,
+      SYX_ACK = 0x40, SYX_INFO_R = 0x41, SYX_GET_R = 0x42,
+      SYX_DUMP_DATA = 0x44, SYX_DUMP_END = 0x45,
+      SYX_NAK = 0x7E,
+    };
+    enum SyxErr : uint8_t {
+      SYXERR_VERSION = 1, SYXERR_CMD = 2, SYXERR_ADDR = 3,
+      SYXERR_VALUE = 4, SYXERR_BUSY = 5, SYXERR_CHECKSUM = 6,
+    };
+    enum SyxClass : uint8_t { CLS_GLOBAL = 0, CLS_IN = 1, CLS_CV = 2, CLS_TR = 3 };
+    static constexpr uint8_t kGlobalParamCount = 7;
+    static constexpr uint8_t kInParamCount = 7;
+    static constexpr uint8_t kOutParamCount = 9;
+
+    // parameter access; value encoding matches the spec (transpose stored +64,
+    // in-map subtype 127 = auto-learn)
+    bool get_param(uint8_t cls, uint8_t idx, uint8_t par, uint8_t &value) {
+        auto &M = frame.MIDIState;
+        switch (cls) {
+          case CLS_GLOBAL:
+            if (idx != 0) return false;
+            switch (par) {
+              case 0: value = 1; return true; // schema
+              case 1: value = active_setup; return true;
+              case 2: value = kNumSetups; return true;
+              case 3: value = M.bend_range; return true;
+              case 4: value = M.poly_mode; return true;
+              case 5: value = M.pc_channel; return true;
+              case 6: value = HS::trig_length; return true;
+              default: return false;
+            }
+          case CLS_IN: {
+            if (idx >= MIDIMAP_MAX || par >= kInParamCount) return false;
+            uint64_t d = M.mapping[idx].Pack();
+            const uint8_t b[7] = {
+              uint8_t(d & 0xff),         // function_cc
+              uint8_t((d >> 8) & 0xff),  // function (type in upper 3 bits)
+              uint8_t((d >> 16) & 0xff), // channel
+              uint8_t((d >> 24) & 0xff), // dac_polyvoice
+              uint8_t((d >> 32) & 0xff), // transpose (raw int8)
+              uint8_t((d >> 40) & 0xff), // range_low
+              uint8_t((d >> 48) & 0xff), // range_high
+            };
+            switch (par) {
+              case 0: value = b[1] >> 5; return true;                 // type
+              case 1: value = (b[0] == 0xff) ? 127 : (b[0] & 0x7f); return true; // subtype/CC (127=learn)
+              case 2: value = b[2]; return true;                      // channel
+              case 3: value = uint8_t(int8_t(b[4]) + 64); return true; // transpose+64
+              case 4: value = b[5]; return true;
+              case 5: value = b[6]; return true;
+              case 6: value = b[3]; return true;                      // polyvoice
+            }
+            return false;
+          }
+          case CLS_CV:
+          case CLS_TR: {
+            const int p = (cls == CLS_TR) ? HS::MIDIFrame::kCVOutPorts + idx : idx;
+            const int limit = (cls == CLS_TR) ? HS::MIDIFrame::kTrigOutPorts
+                                              : HS::MIDIFrame::kCVOutPorts;
+            if (idx >= limit || par >= kOutParamCount) return false;
+            const HS::MIDIOutPort &o = M.outports[p];
+            switch (par) {
+              case 0: value = o.function; return true;
+              case 1: value = o.channel; return true;
+              case 2: value = o.data1; return true;
+              case 3: value = o.data2; return true;
+              case 4: value = uint8_t(o.transpose + 64); return true;
+              case 5: value = o.range_low; return true;
+              case 6: value = o.range_high; return true;
+              case 7: value = o.flags; return true;
+              case 8: value = o.clkdiv; return true;
+            }
+            return false;
+          }
+          default: return false;
+        }
+    }
+
+    // returns 0 on success, else a SyxErr
+    uint8_t set_param(uint8_t cls, uint8_t idx, uint8_t par, uint8_t value) {
+        auto &M = frame.MIDIState;
+        switch (cls) {
+          case CLS_GLOBAL:
+            if (idx != 0) return SYXERR_ADDR;
+            switch (par) {
+              case 1:
+                if (value >= kNumSetups) return SYXERR_VALUE;
+                SelectSetup(value);
+                return 0;
+              case 3:
+                if (value < 1 || value > 24) return SYXERR_VALUE;
+                M.bend_range = value; return 0;
+              case 4:
+                if (value > 2) return SYXERR_VALUE;
+                M.poly_mode = value;
+                M.UpdateMaxPolyphony();
+                return 0;
+              case 5:
+                if (value > 16) return SYXERR_VALUE;
+                M.pc_channel = value; return 0;
+              case 6:
+                if (value < 1) return SYXERR_VALUE;
+                HS::trig_length = value; return 0;
+              case 0: case 2: return SYXERR_VALUE; // read-only
+              default: return SYXERR_ADDR;
+            }
+          case CLS_IN: {
+            if (idx >= MIDIMAP_MAX || par >= kInParamCount) return SYXERR_ADDR;
+            uint64_t d = M.mapping[idx].Pack();
+            auto setbyte = [&d](int n, uint8_t v) {
+              d = (d & ~(uint64_t(0xff) << (n * 8))) | (uint64_t(v) << (n * 8));
+            };
+            switch (par) {
+              case 0:
+                if (value > 5) return SYXERR_VALUE;
+                setbyte(1, value << 5);
+                break;
+              case 1: setbyte(0, (value == 127) ? 0xff : value); break;
+              case 2:
+                if (value > 16) return SYXERR_VALUE;
+                setbyte(2, value); break;
+              case 3:
+                if (value < 16 || value > 112) return SYXERR_VALUE;
+                setbyte(4, uint8_t(int8_t(value) - 64)); break;
+              case 4: setbyte(5, value & 0x7f); break;
+              case 5: setbyte(6, value & 0x7f); break;
+              case 6:
+                if (value >= DAC_CHANNEL_COUNT) return SYXERR_VALUE;
+                setbyte(3, value); break;
+            }
+            M.mapping[idx].Unpack(d);
+            M.UpdateMidiChannelFilter();
+            M.UpdateMaxPolyphony();
+            return 0;
+          }
+          case CLS_CV:
+          case CLS_TR: {
+            const int p = (cls == CLS_TR) ? HS::MIDIFrame::kCVOutPorts + idx : idx;
+            const int limit = (cls == CLS_TR) ? HS::MIDIFrame::kTrigOutPorts
+                                              : HS::MIDIFrame::kCVOutPorts;
+            const int fn_count = (cls == CLS_TR) ? HS::TRFN_COUNT : HS::CVFN_COUNT;
+            if (idx >= limit || par >= kOutParamCount) return SYXERR_ADDR;
+            HS::MIDIOutPort &o = M.outports[p];
+            switch (par) {
+              case 0:
+                if (value >= fn_count) return SYXERR_VALUE;
+                o.function = value;
+                o.ResetRuntime();
+                break;
+              case 1:
+                if (value > 15) return SYXERR_VALUE;
+                o.channel = value; break;
+              case 2: o.data1 = value & 0x7f; break;
+              case 3: o.data2 = value & 0x7f; break;
+              case 4:
+                if (value < 16 || value > 112) return SYXERR_VALUE;
+                o.transpose = int8_t(value) - 64; break;
+              case 5: o.range_low = value & 0x7f; break;
+              case 6: o.range_high = value & 0x7f; break;
+              case 7: o.flags = value; break;
+              case 8:
+                if (value > 15) return SYXERR_VALUE;
+                o.clkdiv = value; break;
+            }
+            o.Sanitize();
+            return 0;
+          }
+          default: return SYXERR_ADDR;
+        }
+    }
+
+    // pending SysEx work: flags set in ISR context, drained in DoLoop()
+    enum SyxPending : uint8_t {
+      PEND_REPLY = 1, PEND_IDENTITY = 2, PEND_INFO = 4,
+      PEND_DUMP = 8, PEND_SAVE = 16, PEND_LOAD = 32, PEND_FACTORY = 64,
+    };
+    volatile uint8_t syx_pending = 0;
+    uint8_t syx_reply[8]; // cmd + payload for ACK/NAK/GET_R
+    uint8_t syx_reply_len = 0;
+    uint8_t syx_dump_setup = 0;
+    uint8_t syx_load_target = 0;
+    // incoming dump bookkeeping
+    uint8_t syx_rx_xor = 0;
+    uint8_t syx_rx_packets = 0;
+
+    void QueueReply(uint8_t cmd, std::initializer_list<uint8_t> payload) {
+        syx_reply[0] = cmd;
+        uint8_t n = 1;
+        for (uint8_t b : payload) {
+            if (n >= sizeof(syx_reply)) break;
+            syx_reply[n++] = b;
+        }
+        syx_reply_len = n;
+        syx_pending |= PEND_REPLY;
+    }
+    void QueueAck(std::initializer_list<uint8_t> echo) { QueueReply(SYX_ACK, echo); }
+    void QueueNak(uint8_t cmd, uint8_t err) { QueueReply(SYX_NAK, {cmd, err}); }
+
+    /* Suspend hook / manual [DUMP]: send the active setup over SysEx */
     void OnSendSysEx() {
-        // Teensy will receive 60-byte sysex files, so there's room for one and only one
-        // Setup. The currently-selected Setup will be the one we're sending. That's 40
-        // bytes.
-        uint8_t V[MIDI_PARAMETER_COUNT];
-        for (int i = 0; i < MIDI_PARAMETER_COUNT; i++)
-        {
-          // TODO
-            int p = 0;
-            // uint8_t offset = MIDI_PARAMETER_COUNT * get_setup_number();
-            // int p = values_[i + offset];
-            if (i > 15 && i < 24) p += 24; // These are signed, so they need to be converted
-            V[i] = static_cast<uint8_t>(p);
-        }
-
-        // Pack the data and send it out
-        UnpackedData unpacked;
-        unpacked.set_data(40, V);
-        PackedData packed = unpacked.pack();
-        SendSysEx(packed, 'M');
+        syx_dump_setup = active_setup;
+        syx_pending |= PEND_DUMP;
     }
 
+    // ISR context: stage the frame; DoLoop() parses it.
     void OnReceiveSysEx() {
-        // Since only one Setup is coming, use the currently-selected setup to determine
-        // where to stash it.
-        uint8_t V[MIDI_PARAMETER_COUNT];
-        if (ExtractSysExData(V, 'M')) {
-            for (int i = 0; i < MIDI_PARAMETER_COUNT; i++)
-            {
-                int p = (int)V[i];
-                if (i > 15 && i < 24) p -= 24; // Restore the sign removed in OnSendSysEx()
-                // TODO
-                // uint8_t offset = MIDI_PARAMETER_COUNT * get_setup_number();
-                // apply_value(i + offset, p);
-            }
-            UpdateLog(1, 0, 5, 0, 'M', 0);
-        } else {
-            char app_code = LastSysExApplicationCode();
-            UpdateLog(1, 0, 5, 0, app_code, 0);
+        if (syx_rx_len) return;  // one frame in flight; next one re-triggers
+        const uint8_t *sx = usbMIDI.getSysExArray();
+        unsigned len = usbMIDI.getSysExArrayLength();
+        if (len > sizeof(syx_rx_buf)) len = sizeof(syx_rx_buf);
+        memcpy((void *)syx_rx_buf, sx, len);
+        syx_rx_len = len;
+    }
+    volatile uint16_t syx_rx_len = 0;
+    uint8_t syx_rx_buf[96];
+
+    void HandleSysEx(const uint8_t *sx, unsigned len) {
+        // Universal Device Inquiry: F0 7E <dev> 06 01 F7
+        if (len >= 6 && sx[1] == 0x7E && sx[3] == 0x06 && sx[4] == 0x01) {
+            syx_pending |= PEND_IDENTITY;
+            return;
         }
-        Resume();
+        if (len < 7 || sx[1] != 0x7D || sx[2] != 0x62) return; // not ours
+        if (sx[3] != 'M') { // another app's dump passing by; just log it
+            UpdateLog(1, 0, 5, 0, sx[3], 0);
+            return;
+        }
+        const uint8_t ver = sx[4];
+        const uint8_t cmd = sx[5];
+        const uint8_t *body = sx + 6;
+        const unsigned blen = (len >= 7) ? len - 7 : 0; // strip F0..cmd and F7
+        if (ver != SYX_PROTO_VERSION) { QueueNak(cmd, SYXERR_VERSION); return; }
+
+        UpdateLog(1, 0, 5, 0, 'M', cmd);
+
+        switch (cmd) {
+          case SYX_INFO: syx_pending |= PEND_INFO; break;
+
+          case SYX_GET: {
+            uint8_t value = 0;
+            if (blen >= 3 && get_param(body[0], body[1], body[2], value))
+                QueueReply(SYX_GET_R, {body[0], body[1], body[2], value});
+            else QueueNak(cmd, SYXERR_ADDR);
+            break;
+          }
+          case SYX_SET: {
+            if (blen < 4) { QueueNak(cmd, SYXERR_ADDR); break; }
+            const uint8_t err = set_param(body[0], body[1], body[2], body[3]);
+            if (err) QueueNak(cmd, err);
+            else QueueAck({body[0], body[1], body[2], body[3]});
+            break;
+          }
+          case SYX_GET_DUMP: {
+            uint8_t s = (blen >= 1) ? body[0] : 0x7f;
+            if (s == 0x7f) s = active_setup;
+            if (s >= kNumSetups) { QueueNak(cmd, SYXERR_VALUE); break; }
+            syx_dump_setup = s;
+            syx_pending |= PEND_DUMP;
+            break;
+          }
+          case SYX_DUMP_DATA: { // host -> device restore, applied live
+            if (blen < 3) { QueueNak(cmd, SYXERR_ADDR); break; }
+            const uint8_t seq = body[1];
+            if (seq == 0) { syx_rx_xor = 0; syx_rx_packets = 0; }
+            unsigned i = 3; // past setup#/seq/total
+            uint8_t err = 0;
+            while (i + 1 < blen) {
+                const uint8_t cls = body[i], idx = body[i + 1];
+                const uint8_t np = (cls == CLS_GLOBAL) ? kGlobalParamCount
+                                 : (cls == CLS_IN) ? kInParamCount : kOutParamCount;
+                if (i + 2 + np > blen) { err = SYXERR_ADDR; break; }
+                for (uint8_t par = 0; par < np; ++par) {
+                    const uint8_t v = body[i + 2 + par];
+                    // skip read-only globals; tolerate per-param rejects
+                    if (cls == CLS_GLOBAL && (par == 0 || par == 1 || par == 2)) continue;
+                    set_param(cls, idx, par, v);
+                }
+                for (unsigned b = i; b < i + 2 + np; ++b) syx_rx_xor ^= body[b];
+                i += 2 + np;
+            }
+            ++syx_rx_packets;
+            if (err) QueueNak(cmd, err);
+            else QueueAck({seq});
+            break;
+          }
+          case SYX_DUMP_END: {
+            if (blen < 3) { QueueNak(cmd, SYXERR_ADDR); break; }
+            const bool ok = (body[1] == syx_rx_packets) && (body[2] == (syx_rx_xor & 0x7f));
+            syx_rx_xor = 0;
+            syx_rx_packets = 0;
+            if (ok) QueueAck({body[0]});
+            else QueueNak(cmd, SYXERR_CHECKSUM);
+            break;
+          }
+          case SYX_SAVE: syx_pending |= PEND_SAVE; break;
+          case SYX_LOAD:
+            if (blen < 1 || body[0] >= kNumSetups) { QueueNak(cmd, SYXERR_VALUE); break; }
+            syx_load_target = body[0];
+            syx_pending |= PEND_LOAD;
+            break;
+          case SYX_FACTORY:
+            if (blen >= 2 && body[0] == 0x21 && body[1] == 0x42)
+                syx_pending |= PEND_FACTORY;
+            else QueueNak(cmd, SYXERR_VALUE);
+            break;
+          case SYX_PANIC:
+            frame.MIDIState.panic_request = true;
+            QueueAck({});
+            break;
+          case SYX_SELECT:
+            if (blen < 1 || body[0] >= kNumSetups) { QueueNak(cmd, SYXERR_VALUE); break; }
+            SelectSetup(body[0]);
+            QueueAck({body[0]});
+            break;
+          default:
+            QueueNak(cmd, SYXERR_CMD);
+            break;
+        }
     }
 
    void ToggleCopyMode() {
@@ -427,7 +1405,14 @@ public:
 
    void ToggleCursor() {
        if (copy_mode) CopySetup(copy_setup_target, copy_setup_source);
-       else cursor.toggle_editing();
+       else if (detail_port < 0) EnterDetail(cursor.cursor_pos());
+#if defined(ARDUINO_TEENSY41)
+       // host detail: Device/Id are read-only - engaging edit mode there
+       // silently eats encoder turns ("it won't let me scroll")
+       else if (detail_port >= kFirstHostRow && param_cursor.cursor_pos() < 2)
+           return;
+#endif
+       else param_cursor.toggle_editing();
    }
 
    /* Perform a copy or sysex dump */
@@ -435,26 +1420,17 @@ public:
        if (source == target) {
            OnSendSysEx();
        } else {
-          uint64_t data = 0;
-          for (int i = 0; i < MIDIMAP_MAX; ++i) {
-            if (!PhzConfig::getValue(INPUT_MAP_KEY + i + source*MIDIMAP_MAX, data))
-              break;
-            PhzConfig::setValue(INPUT_MAP_KEY + i + target*MIDIMAP_MAX, data);
-          }
-          for (int i = 0; i < ADC_CHANNEL_COUNT; ++i) {
-            if (!PhzConfig::getValue(OUTPUT_MAP_KEY + i + source*ADC_CHANNEL_COUNT, data))
-              break;
-            PhzConfig::setValue(OUTPUT_MAP_KEY + i + target*ADC_CHANNEL_COUNT, data);
-          }
-           SelectSetup(target);
-           Resume();
+           PackSetup(active_setup); // capture live edits first
+           setups[target] = setups[source];
+           if (target == active_setup) UnpackSetup(active_setup);
+           else SelectSetup(target);
        }
        copy_mode = 0;
    }
 
 private:
     // Housekeeping
-    int screen; // 0=Assign, 1=Channel, 2=Transpose, 3=Range Low, 4=Range High
+    int8_t detail_port; // -1 = overview list, else the open port row
     bool display; // 0=Setup Edit 1=Log
     bool copy_mode; // Copy mode on/off
     int active_setup; // index of current setup
@@ -470,118 +1446,175 @@ private:
     int note_in[DAC_CHANNEL_COUNT]; // track active note per DAC channel
     uint16_t indicator_in[DAC_CHANNEL_COUNT]; // A MIDI indicator will display next to MIDI In assignment
 
-    // MIDI Out
-    bool gated[ADC_CHANNEL_COUNT]; // Current gated status of each input
-    int note_out[ADC_CHANNEL_COUNT]; // Most recent note from this input channel
-    int last_channel[ADC_CHANNEL_COUNT]; // Keep track of the actual send channel, in case it's changed while the note is on
-    int legato_on[ADC_CHANNEL_COUNT]; // The note handler may currently respond to legato note changes
-    uint16_t indicator_out[ADC_CHANNEL_COUNT]; // A MIDI indicator will display next to MIDI Out assignment
+    // MIDI Out state lives in frame.MIDIState.outports[] (engine-owned)
 
-    void DrawSetupScreens() {
-        // Create the header, showing the current Setup and Screen name
-        gfxHeader("");
-        switch (screen) {
-          case 0: graphics.print("MIDI Assign"); break;
-          case 1: graphics.print("MIDI Channel"); break;
-          case 2: graphics.print("Transpose"); break;
-          case 3: graphics.print("Range Low"); break;
-          case 4: graphics.print("Range High"); break;
-          default: break;
+    // stored setups: packed in-maps + out-ports (see PackSetup/UnpackSetup)
+    struct SetupBlob {
+        uint64_t inmaps[MIDIMAP_MAX];
+        uint64_t outports[HS::MIDIFrame::kOutPorts];
+    };
+    SetupBlob setups[kNumSetups];
+
+    // 8-char port names for the overview rows
+    const char* RowLabel(int pos) const {
+#if defined(ARDUINO_TEENSY41)
+        if (pos >= kFirstHostRow) return (pos - kFirstHostRow) ? "Host2" : "Host1";
+#endif
+        if (pos < DAC_CHANNEL_COUNT) return midi2cv_label[pos];
+        const int p = pos - DAC_CHANNEL_COUNT;
+        if (p < HS::MIDIFrame::kCVOutPorts) return cv2midi_label[p];
+        return trig2midi_label[p - HS::MIDIFrame::kCVOutPorts];
+    }
+
+    // the function currently assigned to a row, as a safe display string
+    const char* RowFunctionName(int pos) const {
+#if defined(ARDUINO_TEENSY41)
+        if (pos >= kFirstHostRow) {
+            const int port = pos - kFirstHostRow;
+            if (!usbHostMIDI[port].idVendor()) return "none";
+            const uint8_t *pn = usbHostMIDI[port].product();
+            if (pn && pn[0]) {
+                static char nm[2][9];
+                int c = 0;
+                for (; pn[c] && c < 8; ++c) nm[port][c] = (char)pn[c];
+                nm[port][c] = 0;
+                return nm[port];
+            }
+            return "device";
         }
-        gfxPrint(128 - 42, 1, "Setup ");
+#endif
+        if (pos < DAC_CHANNEL_COUNT)
+            return frame.MIDIState.mapping[pos].get_label();
+        const int p = pos - DAC_CHANNEL_COUNT;
+        const HS::MIDIOutPort &o = frame.MIDIState.outports[p];
+        if (p >= HS::MIDIFrame::kCVOutPorts)
+            return trig_out_fn_names[o.function < HS::TRFN_COUNT ? o.function : 0];
+        return cv_out_fn_names[o.function < HS::CVFN_COUNT ? o.function : 0];
+    }
+
+    // live physical-input state, left of the activity area:
+    // CV rows get a level bar, trigger rows a gate lamp, MIDI-in rows
+    // a bar for the CV they are currently outputting
+    void DrawRowInputState(int pos, int y) const {
+        const int fullscale = HSAPPLICATION_5V * 2; // 10V unipolar
+        if (pos < DAC_CHANNEL_COUNT) {
+            const int out = frame.MIDIState.mapping[pos].ViewOut();
+            const int h = constrain(out * 8 / fullscale, 0, 8);
+            if (h > 0) graphics.drawRect(50, y + 9 - h, 3, h);
+            return;
+        }
+        const int p = pos - DAC_CHANNEL_COUNT;
+        if (p < HS::MIDIFrame::kCVOutPorts) {
+            const int h = constrain(HS::cvmap[p].In() * 8 / fullscale, 0, 8);
+            if (h > 0) graphics.drawRect(50, y + 9 - h, 3, h);
+        } else {
+            const int k = p - HS::MIDIFrame::kCVOutPorts;
+            if (HS::trigmap[k].Gate()) graphics.drawRect(49, y + 2, 5, 6);
+            else graphics.drawFrame(49, y + 3, 5, 5);
+        }
+    }
+
+    // draw MIDI activity for a row: icon, or the sounding note name
+    void DrawRowActivity(int pos, int y) const {
+        if (pos < DAC_CHANNEL_COUNT) {
+            if (indicator_in[pos] > 0 || note_in[pos] > -1)
+                graphics.drawBitmap8(70, y + 2, 8, MIDI_ICON);
+            return;
+        }
+        const HS::MIDIOutPort &o = frame.MIDIState.outports[pos - DAC_CHANNEL_COUNT];
+        if (o.gated && o.last_note <= 127) {
+            graphics.setPrintPos(70, y + 2);
+            graphics.print(midi_note_numbers[o.last_note]);
+        } else if (o.indicator > 0) {
+            graphics.drawBitmap8(70, y + 2, 8, MIDI_ICON);
+        }
+    }
+
+    // header: presence dot (filled = computer connected) + caps when active.
+    // Inversion stays reserved for focus (design-system: one mark, one
+    // meaning); this is the same dot idiom as the bus WPM indicator.
+    void DrawUSBStatus(int x) const {
+        graphics.drawCircle(x + 1, 4, 2);
+        if (usb_configuration) graphics.drawRect(x, 3, 3, 3);
+        graphics.setPrintPos(x + 6, 1);
+        graphics.print(usb_configuration ? "USB" : "usb");
+    }
+
+    void DrawOverview() const {
+        gfxHeader("Captain");
+        DrawUSBStatus(48);
+        gfxPrint(128 - 48, 1, "Setup ");
         gfxPrint(get_setup_number() + 1);
+        if (LiveConfigDirty()) gfxPrint("*"); // unsaved changes
 
-        // Iterate through the current range of settings
-        OC::menu::SettingsList<OC::menu::kScreenLines, 0, OC::menu::kDefaultValueX - 1> settings_list(cursor);
+        OC::menu::SettingsList<OC::menu::kScreenLines, 0, 76> settings_list(cursor);
         OC::menu::SettingsListItem list_item;
-        while (settings_list.available())
-        {
-            bool suppress = 0; // Don't show the setting if it's not relevant
+        while (settings_list.available()) {
             const int current = settings_list.Next(list_item);
-            int p = current % (DAC_CHANNEL_COUNT+ADC_CHANNEL_COUNT);
-            const bool is_input = p < DAC_CHANNEL_COUNT;
+            if (current >= kNumRows) { list_item.DrawCustom(); continue; }
 
-            // MIDI In and Out indicators for all screens
-            if (is_input) { // It's a MIDI In assignment
-                int in_fn = get_in_assign(p);
-                if (in_fn == MIDI_IN_OFF && screen > 0) suppress = 1;
-
-                if (indicator_in[p] > 0 || note_in[p] > -1) {
-                    if (in_fn == MIDI_IN_NOTE) {
-                        if (note_in[p] > -1) {
-                            graphics.setPrintPos(70, list_item.y + 2);
-                            graphics.print(midi_note_numbers[note_in[p]]);
-                        }
-                    } else graphics.drawBitmap8(70, list_item.y + 2, 8, MIDI_ICON);
-                }
-
-                // Indicate if the assignment is a note type
-                if (in_fn == MIDI_IN_NOTE)
-                    graphics.drawBitmap8(56, list_item.y + 1, 8, MIDI_note_icon);
-                else if (screen > 1) suppress = 1;
-
-                // Indicate if the assignment is a clock
-                if (in_fn >= MIDI_IN_CLOCK_4TH) {
-                    uint8_t o_x = (frame.MIDIState.clock_count < 12) ? 2 : 0;
-                    graphics.drawBitmap8(80 + o_x, list_item.y + 1, 8, MIDI_clock_icon);
-                    if (screen > 0) suppress = 1;
-                }
-
-            } else { // It's a MIDI Out assignment
-                p -= DAC_CHANNEL_COUNT;
-                MIDI_OUT_FUNCTION out_fn = get_out_assign(p);
-
-                if (out_fn == MIDI_OUT_OFF && screen > 0) suppress = 1;
-
-                if (indicator_out[p] > 0 || note_out[p] > -1) {
-                    if (out_fn == MIDI_OUT_NOTE || out_fn == MIDI_OUT_LEGATO) {
-                        if (note_out[p] > -1) {
-                            graphics.setPrintPos(70, list_item.y + 2);
-                            graphics.print(midi_note_numbers[note_out[p]]);
-                        }
-                    } else graphics.drawBitmap8(70, list_item.y + 2, 8, MIDI_ICON);
-                }
-
-                // Indicate if the assignment is a note type
-                if (out_fn == MIDI_OUT_NOTE || out_fn == MIDI_OUT_LEGATO)
-                    graphics.drawBitmap8(56, list_item.y + 1, 8, MIDI_note_icon);
-                else if (screen > 1) suppress = 1;
-            }
-
-            // Draw the item last so that if it's selected, the icons are reversed, too
-            if (!suppress) {
-              const int idx = (is_input && screen == 0) ? 0 : screen + 1;
-              list_item.SetPrintPos();
-              graphics.print(is_input ?
-                  midi2cv_label[current] :
-                  cv2midi_label[current - DAC_CHANNEL_COUNT]);
-              list_item.DrawDefault(GetLabel(current), GetValue(current), CaptainSettings[idx]);
-            } else {
-                list_item.SetPrintPos();
-                graphics.print("                   --");
-                list_item.DrawCustom();
-            }
+            DrawRowInputState(current, list_item.y);
+            DrawRowActivity(current, list_item.y);
+            list_item.SetPrintPos();
+            graphics.print(RowLabel(current));
+            // right column: assigned function; press to open the editor
+            graphics.setPrintPos(0, list_item.y + 2); // reset for DrawDefault path
+            list_item.DrawDefault(RowFunctionName(current), 0, CaptainSettings[0]);
         }
     }
 
-    // The value of the parameter at the given cursor position
-    int GetValue(int pos) const {
-      MIDIMapping &m = (pos < DAC_CHANNEL_COUNT) ?
-          frame.MIDIState.mapping[pos] :
-          frame.MIDIState.outmap[pos - DAC_CHANNEL_COUNT];
-      switch (screen) {
-        case 0: return (m.get_type() | m.get_subtype()); // idk man
-        case 1: return m.get_channel();
-        case 2: return m.get_transpose();
-        case 3: return m.get_low();
-        case 4: return m.get_high();
-        default: return 0;
-      }
-    }
-    const char* const GetLabel(int pos) const {
-      if (pos < DAC_CHANNEL_COUNT)
-        return frame.MIDIState.mapping[pos].get_label();
-      return midi_out_functions[get_out_assign(pos - DAC_CHANNEL_COUNT)];
+    void DrawDetail() const {
+        const int row = detail_port;
+        gfxHeader(RowLabel(row));
+        DrawUSBStatus(52);
+        gfxPrint(128 - 48, 1, "Setup ");
+        gfxPrint(get_setup_number() + 1);
+        if (LiveConfigDirty()) gfxPrint("*");
+
+        OC::menu::SettingsList<OC::menu::kScreenLines, 0, 76> settings_list(param_cursor);
+        OC::menu::SettingsListItem list_item;
+        const int n_params = DetailParamCount(row);
+        while (settings_list.available()) {
+            const int current = settings_list.Next(list_item);
+            if (current >= n_params) { list_item.DrawCustom(); continue; }
+
+            list_item.SetPrintPos();
+            graphics.print(DetailParamLabel(row, current));
+            const int value = DetailParamValue(row, current);
+            const auto &attr = CaptainSettings[DetailParamAttr(row, current)];
+#if defined(ARDUINO_TEENSY41)
+            if (row >= kFirstHostRow) {
+                const int port = row - kFirstHostRow;
+                char buf[12];
+                const char *v = buf;
+                if (current == 0) {             // Device
+                    v = RowFunctionName(row);
+                } else if (current == 1) {      // Id
+                    if (usbHostMIDI[port].idVendor())
+                        snprintf(buf, sizeof(buf), "%04X:%04X",
+                                 usbHostMIDI[port].idVendor(),
+                                 usbHostMIDI[port].idProduct());
+                    else v = "-";
+                } else if (current == 2) {      // Bind
+                    const int b = PortBinding(port);
+                    if (!usbHostMIDI[port].idVendor()) v = "-";
+                    else if (b) snprintf(buf, sizeof(buf), "Setup %d", b);
+                    else v = "off";
+                } else {                        // stored profile rows
+                    const DeviceProfile &pr = profiles[NthProfile(current - 3)];
+                    snprintf(buf, sizeof(buf), "Setup %d", pr.setup + 1);
+                }
+                list_item.DrawDefault(v, 0, attr);
+                continue;
+            }
+#endif
+            if (row < DAC_CHANNEL_COUNT && current == 0) {
+                // in-map Assign: composite value; print its label string
+                list_item.DrawDefault(frame.MIDIState.mapping[row].get_label(), value, attr);
+            } else {
+                list_item.DrawDefault(value, attr);
+            }
+        }
     }
 
     void DrawLogScreen() {
@@ -631,236 +1664,60 @@ private:
         return active_setup;
     }
 
-    // CV inputs translated to MIDI messages
-    void process_midi_out() {
-        auto &hMIDI = HS::frame.MIDIState;
-        for (int ch = 0; ch < ADC_CHANNEL_COUNT; ch++)
-        {
-            MIDI_OUT_FUNCTION out_fn = get_out_assign(ch);
-            if (out_fn == MIDI_OUT_OFF) continue;
-
-            int out_ch = get_out_channel(ch);
-            bool indicator = 0;
-
-            if (out_fn == MIDI_OUT_NOTE || out_fn == MIDI_OUT_LEGATO) {
-                bool read_gate = Gate(ch);
-                bool legato = out_fn == MIDI_OUT_LEGATO;
-
-                // Prepare to read pitch and send gate in the near future; there's a slight
-                // lag between when a gate is read and when the CV can be read.
-                if (read_gate && !gated[ch]) StartADCLag(ch);
-                bool note_on = EndOfADCLag(ch); // If the ADC lag has ended, a note will always be sent
-
-                if (note_on || legato_on[ch]) {
-                    // Get a new reading when gated, or when checking for legato changes
-                    uint8_t midi_note = MIDIQuantizer::NoteNumber(In(ch), get_out_transpose(ch));
-
-                    if (legato_on[ch] && midi_note != note_out[ch]) {
-                        // Send note off if the note has changed
-                        hMIDI.SendNoteOff(last_channel[ch], note_out[ch]);
-                        UpdateLog(0, ch, 1, last_channel[ch], note_out[ch], 0);
-                        note_out[ch] = -1;
-                        indicator = 1;
-                        note_on = 1;
-                    }
-
-                    if (!in_out_range(ch, midi_note)) note_on = 0; // Don't play if out of range
-
-                    if (note_on) {
-                        int velocity = 0x64;
-                        // Look for an input assigned to velocity on the same channel and, if found, use it
-                        for (int vch = 0; vch < DAC_CHANNEL_COUNT; vch++)
-                        {
-                            if (get_out_assign(vch) == MIDI_OUT_VELOCITY && get_out_channel(vch) == out_ch) {
-                                velocity = Proportion(In(vch), HSAPPLICATION_5V, 127);
-                            }
-                        }
-                        CONSTRAIN(velocity, 0, 127);
-                        hMIDI.SendNoteOn(out_ch, midi_note, velocity);
-                        UpdateLog(0, ch, 0, out_ch, midi_note, velocity);
-                        indicator = 1;
-                        note_out[ch] = midi_note;
-                        last_channel[ch] = out_ch;
-                        if (legato) legato_on[ch] = 1;
-                    }
-                }
-
-                if (!read_gate && gated[ch]) { // A note off message should be sent
-                    hMIDI.SendNoteOff(last_channel[ch], note_out[ch], 0);
-                    UpdateLog(0, ch, 1, last_channel[ch], note_out[ch], 0);
-                    note_out[ch] = -1;
-                    indicator = 1;
-                }
-
-                gated[ch] = read_gate;
-                if (!gated[ch]) legato_on[ch] = 0;
-            }
-
-            // Handle other messages
-            if (Changed(ch)) {
-                // Modulation wheel
-                if (out_fn == MIDI_OUT_MOD) {
-                    int cc = get_out_cc(ch);
-
-                    int value = Proportion(In(ch), HSAPPLICATION_5V, 127);
-                    CONSTRAIN(value, 0, 127);
-                    if (cc == 64) value = (value >= 60) ? 127 : 0; // On or off for sustain pedal
-
-                    hMIDI.SendCC(out_ch, cc, value);
-                    UpdateLog(0, ch, 2, out_ch, cc, value);
-                    indicator = 1;
-                }
-
-                // Aftertouch
-                if (out_fn == MIDI_OUT_AFTERTOUCH) {
-                    int value = Proportion(In(ch), HSAPPLICATION_5V, 127);
-                    CONSTRAIN(value, 0, 127);
-                    hMIDI.SendAfterTouch(out_ch, value);
-                    UpdateLog(0, ch, 3, out_ch, 0, value);
-                    indicator = 1;
-                }
-
-                // Pitch Bend
-                if (out_fn == MIDI_OUT_PITCHBEND) {
-                    int16_t bend = Proportion(In(ch) + HSAPPLICATION_3V, HSAPPLICATION_3V * 2, 16383);
-                    CONSTRAIN(bend, 0, 16383);
-                    hMIDI.SendPitchBend(out_ch, bend);
-                    UpdateLog(0, ch, 4, out_ch, 0, bend - 8192);
-                    indicator = 1;
-                }
-            }
-
-            if (indicator) indicator_out[ch] = MIDI_INDICATOR_COUNTDOWN;
-        }
-    }
-
+    // CV/trigger -> MIDI conversion lives in HS::MIDIFrame::ProcessOutputs
+    // (HSIOFrame.cpp); the old per-app implementation is gone.
+    // read one message from the device; returns whether one was processed
     template <typename T1>
-    bool process_midi_in(T1 &device) {
-        if (device.read()) {
-            uint8_t message = device.getType();
-            uint8_t channel = device.getChannel();
-            uint8_t data1 = device.getData1();
-            uint8_t data2 = device.getData2();
+    bool poll_midi(T1 &device, uint8_t srcmask) {
+        if (!device.read()) return false;
 
-            // Handle system exclusive dump for Setup data
-            if (message == HEM_MIDI_SYSEX) OnReceiveSysEx();
-
-            HS::frame.MIDIState.ProcessMIDIMsg({channel, message, data1, data2});
-            //old_process_midi_in(message, channel, data1, data2);
-            return true;
+        uint8_t message = device.getType();
+        // per-interface RX filters (same gates Quadrants applies)
+        if (message >= 0xF8) {
+            if (HS::midi_clkrx_disable & srcmask) return true;
+        } else if (message != HEM_MIDI_SYSEX) {
+            if (HS::midi_msgrx_disable & srcmask) return true;
         }
-        return false;
+        uint8_t channel = device.getChannel();
+        uint8_t data1 = device.getData1();
+        uint8_t data2 = device.getData2();
+
+        // Handle system exclusive dump for Setup data.
+        // Copy only — parsing runs from Loop() so the whole SysEx stack
+        // stays out of the ISR (and out of ITCM on Teensy 4).
+        if (message == HEM_MIDI_SYSEX) {
+            OnReceiveSysEx();
+            return true;   // never thru our own config traffic
+        }
+
+        const HS::MIDIMessage msg = {channel, message, data1, data2};
+        HS::frame.MIDIState.ProcessMIDIMsg(msg);
+        midi_thru(msg, srcmask);
+        return true;
     }
 
-    [[ deprecated ]] // TODO: verify all this is handled in HS::MIDIState, MIDIMapping
-    void old_process_midi_in(int message, int channel, int data1, int data2) {
+    // read one message received over the 200e preset bus (PRESET_BUS builds;
+    // the stub ReadMidiRx returns false elsewhere). Status low nibble is the
+    // 200e bus mask: A (0x8) -> channel 1, B (0x4) -> channel 2.
+    bool poll_bus_midi() {
+        uint8_t status, d1, d2;
+        if (!OC::PresetBus::ReadMidiRx(status, d1, d2)) return false;
 
-        bool note_captured = 0; // A note or gate should only be captured by
-        bool gate_captured = 0; // one assignment, to allow polyphony in the interface
+        const uint8_t type = (status >= 0xF8) ? status : (status & 0xF0);
+        const bool clk = type >= 0xF8;
+        if (clk && (HS::midi_clkrx_disable & mMaskBus)) return true;
+        if (!clk && (HS::midi_msgrx_disable & mMaskBus)) return true;
 
-        // A MIDI message has been received; go through each channel to see if it
-        // needs to be routed to any of the CV outputs
-        for (int ch = 0; ch < DAC_CHANNEL_COUNT; ch++)
-        {
-            int in_fn = get_in_assign(ch);
-            int in_ch = get_in_channel(ch);
-            bool indicator = 0;
-            if (message == HEM_MIDI_NOTE_ON && in_ch == channel) {
-                if (note_in[ch] == -1) { // If this channel isn't already occupied with another note, handle Note On
-                    if (in_fn == MIDI_IN_NOTE && !note_captured) {
-                        // Send quantized pitch CV. Isolate transposition to quantizer so that it notes off aren't
-                        // misinterpreted if transposition is changed during the note.
-                        int note = data1 + get_in_transpose(ch);
-                        note = constrain(note, 0, 127);
-                        if (in_in_range(ch, note)) {
-                            Out(ch, MIDIQuantizer::CV(note));
-                            UpdateLog(1, ch, 0, in_ch, note, data2);
-                            indicator = 1;
-                            note_captured = 1;
-                            note_in[ch] = data1;
-                        } else note_in[ch] = -1;
-                    }
-
-                    if (in_fn == MIDI_IN_GATE && !gate_captured) {
-                        // Send a gate at Note On
-                        GateOut(ch, 1);
-                        indicator = 1;
-                        gate_captured = 1;
-                        note_in[ch] = data1;
-                    }
-
-                    if (in_fn == MIDI_IN_TRIGGER) {
-                        // Send a trigger pulse to CV
-                        ClockOut(ch);
-                        indicator = 1;
-                        gate_captured = 1;
-                    }
-
-                    if (in_fn == MIDI_IN_VELOCITY) {
-                        // Send velocity data to CV
-                        Out(ch, Proportion(data2, 127, HSAPPLICATION_5V));
-                        indicator = 1;
-                    }
-                }
-            }
-
-            if (message == HEM_MIDI_NOTE_OFF && in_ch == channel) {
-                if (note_in[ch] == data1) { // If the note off matches the note on assingned to this output
-                    note_in[ch] = -1;
-                    if (in_fn == MIDI_IN_GATE) {
-                        // Turn off gate on Note Off
-                        GateOut(ch, 0);
-                        indicator = 1;
-                    } else if (in_fn == MIDI_IN_NOTE) {
-                        // Log Note Off on the note assignment
-                        UpdateLog(1, ch, 1, in_ch, data1, 0);
-                    } else if (in_fn == MIDI_IN_VELOCITY) {
-                        Out(ch, 0);
-                    }
-                }
-            }
-
-            bool cc = (in_fn == MIDI_IN_MOD || in_fn >= MIDI_IN_EXPRESSION);
-            if (cc && message == HEM_MIDI_CC && in_ch == channel) {
-                uint8_t cc = 1; // Modulation wheel
-                if (in_fn == MIDI_IN_EXPRESSION) cc = 11;
-                if (in_fn == MIDI_IN_PAN) cc = 10;
-                if (in_fn == MIDI_IN_HOLD) cc = 64;
-                if (in_fn == MIDI_IN_BREATH) cc = 2;
-                if (in_fn == MIDI_IN_Y_AXIS) cc = 74;
-
-                // Send CC wheel to CV
-                if (data1 == cc) {
-                    if (in_fn == MIDI_IN_HOLD && data2 > 0) data2 = 127;
-                    Out(ch, Proportion(data2, 127, HSAPPLICATION_5V));
-                    UpdateLog(1, ch, 2, in_ch, data1, data2);
-                    indicator = 1;
-                }
-            }
-
-            if (message == HEM_MIDI_AFTERTOUCH_CHANNEL && in_fn == MIDI_IN_AFTERTOUCH && in_ch == channel) {
-                // Send aftertouch to CV
-                Out(ch, Proportion(data1, 127, HSAPPLICATION_5V));
-                UpdateLog(1, ch, 3, in_ch, data1, data2);
-                indicator = 1;
-            }
-
-            if (message == HEM_MIDI_PITCHBEND && in_fn == MIDI_IN_PITCHBEND && in_ch == channel) {
-                // Send pitch bend to CV
-                int data = (data2 << 7) + data1 - 8192;
-                Out(ch, Proportion(data, 0x7fff, HSAPPLICATION_3V));
-                UpdateLog(1, ch, 4, in_ch, 0, data);
-                indicator = 1;
-            }
-
-            #ifdef MIDI_DIAGNOSTIC
-            if (message > 0) {
-                UpdateLog(1, ch, 6, message, data1, data2);
-            }
-            #endif
-
-            if (indicator) indicator_in[ch] = MIDI_INDICATOR_COUNTDOWN;
+        const uint8_t buses = clk ? 0x8 : (status & 0x0F);
+        for (uint8_t bit = 0; bit < 4; ++bit) {
+            if (!(buses & (0x8 >> bit))) continue;
+            const HS::MIDIMessage msg =
+                {uint8_t(bit + 1), type, uint8_t(d1 & 0x7F), uint8_t(d2 & 0x7F)};
+            HS::frame.MIDIState.ProcessMIDIMsg(msg);
+            midi_thru(msg, mMaskBus);
+            if (clk) break;
         }
+        return true;
     }
 
     uint8_t get_in_assign(int ch) {
@@ -877,33 +1734,6 @@ private:
 
     bool in_in_range(int ch, int note) {
       return frame.MIDIState.in_in_range(ch, note);
-    }
-
-    MIDI_OUT_FUNCTION get_out_assign(int ch) {
-      switch (frame.MIDIState.get_out_assign(ch) & Type::TYPE_MASK) {
-        default:
-        case Type::NONE: return MIDI_OUT_OFF;
-        case Type::PITCH: return MIDI_OUT_NOTE;
-        case Type::GATE: return MIDI_OUT_LEGATO;
-        case Type::TRIGGER: return MIDI_OUT_VELOCITY;
-        case Type::MODULATOR: return MIDI_OUT_PITCHBEND;
-        case Type::CCONTROL: return MIDI_OUT_MOD;
-      }
-    }
-    uint8_t get_out_cc(int ch) {
-      return frame.MIDIState.get_out_assign(ch) & ~Type::TYPE_MASK;
-    }
-
-    uint8_t get_out_channel(int ch) {
-      return frame.MIDIState.get_out_channel(ch);
-    }
-
-    int8_t get_out_transpose(int ch) {
-      return frame.MIDIState.get_out_transpose(ch);
-    }
-
-    bool in_out_range(int ch, int note) {
-      return frame.MIDIState.in_out_range(ch, note);
     }
 
     void UpdateLog(bool midi_in, int ch, uint8_t message, uint8_t channel, int16_t data1, int16_t data2) {
@@ -928,13 +1758,111 @@ private:
 ////////////////////////////////////////////////////////////////////////////////
 //// App Functions
 ////////////////////////////////////////////////////////////////////////////////
-void AppCaptainMIDI::Init() { BaseStart(); }
-
-size_t AppCaptainMIDI::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
-  return 0;
+FLASHMEM void AppCaptainMIDI::PackSetup(int s) {
+    for (int i = 0; i < MIDIMAP_MAX; ++i)
+        setups[s].inmaps[i] = frame.MIDIState.mapping[i].Pack();
+    for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+        setups[s].outports[i] = frame.MIDIState.outports[i].Pack();
 }
-size_t AppCaptainMIDI::RestoreAppData(util::StreamBufferReader &stream_buffer) {
+
+FLASHMEM void AppCaptainMIDI::UnpackSetup(int s) {
+    for (int i = 0; i < MIDIMAP_MAX; ++i) {
+        setups[s].inmaps[i] = SanitizeInMapPacked(setups[s].inmaps[i]);
+        frame.MIDIState.mapping[i].Unpack(setups[s].inmaps[i]);
+    }
+    for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) {
+        HS::MIDIOutPort &o = frame.MIDIState.outports[i];
+        o.Unpack(setups[s].outports[i]);
+        // clamp per port class: garbage functions crash the label lookup
+        const uint8_t fn_count = (i >= HS::MIDIFrame::kCVOutPorts)
+            ? HS::TRFN_COUNT : HS::CVFN_COUNT;
+        if (o.function >= fn_count) o.function = 0;
+        if (o.velocity_source() > ADC_CHANNEL_COUNT)
+            o.flags &= ~HS::MIDIOutSettings::VEL_SOURCE_MASK;
+        o.ResetRuntime();
+        setups[s].outports[i] = o.Pack(); // keep the blob canonical too
+    }
+    frame.MIDIState.UpdateMidiChannelFilter();
+    frame.MIDIState.UpdateMaxPolyphony();
+}
+
+FLASHMEM uint32_t AppCaptainMIDI::LiveChecksum() const {
+    uint32_t h = 2166136261u ^ active_setup;
+    auto mix = [&h](uint64_t d) {
+        h = (h ^ uint32_t(d)) * 16777619u;
+        h = (h ^ uint32_t(d >> 32)) * 16777619u;
+    };
+    for (int i = 0; i < MIDIMAP_MAX; ++i)
+        mix(frame.MIDIState.mapping[i].Pack());
+    for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+        mix(frame.MIDIState.outports[i].Pack());
+    for (int s = 0; s < kNumSetups; ++s) {
+        for (int i = 0; i < MIDIMAP_MAX; ++i) mix(setups[s].inmaps[i]);
+        for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) mix(setups[s].outports[i]);
+    }
+    mix(uint64_t(frame.MIDIState.bend_range) | (uint64_t(frame.MIDIState.poly_mode) << 8)
+        | (uint64_t(frame.MIDIState.pc_channel) << 16) | (uint64_t(HS::trig_length) << 24));
+    return h;
+}
+
+static AppCaptainMIDI *g_captain_instance = nullptr;
+FLASHMEM void CaptainDumpProfiles() {
+#if defined(ARDUINO_TEENSY41)
+    if (g_captain_instance) g_captain_instance->DumpProfiles();
+#endif
+}
+
+void AppCaptainMIDI::Init() {
+    g_captain_instance = this;
+#if defined(ARDUINO_TEENSY41)
+    LoadProfiles();
+    // First device evaluation waits out the boot recall: a device already
+    // plugged at power-up counts as "arriving" AFTER the preset restore,
+    // so its bound setup wins the boot (the 225e-ish expectation), instead
+    // of being overwritten by the recall finishing a moment later.
+    next_dev_poll_ms = millis() + 3000;
+#endif
+    BaseStart();
+}
+
+FLASHMEM size_t AppCaptainMIDI::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
+#ifdef __IMXRT1062__
+  return 0; // T4.x persists via PhzConfig (see StoreData)
+#else
+  // NOTE: a save captures the live state only if Suspend()/PackSetup ran;
+  // the framework saves from the settings menu, which suspends the app first.
+  stream_buffer.Write(uint8_t(1)); // schema version
+  stream_buffer.Write(uint8_t(active_setup));
+  stream_buffer.Write(uint16_t(0)); // reserved
+  for (int s = 0; s < kNumSetups; ++s) {
+    for (int i = 0; i < MIDIMAP_MAX; ++i)
+      stream_buffer.Write(setups[s].inmaps[i]);
+    for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+      stream_buffer.Write(setups[s].outports[i]);
+  }
+  return stream_buffer.written();
+#endif
+}
+FLASHMEM size_t AppCaptainMIDI::RestoreAppData(util::StreamBufferReader &stream_buffer) {
+#ifdef __IMXRT1062__
   return 0;
+#else
+  const uint8_t version = stream_buffer.Read<uint8_t>();
+  if (version != 1) return stream_buffer.read();
+  // NB: constrain() is a macro that re-evaluates its argument — never
+  // feed it a stream read directly (it desyncs the whole stream)
+  const uint8_t stored_setup = stream_buffer.Read<uint8_t>();
+  active_setup = constrain(stored_setup, 0, kNumSetups - 1);
+  stream_buffer.Read<uint16_t>(); // reserved
+  for (int s = 0; s < kNumSetups; ++s) {
+    for (int i = 0; i < MIDIMAP_MAX; ++i)
+      setups[s].inmaps[i] = stream_buffer.Read<uint64_t>();
+    for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+      setups[s].outports[i] = stream_buffer.Read<uint64_t>();
+  }
+  UnpackSetup(active_setup);
+  return stream_buffer.read();
+#endif
 }
 
 void AppCaptainMIDI::Process(OC::IOFrame *ioframe) {
@@ -977,29 +1905,14 @@ void AppCaptainMIDI::HandleAppEvent(OC::AppEvent event) {
     Resume();
   }
   if (event == OC::APP_EVENT_FLUSH) {
-    // Preset-bus capture: flush live setup to the file-backed store
+    PackSetup(active_setup);
 #ifdef __IMXRT1062__
-    StoreData();
+    StoreData();  // preset-bus capture: persist CAPTAIN.DAT
 #endif
   }
 }
 
-void AppCaptainMIDI::Loop() {
-  // Poll incoming MIDI from loop context: USBHost_t36's transfer queues are
-  // shared with the USB host's own interrupts, so reading it from the
-  // 16.67kHz Controller() ISR deadlocks as soon as a device sends traffic.
-  // A small per-pass budget keeps one chatty source from starving the loop.
-  int budget = 8;
-  while (budget-- > 0 && process_midi_in(usbMIDI)) {}
-#ifdef ARDUINO_TEENSY41
-  budget = 8;
-  while (budget-- > 0 && process_midi_in(usbHostMIDI[0])) {}
-  budget = 8;
-  while (budget-- > 0 && process_midi_in(usbHostMIDI[1])) {}
-  budget = 8;
-  while (budget-- > 0 && process_midi_in(MIDI1)) {}
-#endif
-}
+FLASHMEM void AppCaptainMIDI::Loop() { DoLoop(); } // deferred (non-ISR) work
 
 FLASHMEM
 void AppCaptainMIDI::DrawMenu() const { BaseView(); }
@@ -1007,12 +1920,12 @@ void AppCaptainMIDI::DrawMenu() const { BaseView(); }
 FLASHMEM
 void AppCaptainMIDI::View() const { MainView(); }
 
-void AppCaptainMIDI::DrawScreensaver() const {
+FLASHMEM void AppCaptainMIDI::DrawScreensaver() const {
     BaseScreensaver(true);
 }
 void AppCaptainMIDI::DrawDebugInfo() const { }
 
-void AppCaptainMIDI::HandleButtonEvent(const UI::Event &event) {
+FLASHMEM void AppCaptainMIDI::HandleButtonEvent(const UI::Event &event) {
     if (event.control == OC::CONTROL_BUTTON_R && event.type == UI::EVENT_BUTTON_PRESS)
         ToggleCursor();
     if (event.control == OC::CONTROL_BUTTON_L) {
@@ -1021,22 +1934,24 @@ void AppCaptainMIDI::HandleButtonEvent(const UI::Event &event) {
     }
 
     if (event.control == OC::CONTROL_BUTTON_A && event.type == UI::EVENT_BUTTON_PRESS)
-        SwitchSetup(-1);
+        SwitchSetup(1); // hOC: A is the + button
     if (event.control == OC::CONTROL_BUTTON_B) {
-        if (event.type == UI::EVENT_BUTTON_PRESS) SwitchSetup(1);
+        if (event.type == UI::EVENT_BUTTON_PRESS) SwitchSetup(-1);
         if (event.type == UI::EVENT_BUTTON_LONG_PRESS) ToggleCopyMode();
     }
 }
 
-void AppCaptainMIDI::HandleEncoderEvent(const UI::Event &event) {
+FLASHMEM void AppCaptainMIDI::HandleEncoderEvent(const UI::Event &event) {
     if (event.control == OC::CONTROL_ENCODER_R) {
-        if (cursor.editing()) {
-            EncoderEdit(event.value);
+        if (detail_port < 0) {
+            cursor.Scroll(event.value); // overview: pick a port
+        } else if (param_cursor.editing()) {
+            EditDetailParam(detail_port, param_cursor.cursor_pos(), event.value);
         } else {
-            MoveCursor(event.value);
+            param_cursor.Scroll(event.value); // detail: pick a parameter
         }
     }
     if (event.control == OC::CONTROL_ENCODER_L) {
-        SwitchScreenOrLogView(event.value);
+        LeftEncoderTurn(event.value);
     }
 }

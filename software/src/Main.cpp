@@ -51,6 +51,8 @@
 #include "PresetBus.h"
 #include "PresetBusUI.h"
 
+void CaptainDumpProfiles();  // CaptainMIDI.h (global scope)
+
 #if defined(ARDUINO_TEENSY41)
 USBHost thisUSB;
 USBHub hub1(thisUSB);
@@ -773,6 +775,15 @@ FLASHMEM __attribute__((noinline)) void loop() {
           case 'g':
             Serial.println("Saving global settings + app data...");
             OC::SaveAppData();
+            break;
+          case 'u':  // USB host port device identities + profile table
+            for (int hp = 0; hp < 2; ++hp) {
+              const char *pn = (const char *)usbHostMIDI[hp].product();
+              Serial.printf("host%d: vid=%04X pid=%04X product=%s\n", hp + 1,
+                            usbHostMIDI[hp].idVendor(), usbHostMIDI[hp].idProduct(),
+                            (usbHostMIDI[hp].idVendor() && pn) ? pn : "-");
+            }
+            CaptainDumpProfiles();
             break;
           case 'p':  // toggle the preset-bus overlay (remote UI inspection)
             if (OC::PresetBusUI::Active()) OC::PresetBusUI::Exit();
