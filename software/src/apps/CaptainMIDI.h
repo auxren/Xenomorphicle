@@ -134,10 +134,14 @@ enum CaptainsKeys : uint16_t {
   // upper 7 bits of mapping key
   INPUT_MAP_KEY = 1 << 9,
   OUTPUT_MAP_KEY = 2 << 9,
-  // USB device profiles: plug a known MIDI device into the host jack and
-  // its bound setup loads automatically. Value: vid<<32 | pid<<16 | setup.
-  DEVICE_PROFILE_KEY = 3 << 9,
 };
+// USB device profiles are MODULE-level config, not preset state: they live
+// in GLOBALS.CFG ((9<<8) namespace). CAPTAIN.DAT is captured into preset
+// slots and restored by recalls (including boot recall), which would wipe
+// anything stored there. Values signed with 0xA5<<48 so stale or foreign
+// keys can never parse as profiles. Names at +16.
+static constexpr uint16_t DEVICE_PROFILE_KEY = 9 << 8;
+static constexpr uint64_t kProfileMagic = 0xA5ULL << 48;
 static constexpr int kDeviceProfiles = 8;
 
 const char* const midi_messages[7] = {
@@ -328,16 +332,6 @@ public:
     void StoreData() {
         PhzConfig::load_config("CAPTAIN.DAT");  // own the map before writing
         PhzConfig::setValue(SETUP_KEY, active_setup);
-#if defined(ARDUINO_TEENSY41)
-        for (int i = 0; i < kDeviceProfiles; ++i) {
-            PhzConfig::setValue(DEVICE_PROFILE_KEY + i,
-                (uint64_t(profiles[i].vid) << 32) |
-                (uint64_t(profiles[i].pid) << 16) | profiles[i].setup);
-            uint64_t nm = 0;
-            memcpy(&nm, profiles[i].name, 8);
-            PhzConfig::setValue(DEVICE_PROFILE_KEY + 16 + i, nm);
-        }
-#endif
         for (int s = 0; s < kNumSetups; ++s) {
           for (int i = 0; i < MIDIMAP_MAX; ++i)
             PhzConfig::setValue(INPUT_MAP_KEY + i + s*MIDIMAP_MAX, setups[s].inmaps[i]);
@@ -359,19 +353,6 @@ public:
             if (PhzConfig::getValue(OUTPUT_MAP_KEY + i + s*HS::MIDIFrame::kOutPorts, data))
               setups[s].outports[i] = data;
         }
-#if defined(ARDUINO_TEENSY41)
-        for (int i = 0; i < kDeviceProfiles; ++i) {
-          if (PhzConfig::getValue(DEVICE_PROFILE_KEY + i, data)) {
-            profiles[i].vid = (data >> 32) & 0xFFFF;
-            profiles[i].pid = (data >> 16) & 0xFFFF;
-            profiles[i].setup = constrain((int)(data & 0xFF), 0, kNumSetups - 1);
-          }
-          if (PhzConfig::getValue(DEVICE_PROFILE_KEY + 16 + i, data)) {
-            memcpy(profiles[i].name, &data, 8);
-            profiles[i].name[8] = 0;
-          }
-        }
-#endif
         UnpackSetup(active_setup);
         LeaveDetail();
         saved_checksum = live_checksum_prev = LiveChecksum();
@@ -427,7 +408,8 @@ public:
 
     int DetailParamCount(int row) const {
 #if defined(ARDUINO_TEENSY41)
-        if (row >= kFirstHostRow) return 3 + kDeviceProfiles;
+        // Device / Id / Bind + one row per STORED profile (no empty clutter)
+        if (row >= kFirstHostRow) return 3 + StoredProfileCount();
 #endif
         if (row < DAC_CHANNEL_COUNT) return 6;
         const int p = row - DAC_CHANNEL_COUNT;
@@ -445,9 +427,9 @@ public:
         if (row >= kFirstHostRow) {
             static const char* const host_labels[3] = { "Device", "Id", "Bind" };
             if (par < 3) return host_labels[par];
-            // stored-profile rows: the captured device name (or empty slot)
-            const DeviceProfile &pr = profiles[par - 3];
-            return pr.vid ? pr.name : "-";
+            // stored-profile rows: the captured device name
+            const DeviceProfile &pr = profiles[NthProfile(par - 3)];
+            return pr.name[0] ? pr.name : "device";
         }
 #endif
         static const char* const in_labels[6] = {
@@ -540,17 +522,26 @@ public:
             if (par == 2) {                     // Bind: off / Setup 1..4
                 const int cur = PortBinding(port);
                 int next = constrain(cur + dir, 0, kNumSetups);
-                if (cur == 0 && dir > 0)        // first detent: bind to what
-                    next = active_setup + 1;    // you're hearing right now
+                if (cur == 0 && dir != 0)       // first detent, either way:
+                    next = active_setup + 1;    // bind to what you're hearing
                 if (next == 0) UnbindPort(port);
-                else BindPort(port, uint8_t(next - 1));
-            } else if (par >= 3) {              // stored profiles: retarget/delete
-                DeviceProfile &pr = profiles[par - 3];
-                if (!pr.vid) return;
+                else {
+                    BindPort(port, uint8_t(next - 1));
+                    char msg[16];
+                    snprintf(msg, sizeof(msg), "Bound: Set %d", next);
+                    HS::PokePopup(HS::MESSAGE_POPUP, msg);
+                }
+            } else if (par >= 3 && par - 3 < StoredProfileCount()) {
+                DeviceProfile &pr = profiles[NthProfile(par - 3)];
                 const int next = constrain(pr.setup + 1 + dir, 0, kNumSetups);
-                if (next == 0) pr = {};         // off = delete, worded not hidden
-                else pr.setup = uint8_t(next - 1);
-                StoreData();
+                if (next == 0) {                // off = delete, worded not hidden
+                    pr = {};
+                    MarkProfilesDirty();
+                    EnterDetail(row);           // list shrank: re-seat cursor
+                } else {
+                    pr.setup = uint8_t(next - 1);
+                    MarkProfilesDirty();
+                }
             }
             return;                             // Device/Id are read-only
         }
@@ -838,6 +829,64 @@ public:
     uint16_t seen_vid[2] = {0, 0}, seen_pid[2] = {0, 0};
     uint32_t next_dev_poll_ms = 0;
 
+    // profiles persist in GLOBALS.CFG; after writing, CAPTAIN.DAT is
+    // reloaded so this app's expected map residency is restored.
+    // Deferred: edits mark dirty, DoLoop persists after they settle, so
+    // Bind detents never do file I/O in the UI path.
+    bool profiles_dirty = false;
+    uint32_t profiles_dirty_ms = 0;
+    void MarkProfilesDirty() {
+        profiles_dirty = true;
+        profiles_dirty_ms = millis();
+    }
+    FLASHMEM void PersistProfiles() {
+        profiles_dirty = false;
+        PhzConfig::load_config();
+        for (int i = 0; i < kDeviceProfiles; ++i) {
+            uint64_t v = 0;
+            if (profiles[i].vid)
+                v = kProfileMagic | (uint64_t(profiles[i].vid) << 32) |
+                    (uint64_t(profiles[i].pid) << 16) | profiles[i].setup;
+            PhzConfig::setValue(DEVICE_PROFILE_KEY + i, v);
+            uint64_t nm = 0;
+            memcpy(&nm, profiles[i].name, 8);
+            PhzConfig::setValue(DEVICE_PROFILE_KEY + 16 + i, nm);
+        }
+        PhzConfig::save_config();
+        PhzConfig::load_config("CAPTAIN.DAT");
+    }
+    // boot-time: other apps' Init may have loaded their own files first,
+    // so take the GLOBALS map explicitly rather than assuming residency
+    FLASHMEM void LoadProfiles() {
+        PhzConfig::load_config();
+        uint64_t data = 0;
+        for (int i = 0; i < kDeviceProfiles; ++i) {
+            profiles[i] = {};
+            if (PhzConfig::getValue(DEVICE_PROFILE_KEY + i, data) &&
+                (data >> 48) == 0xA5) {
+                profiles[i].vid = (data >> 32) & 0xFFFF;
+                profiles[i].pid = (data >> 16) & 0xFFFF;
+                profiles[i].setup = constrain((int)(data & 0xFF), 0, kNumSetups - 1);
+                if (PhzConfig::getValue(DEVICE_PROFILE_KEY + 16 + i, data)) {
+                    memcpy(profiles[i].name, &data, 8);
+                    profiles[i].name[8] = 0;
+                }
+            }
+        }
+    }
+
+    int StoredProfileCount() const {
+        int n = 0;
+        for (int i = 0; i < kDeviceProfiles; ++i)
+            if (profiles[i].vid) ++n;
+        return n;
+    }
+    int NthProfile(int n) const {   // index of the nth stored profile
+        for (int i = 0; i < kDeviceProfiles; ++i)
+            if (profiles[i].vid && n-- == 0) return i;
+        return 0;
+    }
+
     int FindProfile(uint16_t vid, uint16_t pid) const {
         for (int i = 0; i < kDeviceProfiles; ++i)
             if (profiles[i].vid == vid && profiles[i].pid == pid && vid) return i;
@@ -859,7 +908,7 @@ public:
         const uint8_t *pn = usbHostMIDI[port].product();
         for (int c = 0; pn && pn[c] && c < 8; ++c)
             profiles[slot].name[c] = (char)pn[c];
-        StoreData();
+        MarkProfilesDirty();
         return slot;
     }
     FLASHMEM void UnbindPort(int port) {
@@ -867,7 +916,7 @@ public:
                                   usbHostMIDI[port].idProduct());
         if (i >= 0) {
             profiles[i] = {};
-            StoreData();
+            MarkProfilesDirty();
         }
     }
     // bind state of the device on a host port: 0 = unbound, 1..4 = setup+1
@@ -875,6 +924,16 @@ public:
         const int i = FindProfile(usbHostMIDI[port].idVendor(),
                                   usbHostMIDI[port].idProduct());
         return (i >= 0) ? profiles[i].setup + 1 : 0;
+    }
+
+    FLASHMEM void DumpProfiles() {
+        for (int i = 0; i < kDeviceProfiles; ++i)
+            if (profiles[i].vid)
+                serial_printf("profile %d: %04X:%04X setup=%d name=%s\n", i,
+                              profiles[i].vid, profiles[i].pid,
+                              profiles[i].setup, profiles[i].name);
+        serial_printf("PortBinding(0)=%d PortBinding(1)=%d active_setup=%d\n",
+                      PortBinding(0), PortBinding(1), active_setup);
     }
 
     // loop context: watch the host ports; a newly arrived known device
@@ -935,6 +994,8 @@ public:
 
 #if defined(ARDUINO_TEENSY41)
         PollDeviceProfiles();
+        if (profiles_dirty && millis() - profiles_dirty_ms > 1500)
+            PersistProfiles();
 #endif
 
         // MIDI input, polled here in loop context (see Controller())
@@ -1369,6 +1430,12 @@ public:
    void ToggleCursor() {
        if (copy_mode) CopySetup(copy_setup_target, copy_setup_source);
        else if (detail_port < 0) EnterDetail(cursor.cursor_pos());
+#if defined(ARDUINO_TEENSY41)
+       // host detail: Device/Id are read-only - engaging edit mode there
+       // silently eats encoder turns ("it won't let me scroll")
+       else if (detail_port >= kFirstHostRow && param_cursor.cursor_pos() < 2)
+           return;
+#endif
        else param_cursor.toggle_editing();
    }
 
@@ -1558,9 +1625,8 @@ private:
                     else if (b) snprintf(buf, sizeof(buf), "Setup %d", b);
                     else v = "off";
                 } else {                        // stored profile rows
-                    const DeviceProfile &pr = profiles[current - 3];
-                    if (pr.vid) snprintf(buf, sizeof(buf), "Setup %d", pr.setup + 1);
-                    else v = "";
+                    const DeviceProfile &pr = profiles[NthProfile(current - 3)];
+                    snprintf(buf, sizeof(buf), "Setup %d", pr.setup + 1);
                 }
                 list_item.DrawDefault(v, 0, attr);
                 continue;
@@ -1716,7 +1782,25 @@ private:
 ////////////////////////////////////////////////////////////////////////////////
 //// App Functions
 ////////////////////////////////////////////////////////////////////////////////
-FLASHMEM void AppCaptainMIDI::Init() { BaseStart(); }
+static AppCaptainMIDI *g_captain_instance = nullptr;
+FLASHMEM void CaptainDumpProfiles() {
+#if defined(ARDUINO_TEENSY41)
+    if (g_captain_instance) g_captain_instance->DumpProfiles();
+#endif
+}
+
+void AppCaptainMIDI::Init() {
+    g_captain_instance = this;
+#if defined(ARDUINO_TEENSY41)
+    LoadProfiles();
+    // First device evaluation waits out the boot recall: a device already
+    // plugged at power-up counts as "arriving" AFTER the preset restore,
+    // so its bound setup wins the boot (the 225e-ish expectation), instead
+    // of being overwritten by the recall finishing a moment later.
+    next_dev_poll_ms = millis() + 3000;
+#endif
+    BaseStart();
+}
 
 FLASHMEM size_t AppCaptainMIDI::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
 #ifdef __IMXRT1062__

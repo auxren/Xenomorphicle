@@ -51,6 +51,8 @@
 #include "PresetBus.h"
 #include "PresetBusUI.h"
 
+void CaptainDumpProfiles();  // CaptainMIDI.h (global scope)
+
 #if defined(ARDUINO_TEENSY41)
 USBHost thisUSB;
 USBHub hub1(thisUSB);
@@ -95,6 +97,7 @@ void ScanI2C() {
 #endif // ARDUINO_TEENSY41
 
 uint_fast8_t MENU_REDRAW = true;
+volatile uint32_t loop_counter = 0;   // main-loop rate, read by DebugDump
 static OC::UiMode ui_mode = OC::UI_MODE_MENU;
 static OC::IOFrame io_frame;
 
@@ -408,6 +411,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
   uint32_t last_redraw_time = 0;
 
   while (true) {
+    ++loop_counter;
 #if defined(ARDUINO_TEENSY41)
     thisUSB.Task();
 #endif
@@ -549,13 +553,14 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.println("Saving global settings + app data...");
             OC::SaveAppData();
             break;
-          case 'u':  // USB host port device identities
+          case 'u':  // USB host port device identities + profile table
             for (int hp = 0; hp < 2; ++hp) {
               Serial.printf("host%d: vid=%04X pid=%04X product=%s\n", hp + 1,
                             usbHostMIDI[hp].idVendor(), usbHostMIDI[hp].idProduct(),
                             usbHostMIDI[hp].idVendor()
                                 ? (const char *)usbHostMIDI[hp].product() : "-");
             }
+            CaptainDumpProfiles();
             break;
           case 'p':  // toggle the preset-bus overlay (remote UI inspection)
             if (OC::PresetBusUI::Active()) OC::PresetBusUI::Exit();

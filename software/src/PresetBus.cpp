@@ -12,6 +12,8 @@
 #include "OC_core.h"
 #include "PhzConfig.h"
 
+extern volatile uint32_t loop_counter;  // Main.cpp (global scope)
+
 namespace OC {
 namespace PresetBus {
 
@@ -337,9 +339,19 @@ static bool tx_gate_open() {
   return true;
 }
 
+static uint32_t loop_rate_hz = 0;
+
 void Task() {
   if (!enabled) return;
   Bus200eSetNow(millis());
+
+  // rolling main-loop rate (the number behind "feels sluggish")
+  static uint32_t rate_t0 = 0, rate_l0 = 0;
+  if (millis() - rate_t0 >= 500) {
+    loop_rate_hz = (loop_counter - rate_l0) * 1000 / (millis() - rate_t0);
+    rate_t0 = millis();
+    rate_l0 = loop_counter;
+  }
 
   if (ring_ovf) {
     ring_ovf = false;
@@ -397,6 +409,7 @@ FLASHMEM void DebugDump() {
   Serial.println("--- PresetBus ---");
   // CORE ISR liveness: two tick samples 5ms apart (16.67kHz => ~83 delta)
   {
+    Serial.printf("loop rate ~%lu Hz\n", (unsigned long)loop_rate_hz);
     const uint32_t t0 = OC::CORE::ticks;
     delay(5);
     Serial.printf("core_ticks=%lu delta5ms=%lu display_en=%d app_isr=%d app_loop=%d\n",
