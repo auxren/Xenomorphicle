@@ -36,8 +36,10 @@ HEADER = [0x7D, 0x62, 0x4D, PROTO_VERSION]  # after F0 (mido adds F0/F7)
 
 CMD_INFO, CMD_GET, CMD_SET, CMD_GET_DUMP = 0x01, 0x02, 0x03, 0x04
 CMD_SAVE, CMD_LOAD, CMD_FACTORY, CMD_PANIC, CMD_SELECT = 0x06, 0x07, 0x08, 0x09, 0x0A
+CMD_ECHO = 0x0B
 CMD_ACK, CMD_INFO_R, CMD_GET_R = 0x40, 0x41, 0x42
 CMD_DUMP_DATA, CMD_DUMP_END, CMD_NAK = 0x44, 0x45, 0x7E
+CMD_ECHO_R = 0x4B
 
 NAK_ERRORS = {
     1: "protocol version mismatch",
@@ -121,6 +123,31 @@ def cmd_identity(args):
               f"protocol v{data[8]}, firmware {data[9]}.{data[10]}.{data[11]}")
     else:
         print("identity reply:", [hex(b) for b in data])
+
+
+def cmd_echo(args):
+    """Round-trip latency probe against the SYX_ECHO op."""
+    dev = HocDevice(args.port)
+    rtts = []
+    timeouts = 0
+    for i in range(args.count):
+        tok = [(i >> 7) & 0x7F, i & 0x7F, 0x55, 0x2A]
+        t0 = time.perf_counter()
+        try:
+            dev.transact(CMD_ECHO, tok, expect=CMD_ECHO_R)
+            rtts.append((time.perf_counter() - t0) * 1000.0)
+        except SystemExit:
+            raise
+        except Exception:
+            timeouts += 1
+        time.sleep(0.005)
+    if not rtts:
+        sys.exit(f"no echo replies ({timeouts} timeouts) - is Captain MIDI active?")
+    rtts.sort()
+    n = len(rtts)
+    print(f"echo RTT over {n}/{args.count} probes (ms): "
+          f"min={rtts[0]:.2f} median={rtts[n // 2]:.2f} "
+          f"p95={rtts[int(n * 0.95)]:.2f} max={rtts[-1]:.2f} timeouts={timeouts}")
 
 
 def cmd_info(args):
@@ -284,6 +311,10 @@ def main():
     sub.add_parser("ports").set_defaults(fn=cmd_ports)
     sub.add_parser("identity").set_defaults(fn=cmd_identity)
     sub.add_parser("info").set_defaults(fn=cmd_info)
+
+    e = sub.add_parser("echo", help="round-trip latency probe (SYX_ECHO)")
+    e.add_argument("--count", type=int, default=100)
+    e.set_defaults(fn=cmd_echo)
 
     g = sub.add_parser("get")
     g.add_argument("cls", help="global|in|cv|tr or numeric class")

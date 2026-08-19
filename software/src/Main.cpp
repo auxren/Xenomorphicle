@@ -690,6 +690,8 @@ FLASHMEM __attribute__((noinline)) void loop() {
       // input until the literal sequence "pew!" arrives.
       static bool console_unlocked = false;
       static uint32_t unlock_shift = 0;
+      static uint32_t destructive_arm_ms = 0;  // C/F double-press confirm
+      static char destructive_arm_key = 0;
       do {
         int cmd = Serial.read();
         if (!console_unlocked) {
@@ -785,10 +787,20 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.printf("PresetBus verbose = %d\n", OC::PresetBus::Verbose());
             break;
 #endif
+          // destructive keys need a second press within 3s ('pew!' stops
+          // robots typing garbage; this stops human typos)
           case 'C':
-            Serial.println("Resetting Config File!!");
-            PhzConfig::clear_config();
-            PhzConfig::save_config();
+            if (millis() - destructive_arm_ms < 3000 && destructive_arm_key == 'C') {
+              destructive_arm_ms = 0;
+              Serial.println("Resetting Config File!!");
+              PhzConfig::clear_config();
+              PhzConfig::save_config();
+            } else {
+              destructive_arm_ms = millis();
+              destructive_arm_key = 'C';
+              Serial.println("'C' RESETS the config - press 'C' again within 3s");
+            }
+            break;
           case 't': SelfTest(); break;  // one-shot system health report
           case 'a': OC::SwitchToDefaultApp(); break;  // remote: activate Captain
           case 'l':
@@ -800,6 +812,13 @@ FLASHMEM __attribute__((noinline)) void loop() {
             PhzConfig::listFiles(SD);
             break;
           case 'F':
+            if (millis() - destructive_arm_ms >= 3000 || destructive_arm_key != 'F') {
+              destructive_arm_ms = millis();
+              destructive_arm_key = 'F';
+              Serial.println("'F' ERASES ALL LittleFS files - press 'F' again within 3s");
+              break;
+            }
+            destructive_arm_ms = 0;
             Serial.println("!! ERASING ALL FILES on LittleFS !!");
             PhzConfig::eraseFiles();
             break;
