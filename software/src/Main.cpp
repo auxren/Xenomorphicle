@@ -549,6 +549,14 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.println("Saving global settings + app data...");
             OC::SaveAppData();
             break;
+          case 'u':  // USB host port device identities
+            for (int hp = 0; hp < 2; ++hp) {
+              Serial.printf("host%d: vid=%04X pid=%04X product=%s\n", hp + 1,
+                            usbHostMIDI[hp].idVendor(), usbHostMIDI[hp].idProduct(),
+                            usbHostMIDI[hp].idVendor()
+                                ? (const char *)usbHostMIDI[hp].product() : "-");
+            }
+            break;
           case 'p':  // toggle the preset-bus overlay (remote UI inspection)
             if (OC::PresetBusUI::Active()) OC::PresetBusUI::Exit();
             else OC::PresetBusUI::Enter();

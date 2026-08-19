@@ -412,6 +412,11 @@ public:
         else if (display) DrawLogScreen();
         else if (detail_port >= 0) DrawDetail();
         else DrawOverview();
+        // popups poked from this app (device recognition, preset engine)
+        // must be drawn here too - only Quadrants drew them before, so
+        // they fired invisibly with Captain active
+        if (OC::CORE::ticks - HS::popup_tick < HEMISPHERE_CURSOR_TICKS * 4)
+            HS::DrawPopup(0, 0, CursorBlink());
     }
 
     // ---- two-level navigation ----
