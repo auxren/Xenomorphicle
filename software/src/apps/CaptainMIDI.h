@@ -323,9 +323,15 @@ public:
     void Suspend() {
         PackSetup(active_setup);
 #ifdef __IMXRT1062__
-        StoreData();
+        // Only hit flash when there is actually something unsaved: this
+        // runs on every app-menu entry (SUSPEND), and an unconditional
+        // CAPTAIN.DAT rewrite (sector erases included) made the A+encoder
+        // menu gesture take seconds. Autosave keeps it clean in practice.
+        if (LiveConfigDirty()) StoreData();
 #endif
-        OnSendSysEx();
+        // dump-to-host on suspend is the Orin workflow contract, but only
+        // when a host is actually configured to hear it
+        if (usb_configuration) OnSendSysEx();
     }
 
 #ifdef __IMXRT1062__
