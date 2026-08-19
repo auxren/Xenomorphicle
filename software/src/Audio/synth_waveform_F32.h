@@ -49,7 +49,11 @@ inline const float* AudioWaveformSineF32() {
 
 // ---------------------------------------------------------------------------
 // Non-modulated oscillator (AudioSynthWaveform port).
-// Implemented waveforms: SINE, ARBITRARY (256-sample float table).
+// Implemented waveforms: SINE, ARBITRARY (256-sample float table),
+// TRIANGLE_VARIABLE, PULSE (integer skew/width math kept identical to the
+// int16 original, incl. the width-0/width-max saw shapes that relied on ARM
+// udiv-by-zero returning 0 - made explicit here; only the final magnitude
+// scaling is float).
 // ---------------------------------------------------------------------------
 class AudioSynthWaveformF32 : public AudioStream_F32 {
 public:
@@ -80,6 +84,12 @@ public:
     if (n < -1.0f) n = -1.0f;
     else if (n > 1.0f) n = 1.0f;
     tone_offset = n;
+  }
+  void pulseWidth(float n) { // 0.0 to 1.0
+    if (n < 0.0f) n = 0.0f;
+    else if (n > 1.0f) n = 1.0f;
+    // vcvt saturates n == 1.0 to 0xFFFFFFFF, same as the int16 original
+    pulse_width = n * 4294967296.0f;
   }
   void begin(short t_type) {
     phase_offset = 0;
@@ -144,6 +154,40 @@ public:
         break;
       }
 
+      case WAVEFORM_TRIANGLE_VARIABLE: {
+        // Integer skew math identical to the int16 original, including the
+        // degenerate widths: pw16 == 0 gives the falling saw and pw16 ==
+        // 0xFFFF the rising saw the original produced via udiv-by-zero == 0.
+        const float tri_scale = mag * (1.0f / 32768.0f);
+        const uint32_t pw16 = pulse_width >> 16;
+        const uint32_t rise = pw16 ? 0xFFFFFFFFu / pw16 : 0;
+        const uint32_t fall =
+          (pw16 != 0xFFFFu) ? 0xFFFFFFFFu / (0xFFFFu - pw16) : 0;
+        const uint32_t halfwidth = pulse_width / 2;
+        for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+          uint32_t n;
+          if (ph < halfwidth) {
+            n = (ph >> 16) * rise;
+            *bp++ = static_cast<float>(n >> 16) * tri_scale;
+          } else if (ph < 0xFFFFFFFFu - halfwidth) {
+            n = 0x7FFFFFFFu - (((ph - halfwidth) >> 16) * fall);
+            *bp++ = static_cast<float>(static_cast<int32_t>(n) >> 16) * tri_scale;
+          } else {
+            n = ((ph + halfwidth) >> 16) * rise + 0x80000000u;
+            *bp++ = static_cast<float>(static_cast<int32_t>(n) >> 16) * tri_scale;
+          }
+          ph += inc;
+        }
+        break;
+      }
+
+      case WAVEFORM_PULSE:
+        for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+          *bp++ = (ph < pulse_width) ? mag : -mag;
+          ph += inc;
+        }
+        break;
+
       default:
         arm_fill_f32(0.0f, block->data, AUDIO_BLOCK_SAMPLES);
         ph += inc * AUDIO_BLOCK_SAMPLES;
@@ -162,6 +206,7 @@ private:
   uint32_t phase_accumulator = 0;
   uint32_t phase_increment = 0;
   uint32_t phase_offset = 0;
+  uint32_t pulse_width = 0x40000000u; // same default as the int16 original
   float magnitude = 0.0f;
   float tone_offset = 0.0f;
   const float* arbdata = nullptr;
