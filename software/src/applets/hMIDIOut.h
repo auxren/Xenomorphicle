@@ -435,6 +435,9 @@ private:
     }
 };
 
+// NOT inline: implicit-inline (comdat) definitions lose FLASHMEM under
+// LTO. Safe non-inline: this header is included only via applets/_config.h
+// into the single OC_apps.cpp TU.
 FLASHMEM void hMIDIOut::View() {
     DrawMonitor();
     if (cursor == LOG_VIEW) DrawLog();

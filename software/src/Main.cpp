@@ -564,10 +564,10 @@ FLASHMEM __attribute__((noinline)) void loop() {
             break;
           case 'u':  // USB host port device identities + profile table
             for (int hp = 0; hp < 2; ++hp) {
+              const char *pn = (const char *)usbHostMIDI[hp].product();
               Serial.printf("host%d: vid=%04X pid=%04X product=%s\n", hp + 1,
                             usbHostMIDI[hp].idVendor(), usbHostMIDI[hp].idProduct(),
-                            usbHostMIDI[hp].idVendor()
-                                ? (const char *)usbHostMIDI[hp].product() : "-");
+                            (usbHostMIDI[hp].idVendor() && pn) ? pn : "-");
             }
             CaptainDumpProfiles();
             break;

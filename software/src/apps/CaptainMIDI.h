@@ -272,12 +272,7 @@ public:
     }
 
     // pack the live mapping/outports state into setups[s]
-    void PackSetup(int s) {
-        for (int i = 0; i < MIDIMAP_MAX; ++i)
-            setups[s].inmaps[i] = frame.MIDIState.mapping[i].Pack();
-        for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
-            setups[s].outports[i] = frame.MIDIState.outports[i].Pack();
-    }
+    void PackSetup(int s);  // out-of-class (FLASHMEM + LTO)
 
     // Clamp a packed in-map blob so stale/garbage EEPROM data can never
     // index a name table out of bounds (that reads a wild pointer:
@@ -299,35 +294,22 @@ public:
     }
 
     // apply setups[s] to the live state
-    void UnpackSetup(int s) {
-        for (int i = 0; i < MIDIMAP_MAX; ++i) {
-            setups[s].inmaps[i] = SanitizeInMapPacked(setups[s].inmaps[i]);
-            frame.MIDIState.mapping[i].Unpack(setups[s].inmaps[i]);
-        }
-        for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) {
-            HS::MIDIOutPort &o = frame.MIDIState.outports[i];
-            o.Unpack(setups[s].outports[i]);
-            // clamp per port class: garbage functions crash the label lookup
-            const uint8_t fn_count = (i >= HS::MIDIFrame::kCVOutPorts)
-                ? HS::TRFN_COUNT : HS::CVFN_COUNT;
-            if (o.function >= fn_count) o.function = 0;
-            if (o.velocity_source() > ADC_CHANNEL_COUNT)
-                o.flags &= ~HS::MIDIOutSettings::VEL_SOURCE_MASK;
-            o.ResetRuntime();
-            setups[s].outports[i] = o.Pack(); // keep the blob canonical too
-        }
-        frame.MIDIState.UpdateMidiChannelFilter();
-        frame.MIDIState.UpdateMaxPolyphony();
-    }
+    void UnpackSetup(int s);  // out-of-class (FLASHMEM + LTO)
 
     void Suspend() {
+        // Capture dirtiness BEFORE PackSetup: packing copies the live frame
+        // into setups[] which is exactly what LiveConfigDirty compares, so
+        // checking after packing is always-false (review C1 - edits were
+        // silently revertible via menu round-trips). The checksum term also
+        // covers setup switches and SysEx edits to non-active setups.
+        const bool dirty = LiveConfigDirty();
         PackSetup(active_setup);
 #ifdef __IMXRT1062__
-        // Only hit flash when there is actually something unsaved: this
-        // runs on every app-menu entry (SUSPEND), and an unconditional
-        // CAPTAIN.DAT rewrite (sector erases included) made the A+encoder
-        // menu gesture take seconds. Autosave keeps it clean in practice.
-        if (LiveConfigDirty()) StoreData();
+        // Only hit flash when something is actually unsaved: this runs on
+        // every app-menu entry, and an unconditional CAPTAIN.DAT rewrite
+        // (sector erases included) made the menu gesture take seconds.
+        if (dirty || LiveChecksum() != saved_checksum) StoreData();
+        if (profiles_dirty) PersistProfiles();  // debounce dies with DoLoop
 #endif
         // dump-to-host on suspend is the Orin workflow contract, but only
         // when a host is actually configured to hear it
@@ -530,8 +512,10 @@ public:
                 int next = constrain(cur + dir, 0, kNumSetups);
                 if (cur == 0 && dir != 0)       // first detent, either way:
                     next = active_setup + 1;    // bind to what you're hearing
-                if (next == 0) UnbindPort(port);
-                else {
+                if (next == 0) {
+                    UnbindPort(port);
+                    EnterDetail(row);   // list shrank: re-seat the cursor
+                } else {
                     BindPort(port, uint8_t(next - 1));
                     char msg[16];
                     snprintf(msg, sizeof(msg), "Bound: Set %d", next);
@@ -773,24 +757,7 @@ public:
     uint32_t saved_checksum = 0;
     uint8_t settle_seconds = 0;
 
-    uint32_t LiveChecksum() const {
-        uint32_t h = 2166136261u ^ active_setup;
-        auto mix = [&h](uint64_t d) {
-            h = (h ^ uint32_t(d)) * 16777619u;
-            h = (h ^ uint32_t(d >> 32)) * 16777619u;
-        };
-        for (int i = 0; i < MIDIMAP_MAX; ++i)
-            mix(frame.MIDIState.mapping[i].Pack());
-        for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
-            mix(frame.MIDIState.outports[i].Pack());
-        for (int s = 0; s < kNumSetups; ++s) {
-            for (int i = 0; i < MIDIMAP_MAX; ++i) mix(setups[s].inmaps[i]);
-            for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) mix(setups[s].outports[i]);
-        }
-        mix(uint64_t(frame.MIDIState.bend_range) | (uint64_t(frame.MIDIState.poly_mode) << 8)
-            | (uint64_t(frame.MIDIState.pc_channel) << 16) | (uint64_t(HS::trig_length) << 24));
-        return h;
-    }
+    uint32_t LiveChecksum() const;  // out-of-class (FLASHMEM + LTO)
 
     void PersistNow() {
         PackSetup(active_setup);
@@ -1788,6 +1755,53 @@ private:
 ////////////////////////////////////////////////////////////////////////////////
 //// App Functions
 ////////////////////////////////////////////////////////////////////////////////
+FLASHMEM void AppCaptainMIDI::PackSetup(int s) {
+    for (int i = 0; i < MIDIMAP_MAX; ++i)
+        setups[s].inmaps[i] = frame.MIDIState.mapping[i].Pack();
+    for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+        setups[s].outports[i] = frame.MIDIState.outports[i].Pack();
+}
+
+FLASHMEM void AppCaptainMIDI::UnpackSetup(int s) {
+    for (int i = 0; i < MIDIMAP_MAX; ++i) {
+        setups[s].inmaps[i] = SanitizeInMapPacked(setups[s].inmaps[i]);
+        frame.MIDIState.mapping[i].Unpack(setups[s].inmaps[i]);
+    }
+    for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) {
+        HS::MIDIOutPort &o = frame.MIDIState.outports[i];
+        o.Unpack(setups[s].outports[i]);
+        // clamp per port class: garbage functions crash the label lookup
+        const uint8_t fn_count = (i >= HS::MIDIFrame::kCVOutPorts)
+            ? HS::TRFN_COUNT : HS::CVFN_COUNT;
+        if (o.function >= fn_count) o.function = 0;
+        if (o.velocity_source() > ADC_CHANNEL_COUNT)
+            o.flags &= ~HS::MIDIOutSettings::VEL_SOURCE_MASK;
+        o.ResetRuntime();
+        setups[s].outports[i] = o.Pack(); // keep the blob canonical too
+    }
+    frame.MIDIState.UpdateMidiChannelFilter();
+    frame.MIDIState.UpdateMaxPolyphony();
+}
+
+FLASHMEM uint32_t AppCaptainMIDI::LiveChecksum() const {
+    uint32_t h = 2166136261u ^ active_setup;
+    auto mix = [&h](uint64_t d) {
+        h = (h ^ uint32_t(d)) * 16777619u;
+        h = (h ^ uint32_t(d >> 32)) * 16777619u;
+    };
+    for (int i = 0; i < MIDIMAP_MAX; ++i)
+        mix(frame.MIDIState.mapping[i].Pack());
+    for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+        mix(frame.MIDIState.outports[i].Pack());
+    for (int s = 0; s < kNumSetups; ++s) {
+        for (int i = 0; i < MIDIMAP_MAX; ++i) mix(setups[s].inmaps[i]);
+        for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) mix(setups[s].outports[i]);
+    }
+    mix(uint64_t(frame.MIDIState.bend_range) | (uint64_t(frame.MIDIState.poly_mode) << 8)
+        | (uint64_t(frame.MIDIState.pc_channel) << 16) | (uint64_t(HS::trig_length) << 24));
+    return h;
+}
+
 static AppCaptainMIDI *g_captain_instance = nullptr;
 FLASHMEM void CaptainDumpProfiles() {
 #if defined(ARDUINO_TEENSY41)
