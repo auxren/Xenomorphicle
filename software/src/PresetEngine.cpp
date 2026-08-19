@@ -65,6 +65,7 @@ static uint32_t op_count = 0;            // completed save/recall operations
 static bool last_save_ok = false;
 static bool busy = false;
 static int quad_recall_hint = -1;
+static bool skip_captain_restore = false;  // boot recall only
 
 static DMAMEM AppData capture;               // RAM capture buffer (~4KB)
 
@@ -310,7 +311,11 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
     slot_name(name, slot, 'S', "DAT");
     copy_file(slot_fs(), name, "SCENERY.DAT");
   }
-  if (flags & CONTENT_CAPTAIN) {
+  // Boot recall deliberately keeps the LIVE Captain config: it's the
+  // module's MIDI-interface setup (autosaved continuously), not scene
+  // state - restoring the slot's snapshot at power-up silently rewound
+  // the owner's mapping edits. Explicit recalls still restore it.
+  if ((flags & CONTENT_CAPTAIN) && !skip_captain_restore) {
     slot_name(name, slot, 'C', "DAT");
     copy_file(slot_fs(), name, "CAPTAIN.DAT");
   }
@@ -390,7 +395,8 @@ FLASHMEM void BootRecall() {
   if (!PhzConfig::getValue(kCurSlotKey, v) || v >= kNumSlots) return;
   if (!SlotUsed((uint8_t)v)) return;
   serial_printf("PresetEngine: boot recall slot %d\n", (int)v);
-  RequestRecall((uint8_t)v);   // local only: no bus broadcast at power-up
+  skip_captain_restore = true;   // cleared after the first Process() pass
+  RequestRecall((uint8_t)v);     // local only: no bus broadcast at power-up
 }
 
 FLASHMEM void Process() {
@@ -403,6 +409,7 @@ FLASHMEM void Process() {
   if (r >= 0) {
     pending_recall = -1;
     RecallSlot(r);
+    skip_captain_restore = false;   // only ever true for the boot recall
   }
   if (cur_slot_dirty_ms && millis() - cur_slot_dirty_ms > 3000)
     persist_cur_slot();

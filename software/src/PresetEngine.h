@@ -48,7 +48,7 @@ bool LastSaveOk();            // result of the most recent save
 // Boot-time restore of the last bus preset (200e power-up semantics):
 // reads the persisted current slot and queues a local recall if it still
 // validates. Call once from setup(), after the apps have started.
-void BootRecall();
+void BootRecall();  // skips Captain-config restore: boot keeps live edits
 bool SlotUsed(uint8_t slot);  // slot has a stored preset on disk
 
 // slot names: flat PBNAMES.BIN sidecar (16 chars max, RAM-cached at Init;
