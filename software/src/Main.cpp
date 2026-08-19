@@ -52,6 +52,7 @@
 #include "PresetBusUI.h"
 
 void CaptainDumpProfiles();  // CaptainMIDI.h (global scope)
+void CaptainMidiHealth();    // CaptainMIDI.h (global scope)
 
 #if defined(ARDUINO_TEENSY41)
 USBHost thisUSB;
@@ -599,6 +600,9 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
                   s.bus_recovered, s.bus_stuck);
   }
 #endif
+#if defined(ARDUINO_TEENSY41)
+  CaptainMidiHealth();
+#endif
   Serial.println("=== selftest done ===");
 }
 #endif
@@ -729,7 +733,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
                           OC::CORE::app_loop_enabled ? "on" : "OFF");
 #if defined(__IMXRT1062__)
 #if defined(ARDUINO_TEENSY41)
-            Serial.println("i i2c scan   g save globals+app data");
+            Serial.println("i i2c scan   u host devices + MIDI profiles   g save globals+app data");
             Serial.println("-- preset bus --");
             Serial.println("local:  ( save0  ) recall0  { save1  } recall1");
 #if defined(PRESET_BUS)
