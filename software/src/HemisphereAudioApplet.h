@@ -4,6 +4,7 @@
 #include "dsputils.h"
 #include "Audio/effect_reverb_schroeder_F32.h"
 #include "Audio/effect_freeverb_F32.h"
+#include "Audio/effect_dynamics_F32.h"
 #include "src/Audio/effect_dynamics.h"
 #include <AudioStream.h>
 
@@ -19,7 +20,11 @@ public:
   // F32 reverbs: only the F32 Reverb/Bungverb applets draw from these pools
   static Factory<AudioEffectReverbSchroederF32, 8> bung_factory;
   static Factory<AudioEffectFreeverbF32, 8> verb_factory;
+  // int16 pool stays for ThreeBandz; the F32 Dynamics applet has its own pool
+  // (10 = every slot running stereo Dynamics). Factory allocates lazily, so
+  // the second pool costs nothing until instances are actually used.
   static Factory<AudioEffectDynamics, 20> compressor_factory;
+  static Factory<AudioEffectDynamicsF32, 10> compressor_f32_factory;
 
   static const uint_fast8_t CONFIG_SIZE = 4;
   static const uint_fast8_t MAX_CABLES = 32;
@@ -102,6 +107,13 @@ public:
   }
   void ReleaseComp(AudioEffectDynamics* comp) {
     compressor_factory.release(comp);
+  }
+
+  AudioEffectDynamicsF32 *GetCompF32() {
+    return compressor_f32_factory.get();
+  }
+  void ReleaseCompF32(AudioEffectDynamicsF32* comp) {
+    compressor_f32_factory.release(comp);
   }
 
   virtual void Disconnect() {
