@@ -1,42 +1,35 @@
 #pragma once
 
+// Float32 port of AudioEffectClouds (see AudioEffectClouds.h): same grain
+// scheduler (centred density: 0=silence, neg=periodic, pos=stochastic), same
+// rect→tri→Hann window morph from the shared Q15 Hann LUT (identical window
+// values — one table in flash serves both ports), same Hermite-interpolated
+// grain reads. The record buffer stores float32, so grain playback and the
+// feedback path never truncate to int16; Hermite taps read floats directly
+// (no per-tap int→float conversion). The feedback write into the buffer keeps
+// the original's double saturation — feedback term clamped to full scale,
+// then the input+feedback sum clamped again — so the feedback loop stays
+// bounded exactly like the int16 version's rail clipping (±1.0 here being the
+// float image of the int16 rails). Grain output leaves unclipped: headroom
+// stays float until the applet's edge converter.
+//
+// Buffer memory follows the int16 scheme (ExtAudioBuffer/extmem_calloc: PSRAM
+// when present): same sample counts, 4 bytes/sample instead of 2.
+
 #include "AudioBuffer.h"
+#include "AudioEffectClouds.h" // CloudsCircBuffer<T> template + shared Hann LUT
 #include "../dsputils.h"
-#include "../dsputils_arm.h"
 #include "../src/extern/stmlib_utils_random.h"
+#include "../extern/f32/AudioStream_F32.h"
 #include <Audio.h>
 
-// Thin subclass of ExtAudioBuffer exposing write position and raw buffer
-// access needed by AudioEffectClouds for absolute-position grain reads.
-template <typename T = int16_t>
-class CloudsCircBuffer : public ExtAudioBuffer<T> {
-public:
-    using ExtAudioBuffer<T>::ExtAudioBuffer;
-    size_t GetWriteIx() const { return this->write_ix; }
-    T*     RawBuffer()  const { return this->buffer; }
-    bool   IsReady()    const { return this->buffer != nullptr; }
-};
-
-// Clouds-inspired live granular processor.
-//
-// Improvements over AudioEffectMist:
-//   Texture   — continuous window morph: rect (0) → triangle (0.5) → Hann (1.0)
-//               Uses a 256-entry Q15 Hann LUT (512 bytes flash) — no sinf in hot loop.
-//   Density   — centred: 0=silence, <0=regular periodic, >0=stochastic cloud
-//   Feedback  — fraction of grain output fed back into the record buffer
-//
-// Hot-loop design:
-//   Single grain inner loop (no switch) — texture morph is 6 float ops per sample.
-//   Hann via LUT read + one fmul: no transcendental functions in the hot path.
-//   Hermite interpolation: 6 fmul + 5 fadd — single-cycle on Cortex-M7 FPU.
-//   Feedback held in a float[128] member array (not stack) to avoid stack pressure.
-class AudioEffectClouds : public AudioStream {
+class AudioEffectCloudsF32 : public AudioStream_F32 {
 public:
     static const size_t CLOUDS_BUFFER_SAMPLES = AUDIO_SAMPLE_RATE; // ~1 sec
     static const int    MAX_GRAINS = 12;
 
-    AudioEffectClouds(size_t buf_len = CLOUDS_BUFFER_SAMPLES)
-        : AudioStream(1, input_queue_array), g_buffer(buf_len) {}
+    AudioEffectCloudsF32(size_t buf_len = CLOUDS_BUFFER_SAMPLES)
+        : AudioStream_F32(1, input_queue_array), g_buffer(buf_len) {}
 
     void Acquire() { g_buffer.Acquire(); }
     void Release() { g_buffer.Release(); }
@@ -64,9 +57,12 @@ public:
     }
 
     void update() override {
-        audio_block_t* in  = receiveReadOnly(0);
-        audio_block_t* out = allocate();
-        if (!out) { if (in) release(in); return; }
+        audio_block_f32_t* in  = receiveReadOnly_f32(0);
+        audio_block_f32_t* out = AudioStream_F32::allocate_f32();
+        if (!out) {
+            if (in) AudioStream_F32::release(in);
+            return;
+        }
 
         // Snapshot volatile params once for this block.
         const float  cur_pos      = pos_;
@@ -83,30 +79,38 @@ public:
         if (!g_buffer.IsReady()) {
             // No PSRAM — pass through unchanged.
             if (in) {
-                memcpy(out->data, in->data, AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
+                memcpy(out->data, in->data, AUDIO_BLOCK_SAMPLES * sizeof(float));
             } else {
-                memset(out->data, 0, AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
+                std::fill_n(out->data, AUDIO_BLOCK_SAMPLES, 0.0f);
             }
-            transmit(out, 0);
-            release(out);
-            if (in) release(in);
+            AudioStream_F32::transmit(out);
+            AudioStream_F32::release(out);
+            if (in) AudioStream_F32::release(in);
             return;
         }
 
-        int16_t* buf = g_buffer.RawBuffer();
+        float* buf = g_buffer.RawBuffer();
 
         // ── Write incoming audio (+ feedback from previous block) unless frozen ─
         if (!cur_freeze) {
             if (cur_feedback > 0.0f && in) {
                 // Mix live input with previous block's feedback, then write.
-                int16_t tmp[AUDIO_BLOCK_SAMPLES];
+                // Same double saturation as the int16 version (which clipped
+                // the feedback term to the int16 rails, then clipped the sum
+                // again on storage): keeps the feedback loop bounded.
+                float tmp[AUDIO_BLOCK_SAMPLES];
                 for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-                    int32_t s = (int32_t)in->data[i] + Clip16(feedback_buf_[i]);
-                    tmp[i] = (int16_t)(s > 32767 ? 32767 : (s < -32768 ? -32768 : s));
+                    float fb = feedback_buf_[i];
+                    if (fb > 1.0f)  fb = 1.0f;
+                    if (fb < -1.0f) fb = -1.0f;
+                    float s = in->data[i] + fb;
+                    if (s > 1.0f)  s = 1.0f;
+                    if (s < -1.0f) s = -1.0f;
+                    tmp[i] = s;
                 }
                 g_buffer.Write(tmp);
             } else if (in) {
-                g_buffer.Write(in);
+                g_buffer.Write(in->data, AUDIO_BLOCK_SAMPLES);
             }
         }
 
@@ -144,7 +148,8 @@ public:
         //   At tex_lo=1, tex_hi=1: pure Hann.
         //   (tex_lo, tex_hi precomputed at spawn — 0 per-sample cost.)
         //
-        // Hann: read Q15 LUT, convert with one fmul. No sinf in the hot path.
+        // Hann: read shared Q15 LUT, convert with one fmul — same values as
+        // the int16 port, no sinf in the hot path.
         float accum_buf[AUDIO_BLOCK_SAMPLES] = {};
 
         for (auto& g : grains) {
@@ -157,18 +162,18 @@ public:
                 // ── Window ────────────────────────────────────────────────────
                 float tri = (t < 0.5f) ? (2.0f * t) : (2.0f - 2.0f * t);
                 uint8_t lut_idx = (uint8_t)(t * 255.0f + 0.5f);
-                float hann = (float)hann_lut_[lut_idx] * (1.0f / 32767.0f);
+                float hann = (float)AudioEffectClouds::hann_lut_[lut_idx] * (1.0f / 32767.0f);
                 float w = tri + g.tex_lo * (1.0f - tri) + g.tex_hi * (hann - tri);
                 t += t_step;
 
-                // ── Hermite interpolated read ──────────────────────────────────
+                // ── Hermite interpolated read (float taps — no conversion) ─────
                 size_t idx  = (size_t)g.read_ptr;
                 float  frac = g.read_ptr - (float)idx;
                 size_t im1  = (idx == 0)             ? buf_size - 1       : idx - 1;
                 size_t i1   = (idx + 1 >= buf_size)  ? 0                  : idx + 1;
                 size_t i2   = (idx + 2 >= buf_size)  ? idx + 2 - buf_size : idx + 2;
-                accum_buf[i] += InterpHermite((float)buf[im1], (float)buf[idx],
-                                              (float)buf[i1],  (float)buf[i2], frac) * w;
+                accum_buf[i] += InterpHermite(buf[im1], buf[idx],
+                                              buf[i1],  buf[i2], frac) * w;
 
                 g.read_ptr += g.pitch;
                 if (g.read_ptr >= (float)buf_size) g.read_ptr -= (float)buf_size;
@@ -177,23 +182,18 @@ public:
             }
         }
 
-        // ── Pass 3: scale, clip to output; capture feedback for next block ─────
+        // ── Pass 3: scale to output; capture feedback for next block ───────────
+        // No clip here: headroom stays float until the applet's edge converter.
         for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
             float scaled = accum_buf[i] * GRAIN_SCALE;
-            out->data[i] = Clip16(scaled);
+            out->data[i] = scaled;
             feedback_buf_[i] = scaled * cur_feedback;
         }
 
-        transmit(out, 0);
-        release(out);
-        if (in) release(in);
+        AudioStream_F32::transmit(out);
+        AudioStream_F32::release(out);
+        if (in) AudioStream_F32::release(in);
     }
-
-public:
-    // 256-entry Q15 Hann window LUT: round(sin²(π×i/255) × 32767), i = 0..255.
-    // const static → placed in .rodata (flash) by the linker. 512 bytes, zero SRAM cost.
-    // Public so the float32 port (AudioEffectCloudsF32) shares the same table.
-    static const int16_t hann_lut_[256];
 
 private:
     // Equal-power normalisation for up to 16 grains. 1/sqrt(16) = 0.25.
@@ -210,8 +210,8 @@ private:
         float  tex_hi        = 0.0f; // blend weight: tri→Hann  (precomputed at spawn)
     } grains[MAX_GRAINS];
 
-    CloudsCircBuffer<int16_t> g_buffer;
-    audio_block_t* input_queue_array[1];
+    CloudsCircBuffer<float> g_buffer;
+    audio_block_f32_t* input_queue_array[1];
 
     // Feedback accumulator — member array (not stack) to avoid stack pressure.
     float feedback_buf_[AUDIO_BLOCK_SAMPLES] = {};
@@ -282,41 +282,4 @@ private:
         g->tex_hi        = tex_hi;
         g->active        = true;
     }
-};
-
-// ── Hann LUT ──────────────────────────────────────────────────────────────────
-// round(sin²(π × i/255) × 32767) for i = 0..255. 512 bytes in .rodata (flash).
-const int16_t AudioEffectClouds::hann_lut_[256] = {
-       0,     5,    20,    45,    80,   124,   179,   243,
-     317,   401,   495,   598,   711,   833,   965,  1106,
-    1257,  1416,  1585,  1763,  1949,  2145,  2349,  2561,
-    2782,  3011,  3249,  3494,  3747,  4008,  4276,  4552,
-    4834,  5124,  5421,  5724,  6034,  6350,  6672,  7000,
-    7334,  7673,  8018,  8367,  8722,  9081,  9444,  9812,
-   10184, 10559, 10938, 11321, 11706, 12094, 12485, 12879,
-   13274, 13671, 14070, 14470, 14872, 15274, 15677, 16081,
-   16484, 16888, 17291, 17694, 18096, 18497, 18897, 19295,
-   19691, 20085, 20477, 20867, 21254, 21638, 22019, 22396,
-   22770, 23139, 23505, 23866, 24223, 24575, 24922, 25264,
-   25601, 25932, 26257, 26576, 26889, 27195, 27495, 27789,
-   28075, 28354, 28626, 28891, 29148, 29397, 29638, 29871,
-   30096, 30313, 30521, 30721, 30912, 31094, 31267, 31432,
-   31587, 31732, 31869, 31996, 32114, 32222, 32320, 32409,
-   32488, 32557, 32617, 32666, 32706, 32736, 32756, 32766,
-   32766, 32756, 32736, 32706, 32666, 32617, 32557, 32488,
-   32409, 32320, 32222, 32114, 31996, 31869, 31732, 31587,
-   31432, 31267, 31094, 30912, 30721, 30521, 30313, 30096,
-   29871, 29638, 29397, 29148, 28891, 28626, 28354, 28075,
-   27789, 27495, 27195, 26889, 26576, 26257, 25932, 25601,
-   25264, 24922, 24575, 24223, 23866, 23505, 23139, 22770,
-   22396, 22019, 21638, 21254, 20867, 20477, 20085, 19691,
-   19295, 18897, 18497, 18096, 17694, 17291, 16888, 16484,
-   16081, 15677, 15274, 14872, 14470, 14070, 13671, 13274,
-   12879, 12485, 12094, 11706, 11321, 10938, 10559, 10184,
-    9812,  9444,  9081,  8722,  8367,  8018,  7673,  7334,
-    7000,  6672,  6350,  6034,  5724,  5421,  5124,  4834,
-    4552,  4276,  4008,  3747,  3494,  3249,  3011,  2782,
-    2561,  2349,  2145,  1949,  1763,  1585,  1416,  1257,
-    1106,   965,   833,   711,   598,   495,   401,   317,
-     243,   179,   124,    80,    45,    20,     5,     0,
 };
