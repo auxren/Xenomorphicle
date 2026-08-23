@@ -520,6 +520,11 @@ public:
                     EnterDetail(row);   // list shrank: re-seat the cursor
                 } else {
                     BindPort(port, uint8_t(next - 1));
+                    // binding an UNKNOWN device stores a new profile, so the
+                    // row list just grew: extend the cursor's range in place
+                    // (AdjustEnd keeps the cursor and screen line where they
+                    // are; Init would yank it back to the top mid-edit)
+                    param_cursor.AdjustEnd(DetailParamCount(row) - 1);
                     char msg[16];
                     snprintf(msg, sizeof(msg), "Bound: Set %d", next);
                     HS::PokePopup(HS::MESSAGE_POPUP, msg);
