@@ -399,8 +399,8 @@ public:
 
     int DetailParamCount(int row) const {
 #if defined(ARDUINO_TEENSY41)
-        // Device / Id / Bind + one row per STORED profile (no empty clutter)
-        if (row >= kFirstHostRow) return 3 + StoredProfileCount();
+        // Device / Id / Bind / Bus + one row per STORED profile (no clutter)
+        if (row >= kFirstHostRow) return 4 + StoredProfileCount();
 #endif
         if (row < DAC_CHANNEL_COUNT) return 6;
         const int p = row - DAC_CHANNEL_COUNT;
@@ -416,10 +416,10 @@ public:
     const char* DetailParamLabel(int row, int par) const {
 #if defined(ARDUINO_TEENSY41)
         if (row >= kFirstHostRow) {
-            static const char* const host_labels[3] = { "Device", "Id", "Bind" };
-            if (par < 3) return host_labels[par];
+            static const char* const host_labels[4] = { "Device", "Id", "Bind", "Bus" };
+            if (par < 4) return host_labels[par];
             // stored-profile rows: the captured device name
-            const DeviceProfile &pr = profiles[NthProfile(par - 3)];
+            const DeviceProfile &pr = profiles[NthProfile(par - 4)];
             return pr.name[0] ? pr.name : "device";
         }
 #endif
@@ -524,8 +524,22 @@ public:
                     snprintf(msg, sizeof(msg), "Bound: Set %d", next);
                     HS::PokePopup(HS::MESSAGE_POPUP, msg);
                 }
-            } else if (par >= 3 && par - 3 < StoredProfileCount()) {
-                DeviceProfile &pr = profiles[NthProfile(par - 3)];
+            } else if (par == 3) {              // Bus thru for THIS device
+                if (!usbHostMIDI[port].idVendor() || dir == 0) return;
+                const uint8_t off = dir > 0 ? 0 : 1;   // right = on, left = off
+                if (off == port_no_bus_thru[port]) return;
+                port_no_bus_thru[port] = off;
+                // remember it on the device's profile so it follows the
+                // device, not the port it happened to land on
+                const int pi = FindProfile(usbHostMIDI[port].idVendor(),
+                                           usbHostMIDI[port].idProduct());
+                if (pi >= 0 && profiles[pi].no_bus_thru != off) {
+                    profiles[pi].no_bus_thru = off;
+                    MarkProfilesDirty();
+                }
+                HS::PokePopup(HS::MESSAGE_POPUP, off ? "Bus: off" : "Bus: on");
+            } else if (par >= 4 && par - 4 < StoredProfileCount()) {
+                DeviceProfile &pr = profiles[NthProfile(par - 4)];
                 const int next = constrain(pr.setup + 1 + dir, 0, kNumSetups);
                 if (next == 0) {                // off = delete, worded not hidden
                     pr = {};
@@ -799,9 +813,15 @@ public:
     struct DeviceProfile {
         uint16_t vid = 0, pid = 0;
         uint8_t setup = 0;
+        // Suppress (not enable) so a profile stored before this existed
+        // reads 0 and keeps the old always-on behavior.
+        uint8_t no_bus_thru = 0;
         char name[9] = "";   // 8 chars from the USB product string
     };
     DeviceProfile profiles[kDeviceProfiles];
+    // live per-port copy of the profile's bus-thru choice; a device with no
+    // profile plays to the bus, as it always did
+    uint8_t port_no_bus_thru[2] = {0, 0};
     uint16_t seen_vid[2] = {0, 0}, seen_pid[2] = {0, 0};
     uint32_t next_dev_poll_ms = 0;
 
@@ -822,7 +842,8 @@ public:
             uint64_t v = 0;
             if (profiles[i].vid)
                 v = kProfileMagic | (uint64_t(profiles[i].vid) << 32) |
-                    (uint64_t(profiles[i].pid) << 16) | profiles[i].setup;
+                    (uint64_t(profiles[i].pid) << 16) | profiles[i].setup |
+                    (profiles[i].no_bus_thru ? (uint64_t(1) << 8) : 0);
             PhzConfig::setValue(DEVICE_PROFILE_KEY + i, v);
             uint64_t nm = 0;
             memcpy(&nm, profiles[i].name, 8);
@@ -843,6 +864,7 @@ public:
                 profiles[i].vid = (data >> 32) & 0xFFFF;
                 profiles[i].pid = (data >> 16) & 0xFFFF;
                 profiles[i].setup = constrain((int)(data & 0xFF), 0, kNumSetups - 1);
+                profiles[i].no_bus_thru = (data >> 8) & 1;
                 if (PhzConfig::getValue(DEVICE_PROFILE_KEY + 16 + i, data)) {
                     memcpy(profiles[i].name, &data, 8);
                     profiles[i].name[8] = 0;
@@ -880,7 +902,9 @@ public:
             for (int i = 0; i < kDeviceProfiles && slot < 0; ++i)
                 if (!profiles[i].vid) slot = i;
         if (slot < 0) return -1;   // table full: worded as 'full' in the UI
-        profiles[slot] = { vid, pid, uint8_t(setup % kNumSetups), "" };
+        // re-binding a known device keeps its bus-thru choice
+        const uint8_t keep_bus = profiles[slot].no_bus_thru;
+        profiles[slot] = { vid, pid, uint8_t(setup % kNumSetups), keep_bus, "" };
         const uint8_t *pn = usbHostMIDI[port].product();
         for (int c = 0; pn && pn[c] && c < 8; ++c)
             profiles[slot].name[c] = (char)pn[c];
@@ -923,8 +947,14 @@ public:
             if (vid == seen_vid[port] && pid == seen_pid[port]) continue;
             seen_vid[port] = vid;
             seen_pid[port] = pid;
-            if (!vid) continue;                    // departure
+            if (!vid) {                            // departure
+                port_no_bus_thru[port] = 0;        // next device starts on
+                continue;
+            }
             const int i = FindProfile(vid, pid);
+            // bus-thru follows the DEVICE: applied even when the setup
+            // switch below is held back by unsaved edits
+            port_no_bus_thru[port] = (i >= 0) ? profiles[i].no_bus_thru : 0;
             if (i < 0) {
                 // recognition feedback only, no action implied
                 HS::PokePopup(HS::MESSAGE_POPUP, RowFunctionName(kFirstHostRow + port));
@@ -1630,8 +1660,11 @@ private:
                     if (!usbHostMIDI[port].idVendor()) v = "-";
                     else if (b) snprintf(buf, sizeof(buf), "Setup %d", b);
                     else v = "off";
+                } else if (current == 3) {      // Bus: play the 200e bus?
+                    if (!usbHostMIDI[port].idVendor()) v = "-";
+                    else v = port_no_bus_thru[port] ? "off" : "on";
                 } else {                        // stored profile rows
-                    const DeviceProfile &pr = profiles[NthProfile(current - 3)];
+                    const DeviceProfile &pr = profiles[NthProfile(current - 4)];
                     snprintf(buf, sizeof(buf), "Setup %d", pr.setup + 1);
                 }
                 list_item.DrawDefault(v, 0, attr);
@@ -1722,7 +1755,15 @@ private:
 
         const HS::MIDIMessage msg = {channel, message, data1, data2};
         HS::frame.MIDIState.ProcessMIDIMsg(msg);
-        midi_thru(msg, srcmask);
+        uint8_t exclude = srcmask;
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+        // per-device bus thru (Host detail "Bus" row): keep a chatty
+        // controller off the 200e bus without muting it everywhere else
+        if ((srcmask == mMaskUSBHost && port_no_bus_thru[0]) ||
+            (srcmask == mMaskUSBHost2 && port_no_bus_thru[1]))
+            exclude |= mMaskBus;
+#endif
+        midi_thru(msg, exclude);
         return true;
     }
 

@@ -7,6 +7,7 @@
 
 #include <LittleFS.h>
 
+#include "MidiTxRing.h"
 #include "PresetBus.h"
 #include "PresetBus200e.h"
 #include "PresetBusCard.h"
@@ -153,13 +154,16 @@ static void lpi2c1_slave_isr() {
 // consumer -- plain SPSC.
 // TX: producers = app ISR (engine sends) AND loop (thru), so pushes are
 // briefly IRQ-masked. Consumer = Task() (loop).
-static constexpr uint8_t kMidiRing = 32;  // power of two
+// RX comes off the same slow wire it is parsed from and never needs depth.
+// TX is the deep, coalescing one (MidiTxRing.h) - host-tested, because the
+// wraparound arithmetic is exactly where silent queue bugs live.
+static constexpr uint8_t kMidiRing = 32;
 static volatile uint32_t midi_rx_q[kMidiRing];
 static volatile uint8_t midi_rx_w = 0;
 static uint8_t midi_rx_r = 0;
-static volatile uint32_t midi_tx_q[kMidiRing];
-static volatile uint8_t midi_tx_w = 0;
-static uint8_t midi_tx_r = 0;
+static constexpr uint8_t kMidiRingRx = kMidiRing;
+static constexpr uint8_t kMidiRingTx = MidiTxRing::kSize;
+static MidiTxRing midi_tx;
 static uint8_t midi_tx_fails = 0;
 
 // ---- parser callbacks into the preset engine -------------------------------
@@ -499,17 +503,14 @@ void QueueMidiTx(uint8_t type, uint8_t channel, uint8_t d1, uint8_t d2) {
   }
   // pushes come from both the app ISR and loop: mask IRQs around the ring.
   // (Unconditional re-enable is fine — ISRs run with PRIMASK clear, and the
-  // loop never calls this with interrupts already masked.)
+  // loop never calls this with interrupts already masked.) The ring folds
+  // continuous controllers into a pending one of the same stream; see
+  // MidiTxRing.h for why, and test_miditxring.cpp for the proof.
   __disable_irq();
-  if (uint8_t(midi_tx_w - midi_tx_r) >= kMidiRing) {
-    stats.midi_tx_drop++;
-  } else {
-    midi_tx_q[midi_tx_w & (kMidiRing - 1)] =
-        uint32_t(status) | (uint32_t(d1) << 8) | (uint32_t(d2) << 16);
-    midi_tx_w = midi_tx_w + 1;
-    const uint8_t d = uint8_t(midi_tx_w - midi_tx_r);
-    if (d > stats.midi_tx_hw) stats.midi_tx_hw = d;
-  }
+  midi_tx.push(status, d1, d2);
+  stats.midi_tx_drop = midi_tx.dropped;
+  stats.midi_tx_merged = midi_tx.merged;
+  stats.midi_tx_hw = midi_tx.high_water;
   __enable_irq();
 }
 
@@ -526,10 +527,10 @@ bool ReadMidiRx(uint8_t &status, uint8_t &d1, uint8_t &d2) {
 // master queued MIDI frames onto the bus; quiet-gated like the QUERY reply
 FLASHMEM static void pump_midi_tx() {
   uint8_t sent = 0;
-  while (midi_tx_r != midi_tx_w && sent < 4) {
+  uint32_t v = 0;
+  while (midi_tx.peek(v) && sent < 4) {
     if (!tx_gate_open()) return;
 
-    const uint32_t v = midi_tx_q[midi_tx_r & (kMidiRing - 1)];
     // [08][00][22][0F][status|mask][00][d1][d2][00] -- 2WIRELESS long format
     uint8_t f[9] = { 0x08, 0x00, 0x22, 0x0F,
                      uint8_t(v & 0xFF), 0x00,
@@ -542,16 +543,16 @@ FLASHMEM static void pump_midi_tx() {
     if (err == 0) Bus200eSuppressFrame(f, sizeof(f));
 
     if (err == 0) {
-      midi_tx_r = midi_tx_r + 1;
+      midi_tx.pop();
       midi_tx_fails = 0;
       stats.midi_tx++;
       ++sent;
     } else {
       // arbitration loss etc: retry next Task() pass; give up eventually
       if (++midi_tx_fails >= 100) {
-        midi_tx_r = midi_tx_r + 1;
+        midi_tx.pop();
         midi_tx_fails = 0;
-        stats.midi_tx_drop++;
+        stats.midi_tx_drop = ++midi_tx.dropped;
       }
       return;
     }
@@ -738,15 +739,15 @@ FLASHMEM void DebugDump() {
                 stats.isr_count, stats.starts, stats.stops, stats.bytes,
                 stats.ring_ovf);
   Serial.printf("hw: ring=%lu/%u midi_rx=%lu/%u midi_tx=%lu/%u | stuck=%lu recovered=%lu\n",
-                stats.ring_hw, kRingSize, stats.midi_rx_hw, kMidiRing,
-                stats.midi_tx_hw, kMidiRing, stats.bus_stuck,
+                stats.ring_hw, kRingSize, stats.midi_rx_hw, kMidiRingRx,
+                stats.midi_tx_hw, kMidiRingTx, stats.bus_stuck,
                 stats.bus_recovered);
   const Bus200eStats *ps = Bus200eGetStats();
   Serial.printf("frames=%lu dropped=%lu query_tx=%lu query_retry=%lu\n",
                 ps->frames, ps->dropped, stats.query_replies, stats.query_retries);
-  Serial.printf("midi: rx=%lu rx_ovf=%lu tx=%lu tx_drop=%lu\n",
+  Serial.printf("midi: rx=%lu rx_ovf=%lu tx=%lu tx_drop=%lu tx_merged=%lu\n",
                 stats.midi_rx, stats.midi_rx_ovf, stats.midi_tx,
-                stats.midi_tx_drop);
+                stats.midi_tx_drop, stats.midi_tx_merged);
   Serial.printf("engine: last_slot=%d was_save=%d busy=%d\n",
                 PresetEngine::LastSlot(), PresetEngine::LastWasSave(),
                 PresetEngine::Busy());

@@ -35,6 +35,7 @@ struct Stats {
   uint32_t midi_rx_ovf;    // dropped: RX ring full
   uint32_t midi_tx;        // bus MIDI frames mastered onto the bus
   uint32_t midi_tx_drop;   // dropped: TX ring full or persistent arb loss
+  uint32_t midi_tx_merged; // continuous controllers folded into a pending one
   // high-water marks (selftest): worst observed ring depths
   uint32_t ring_hw;
   uint32_t midi_rx_hw;
