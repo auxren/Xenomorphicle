@@ -1030,9 +1030,12 @@ public:
     }
 
     // runs in the main loop (not the ISR): drains deferred work
-    FLASHMEM void DoLoop() {
-        auto &hMIDI = frame.MIDIState;
-
+public:
+    // Drain every MIDI source into the (global) MIDIState and run thru.
+    // Split out of DoLoop so ANOTHER app can keep the MIDI->CV engine alive
+    // while Captain is suspended - the Tuner calls this so you can play the
+    // note you are tuning. Loop context only: USBHost_t36 is not ISR-safe.
+    FLASHMEM void PollMidiSources() {
         {   // worst-case poll cadence, for the selftest latency budget.
             // Gaps over 1s are app-suspension time (menu, other app), not
             // poll latency - skip them so the metric stays meaningful.
@@ -1043,13 +1046,6 @@ public:
             poll_last_us = now_us;
         }
 
-#if defined(ARDUINO_TEENSY41)
-        PollDeviceProfiles();
-        if (profiles_dirty && millis() - profiles_dirty_ms > 1500)
-            PersistProfiles();
-#endif
-
-        // MIDI input, polled here in loop context (see Controller())
         int budget = 8;
         while (budget-- > 0 && poll_midi(usbMIDI, mMaskUSBDev)) {}
 #ifdef ARDUINO_TEENSY41
@@ -1062,6 +1058,20 @@ public:
         budget = 8;
         while (budget-- > 0 && poll_bus_midi()) {}
 #endif
+    }
+
+    // (this region was already public; restore it rather than privatize
+    // everything below, which includes the selftest instrumentation)
+    FLASHMEM void DoLoop() {
+        auto &hMIDI = frame.MIDIState;
+
+#if defined(ARDUINO_TEENSY41)
+        PollDeviceProfiles();
+        if (profiles_dirty && millis() - profiles_dirty_ms > 1500)
+            PersistProfiles();
+#endif
+
+        PollMidiSources();
 
         if (syx_rx_len) {
             HandleSysEx(syx_rx_buf, syx_rx_len);
@@ -1912,6 +1922,13 @@ FLASHMEM void CaptainDumpProfiles() {
 #if defined(ARDUINO_TEENSY41)
     if (g_captain_instance) g_captain_instance->DumpProfiles();
 #endif
+}
+
+// Keep the MIDI->CV engine running from another app (the Tuner): one
+// implementation, so thru, filters and per-device bus masking cannot drift
+// between the two callers. No-op when Captain has never been initialized.
+FLASHMEM void CaptainPollMidi() {
+    if (g_captain_instance) g_captain_instance->PollMidiSources();
 }
 
 // selftest hook: MIDI poll cadence + echo probe stats (gap max resets on read)

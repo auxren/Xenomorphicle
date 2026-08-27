@@ -35,11 +35,26 @@ static constexpr int kRowH[kRows] = { 7, 7, 7 };
 
 }  // namespace TunerAppNS
 
-OC_APP_CLASS(AppTuner, TWOCCS("TU"), "Tuner", "Strobe tuner") {
+void CaptainPollMidi();   // CaptainMIDI.h (global scope)
+
+OC_APP_CLASS(AppTuner, TWOCCS("TU"), "Tuner", "Strobe tuner"),
+  public HSApplication {
 public:
   OC_APP_INTERFACE_DECLARE(AppTuner, 4);
 
+  // HSApplication: the tuner keeps Captain's MIDI->CV mapping alive so you
+  // can play the note you are tuning instead of only tuning a drone.
+  void Start() final {}
+  void Resume() final {}
+  void Controller() final {
+    if (!midi_out_) return;
+    for (int ch = 0; ch < DAC_CHANNEL_COUNT; ++ch)
+      Out(ch, HS::frame.MIDIState.mapping[ch].output);
+  }
+  void View() const final { DrawMenu(); }
+
 private:
+  bool midi_out_ = true;   // pass MIDI through to the CV outs while tuning
   AudioAnalyzeStrobe strobe_;
   AudioAnalyzeNoteFrequency notefreq_;
   AudioConnection *conn_strobe_ = nullptr;
@@ -125,6 +140,7 @@ FLASHMEM size_t AppTuner::SaveAppData(util::StreamBufferWriter &stream_buffer) c
   stream_buffer.Write<uint16_t>(a4_hz_);
   stream_buffer.Write<uint8_t>(manual_ ? 1 : 0);
   stream_buffer.Write<uint8_t>((uint8_t)manual_note_);
+  stream_buffer.Write<uint8_t>(midi_out_ ? 1 : 0);
   return stream_buffer.overflow() ? 0 : stream_buffer.written();
 }
 
@@ -134,6 +150,7 @@ FLASHMEM size_t AppTuner::RestoreAppData(util::StreamBufferReader &stream_buffer
   manual_ = stream_buffer.Read<uint8_t>() != 0;
   const uint8_t mn = stream_buffer.Read<uint8_t>();
   manual_note_ = (mn >= 12 && mn <= 120) ? (int8_t)mn : 69;
+  midi_out_ = stream_buffer.Read<uint8_t>() != 0;
   SetTarget(manual_ ? manual_note_ : 69);
   return stream_buffer.underflow() ? 0 : stream_buffer.read();
 }
@@ -147,9 +164,13 @@ FLASHMEM void AppTuner::HandleAppEvent(OC::AppEvent event) {
   }
 }
 
-void AppTuner::Process(OC::IOFrame *ioframe) { (void)ioframe; }
+void AppTuner::Process(OC::IOFrame *ioframe) { BaseController(ioframe); }
 
 FLASHMEM void AppTuner::Loop() {
+  // keep Captain's MIDI engine fed while it is suspended, so notes still
+  // reach the CV outs and thru still reaches the bus
+  if (midi_out_) CaptainPollMidi();
+
   // --- coarse: what note is this? -----------------------------------------
   if (notefreq_.available()) {
     const float f = notefreq_.read();
@@ -245,6 +266,11 @@ FLASHMEM void AppTuner::DrawMenu() const {
     graphics.setPrintPos(30, 16);
     graphics.print("LOCK");
   }
+  if (!midi_out_) {
+    graphics.setPrintPos(112, 2);
+    graphics.print("M");
+    graphics.invertRect(110, 0, 12, 10);
+  }
 
   graphics.setPrintPos(62, 16);
   if (have_signal_) {
@@ -292,8 +318,7 @@ FLASHMEM void AppTuner::HandleButtonEvent(const UI::Event &event) {
       if (manual_) manual_note_ = target_note_;
       else SetTarget(target_note_);
     } else if (OC::CONTROL_BUTTON_L == event.control) {
-      a4_hz_ = 440;                    // snap the reference back to standard
-      SetTarget(target_note_);
+      midi_out_ = !midi_out_;          // let the keyboard play while tuning
     }
   }
 }
@@ -315,9 +340,10 @@ FLASHMEM void AppTuner::HandleEncoderEvent(const UI::Event &event) {
 }
 
 FLASHMEM void AppTuner::GetIOConfig(OC::IOConfig &ioconfig) const {
-  // the tuner listens on the audio input; it drives no CV outputs
+  // the tuner listens on the audio input; the CV outs stay on Captain's
+  // MIDI mapping so the keyboard keeps playing while you tune
   for (int i = 0; i < DAC_CHANNEL_COUNT; ++i)
-    ioconfig.outputs[i].set("off", OC::OUTPUT_MODE_RAW);
+    ioconfig.outputs[i].set(midi_out_ ? "midi" : "off", OC::OUTPUT_MODE_RAW);
 }
 
 FLASHMEM void AppTuner::DrawDebugInfo() const {

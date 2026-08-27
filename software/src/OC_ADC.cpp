@@ -207,7 +207,7 @@ void ADC::Init_DMA() {
 
 static void Init_Teensy4_builtin_ADC();
 #if defined(ARDUINO_TEENSY41)
-static void Init_Teensy41_ADC33131D_chip();
+FLASHMEM static void Init_Teensy41_ADC33131D_chip();  // boot only
 #endif
 
 FLASHMEM
@@ -348,7 +348,7 @@ static void Init_Teensy4_builtin_ADC() {
 #endif
 
 #if defined(ARDUINO_TEENSY41)
-static void Init_Teensy41_ADC33131D_chip() {
+FLASHMEM static void Init_Teensy41_ADC33131D_chip() {
   // configure a timer to trigger FlexIO
   const int comp1 = ((float)F_BUS_ACTUAL) / (ADC33131_SAMPLE_RATE) / 2.0f + 0.5f;
   TMR4_ENBL &= ~(1<<3);
