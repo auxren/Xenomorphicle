@@ -354,6 +354,14 @@ public:
         UnpackSetup(active_setup);
         LeaveDetail();
         saved_checksum = live_checksum_prev = LiveChecksum();
+#if defined(ARDUINO_TEENSY41)
+        // Coming back from another app, a device that never unplugged is not
+        // an "arrival", so its bound setup was never re-selected - the bind
+        // looked dead until you physically replugged. Re-run the check once,
+        // quietly, against whatever is actually connected.
+        reapply_bindings_ = true;
+        next_dev_poll_ms = millis() + 250;   // let the app finish resuming
+#endif
     }
 #endif
 
@@ -827,7 +835,13 @@ public:
     // live per-port copy of the profile's bus-thru choice; a device with no
     // profile plays to the bus, as it always did
     uint8_t port_no_bus_thru[2] = {0, 0};
+    // stable copy of each port's product string, taken once when the device
+    // settles - the draw path must never touch the live USB buffer
+    char port_name_[2][9] = {{0}, {0}};
     uint16_t seen_vid[2] = {0, 0}, seen_pid[2] = {0, 0};
+    // set on resume: re-apply bindings for devices that were already there,
+    // quietly (no arrival popups for something that never left)
+    bool reapply_bindings_ = false;
     uint32_t next_dev_poll_ms = 0;
 
     // profiles persist in GLOBALS.CFG; after writing, CAPTAIN.DAT is
@@ -946,15 +960,28 @@ public:
     FLASHMEM void PollDeviceProfiles() {
         if (millis() < next_dev_poll_ms) return;
         next_dev_poll_ms = millis() + 500;   // let the product string arrive
+        const bool quiet = reapply_bindings_;   // resume: no arrival popups
+        reapply_bindings_ = false;
         for (int port = 0; port < 2; ++port) {
             const uint16_t vid = usbHostMIDI[port].idVendor();
             const uint16_t pid = usbHostMIDI[port].idProduct();
-            if (vid == seen_vid[port] && pid == seen_pid[port]) continue;
+            if (!quiet && vid == seen_vid[port] && pid == seen_pid[port]) continue;
             seen_vid[port] = vid;
             seen_pid[port] = pid;
             if (!vid) {                            // departure
                 port_no_bus_thru[port] = 0;        // next device starts on
+                port_name_[port][0] = 0;
                 continue;
+            }
+            // snapshot the product string here, where the device has had time
+            // to settle, so the draw path never reads the live USB buffer
+            const uint8_t *pn = usbHostMIDI[port].product();
+            if (pn && pn[0]) {
+                int c = 0;
+                for (; c < 8 && pn[c]; ++c) port_name_[port][c] = (char)pn[c];
+                port_name_[port][c] = 0;
+            } else {
+                port_name_[port][0] = 0;
             }
             const int i = FindProfile(vid, pid);
             // bus-thru follows the DEVICE: applied even when the setup
@@ -962,19 +989,22 @@ public:
             port_no_bus_thru[port] = (i >= 0) ? profiles[i].no_bus_thru : 0;
             if (i < 0) {
                 // recognition feedback only, no action implied
-                HS::PokePopup(HS::MESSAGE_POPUP, RowFunctionName(kFirstHostRow + port));
+                if (!quiet)
+                    HS::PokePopup(HS::MESSAGE_POPUP, RowFunctionName(kFirstHostRow + port));
             } else if (profiles[i].setup == active_setup) {
-                HS::PokePopup(HS::MESSAGE_POPUP, "Setup active");
+                if (!quiet) HS::PokePopup(HS::MESSAGE_POPUP, "Setup active");
             } else if (LiveConfigDirty()) {
                 // auto-anything must never eat unsaved edits
-                HS::PokePopup(HS::MESSAGE_POPUP, "Held: unsaved");
+                if (!quiet) HS::PokePopup(HS::MESSAGE_POPUP, "Held: unsaved");
             } else {
                 SelectSetup(profiles[i].setup);
-                char msg[16];
-                snprintf(msg, sizeof(msg), "%s>Set%d",
-                         profiles[i].name[0] ? profiles[i].name : "Device",
-                         profiles[i].setup + 1);
-                HS::PokePopup(HS::MESSAGE_POPUP, msg);
+                if (!quiet) {
+                    char msg[16];
+                    snprintf(msg, sizeof(msg), "%s>Set%d",
+                             profiles[i].name[0] ? profiles[i].name : "Device",
+                             profiles[i].setup + 1);
+                    HS::PokePopup(HS::MESSAGE_POPUP, msg);
+                }
             }
         }
     }
@@ -1537,15 +1567,11 @@ private:
         if (pos >= kFirstHostRow) {
             const int port = pos - kFirstHostRow;
             if (!usbHostMIDI[port].idVendor()) return "none";
-            const uint8_t *pn = usbHostMIDI[port].product();
-            if (pn && pn[0]) {
-                static char nm[2][9];
-                int c = 0;
-                for (; pn[c] && c < 8; ++c) nm[port][c] = (char)pn[c];
-                nm[port][c] = 0;
-                return nm[port];
-            }
-            return "device";
+            // Read our OWN snapshot, never the live USB string: the host
+            // stack rewrites that buffer while a device enumerates, and this
+            // runs in the draw path - which is exactly how a replug painted
+            // garbage across the row for a few seconds.
+            return port_name_[port][0] ? port_name_[port] : "device";
         }
 #endif
         if (pos < DAC_CHANNEL_COUNT)
