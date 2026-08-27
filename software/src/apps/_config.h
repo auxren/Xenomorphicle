@@ -42,6 +42,9 @@ namespace menu = OC::menu;
 #include "ScaleEditor.h"
 #include "WaveformEditor.h"
 #include "PongGame.h"
+#ifdef ENABLE_APP_TUNER
+#include "TunerApp.h"
+#endif
 #include "Backup.h"
 #include "SETTINGS.h"
 
@@ -133,6 +136,9 @@ static DMAMEM AppContainer<void // this space intentionally left blank
 #endif
 #ifdef ENABLE_APP_PONG
   , AppPong
+#endif
+#ifdef ENABLE_APP_TUNER
+  , AppTuner
 #endif
   , AppScaleEditor
 #ifndef NO_HEMISPHERE
