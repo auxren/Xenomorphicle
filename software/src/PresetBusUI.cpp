@@ -390,11 +390,18 @@ void Task() {
     if (pending_slot >= 0) {
       if (PresetEngine::OpCount() != pending_opcount) {
         const uint8_t shown = (uint8_t)pending_slot + 1;
-        if (pending_was_save)
+        if (pending_was_save) {
           snprintf(banner, sizeof(banner),
                    PresetEngine::LastSaveOk() ? "STORED %d" : "STORE ERR %d", shown);
-        else
-          snprintf(banner, sizeof(banner), "RECALLED %d", shown);
+        } else {
+          // A refused recall reports its reason at once ("EMPTY SLOT 7"),
+          // which is a different sentence from RECALL FAILED: the first
+          // means the slot has nothing stored, the second means the op
+          // never finished. A night was lost to conflating them.
+          const char *err = PresetEngine::LastRecallError();
+          if (err) snprintf(banner, sizeof(banner), "%s %d", err, shown);
+          else snprintf(banner, sizeof(banner), "RECALLED %d", shown);
+        }
         banner_until_ms = millis() + 1600;
         pending_slot = -1;
         sel_stored = -1;

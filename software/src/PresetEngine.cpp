@@ -63,6 +63,14 @@ static bool last_was_save = false;
 static uint32_t cur_slot_dirty_ms = 0;   // 0 = clean
 static uint32_t op_count = 0;            // completed save/recall operations
 static bool last_save_ok = false;
+// Why the most recent recall refused, or nullptr if it succeeded. A recall
+// that fails validation used to exit WITHOUT bumping op_count, so the
+// overlay's completion watch waited out its whole 4-second timeout and then
+// showed a generic RECALL FAILED -- for what was actually an empty slot.
+// That misdirection cost a night: the owner read it as a bus fault when the
+// truth was that the 15s Teensy restores had wiped every PB_* file (a full
+// restore erases ALL flash including LittleFS; a reflash does not).
+static const char *last_recall_err = nullptr;
 static bool busy = false;
 static int quad_recall_hint = -1;
 static bool skip_captain_restore = false;  // boot recall only
@@ -258,6 +266,20 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
 
 // ---- recall ----------------------------------------------------------------
 
+// A refused recall is still a FINISHED op: op_count bumps so the overlay's
+// completion watch reports the reason at once instead of timing out into a
+// generic failure, and the serial log gets a closing line instead of a
+// dangling "recall slot N". last_slot is deliberately untouched -- nothing
+// was recalled, so "the current preset" has not changed.
+FLASHMEM static bool recall_refused(uint8_t slot, const char *why) {
+  last_recall_err = why;
+  last_was_save = false;
+  op_count++;
+  busy = false;
+  serial_printf("PresetEngine: recall slot %d refused (%s)\n", slot, why);
+  return false;
+}
+
 FLASHMEM bool RecallSlot(uint8_t slot) {
   if (slot >= kNumSlots) return false;
   busy = true;
@@ -269,8 +291,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   if (!read_appdata_file(slot)) {
     HS::PokePopup(HS::MESSAGE_POPUP, "Empty preset");
     // put the map back (read_appdata doesn't touch it, but stay safe)
-    busy = false;
-    return false;
+    return recall_refused(slot, "EMPTY SLOT");
   }
   slot_name(name, slot, 'G', "CFG");
   if (!PhzConfig::load_config(name, slot_fs())) {
@@ -279,8 +300,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
     PhzConfig::load_config();
     app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
     HS::PokePopup(HS::MESSAGE_POPUP, "Bad preset");
-    busy = false;
-    return false;
+    return recall_refused(slot, "BAD PRESET");
   }
   uint64_t schema = 0, flags = 0, meta = 0;
   PhzConfig::getValue(kSchemaKey, schema);
@@ -291,8 +311,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
     PhzConfig::load_config();  // drop slot content, re-own the base map
     app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
     HS::PokePopup(HS::MESSAGE_POPUP, "Bad preset ver");
-    busy = false;
-    return false;
+    return recall_refused(slot, "OLD PRESET");
   }
 
   // 2. freeze the app world
@@ -346,6 +365,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
 
   last_slot = slot;
   last_was_save = false;
+  last_recall_err = nullptr;
   cur_slot_dirty_ms = millis() | 1;
   op_count++;
   busy = false;
@@ -424,6 +444,7 @@ FLASHMEM int ConsumeQuadrantsRecallHint() {
 int8_t LastSlot() { return last_slot; }
 uint32_t OpCount() { return op_count; }
 bool LastSaveOk() { return last_save_ok; }
+const char *LastRecallError() { return last_recall_err; }
 
 // ---- slot names --------------------------------------------------------
 // One flat 30x16 byte file, whole thing cached in RAM. Deliberately not a
