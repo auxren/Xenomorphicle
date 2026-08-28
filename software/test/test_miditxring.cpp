@@ -39,7 +39,7 @@ static uint8_t d2_at(uint8_t depth) {
 static void test_basic_queue() {
   ring.reset();
   CHECK(ring.pending() == 0);
-  uint32_t v;
+  uint32_t v = 0;
   CHECK(!ring.peek(v));                 // empty
   CHECK(ring.push(NOTEON, 60, 100));
   CHECK(ring.pending() == 1);
@@ -118,7 +118,7 @@ static void test_head_entry_is_never_rewritten() {
   ring.push(CHAT_A, 0, 6);              // head protected -> appends
   CHECK(ring.pending() == 2);
   CHECK(ring.merged == 0);
-  uint32_t v;
+  uint32_t v = 0;
   CHECK(ring.peek(v));
   CHECK(((v >> 16) & 0xFF) == 5);       // head still the value being sent
   ring.push(CHAT_A, 0, 7);              // now merges into entry 1
@@ -155,7 +155,7 @@ static void test_wraparound() {
   for (int cycle = 0; cycle < 8; ++cycle) {
     for (uint8_t i = 0; i < 100; ++i) CHECK(ring.push(NOTEON, i, 1));
     for (uint8_t i = 0; i < 100; ++i) {
-      uint32_t v;
+      uint32_t v = 0;
       CHECK(ring.peek(v));
       CHECK(((v >> 8) & 0xFF) == i);    // FIFO order preserved across wrap
       ring.pop();
@@ -178,7 +178,7 @@ static void test_drain_order_after_merge() {
   ring.push(NOTEOFF, 60, 0);
   ring.push(CC_A, 74, 99);              // merges into slot 1, keeps position
   CHECK(ring.pending() == 3);
-  uint32_t v;
+  uint32_t v = 0;
   ring.peek(v); CHECK((v & 0xFF) == NOTEON); ring.pop();
   ring.peek(v); CHECK((v & 0xFF) == CC_A && ((v >> 16) & 0xFF) == 99); ring.pop();
   ring.peek(v); CHECK((v & 0xFF) == NOTEOFF); ring.pop();
