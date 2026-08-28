@@ -384,7 +384,15 @@ public:
 
             MIDIMapping &map = frame.MIDIState.mapping[ch];
 
-            Out(ch, map.output);
+            // ViewOut, not output: the bend term lives there. Driving the
+            // raw value meant pitch bend was received, stored and DRAWN --
+            // the row's level bar moved -- while the jack never carried it.
+            // Found by measurement: a -2.5 cent/semitone correction sent
+            // over bend changed a tuning fit by exactly nothing while the
+            // display swore it was happening (2026-08-28, tune_check
+            // --corrected). ViewOut returns raw output for non-pitch maps
+            // and is a plain multiply, safe at 16.67kHz.
+            Out(ch, map.ViewOut());
         }
     }
 
