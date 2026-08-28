@@ -371,6 +371,8 @@ public:
         // queues shared with the USB host interrupts and locks the module
         // the moment a real device delivers traffic.
 
+        PumpTransport();
+
         // Convert CV/trigger inputs to outgoing MIDI messages
         frame.MIDIState.ProcessOutputs(frame);
 
@@ -1009,6 +1011,69 @@ public:
         }
     }
 #endif  // ARDUINO_TEENSY41
+
+    // The internal transport, kept alive while Captain is front.
+    //
+    // ClockSetup's Controller is the clock engine everywhere else, but it
+    // runs only inside HEMISPHERE and Quadrants. With Captain as the
+    // standing app the internal clock froze silently: nothing called
+    // SyncTrig, so a running clock never tocked, and a 252e listening on
+    // the 200e bus had nothing to follow. This is the engine half of that
+    // Controller -- transport queue, sync, and the realtime TX fan-out
+    // with the same ClkTx gates; the applet keeps its UI, flashers and
+    // virtual outputs. Same ISR context as ClockSetup under Quadrants,
+    // with the sends deferred for the same reason.
+    //
+    // Externally clocked (the rig: the Orin sends 0xF8 over USB), clock_q
+    // disables MIDI-out, so the bus copy of that clock comes from
+    // midi_thru below and is never doubled here. Internally clocked, this
+    // is the only source of bus clock.
+    void PumpTransport() {
+        auto &ms = frame.MIDIState;
+        bool midi_sync = false;
+        bool clock_sync = HS::frame.synctrig;
+
+        if (ms.clock_q) {
+            ms.clock_q = 0;
+            clock_sync = 1;
+            midi_sync = 1;
+            HS::clock_m.DisableMIDIOut();
+        }
+        if (ms.start_q) {
+            ms.start_q = 0;
+            HS::clock_m.DisableMIDIOut();
+            HS::clock_m.Start();
+        }
+        if (ms.stop_q) {
+            ms.stop_q = 0;
+            HS::clock_m.Stop();
+            HS::clock_m.EnableMIDIOut();
+        }
+
+        // Paused means wait for clock-sync to start
+        if (HS::clock_m.IsPaused() && clock_sync)
+            HS::clock_m.Start();
+
+        if (HS::clock_m.IsRunning())
+            HS::clock_m.SyncTrig(clock_sync, midi_sync);
+
+        if (HS::clock_m.IsRunning() && HS::clock_m.MIDITock()) {
+          OC::CORE::DeferTask([](){
+            if (~HS::midi_clktx_disable & HS::mMaskUSBDev)
+              usbMIDI.sendRealTime(usbMIDI.Clock);
+#ifdef ARDUINO_TEENSY41
+            if (~HS::midi_clktx_disable & HS::mMaskUSBHost)
+              usbHostMIDI[0].sendRealTime(usbMIDI.Clock);
+            if (~HS::midi_clktx_disable & HS::mMaskUSBHost2)
+              usbHostMIDI[1].sendRealTime(usbMIDI.Clock);
+            if (~HS::midi_clktx_disable & HS::mMaskSerial)
+              MIDI1.sendRealTime(midi::MidiType(usbMIDI.Clock));
+            if (~HS::midi_clktx_disable & HS::mMaskBus)
+              OC::PresetBus::QueueMidiTx(usbMIDI.Clock, 0, 0, 0);
+#endif
+          });
+        }
+    }
 
     // forward an incoming message to the other interfaces (source excluded),
     // honoring the same thru mask Quadrants uses -- the bus included, so a
