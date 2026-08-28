@@ -847,6 +847,35 @@ FLASHMEM __attribute__((noinline)) void loop() {
             // worst-case format outlives the 128s watchdog: timer-fed
             watchdog_feed_during([] { PhzConfig::eraseFiles(); });
             break;
+          case 'Z':
+            // Drop into HalfKay so the host can flash us, WITHOUT anybody
+            // touching the module.
+            //
+            // This board is mounted with the Teensy's PROGRAM button
+            // unreachable, so the only way into the bootloader was the
+            // front panel (SETTINGS -> Reflash). That is fine at a bench
+            // and impossible from the Orin, which is where every build
+            // actually comes from -- a deploy that needs a human to walk
+            // over is a deploy that does not happen. docs/bench-console.md
+            // and FAQ.md both still say "press the PROGRAM button"; they
+            // are inherited from upstream hardware that exposes one.
+            //
+            // Same double-press guard as C and F: this stops the
+            // instrument dead until something re-flashes it, which mid-set
+            // would be the worst possible surprise.
+            if (millis() - destructive_arm_ms >= 3000 || destructive_arm_key != 'Z') {
+              destructive_arm_ms = millis();
+              destructive_arm_key = 'Z';
+              Serial.println("'Z' REBOOTS to the bootloader (stops playing) "
+                             "- press 'Z' again within 3s");
+              break;
+            }
+            destructive_arm_ms = 0;
+            Serial.println("rebooting into HalfKay -- run teensy_loader_cli now");
+            Serial.flush();
+            delay(50);          // let the line reach the host before USB drops
+            _reboot_Teensyduino_();
+            break;
 #endif
 
             // TODO:

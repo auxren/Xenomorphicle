@@ -53,6 +53,7 @@ stray typing is harmless but will spew capture bytes.
 |---|---|
 | `C` | **clear/reset the config file** (GLOBALS.CFG rewritten empty) |
 | `F` | **erase ALL LittleFS files** — presets, config, CRASH.LOG, everything |
+| `Z` | **reboot into HalfKay** so a host can flash — stops playing (see "Flashing headlessly") |
 
 ## Reading the selftest (`t`)
 
@@ -135,6 +136,27 @@ p95 0.24 ms, max 0.51 ms, 0 drops — ~90 µs one-way.
    boot after a good load; a corrupt primary restores from the backup
    silently instead of dropping into the factory-reset prompt.
 3. **Truly wedged** (pre-watchdog-arm hang, or repeated watchdog loops):
-   press the **PROGRAM button** on the Teensy (drops into the bootloader;
-   re-flash or just let it restart) or **power-cycle**. State comes back
-   via boot recall.
+   **power-cycle**. State comes back via boot recall.
+
+## Flashing headlessly
+
+The Teensy's PROGRAM button is **not reachable** once this board is mounted,
+so the advice inherited from upstream — "press the program button" — does not
+apply, and neither does `teensy_loader_cli -s`: a soft reboot still needs the
+running firmware to enter the bootloader for it. Two ways in:
+
+- **Front panel:** SETTINGS → **Reflash** ("Flash Upgrade Mode").
+- **From a host:** console **`Z`**, double-press like `C` and `F`. It calls
+  `_reboot_Teensyduino_()` and drops straight into HalfKay.
+
+```
+# on the rig, with NOTHING else holding the serial port
+python3 -c "import os; fd=os.open('/dev/orin/xenomorph', os.O_RDWR); os.write(fd, b'ZZ')"
+teensy_loader_cli --mcu=TEENSY41 -w -v firmware.hex
+```
+
+**Free the serial port first.** Anything holding `/dev/ttyACM*` — a logger, a
+capture script — blocks both the console write and the loader, and the
+loader's failure reads "Error opening USB device… press the reset button",
+which sends you hunting for a button that does not exist. That is exactly how
+an afternoon went missing on 2026-08-27.
