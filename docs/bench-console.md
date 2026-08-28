@@ -138,6 +138,30 @@ p95 0.24 ms, max 0.51 ms, 0 drops — ~90 µs one-way.
 3. **Truly wedged** (pre-watchdog-arm hang, or repeated watchdog loops):
    **power-cycle**. State comes back via boot recall.
 
+## Flashing
+
+**Use `software/flash.sh`.** It builds, refuses any image that is not linked
+for slot 0, stages a rollback it will not overwrite, stops the running app so
+no CV transient reaches the Buchla, flashes, and verifies by enumeration.
+
+### The trap it exists to prevent
+
+`platformio.ini` gives each environment its own linker script:
+
+| env | ldscript | base | bootable alone? |
+|---|---|---|---|
+| `T41` | `slot1.ld` | 0x60100000 | **no** |
+| `T41_audio` | `slot0.ld` | 0x60000000 | **yes — this is what the module runs** |
+| `T41_MTP` | `slot2.ld` | — | no |
+
+A slot-1 image programs perfectly and reports `Booting`. The RT1062 then
+finds nothing at 0x60000000, falls into its ROM downloader, and enumerates as
+`1fc9:0135 "SE Blank RT Family"` — which is indistinguishable from a dead
+module. On 2026-08-27 that consumed an evening, two full Teensy restores
+(which erase EEPROM, so **calibration had to be redone**), and a lot of
+pressing a PROGRAM button this board does not expose. Check the first record
+of the hex: `:02000004` **`6000`** means slot 0.
+
 ## Flashing headlessly
 
 The Teensy's PROGRAM button is **not reachable** once this board is mounted,
