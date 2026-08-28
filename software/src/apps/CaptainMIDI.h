@@ -1118,12 +1118,20 @@ public:
         }
         if (pending & PEND_INFO) {
             const uint8_t info[] = {
-                1, // schema
+                2, // schema: 2 adds n_dac_out and class 4 (DAC)
                 2, 0, 1, // firmware version
                 MIDIMAP_MAX,
                 HS::MIDIFrame::kCVOutPorts, HS::MIDIFrame::kTrigOutPorts,
                 kNumSetups, uint8_t(active_setup),
                 uint8_t(LiveConfigDirty() ? 1 : 0),
+                // How many CV outputs this board actually has. Everything
+                // else in this payload counts something else -- in_maps is
+                // 32, and kCVOutPorts/kTrigOutPorts are the jacks you patch
+                // INTO -- so a host had no way to ask this and had to assert
+                // it instead. Four on an hOC, eight on the Xenomorpher.
+                // Appended last: older hosts zip field names against the
+                // payload and simply stop early.
+                DAC_CHANNEL_COUNT,
             };
             SendSyxFrame(SYX_INFO_R, info, sizeof(info));
         }
@@ -1170,10 +1178,20 @@ public:
       SYXERR_VERSION = 1, SYXERR_CMD = 2, SYXERR_ADDR = 3,
       SYXERR_VALUE = 4, SYXERR_BUSY = 5, SYXERR_CHECKSUM = 6,
     };
-    enum SyxClass : uint8_t { CLS_GLOBAL = 0, CLS_IN = 1, CLS_CV = 2, CLS_TR = 3 };
+    // CLS_DAC is the physical CV output (A..H), as against CLS_IN which is
+    // the MIDI map that feeds it. It exists because output voltage scaling
+    // lived only in the I/O settings menu: a host could bind a pitch to
+    // output A over SysEx but could not tell the module that A drives a
+    // Buchla at 1.2V/oct, so every interval played 20% flat until somebody
+    // walked over and set it by hand. Nothing about that was a hardware
+    // limit -- the per-channel setting already existed and IOFrameToChannel
+    // already consults it every tick; the wire simply had no word for it.
+    enum SyxClass : uint8_t { CLS_GLOBAL = 0, CLS_IN = 1, CLS_CV = 2,
+                              CLS_TR = 3, CLS_DAC = 4 };
     static constexpr uint8_t kGlobalParamCount = 7;
     static constexpr uint8_t kInParamCount = 7;
     static constexpr uint8_t kOutParamCount = 9;
+    static constexpr uint8_t kDacParamCount = 2;   // scaling, autotune
 
     // parameter access; value encoding matches the spec (transpose stored +64,
     // in-map subtype 127 = auto-learn)
@@ -1183,7 +1201,7 @@ public:
           case CLS_GLOBAL:
             if (idx != 0) return false;
             switch (par) {
-              case 0: value = 1; return true; // schema
+              case 0: value = 2; return true; // schema (2 = has class 4 / n_dac_out)
               case 1: value = active_setup; return true;
               case 2: value = kNumSetups; return true;
               case 3: value = M.bend_range; return true;
@@ -1232,6 +1250,15 @@ public:
               case 6: value = o.range_high; return true;
               case 7: value = o.flags; return true;
               case 8: value = o.clkdiv; return true;
+            }
+            return false;
+          }
+          case CLS_DAC: {
+            if (idx >= DAC_CHANNEL_COUNT || par >= kDacParamCount) return false;
+            const OC::IOSettings &io = io_settings();
+            switch (par) {
+              case 0: value = uint8_t(io.get_output_scaling(idx)); return true;
+              case 1: value = io.autotune_data_enabled(idx) ? 1 : 0; return true;
             }
             return false;
           }
@@ -1326,6 +1353,31 @@ public:
                 o.clkdiv = value; break;
             }
             o.Sanitize();
+            return 0;
+          }
+          case CLS_DAC: {
+            if (idx >= DAC_CHANNEL_COUNT || par >= kDacParamCount)
+              return SYXERR_ADDR;
+            OC::IOSettings &io = mutable_io_settings();
+            switch (par) {
+              case 0:
+                // Scaling applies BEFORE the clamp in PitchToScaledDAC, so
+                // 1.2x on an output carrying a 0..10V controller pins every
+                // value over ~106 to full scale. That is the caller's
+                // business, not ours: a module cannot know whether output E
+                // is a note or a filter sweep. Range-check and obey.
+                if (value >= OC::VOLTAGE_SCALING_LAST) return SYXERR_VALUE;
+                io.apply_value(
+                    OC::IOSettings::channel_setting(OC::IO_SETTING_A_SCALING, idx),
+                    value);
+                break;
+              case 1:
+                if (value > 1) return SYXERR_VALUE;
+                io.apply_value(
+                    OC::IOSettings::channel_setting(OC::IO_SETTING_A_TUNING, idx),
+                    value);
+                break;
+            }
             return 0;
           }
           default: return SYXERR_ADDR;

@@ -78,11 +78,18 @@ the target setup as last stored.
 ### INFO_R payload (`41`)
 
 ```
-schema fw_maj fw_min fw_pat n_inmaps n_cv_out n_trig_out n_setups active dirty
+schema fw_maj fw_min fw_pat n_inmaps n_cv_out n_trig_out n_setups active dirty n_dac_out
 ```
 
 `dirty` = 1 when the live configuration differs from the stored active
 setup (same condition as the `*` next to the setup number on screen).
+
+`n_dac_out` (schema 2+, appended last) is how many **CV outputs** the board
+has — 4 on an hOC, 8 on a Xenomorpher. Every other count in this payload
+counts something else: `n_inmaps` is 32, and `n_cv_out`/`n_trig_out` are the
+jacks you patch *into*. Before schema 2 a host had no way to ask and had to
+assert it, which is only ever right by luck. Hosts should treat its absence
+as "cannot say" rather than as zero.
 
 ### NAK error codes
 
@@ -111,10 +118,15 @@ Parameters are addressed as `(class, idx, param)`. All values 0–127.
 | 5 | pc_channel | 0..16 | program-change listen channel, 0 = omni |
 | 6 | trig_length | 1..127 | trigger/note pulse length, ms |
 
-### class 1 — MIDI-IN map (idx 0..n_inmaps-1; 8 on the hOC)
+### class 1 — MIDI-IN map (idx 0..n_inmaps-1; 32 on Teensy 4.x, 8 on T3.2)
 
-Each map translates incoming MIDI to one behavior; maps 0-3 drive DAC
-outputs A-D directly (map i → output i).
+Each map translates incoming MIDI to one behavior. **Maps 0..n_dac_out-1
+drive the DAC outputs directly, map i → output i** — four of them on an hOC,
+eight on a Xenomorpher. Maps beyond that exist and can be configured, but
+reach no CV output under Captain MIDI.
+
+Read `n_dac_out` from INFO to know how many that is; do not infer it from
+`n_inmaps` (32) or `n_cv_out` (the CV jacks you patch into).
 
 | param | name | range | notes |
 |---|---|---|---|
@@ -131,6 +143,30 @@ Subtypes — Pitch: 0 Note, 1 PolyN, 2 LoNote, 3 HiNote, 4 PdlNote,
 5 Reset. Trigger: 0 Trig, 1 Trig1st, 2 TrgAlws, 3 Start, 4 Stop,
 5 Clk-1, 6 Clk-2, 7 Clk-4, 8 Clk-8, 9 Clk24. Modulator: 0 Veloc,
 1 PolyV, 2 ChnAft, 3 KeyAft, 4 Bend.
+
+### class 4 — DAC output (idx 0..n_dac_out-1 = outputs A..H) — schema 2+
+
+The physical CV output, as against class 1 which is the MIDI map that feeds
+it. Added because output voltage scaling lived only in the module's I/O
+settings menu: a host could bind a pitch to output A over SysEx but had no
+way to say that A drives a Buchla at 1.2V/oct, so every interval played 20%
+flat until somebody walked over and set it by hand.
+
+| param | name | range | notes |
+|---|---|---|---|
+| 0 | scaling | 0..7 | 0 1V/oct, 1-3 Carlos alpha/beta/gamma, 4 Bohlen-Pierce, 5 quartertone, **6 1.2V/oct**, 7 2V/oct |
+| 1 | autotune | 0..1 | use stored autotune data for this output |
+
+⚠️ **Scaling is applied before the clamp** (`PitchToScaledDAC`). On an output
+carrying a 0-10V controller or envelope rather than a note, 1.2x pins every
+value over ~106 to full scale and the top sixth of its travel flattens off,
+silently — it reads as a broken envelope, not as a wrong setting. Set
+1.2V/oct on the outputs carrying *notes* and state 1V/oct on the rest rather
+than leaving whatever the last patch used.
+
+Not in DUMP: the dump walks classes 0-3 with a fixed record length per class,
+so adding class 4 would change a format hosts already parse. Read output
+scaling with GET.
 
 ### class 2 — CV-OUT port (idx 0..3 = CV inputs 1-4)
 ### class 3 — TRIG-OUT port (idx 0..3 = trigger inputs 1-4)
