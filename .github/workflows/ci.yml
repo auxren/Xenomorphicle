@@ -40,6 +40,11 @@ jobs:
               test_buchla251e_slot_codec.cpp ../src/Buchla251eSlotCodec.cpp \
               ../src/Buchla251eGenerator.cpp ../src/src/extern/bjorklund.cpp
           ./build/test_buchla251e_slot_codec
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_buchla251e_recorder \
+              test_buchla251e_recorder.cpp ../src/Buchla251eSlotCodec.cpp \
+              ../src/Buchla251eRecorder.cpp
+          ./build/test_buchla251e_recorder
 
   firmware:
     runs-on: ubuntu-latest
