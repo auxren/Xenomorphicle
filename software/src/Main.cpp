@@ -639,6 +639,39 @@ FLASHMEM void setup() {
 #include "Audio/USB_F32.h"
 #endif
 #endif
+// TEMPORARY bench diagnostic: name the physical buttons. The pin tables in
+// OC_gpio.cpp branch on the hardware ID voltage and the variants disagree
+// about which pin is X vs Z, so read the panel rather than the source.
+// Watches for ~20s and prints every press/release with its control name.
+FLASHMEM __attribute__((noinline)) static void ButtonWatch() {
+  using namespace OC;
+  static const struct { UiControl c; const char *name; } kBtns[] = {
+    { CONTROL_BUTTON_UP,    "UP / A"      },
+    { CONTROL_BUTTON_DOWN,  "DOWN / B"    },
+    { CONTROL_BUTTON_L,     "encL (left encoder push)"  },
+    { CONTROL_BUTTON_R,     "encR (right encoder push)" },
+    { CONTROL_BUTTON_M,     "M / Z"       },
+    { CONTROL_BUTTON_UP2,   "UP2 / X"     },
+    { CONTROL_BUTTON_DOWN2, "DOWN2 / Y"   },
+  };
+  const int n = (int)(sizeof(kBtns) / sizeof(kBtns[0]));
+  bool prev[7] = { false, false, false, false, false, false, false };
+  Serial.println("=== button watch: press each button (20s) ===");
+  const uint32_t t0 = millis();
+  while (millis() - t0 < 20000) {
+    for (int i = 0; i < n; ++i) {
+      const bool now = ui.read_immediate(kBtns[i].c);
+      if (now != prev[i]) {
+        Serial.printf("  %-28s %s\n", kBtns[i].name, now ? "PRESSED" : "released");
+        prev[i] = now;
+      }
+    }
+    watchdog_feed();
+    delay(5);
+  }
+  Serial.println("=== button watch done ===");
+}
+
 extern char _heap_end[], *__brkval;
 FLASHMEM __attribute__((noinline)) static void SelfTest() {
   Serial.println("=== selftest ===");
@@ -1219,6 +1252,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
             }
             break;
           case 't': SelfTest(); break;  // one-shot system health report
+          case 'K': ButtonWatch(); break;  // name the physical buttons
           case 'a': OC::SwitchToDefaultApp(); break;  // remote: activate Captain
           case 'l':
             Serial.println(" -=- LittleFS -=- ");
