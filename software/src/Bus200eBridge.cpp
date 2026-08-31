@@ -26,7 +26,9 @@ static uint8_t g_mod_addr = 0;
 static uint32_t g_dump_bytes = 0;   // last dump sent/received, raw length
 static uint8_t g_last_nak = 0;
 
-// inbound (PUT_DUMP) reassembly
+// inbound (PUT_DUMP) reassembly. One bit per packet: 1561 packets = 196
+// bytes of .bss, the price of tracking completeness/duplicates for a whole
+// 64K card image rather than v1's 127-packet, 5588-byte window.
 static uint8_t g_rx_seen[(BUS200E_BRIDGE_MAX_PACKETS + 7) / 8];
 static uint16_t g_rx_count = 0;     // distinct packets stored
 static uint32_t g_rx_len = 0;       // highest end-offset written
@@ -34,8 +36,8 @@ static uint32_t g_rx_last_ms = 0;
 
 // outbound (GET_DUMP) streaming
 static uint32_t g_tx_len = 0;
-static uint8_t g_tx_seq = 0;
-static uint8_t g_tx_total = 0;
+static uint16_t g_tx_seq = 0;
+static uint16_t g_tx_total = 0;
 static uint8_t g_tx_xor = 0;
 
 // ---- small helpers -------------------------------------------------------------
@@ -53,9 +55,17 @@ BRIDGE_CODE static void send_msg(uint8_t cmd, const uint8_t *payload, uint32_t l
   if (n > 0) g_ops->send_message(out, (uint32_t) n);
 }
 
+// ACK{cmd, mod_addr} -- the one-byte context form, for GET_DUMP/PUT_DUMP.
 BRIDGE_CODE static void send_ack(uint8_t echo_cmd, uint8_t ctx) {
   const uint8_t p[2] = { echo_cmd, ctx };
   send_msg(BUS200E_SYSEX_CMD_ACK, p, 2);
+}
+
+// ACK{cmd, lo, hi} -- the septet-pair form, for the two contexts that are
+// 14-bit as of protocol v2: DUMP_DATA's seq and DUMP_END's n_packets.
+BRIDGE_CODE static void send_ack14(uint8_t echo_cmd, uint16_t ctx) {
+  const uint8_t p[3] = { echo_cmd, BUS200E_SYSEX_LO7(ctx), BUS200E_SYSEX_HI7(ctx) };
+  send_msg(BUS200E_SYSEX_CMD_ACK, p, 3);
 }
 
 BRIDGE_CODE static void send_nak(uint8_t cmd, uint8_t err) {
@@ -126,13 +136,18 @@ BRIDGE_CODE static void handle_info(void) {
   // Reporting an invented 4/16 here would be firmware asserting a format it
   // has never parsed.
   const uint8_t info[] = {
-    1,                                     // schema
+    2,                                     // schema (2 = protocol v2 layout)
     0,                                     // n_sequences: unknown to firmware
     0,                                     // max_steps:   unknown to firmware
-    (uint8_t) (g_dump_bytes & 0x7F),       // last dump length, 7 bits at a time
+    // Last dump length, low septet first. THREE septets, not v1's two: the
+    // transfer this bridge exists for is 63120 bytes, and 14 bits stops at
+    // 16383. 21 bits covers the whole 64K card image with room to spare.
+    (uint8_t) (g_dump_bytes & 0x7F),
     (uint8_t) ((g_dump_bytes >> 7) & 0x7F),
+    (uint8_t) ((g_dump_bytes >> 14) & 0x7F),
     BUS200E_SYSEX_CHUNK_BYTES,             // appended: raw bytes per DUMP_DATA
-    BUS200E_BRIDGE_MAX_PACKETS,            // appended: transfer packet ceiling
+    BUS200E_SYSEX_LO7(BUS200E_BRIDGE_MAX_PACKETS),   // appended: packet ceiling,
+    BUS200E_SYSEX_HI7(BUS200E_BRIDGE_MAX_PACKETS),   //           lo/hi septets
     (uint8_t) (g_ops->card_serving() ? 1 : 0),
   };
   send_msg(BUS200E_SYSEX_CMD_INFO_R, info, sizeof(info));
@@ -194,12 +209,14 @@ BRIDGE_CODE static void handle_put_dump(const uint8_t *payload, uint32_t len) {
   send_ack(BUS200E_SYSEX_CMD_PUT_DUMP, g_mod_addr);
 }
 
-BRIDGE_CODE static void handle_dump_data(uint8_t seq, uint8_t total,
+BRIDGE_CODE static void handle_dump_data(uint16_t seq, uint16_t total,
                                           const uint8_t *raw, uint32_t raw_len) {
   if (g_state != BUS200E_BRIDGE_RECEIVING) {
     send_nak(BUS200E_SYSEX_CMD_DUMP_DATA, BUS200E_SYSEX_NAK_UNKNOWN_CMD);
     return;
   }
+  // seq is what indexes g_rx_seen, so the ceiling check is what keeps a
+  // hostile/garbled 14-bit seq out of the bitmap -- load-bearing, not tidy.
   if (seq >= BUS200E_BRIDGE_MAX_PACKETS || total == 0 || seq >= total ||
       total > BUS200E_BRIDGE_MAX_PACKETS || raw_len > BUS200E_SYSEX_CHUNK_BYTES) {
     send_nak(BUS200E_SYSEX_CMD_DUMP_DATA, BUS200E_SYSEX_NAK_CHECKSUM);
@@ -226,7 +243,7 @@ BRIDGE_CODE static void handle_dump_data(uint8_t seq, uint8_t total,
   }
   if (off + raw_len > g_rx_len) g_rx_len = off + raw_len;
   g_rx_last_ms = g_ops->now_ms();
-  send_ack(BUS200E_SYSEX_CMD_DUMP_DATA, seq);
+  send_ack14(BUS200E_SYSEX_CMD_DUMP_DATA, seq);
 }
 
 BRIDGE_CODE static void handle_dump_end(const uint8_t *payload, uint32_t len) {
@@ -234,18 +251,18 @@ BRIDGE_CODE static void handle_dump_end(const uint8_t *payload, uint32_t len) {
     send_nak(BUS200E_SYSEX_CMD_DUMP_END, BUS200E_SYSEX_NAK_UNKNOWN_CMD);
     return;
   }
-  if (len < 2) {
+  if (len < 3) {
     send_nak(BUS200E_SYSEX_CMD_DUMP_END, BUS200E_SYSEX_NAK_CHECKSUM);
     session_reset();
     return;
   }
-  const uint8_t n_packets = payload[0];
-  const uint8_t xor7 = payload[1];
+  const uint16_t n_packets = BUS200E_SYSEX_FROM14(payload[0], payload[1]);
+  const uint8_t xor7 = payload[2];
 
   // every packet 0..n_packets-1 present, and nothing beyond it
   int complete = (n_packets != 0) && (g_rx_count == n_packets) &&
                  (n_packets <= BUS200E_BRIDGE_MAX_PACKETS);
-  for (uint8_t i = 0; complete && i < n_packets; ++i)
+  for (uint16_t i = 0; complete && i < n_packets; ++i)
     if (!(g_rx_seen[i >> 3] & (uint8_t) (1u << (i & 7)))) complete = 0;
 
   uint8_t *image = g_ops->card_image();
@@ -274,7 +291,7 @@ BRIDGE_CODE static void handle_dump_end(const uint8_t *payload, uint32_t len) {
   // ACK means "accepted and started", not "finished": a RESTORE runs over
   // real bus time (seconds). The host polls STATUS for the outcome.
   g_state = BUS200E_BRIDGE_RESTORING;
-  send_ack(BUS200E_SYSEX_CMD_DUMP_END, n_packets);
+  send_ack14(BUS200E_SYSEX_CMD_DUMP_END, n_packets);
 }
 
 // ---- RX entry point --------------------------------------------------------------
@@ -287,7 +304,8 @@ BRIDGE_CODE void Bus200eBridgeHandleSysEx(const uint8_t *sysex, uint32_t len) {
   if (len && sysex[len - 1] == 0xF7) len--;
   if (len < 5) return;
 
-  uint8_t cmd = 0, seq = 0, total = 0;
+  uint8_t cmd = 0;
+  uint16_t seq = 0, total = 0;
   uint8_t raw[BUS200E_SYSEX_CHUNK_BYTES];
   uint32_t raw_len = 0;
   const int rc = Bus200eSysExParseMessage(sysex, len, &cmd, &seq, &total,
@@ -342,9 +360,10 @@ BRIDGE_CODE static void pump_capture(void) {
     return;
   }
   if (n > BUS200E_BRIDGE_MAX_DUMP_BYTES) {
-    // n_packets is one 7-bit field; a bigger capture cannot be described by
-    // this protocol version. Refuse rather than hand back a truncated dump
-    // the browser would happily write straight back to the module.
+    // Only reachable on a build whose card image is larger than the address
+    // space a card pointer can name -- i.e. never, today. Kept because the
+    // alternative is handing back a truncated dump the browser would happily
+    // write straight back to the module.
     send_nak(BUS200E_SYSEX_CMD_GET_DUMP, BUS200E_SYSEX_NAK_CHECKSUM);
     session_reset();
     return;
@@ -354,7 +373,7 @@ BRIDGE_CODE static void pump_capture(void) {
   g_tx_len = n;
   g_tx_seq = 0;
   g_tx_xor = 0;
-  g_tx_total = (uint8_t) ((n + BUS200E_SYSEX_CHUNK_BYTES - 1) / BUS200E_SYSEX_CHUNK_BYTES);
+  g_tx_total = (uint16_t) ((n + BUS200E_SYSEX_CHUNK_BYTES - 1) / BUS200E_SYSEX_CHUNK_BYTES);
   g_state = BUS200E_BRIDGE_SENDING;
 }
 
@@ -371,16 +390,21 @@ BRIDGE_CODE static void pump_send(void) {
     const uint32_t off = (uint32_t) g_tx_seq * BUS200E_SYSEX_CHUNK_BYTES;
     uint32_t chunk = g_tx_len - off;
     if (chunk > BUS200E_SYSEX_CHUNK_BYTES) chunk = BUS200E_SYSEX_CHUNK_BYTES;
-    const uint8_t hdr[2] = { g_tx_seq, g_tx_total };
-    const int n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_DUMP_DATA, hdr, 2,
+    const uint8_t hdr[BUS200E_SYSEX_DUMP_HDR_BYTES] = {
+      BUS200E_SYSEX_LO7(g_tx_seq),   BUS200E_SYSEX_HI7(g_tx_seq),
+      BUS200E_SYSEX_LO7(g_tx_total), BUS200E_SYSEX_HI7(g_tx_total),
+    };
+    const int n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_DUMP_DATA, hdr, sizeof(hdr),
                                             image + off, chunk, out, sizeof(out));
     if (n > 0) g_ops->send_message(out, (uint32_t) n);
     g_tx_xor = Bus200eSysExXor7(g_tx_xor, image + off, chunk);
     g_tx_seq++;
   }
   if (g_tx_seq >= g_tx_total) {
-    const uint8_t end[2] = { g_tx_total, g_tx_xor };
-    send_msg(BUS200E_SYSEX_CMD_DUMP_END, end, 2);
+    const uint8_t end[3] = {
+      BUS200E_SYSEX_LO7(g_tx_total), BUS200E_SYSEX_HI7(g_tx_total), g_tx_xor,
+    };
+    send_msg(BUS200E_SYSEX_CMD_DUMP_END, end, 3);
     session_reset();
   }
 }

@@ -49,20 +49,28 @@
 //
 //   host: PUT_DUMP [mod_addr]
 //   dev:  ACK [PUT_DUMP, mod_addr]            (or NAK)
-//   host: DUMP_DATA [0, total, <packed>]  -> dev: ACK [DUMP_DATA, 0]
+//   host: DUMP_DATA [0, 0, total_lo, total_hi, <packed>]
+//                                         -> dev: ACK [DUMP_DATA, 0, 0]
 //         ...
-//   host: DUMP_END [total, xor7]
-//   dev:  ACK [DUMP_END, total]               (or NAK 6 on a bad transfer)
+//   host: DUMP_END [n_lo, n_hi, xor7]
+//   dev:  ACK [DUMP_END, n_lo, n_hi]          (or NAK 6 on a bad transfer)
 //         ... MasterRestore(mod_addr) runs over real bus time; the host
 //             polls STATUS to learn how it ended ...
 //
-// DUMP_END's n_packets is a single 7-bit field, so a transfer is capped at
-// 127 packets = BUS200E_BRIDGE_MAX_DUMP_BYTES raw bytes. That is far smaller
-// than the 64K card image; a capture bigger than the cap is refused (NAK 6)
-// rather than silently truncated. Raising it means a protocol version bump,
-// not a constant change here. Concretely: a real 251e bank is 63120 bytes,
-// so a whole-bank 251e dump does NOT fit this transport and will be NAK 6'd
-// -- the bridge is for small banks until that version bump happens.
+// ---- transfer ceiling: the card image, not the wire (as of protocol v2) ---
+// Protocol v1's packet counters were single 7-bit bytes, capping a transfer
+// at 127 packets = 5588 raw bytes -- and this module refused (clean NAK 6)
+// anything larger rather than truncate it. A real 251e bank is 63120 bytes,
+// so the one transfer this bridge exists to carry did not fit.
+//
+// v2's 14-bit septet-pair counters (Bus200eSysEx.h) reach 16383 packets,
+// which at 42 raw bytes/packet is 687 KB -- far past anything the device
+// can stage. So the binding limit is now the CARD IMAGE the bytes live in
+// (BUSCARD_SIZE = 65536), and BUS200E_BRIDGE_MAX_PACKETS below is derived
+// from it rather than from a field width. A capture larger than the image
+// is still refused rather than truncated; it just cannot happen with any
+// real 200e module, since the image spans the entire 16-bit address a card
+// pointer can name. 63120 bytes = 1503 packets, comfortably inside both.
 //
 // ---- The card-image offset assumption: now CONFIRMED zero ------------------
 // This module reads a capture from card image offset 0 and writes a pushed
@@ -80,19 +88,52 @@
 // timing caveats on top of the offset question above.
 // ---------------------------------------------------------------------------
 
-// DUMP_END carries n_packets in one 7-bit byte.
-#define BUS200E_BRIDGE_MAX_PACKETS 127
-#define BUS200E_BRIDGE_MAX_DUMP_BYTES \
-  (BUS200E_BRIDGE_MAX_PACKETS * BUS200E_SYSEX_CHUNK_BYTES)  // 5588
+// The staging area's size, and therefore the transfer's. Deliberately spelled
+// as its own constant instead of #including PresetBusCard.h: this module is
+// BSP-free, learns the REAL card size at runtime through ops->card_size(),
+// and needs a compile-time number only to size the reassembly bitmap below.
+// It matches BUSCARD_SIZE (65536, the full 16-bit span a 24xx/FRAM card
+// pointer can name) so the bitmap can never be the thing that refuses a
+// transfer the card itself would have accepted.
+#define BUS200E_BRIDGE_MAX_DUMP_BYTES 65536u
+#define BUS200E_BRIDGE_MAX_PACKETS                                       \
+  ((BUS200E_BRIDGE_MAX_DUMP_BYTES + BUS200E_SYSEX_CHUNK_BYTES - 1u) /    \
+   BUS200E_SYSEX_CHUNK_BYTES)   // 1561 at 42 raw bytes/packet
+
+#if defined(__cplusplus)
+// The wire could carry more packets than we will ever track; make sure it is
+// never the other way round.
+static_assert(BUS200E_BRIDGE_MAX_PACKETS <= BUS200E_SYSEX_MAX_COUNT,
+              "packet ceiling must fit the protocol's 14-bit counters");
+#endif
 
 // A half-finished PUT_DUMP would otherwise pin the session forever (and lock
 // out every later GET_DUMP): a browser tab closing mid-transfer is normal.
-#define BUS200E_BRIDGE_RX_TIMEOUT_MS 5000
+//
+// This is a per-GAP budget (it restarts on every accepted DUMP_DATA), not a
+// whole-transfer one, so a 63 KB dump does not need it scaled by 11x -- the
+// time between two adjacent packets is the same whether there are 8 of them
+// or 1503. What DID change is how long the browser stays in the loop: a
+// 1503-packet transfer runs for seconds, a window in which Chrome can
+// background the tab or stall it for GC. 10s is three times the browser
+// side's own 3s per-frame ack timeout (sysex-transport.js's ackTimeoutMs),
+// so the host always gives up on a stalled exchange before the device tears
+// the session down underneath it -- and a genuinely wedged session still
+// frees itself well inside a human's patience for retrying.
+#define BUS200E_BRIDGE_RX_TIMEOUT_MS 10000
 
-// How many DUMP_DATA frames one Bus200eBridgeTask() call may push out. The
-// whole stream is a few KB and usbMIDI's TX path is shared with the audio/
-// MIDI foundation requirement, so it is metered across loop passes instead
-// of blasted in one go.
+// How many DUMP_DATA frames one Bus200eBridgeTask() call may push out.
+// usbMIDI's TX path is shared with the audio/MIDI foundation requirement, so
+// the stream is metered across loop passes instead of blasted in one go.
+//
+// Still 4, and deliberately so after re-checking it against the now much
+// larger transfer: a 63120-byte bank is 1503 frames = 376 Task() calls. Even
+// at a pessimistic 500 loop passes/second (the o_C loop runs far faster than
+// that between its 16.6kHz CV ISR slices) the whole bank is out the door in
+// well under a second, and on the wire 1503 * 59 bytes is ~119 KB of USB
+// MIDI event packets -- nothing for a T4.1's high-speed USB. Raising the
+// budget would only buy time the transfer does not need, at the cost of
+// pushing harder on a TX ring that usbMIDI.sendSysEx() blocks on when full.
 #define BUS200E_BRIDGE_SEND_BUDGET 4
 
 typedef enum {

@@ -25,11 +25,17 @@ static int checks = 0, fails = 0;
 
 // ---- fake platform ----------------------------------------------------------
 
-// Power of two like BUSCARD_SIZE, and deliberately bigger than
-// BUS200E_BRIDGE_MAX_DUMP_BYTES so the "capture too big for a one-byte packet
-// count" path is reachable without a 32K buffer.
-static const uint32_t kFakeCardSize = 8192;
-static uint8_t fake_card[kFakeCardSize];
+// The default fake card is small (8K) so most tests stay cheap. Two things
+// need more: the real 63120-byte 251e bank (which needs the full
+// BUS200E_BRIDGE_MAX_DUMP_BYTES image), and the "capture larger than this
+// build can describe" refusal, which is now only reachable on a card image
+// bigger than the 64K a card pointer can name -- so the backing array is
+// sized past that and fake_card_size is per-test.
+static const uint32_t kFakeCardSmall = 8192;
+static const uint32_t kFakeCardFull = BUS200E_BRIDGE_MAX_DUMP_BYTES;   // 65536
+static const uint32_t kFakeCardOversize = BUS200E_BRIDGE_MAX_DUMP_BYTES + 4096;
+static uint8_t fake_card[kFakeCardOversize];
+static uint32_t fake_card_size;
 
 static uint32_t fake_now;
 static int fake_serving;
@@ -49,7 +55,7 @@ static int fake_dirty_calls;
 
 struct SentMsg {
   uint8_t cmd;
-  uint8_t seq, total;
+  uint16_t seq, total;        // 14-bit as of protocol v2
   std::vector<uint8_t> raw;   // unpacked payload (or chunk, for DUMP_DATA)
   int parse_rc;
 };
@@ -66,7 +72,7 @@ static int f_card_serve_enable(int on) {
 static uint8_t *f_card_image() {
   return (fake_serving && !fake_image_null) ? fake_card : nullptr;
 }
-static uint32_t f_card_size() { return kFakeCardSize; }
+static uint32_t f_card_size() { return fake_card_size; }
 static void f_card_dirty() { fake_dirty_calls++; }
 
 static int f_master_backup(uint8_t a) {
@@ -106,8 +112,9 @@ static const Bus200eBridgeOps fake_ops = {
   f_send,
 };
 
-static void reset_all() {
+static void reset_all(uint32_t card_size = kFakeCardSmall) {
   memset(fake_card, 0xFF, sizeof(fake_card));
+  fake_card_size = card_size;
   fake_now = 1000;
   fake_serving = 0;
   fake_serve_enable_result = 0;
@@ -148,13 +155,31 @@ static void feed(uint8_t cmd, std::initializer_list<uint8_t> payload,
 }
 
 // Feed one DUMP_DATA packet, packing the chunk the way the browser's
-// packChunk()/Bus200eSysExPack does.
-static void feed_dump_data(uint8_t seq, uint8_t total,
+// packChunk()/Bus200eSysExPack does. seq/total ride the wire as 14-bit
+// septet pairs (protocol v2), exactly as sysex-transport.js's packDump emits.
+static void feed_dump_data(uint16_t seq, uint16_t total,
                            const uint8_t *chunk, uint32_t chunk_len) {
-  const uint8_t hdr[2] = { seq, total };
+  const uint8_t hdr[BUS200E_SYSEX_DUMP_HDR_BYTES] = {
+    BUS200E_SYSEX_LO7(seq),   BUS200E_SYSEX_HI7(seq),
+    BUS200E_SYSEX_LO7(total), BUS200E_SYSEX_HI7(total),
+  };
   uint8_t msg[BUS200E_SYSEX_MAX_MESSAGE];
-  const int n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_DUMP_DATA, hdr, 2,
+  const int n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_DUMP_DATA, hdr, sizeof(hdr),
                                          chunk, chunk_len, msg, sizeof(msg));
+  assert(n > 0);
+  Bus200eBridgeHandleSysEx(msg, (uint32_t) n);
+}
+
+// A DUMP_END payload: [n_lo, n_hi, xor7].
+static std::vector<uint8_t> dump_end_payload(uint16_t n_packets, uint8_t xor7) {
+  return { BUS200E_SYSEX_LO7(n_packets), BUS200E_SYSEX_HI7(n_packets), xor7 };
+}
+
+static void feed_dump_end(uint16_t n_packets, uint8_t xor7) {
+  const std::vector<uint8_t> p = dump_end_payload(n_packets, xor7);
+  uint8_t msg[BUS200E_SYSEX_MAX_MESSAGE];
+  const int n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_DUMP_END, p.data(),
+                                         (uint32_t) p.size(), nullptr, 0, msg, sizeof(msg));
   assert(n > 0);
   Bus200eBridgeHandleSysEx(msg, (uint32_t) n);
 }
@@ -176,9 +201,9 @@ static bool reassemble(std::vector<uint8_t> &out, size_t from) {
       if (out.size() != off) return false;   // packets must arrive in order
       out.insert(out.end(), sent[i].raw.begin(), sent[i].raw.end());
     } else if (sent[i].cmd == BUS200E_SYSEX_CMD_DUMP_END) {
-      if (sent[i].raw.size() < 2) return false;
-      n_packets = sent[i].raw[0];
-      xor7 = sent[i].raw[1];
+      if (sent[i].raw.size() < 3) return false;
+      n_packets = BUS200E_SYSEX_FROM14(sent[i].raw[0], sent[i].raw[1]);
+      xor7 = sent[i].raw[2];
     }
   }
   if (n_packets < 0) return false;
@@ -188,7 +213,9 @@ static bool reassemble(std::vector<uint8_t> &out, size_t from) {
   return Bus200eSysExXor7(0, out.data(), (uint32_t) out.size()) == (xor7 & 0x7F);
 }
 
-// pump Task() until the session settles (or a step budget runs out)
+// pump Task() until the session settles (or a step budget runs out).
+// A whole 251e bank is 1503 frames at BUS200E_BRIDGE_SEND_BUDGET=4 per call,
+// so callers streaming one must raise the budget past 376.
 static void pump(int steps = 64) {
   while (steps-- > 0 && Bus200eBridgeGetState() != BUS200E_BRIDGE_IDLE)
     Bus200eBridgeTask();
@@ -287,16 +314,129 @@ static void test_get_dump_empty_capture() {
   CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
 }
 
-static void test_get_dump_too_big_for_one_byte_packet_count() {
-  printf("test_get_dump_too_big_for_one_byte_packet_count\n");
-  reset_all();
+static void test_get_dump_bigger_than_this_build_can_describe() {
+  printf("test_get_dump_bigger_than_this_build_can_describe\n");
+  // Under protocol v1 this was the 127-packet/5588-byte wire ceiling and any
+  // real 251e bank tripped it. Under v2 the ceiling is the card image
+  // itself, so reaching it needs a fake card LARGER than the 64K a card
+  // pointer can name -- i.e. it is now unreachable on real hardware. The
+  // refusal is still tested, because refusing beats handing the browser a
+  // truncated dump it would write straight back to the module.
+  reset_all(kFakeCardOversize);
   feed(BUS200E_SYSEX_CMD_GET_DUMP, { 0x2E });
   fake_state = BUS200E_MASTER_DONE;
-  fake_bytes = BUS200E_BRIDGE_MAX_DUMP_BYTES + 1;  // < card size, > 127 packets
-  CHECK(fake_bytes < kFakeCardSize);   // so the clamp isn't what refuses it
+  fake_bytes = BUS200E_BRIDGE_MAX_DUMP_BYTES + 1;
+  CHECK(fake_bytes < fake_card_size);   // so the clamp isn't what refuses it
   Bus200eBridgeTask();
   CHECK(nak_code(last_sent()) == BUS200E_SYSEX_NAK_CHECKSUM);
   CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+}
+
+// ---- the transfer this whole protocol version exists for --------------------
+
+#define REAL_251E_BANK_BYTES 63120u   // 30 records x 2104, per a live MasterBackup(0x5C)
+#define REAL_251E_BANK_PACKETS 1503u  // ceil(63120 / 42)
+#define REAL_251E_BANK_XOR7 0x10u     // over (i*37+11)&0xFF, i < 63120
+
+// The same synthetic bank the SysEx suite and the JS suite both use.
+static uint8_t bank_byte(uint32_t i) { return (uint8_t) ((i * 37u + 11u) & 0xFFu); }
+
+static void test_get_dump_streams_a_whole_63120_byte_251e_bank() {
+  printf("test_get_dump_streams_a_whole_63120_byte_251e_bank\n");
+  // Protocol v1 NAK 6'd this outright -- 63120 bytes is 11.3x its 5588-byte
+  // ceiling -- which meant the bridge could not carry the one dump it was
+  // built for. This is the test that says it now can.
+  reset_all(kFakeCardFull);
+  for (uint32_t i = 0; i < REAL_251E_BANK_BYTES; ++i) fake_card[i] = bank_byte(i);
+
+  feed(BUS200E_SYSEX_CMD_GET_DUMP, { 0x5C });   // the 251e's real bus address
+  CHECK(fake_backup_addr == 0x5C);
+  const size_t after_ack = sent.size();
+
+  fake_state = BUS200E_MASTER_DONE;
+  fake_bytes = REAL_251E_BANK_BYTES;
+  pump(1024);   // 1503 frames / SEND_BUDGET 4 = 376 Task() calls
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(Bus200eBridgeDumpBytes() == REAL_251E_BANK_BYTES);
+
+  // exactly 1503 DUMP_DATA frames + one DUMP_END, every one parseable
+  size_t data_frames = 0, end_frames = 0;
+  for (size_t i = after_ack; i < sent.size(); ++i) {
+    CHECK(sent[i].parse_rc == 0);
+    if (sent[i].cmd == BUS200E_SYSEX_CMD_DUMP_DATA) {
+      CHECK(sent[i].seq == data_frames);           // in order, 14-bit intact
+      CHECK(sent[i].total == REAL_251E_BANK_PACKETS);
+      data_frames++;
+    } else if (sent[i].cmd == BUS200E_SYSEX_CMD_DUMP_END) {
+      CHECK(sent[i].raw.size() == 3);
+      CHECK(BUS200E_SYSEX_FROM14(sent[i].raw[0], sent[i].raw[1]) == REAL_251E_BANK_PACKETS);
+      CHECK(sent[i].raw[2] == REAL_251E_BANK_XOR7);
+      end_frames++;
+    }
+  }
+  CHECK(data_frames == REAL_251E_BANK_PACKETS);
+  CHECK(end_frames == 1);
+  // and the seq that would have overflowed a v1 byte really did go out
+  CHECK(sent[after_ack + 200].seq == 200);
+  CHECK(sent[after_ack + 1234].seq == 1234);
+
+  std::vector<uint8_t> got;
+  CHECK(reassemble(got, after_ack));
+  CHECK(got.size() == REAL_251E_BANK_BYTES);
+  CHECK(memcmp(got.data(), fake_card, REAL_251E_BANK_BYTES) == 0);
+}
+
+static void test_put_dump_accepts_a_whole_63120_byte_251e_bank() {
+  printf("test_put_dump_accepts_a_whole_63120_byte_251e_bank\n");
+  reset_all(kFakeCardFull);
+  std::vector<uint8_t> data(REAL_251E_BANK_BYTES);
+  for (uint32_t i = 0; i < REAL_251E_BANK_BYTES; ++i) data[i] = bank_byte(i);
+
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x5C });
+  const uint16_t total = REAL_251E_BANK_PACKETS;
+  for (uint16_t seq = 0; seq < total; ++seq) {
+    const uint32_t off = (uint32_t) seq * BUS200E_SYSEX_CHUNK_BYTES;
+    uint32_t chunk = REAL_251E_BANK_BYTES - off;
+    if (chunk > BUS200E_SYSEX_CHUNK_BYTES) chunk = BUS200E_SYSEX_CHUNK_BYTES;
+    feed_dump_data(seq, total, data.data() + off, chunk);
+  }
+  // every packet got its own ACK{DUMP_DATA, seq_lo, seq_hi} -- the 3-byte
+  // septet-pair ACK form, since a seq no longer fits one context byte
+  uint32_t data_acks = 0;
+  for (const auto &m : sent) {
+    if (m.cmd == BUS200E_SYSEX_CMD_ACK && m.raw.size() == 3 &&
+        m.raw[0] == BUS200E_SYSEX_CMD_DUMP_DATA) {
+      CHECK(BUS200E_SYSEX_FROM14(m.raw[1], m.raw[2]) == data_acks);
+      data_acks++;
+    }
+  }
+  CHECK(data_acks == REAL_251E_BANK_PACKETS);
+
+  feed_dump_end(total, Bus200eSysExXor7(0, data.data(), REAL_251E_BANK_BYTES));
+  CHECK(Bus200eSysExXor7(0, data.data(), REAL_251E_BANK_BYTES) == REAL_251E_BANK_XOR7);
+
+  CHECK(memcmp(fake_card, data.data(), REAL_251E_BANK_BYTES) == 0);
+  CHECK(fake_restore_calls == 1);
+  CHECK(fake_restore_addr == 0x5C);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_RESTORING);
+  CHECK(Bus200eBridgeDumpBytes() == REAL_251E_BANK_BYTES);
+  CHECK(last_sent() && last_sent()->cmd == BUS200E_SYSEX_CMD_ACK);
+  CHECK(last_sent()->raw.size() == 3);
+  CHECK(last_sent()->raw[0] == BUS200E_SYSEX_CMD_DUMP_END);
+  CHECK(BUS200E_SYSEX_FROM14(last_sent()->raw[1], last_sent()->raw[2]) == total);
+}
+
+static void test_put_dump_refuses_a_seq_past_the_card_image() {
+  printf("test_put_dump_refuses_a_seq_past_the_card_image\n");
+  // 14 bits can name 16383 packets; this build tracks 1561. A seq past that
+  // must be refused, not written into the seen-bitmap.
+  reset_all(kFakeCardFull);
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x5C });
+  const uint8_t chunk[4] = { 1, 2, 3, 4 };
+  feed_dump_data((uint16_t) BUS200E_BRIDGE_MAX_PACKETS, 16383, chunk, sizeof(chunk));
+  CHECK(nak_code(last_sent()) == BUS200E_SYSEX_NAK_CHECKSUM);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(fake_restore_calls == 0);
 }
 
 // ---- PUT_DUMP ------------------------------------------------------------------
@@ -312,9 +452,9 @@ static std::vector<uint8_t> put_dump_payload(uint32_t len) {
 static void stream_put_dump(const std::vector<uint8_t> &data, uint8_t mod_addr,
                             bool corrupt_checksum = false, int skip_seq = -1) {
   feed(BUS200E_SYSEX_CMD_PUT_DUMP, { mod_addr });
-  const uint8_t total =
-      (uint8_t) ((data.size() + BUS200E_SYSEX_CHUNK_BYTES - 1) / BUS200E_SYSEX_CHUNK_BYTES);
-  for (uint8_t seq = 0; seq < total; ++seq) {
+  const uint16_t total =
+      (uint16_t) ((data.size() + BUS200E_SYSEX_CHUNK_BYTES - 1) / BUS200E_SYSEX_CHUNK_BYTES);
+  for (uint16_t seq = 0; seq < total; ++seq) {
     if (seq == skip_seq) continue;
     const uint32_t off = (uint32_t) seq * BUS200E_SYSEX_CHUNK_BYTES;
     uint32_t chunk = (uint32_t) data.size() - off;
@@ -323,7 +463,7 @@ static void stream_put_dump(const std::vector<uint8_t> &data, uint8_t mod_addr,
   }
   uint8_t xor7 = Bus200eSysExXor7(0, data.data(), (uint32_t) data.size());
   if (corrupt_checksum) xor7 = (uint8_t) ((xor7 ^ 0x01) & 0x7F);
-  feed(BUS200E_SYSEX_CMD_DUMP_END, { total, xor7 });
+  feed_dump_end(total, xor7);
 }
 
 static void test_put_dump_round_trip() {
@@ -346,13 +486,13 @@ static void test_put_dump_round_trip() {
   CHECK(last_sent() && last_sent()->cmd == BUS200E_SYSEX_CMD_ACK);
   CHECK(last_sent()->raw[0] == BUS200E_SYSEX_CMD_DUMP_END);
 
-  // every DUMP_DATA got its own ACK{DUMP_DATA, seq}
+  // every DUMP_DATA got its own ACK{DUMP_DATA, seq_lo, seq_hi}
   int data_acks = 0;
   for (const auto &m : sent)
-    if (m.cmd == BUS200E_SYSEX_CMD_ACK && m.raw.size() >= 2 &&
+    if (m.cmd == BUS200E_SYSEX_CMD_ACK && m.raw.size() == 3 &&
         m.raw[0] == BUS200E_SYSEX_CMD_DUMP_DATA)
-      CHECK(m.raw[1] == data_acks++);
-  CHECK(data_acks == 7);  // ceil(300/44)
+      CHECK(BUS200E_SYSEX_FROM14(m.raw[1], m.raw[2]) == data_acks++);
+  CHECK(data_acks == 8);  // ceil(300/42)
 
   fake_state = BUS200E_MASTER_DONE;
   pump();
@@ -386,17 +526,16 @@ static void test_put_dump_duplicate_packet_is_harmless() {
   reset_all();
   const std::vector<uint8_t> data = put_dump_payload(120);
   feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x2E });
-  const uint8_t total = 3;  // ceil(120/44)
+  const uint16_t total = 3;  // ceil(120/42)
   for (int pass = 0; pass < 2; ++pass)   // send packet 1 twice
-    for (uint8_t seq = 0; seq < total; ++seq) {
+    for (uint16_t seq = 0; seq < total; ++seq) {
       if (pass && seq != 1) continue;
       const uint32_t off = (uint32_t) seq * BUS200E_SYSEX_CHUNK_BYTES;
       uint32_t chunk = (uint32_t) data.size() - off;
       if (chunk > BUS200E_SYSEX_CHUNK_BYTES) chunk = BUS200E_SYSEX_CHUNK_BYTES;
       feed_dump_data(seq, total, data.data() + off, chunk);
     }
-  feed(BUS200E_SYSEX_CMD_DUMP_END,
-       { total, Bus200eSysExXor7(0, data.data(), (uint32_t) data.size()) });
+  feed_dump_end(total, Bus200eSysExXor7(0, data.data(), (uint32_t) data.size()));
   // the checksum is recomputed from the image, so a retransmit can't skew it
   CHECK(fake_restore_calls == 1);
   CHECK(memcmp(fake_card, data.data(), data.size()) == 0);
@@ -447,8 +586,22 @@ static void test_dump_data_outside_a_session() {
   const uint8_t chunk[4] = { 1, 2, 3, 4 };
   feed_dump_data(0, 1, chunk, sizeof(chunk));
   CHECK(nak_code(last_sent()) == BUS200E_SYSEX_NAK_UNKNOWN_CMD);
-  feed(BUS200E_SYSEX_CMD_DUMP_END, { 1, 0 });
+  feed_dump_end(1, 0);
   CHECK(nak_code(last_sent()) == BUS200E_SYSEX_NAK_UNKNOWN_CMD);
+}
+
+static void test_dump_end_needs_the_full_three_byte_payload() {
+  printf("test_dump_end_needs_the_full_three_byte_payload\n");
+  // A v1 host's two-byte [n_packets, xor7] must be refused, not read as
+  // [n_lo, n_hi] with the checksum missing.
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x2E });
+  const uint8_t chunk[4] = { 1, 2, 3, 4 };
+  feed_dump_data(0, 1, chunk, sizeof(chunk));
+  feed(BUS200E_SYSEX_CMD_DUMP_END, { 1, Bus200eSysExXor7(0, chunk, sizeof(chunk)) });
+  CHECK(nak_code(last_sent()) == BUS200E_SYSEX_NAK_CHECKSUM);
+  CHECK(fake_restore_calls == 0);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
 }
 
 static void test_dump_data_out_of_range_seq() {
@@ -469,11 +622,28 @@ static void test_info_and_status() {
   feed(BUS200E_SYSEX_CMD_INFO, {}, /*wrap_f0f7=*/true);
   const SentMsg *m = last_sent();
   CHECK(m && m->cmd == BUS200E_SYSEX_CMD_INFO_R);
-  CHECK(m->raw.size() >= 8);
-  CHECK(m->raw[0] == 1);                            // schema
+  CHECK(m->raw.size() >= 10);
+  CHECK(m->raw[0] == 2);                            // schema 2 = protocol v2
   CHECK(m->raw[1] == 0 && m->raw[2] == 0);          // format not decoded by firmware
-  CHECK(m->raw[5] == BUS200E_SYSEX_CHUNK_BYTES);
-  CHECK(m->raw[6] == BUS200E_BRIDGE_MAX_PACKETS);
+  // [3..5] last dump length, three septets low-first (14 bits could not
+  // report a 63120-byte bank)
+  CHECK(m->raw[6] == BUS200E_SYSEX_CHUNK_BYTES);
+  CHECK(BUS200E_SYSEX_FROM14(m->raw[7], m->raw[8]) == BUS200E_BRIDGE_MAX_PACKETS);
+  CHECK(BUS200E_BRIDGE_MAX_PACKETS == 1561);        // ceil(65536 / 42)
+
+  // ...and after a real bank has moved, the length field reports all of it
+  reset_all(kFakeCardFull);
+  std::vector<uint8_t> bank(REAL_251E_BANK_BYTES);
+  for (uint32_t i = 0; i < REAL_251E_BANK_BYTES; ++i) bank[i] = bank_byte(i);
+  stream_put_dump(bank, 0x5C);
+  feed(BUS200E_SYSEX_CMD_INFO, {});
+  m = last_sent();
+  CHECK(m && m->cmd == BUS200E_SYSEX_CMD_INFO_R);
+  const uint32_t reported = (uint32_t) m->raw[3] | ((uint32_t) m->raw[4] << 7) |
+                            ((uint32_t) m->raw[5] << 14);
+  CHECK(reported == REAL_251E_BANK_BYTES);
+
+  reset_all();
 
   fake_state = BUS200E_MASTER_TRANSFERRING;
   fake_error = BUS200E_MASTER_ERR_NONE;
@@ -492,9 +662,11 @@ static void test_unknown_command_and_bad_version() {
   feed(0x33, { 1, 2 });
   CHECK(nak_code(last_sent()) == BUS200E_SYSEX_NAK_UNKNOWN_CMD);
 
-  // hand-built frame with the wrong protocol version
+  // hand-built frame with the wrong protocol version -- 0x01 is the one that
+  // matters now: an applet still speaking v1's 7-bit packet counters gets
+  // NAK 1 rather than a silently misparsed transfer.
   uint8_t bad[] = { BUS200E_SYSEX_MFR_ID, BUS200E_SYSEX_FAMILY_ID,
-                    BUS200E_SYSEX_APP_ID, 0x02, BUS200E_SYSEX_CMD_INFO };
+                    BUS200E_SYSEX_APP_ID, 0x01, BUS200E_SYSEX_CMD_INFO };
   const size_t before = sent.size();
   Bus200eBridgeHandleSysEx(bad, sizeof(bad));
   CHECK(sent.size() == before + 1);
@@ -534,9 +706,12 @@ int main() {
   test_get_dump_master_refuses();
   test_get_dump_master_fails_mid_job();
   test_get_dump_empty_capture();
-  test_get_dump_too_big_for_one_byte_packet_count();
+  test_get_dump_bigger_than_this_build_can_describe();
+  test_get_dump_streams_a_whole_63120_byte_251e_bank();
 
   test_put_dump_round_trip();
+  test_put_dump_accepts_a_whole_63120_byte_251e_bank();
+  test_put_dump_refuses_a_seq_past_the_card_image();
   test_put_dump_bad_checksum_never_restores();
   test_put_dump_missing_packet_never_restores();
   test_put_dump_duplicate_packet_is_harmless();
@@ -545,6 +720,7 @@ int main() {
   test_put_dump_rx_timeout_frees_the_session();
   test_dump_data_outside_a_session();
   test_dump_data_out_of_range_seq();
+  test_dump_end_needs_the_full_three_byte_payload();
 
   test_info_and_status();
   test_unknown_command_and_bad_version();

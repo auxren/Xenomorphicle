@@ -18,8 +18,10 @@ namespace Bus200eBridgeUsb {
 // One frame in flight, exactly like CaptainMIDI::OnReceiveSysEx: a second
 // frame arriving before Task() drains the first is dropped, and the host's
 // own flow control (one outstanding request, per-packet ACK) is what keeps
-// that from happening. Sized for BUS200E_SYSEX_MAX_MESSAGE + F0 + F7 = 60,
-// rounded up.
+// that from happening -- and it is the reason a 1503-packet 251e bank can
+// stream through a single-frame staging buffer at all. Sized for
+// BUS200E_SYSEX_MAX_MESSAGE + F0 + F7 (59 under protocol v2, 60 under v1),
+// rounded up to 64; hOC's 60-byte frame ceiling is what keeps that true.
 static volatile uint16_t rx_len = 0;
 static uint8_t rx_buf[64];
 static volatile uint32_t rx_dropped = 0;

@@ -79,6 +79,12 @@ SYSEX_CODE int Bus200eSysExBuildMessage(uint8_t cmd,
   if (raw_chunk_len > BUS200E_SYSEX_CHUNK_BYTES) return -1;
   if (field_len && !field_payload) return -1;
   if (raw_chunk_len && !raw_chunk) return -1;
+  // A DUMP_DATA frame's header is a fixed four septets (seq lo/hi, total
+  // lo/hi) -- v2 widened these, and a caller still passing v1's two bytes
+  // must fail loudly here rather than have its chunk silently read as a
+  // header. (A zero-length chunk is legal; a wrong-size header is not.)
+  if (cmd == BUS200E_SYSEX_CMD_DUMP_DATA && field_len != BUS200E_SYSEX_DUMP_HDR_BYTES)
+    return -1;
 
   out[0] = BUS200E_SYSEX_MFR_ID;
   out[1] = BUS200E_SYSEX_FAMILY_ID;
@@ -103,7 +109,7 @@ SYSEX_CODE int Bus200eSysExBuildMessage(uint8_t cmd,
 }
 
 SYSEX_CODE int Bus200eSysExParseMessage(const uint8_t *in, uint32_t in_len,
-                                         uint8_t *cmd_out, uint8_t *out_seq, uint8_t *out_total,
+                                         uint8_t *cmd_out, uint16_t *out_seq, uint16_t *out_total,
                                          uint8_t *out_raw, uint32_t out_raw_cap,
                                          uint32_t *out_raw_len) {
   if (in_len < 5) return -1;
@@ -117,11 +123,11 @@ SYSEX_CODE int Bus200eSysExParseMessage(const uint8_t *in, uint32_t in_len,
   const uint32_t payload_len = in_len - 5;
 
   if (cmd == BUS200E_SYSEX_CMD_DUMP_DATA) {
-    if (payload_len < 2) return -1;
-    const uint8_t seq = payload[0];
-    const uint8_t total = payload[1];
-    const uint8_t *packed = payload + 2;
-    const uint32_t packed_len = payload_len - 2;
+    if (payload_len < BUS200E_SYSEX_DUMP_HDR_BYTES) return -1;
+    const uint16_t seq = BUS200E_SYSEX_FROM14(payload[0], payload[1]);
+    const uint16_t total = BUS200E_SYSEX_FROM14(payload[2], payload[3]);
+    const uint8_t *packed = payload + BUS200E_SYSEX_DUMP_HDR_BYTES;
+    const uint32_t packed_len = payload_len - BUS200E_SYSEX_DUMP_HDR_BYTES;
 
     const int need = scan_unpacked_len(packed, packed_len);
     if (need < 0) return -4;
