@@ -55,4 +55,14 @@ struct Buchla251eEuclidParams {
 // generation or a hand-edit left a marker somewhere inside the new range.
 void Buchla251eGenerateEuclid(const Buchla251eEuclidParams &params, Buchla251eSequence &sequence);
 
+// The same limits Buchla251eGenerateEuclid applies internally, exposed so a
+// UI can enforce them WHILE the user is turning an encoder rather than
+// letting the generator silently clamp at apply time, where the user never
+// sees what happened to the value they chose.
+//
+// Note the dependency direction: shrinking `length` drags `fill` and
+// `rotation` down with it, because a fill of 12 in a length of 8 is not a
+// value anything can honour. Growing `length` leaves them alone.
+void Buchla251eClampEuclidParams(uint8_t &length, uint8_t &fill, uint8_t &rotation);
+
 #endif  // BUCHLA251EGENERATOR_H_

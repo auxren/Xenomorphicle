@@ -24,6 +24,13 @@ uint8_t ClampU8(int v, int lo, int hi) {
 }  // namespace
 
 B251E_GEN_CODE
+void Buchla251eClampEuclidParams(uint8_t &length, uint8_t &fill, uint8_t &rotation) {
+  length = ClampU8(length, 2, 32);
+  fill = ClampU8(fill, 0, length);
+  rotation = ClampU8(rotation, 0, (uint8_t)(length - 1));
+}
+
+B251E_GEN_CODE
 void Buchla251eGenerateEuclid(const Buchla251eEuclidParams &params, Buchla251eSequence &sequence) {
   const uint8_t length = ClampU8(params.length, 2, 32);
   const uint8_t fill = ClampU8(params.fill, 0, length);

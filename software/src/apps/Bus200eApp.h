@@ -51,8 +51,12 @@
 
 #include "../Buchla200eModuleTable.h"
 #include "../Buchla200eWriteGuard.h"
+#include "../Buchla251eGenerator.h"
+#include "../Buchla251eNoteMap.h"
+#include "../Buchla251eRecorder.h"
 #include "../Buchla251eSlotCodec.h"
 #include "../Buchla259eSlotCodec.h"
+#include "../HSMIDI.h"
 #include "../PresetBus.h"
 
 namespace Bus200eAppNS {
@@ -61,7 +65,29 @@ enum Screen : uint8_t {
   SCR_MODULE_SELECT = 0,
   SCR_MODULE_HOME,
   SCR_WRITE_CONFIRM,   // armed; nothing has gone on the wire yet
+  SCR_EDIT,            // per-stage editor over the selected sequence
+  SCR_GEN,             // Euclidean generator parameters
+  SCR_REC,             // record stages from incoming MIDI
 };
+
+// Generator parameter cursor. Pitches are carried as MIDI note numbers, not
+// volts: on this module raw stage value == note number exactly (1.2V/oct,
+// note 0 = 0V), and showing volts here would invite the 1V/oct assumption
+// that this format does NOT follow. See Buchla251eNoteMap.h.
+enum GenParam : uint8_t {
+  GEN_LENGTH = 0,
+  GEN_FILL,
+  GEN_ROTATION,
+  GEN_NOTE,      // pitch of an active (pulse) stage
+  GEN_REST,      // pitch of an inactive stage
+  GEN_COUNT,
+};
+
+// bjorklund.h returns a uint32_t mask, so a Euclidean pattern cannot exceed
+// 32 steps. The format holds 50, reachable by hand-editing or recording --
+// the UI states the cap rather than silently clamping a user who typed 40.
+static constexpr int kGenMaxLength = 32;
+static constexpr int kGenMinLength = 2;
 
 // Home-screen action row. READ and SAVE are implemented; Edit/Gen/Rec are
 // deliberate stubs so the row's shape (and the muscle memory) is settled
@@ -210,8 +236,25 @@ public:
 
   void Start() final {}
   void Resume() final {}
-  // ISR context: nothing to do. Deliberately empty -- see header comment.
-  void Controller() final {}
+
+  // ISR context (core timer, ~16.6kHz). Does nothing at all unless a
+  // recording is armed -- and when it is, the only work is draining the MIDI
+  // interfaces into a fixed-size array. No heap, no blocking, no Serial.
+  //
+  // This is the ONE part of this app that must stay in ITCM: it is ISR-hot,
+  // so nothing below it is FLASHMEM.
+  void Controller() final {
+#if defined(ARDUINO_TEENSY41)
+    if (!rec_armed_) return;
+    rec_timeout_ = 0;
+    RecPollDevice(usbMIDI);          // USB device (a computer)
+    RecPollDevice(usbHostMIDI[0]);   // USB host port -- the k-board lives here
+    RecPollDevice(usbHostMIDI[1]);
+    RecPollDevice(MIDI1);            // DIN on Serial8
+    RecPollBusMidi();                // 200e bus MIDI
+#endif
+  }
+
   void View() const final { DrawMenu(); }
 
 private:
@@ -266,6 +309,69 @@ private:
   uint8_t row_cursor_ = 0;     // index into kRows259e
   uint8_t row_top_ = 0;        // scroll offset
 
+  // --- edit screen ---
+  uint8_t edit_stage_ = 0;     // 0-49, cursor into the selected sequence
+
+  // --- generator screen ---
+  uint8_t gen_cursor_ = Bus200eAppNS::GEN_LENGTH;
+  uint8_t gen_len_ = 16;
+  uint8_t gen_fill_ = 5;
+  uint8_t gen_rot_ = 0;
+  uint8_t gen_note_ = 60;      // MIDI note for an active stage
+  uint8_t gen_rest_ = 0;       // MIDI note for a rest stage
+
+  // --- record screen ---
+  // recorder_ points into working_slot_ once armed, so it must never outlive
+  // an arm; Init(), disarm and suspend all clear rec_armed_.
+  Buchla251eRecorder recorder_;
+  volatile bool rec_armed_ = false;      // written by UI, read by the ISR
+  volatile uint8_t rec_count_ = 0;       // mirrored out of the ISR for drawing
+  volatile uint8_t rec_last_note_ = 0;
+  volatile bool rec_any_ = false;        // anything at all arrived yet
+#if defined(ARDUINO_TEENSY41)
+  elapsedMicros rec_timeout_;            // bounds the ISR drain, as Quadrants does
+#endif
+
+  // ISR-hot, deliberately in-class (so NOT FLASHMEM) and deliberately
+  // template-per-device, matching Quadrants::ProcessMIDI. Only note-ons are
+  // of interest; everything else is left for the apps that own it.
+#if defined(ARDUINO_TEENSY41)
+  template <typename T1>
+  void RecPollDevice(T1 &device) {
+    while (rec_timeout_ < 60 && device.read()) {
+      if (device.getType() == HEM_MIDI_NOTE_ON)
+        RecNote(device.getData1(), device.getData2());
+    }
+  }
+
+  void RecPollBusMidi() {
+#ifdef PRESET_BUS
+    uint8_t status, d1, d2;
+    while (rec_timeout_ < 60 && OC::PresetBus::ReadMidiRx(status, d1, d2)) {
+      // Realtime bytes are whole status bytes; channel messages carry the
+      // 200e bus mask in the low nibble, so mask it off before comparing.
+      if (status < 0xF8 && (status & 0xF0) == HEM_MIDI_NOTE_ON)
+        RecNote(d1 & 0x7F, d2 & 0x7F);
+    }
+#endif
+  }
+
+  // The one place a note becomes a stage. Velocity-0 is a note-off by MIDI
+  // convention; the recorder already ignores it, so this does not re-handle
+  // it -- it only mirrors state out for the display.
+  void RecNote(uint8_t note, uint8_t vel) {
+    if (recorder_.NoteOn(note, vel)) {
+      rec_count_ = recorder_.count();
+      rec_last_note_ = note;
+      rec_any_ = true;
+    } else if (vel > 0) {
+      // A real note that did not fit: the sequence is full. Surfaced on
+      // screen rather than dropped silently.
+      rec_any_ = true;
+    }
+  }
+#endif  // ARDUINO_TEENSY41
+
   static bool IsFound(const uint8_t *bits, int i) {
     return (bits[i >> 3] >> (i & 7)) & 1;
   }
@@ -297,10 +403,23 @@ private:
   void DrawTenths(int tenths, const char *suffix) const;
   void ScrollRows(int delta);
   void DrawStageStrip() const;
+  void DrawStageStripCursor() const;
   void DrawReadState() const;
   int SeqEndStage() const;     // 0-indexed stage holding the end marker, or -1
   uint8_t SeqPeakRaw() const;
   int FoundIndexToTableIndex(int nth) const;
+
+  // edit / gen / rec
+  void DrawEdit() const;
+  void DrawGen() const;
+  void DrawRec() const;
+  void EditNudge(int delta);
+  void EditToggleEnd();
+  void GenAdjust(int delta);
+  void GenApply();
+  void RecArm();
+  void RecStop();
+  bool HaveSequence() const;   // a decoded 251e slot is on screen
 };
 
 // ---------------------------------------------------------------------------
@@ -673,6 +792,138 @@ uint8_t AppBus200e::SeqPeakRaw() const {
   return peak;
 }
 
+// Edit/Gen/Rec all mutate working_slot_, which only means anything once a
+// bank has actually been read. Without this they would happily let the user
+// sculpt a buffer full of nothing and then offer to write it.
+FLASHMEM __attribute__((noinline))
+bool AppBus200e::HaveSequence() const {
+  return read_state_ == Bus200eAppNS::READ_OK &&
+         CurrentModuleType() == Bus200eAppNS::MODTYPE_251E;
+}
+
+// --- edit ------------------------------------------------------------------
+
+FLASHMEM __attribute__((noinline))
+void AppBus200e::EditNudge(int delta) {
+  if (!HaveSequence()) return;
+  Buchla251eStage &st = working_slot_.sequences[seq_].stages[edit_stage_];
+  int v = (int)st.value + delta;
+  CONSTRAIN(v, 0, 255);
+  if ((uint8_t)v == st.value) return;
+  st.value = (uint8_t)v;
+  edited_ = true;
+}
+
+// The loop point. Given its own button rather than a chord because it is the
+// single most consequential edit on this screen: it decides where the
+// sequence restarts, and a sequence with no marker runs all 50 stages.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::EditToggleEnd() {
+  if (!HaveSequence()) return;
+  Buchla251eSequence &s = working_slot_.sequences[seq_];
+  const bool had = Buchla251eHasEndMarker(s.stages[edit_stage_]);
+  if (had) {
+    Buchla251eSetEndMarker(s.stages[edit_stage_], false);
+  } else {
+    // Exactly one loop point: clear all 50 first, matching the same
+    // clear-all-then-set-one discipline the generator and recorder use.
+    for (int i = 0; i < kBuchla251eStagesPerSequence; ++i)
+      Buchla251eSetEndMarker(s.stages[i], false);
+    Buchla251eSetEndMarker(s.stages[edit_stage_], true);
+  }
+  edited_ = true;
+}
+
+// --- generator -------------------------------------------------------------
+
+FLASHMEM __attribute__((noinline))
+void AppBus200e::GenAdjust(int delta) {
+  using namespace Bus200eAppNS;
+  int v;
+  switch (gen_cursor_) {
+    case GEN_LENGTH:
+      v = (int)gen_len_ + delta;
+      CONSTRAIN(v, kGenMinLength, kGenMaxLength);
+      gen_len_ = (uint8_t)v;
+      break;
+    case GEN_FILL:
+      v = (int)gen_fill_ + delta;
+      CONSTRAIN(v, 0, (int)gen_len_);
+      gen_fill_ = (uint8_t)v;
+      break;
+    case GEN_ROTATION:
+      v = (int)gen_rot_ + delta;
+      CONSTRAIN(v, 0, (int)gen_len_ - 1);
+      gen_rot_ = (uint8_t)v;
+      break;
+    case GEN_NOTE:
+      v = (int)gen_note_ + delta;
+      CONSTRAIN(v, 0, 127);
+      gen_note_ = (uint8_t)v;
+      break;
+    case GEN_REST:
+      v = (int)gen_rest_ + delta;
+      CONSTRAIN(v, 0, 127);
+      gen_rest_ = (uint8_t)v;
+      break;
+    default: break;
+  }
+  // Enforce the generator's own invariants here, while the user is looking
+  // at the numbers -- shrinking length has to drag fill/rotation down with
+  // it, and letting the generator do that silently at apply time would show
+  // the user a fill it never used.
+  Buchla251eClampEuclidParams(gen_len_, gen_fill_, gen_rot_);
+}
+
+// Explicit, not live-on-every-turn: applying overwrites stages, and the user
+// should pick the moment. Returns to the home screen so the strip shows what
+// was produced rather than leaving them on a parameter screen guessing.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::GenApply() {
+  if (!HaveSequence()) return;
+  Buchla251eEuclidParams p;
+  p.length = gen_len_;
+  p.fill = gen_fill_;
+  p.rotation = gen_rot_;
+  // The generator takes volts; raw == note number and raw == volts*10, so
+  // note/10 is the volts that round-trips back to exactly this note.
+  p.base_volts = (float)Buchla251eNoteToRaw(gen_note_) / 10.0f;
+  p.rest_volts = (float)Buchla251eNoteToRaw(gen_rest_) / 10.0f;
+  Buchla251eGenerateEuclid(p, working_slot_.sequences[seq_]);
+  edited_ = true;
+  edit_stage_ = 0;
+  screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+}
+
+// --- recorder --------------------------------------------------------------
+
+// Arming is cheap and freely repeatable: it touches no bus and carries none
+// of the write path's confirm ceremony, because it only mutates the local
+// working buffer. The expensive gesture belongs on Save, not here.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::RecArm() {
+  if (!HaveSequence()) return;
+  recorder_.Reset(working_slot_.sequences[seq_]);
+  rec_count_ = 0;
+  rec_last_note_ = 0;
+  rec_any_ = false;
+#if defined(ARDUINO_TEENSY41)
+  rec_timeout_ = 0;
+#endif
+  rec_armed_ = true;   // last: the ISR starts polling the instant this is set
+}
+
+FLASHMEM __attribute__((noinline))
+void AppBus200e::RecStop() {
+  if (!rec_armed_) return;
+  rec_armed_ = false;  // first: stop the ISR before touching what it writes
+  // Stop() places the end marker at the last recorded stage, and is a
+  // complete no-op when nothing was recorded -- so an arm-then-stop with no
+  // notes is a safe cancel, not a silent wipe of the existing markers.
+  recorder_.Stop();
+  if (rec_count_ > 0) edited_ = true;
+}
+
 // Move the 259e list cursor, dragging the 3-row window along with it.
 FLASHMEM __attribute__((noinline))
 void AppBus200e::ScrollRows(int delta) {
@@ -773,6 +1024,16 @@ void AppBus200e::DrawStageStrip() const {
     if (Buchla251eHasEndMarker(s.stages[i]))
       graphics.drawVLine(x, kStripTop - 2, kStripH + 5);
   }
+}
+
+// Editor cursor: a caret UNDER the strip's baseline. Deliberately not an
+// inverted column -- the end marker already owns the below-baseline region's
+// full height, and a solid bar there would be indistinguishable from it.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::DrawStageStripCursor() const {
+  using namespace Bus200eAppNS;
+  const int x = kStripX + (int)edit_stage_ * 2;
+  graphics.drawHLine(x - 1, kStripBase + 3, 3);
 }
 
 // Provenance line. This is the whole reason the screen is trustworthy: the
@@ -934,6 +1195,138 @@ void AppBus200e::DrawModule251e() const {
     if (i == action_) graphics.invertRect(x - 1, 55, w + 2, 10);
     x += w + 4;
   }
+}
+
+// --- edit / gen / rec screens ---------------------------------------------
+
+// The stage editor. Reuses the home screen's strip so the shape the user was
+// just looking at is the shape they are now editing, with a cursor added.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::DrawEdit() const {
+  using namespace Bus200eAppNS;
+
+  graphics.setPrintPos(0, 13);
+  graphics.printf("Edit %c  stage %d", 'A' + seq_, edit_stage_ + 1);  // 1-indexed
+
+  if (!HaveSequence()) {
+    graphics.setPrintPos(0, 30);
+    graphics.print("Read a bank first.");
+    graphics.setPrintPos(0, 56);
+    graphics.print("encL:back");
+    return;
+  }
+
+  const Buchla251eSequence &s = working_slot_.sequences[seq_];
+  const uint8_t raw = s.stages[edit_stage_].value;
+
+  // Note number AND volts: the note is what a musician reasons in, the volts
+  // are what the module actually receives, and on this format they are the
+  // same number scaled -- showing both keeps the 1.2V/oct mapping visible
+  // instead of hiding it behind a note name.
+  graphics.setPrintPos(0, 22);
+  graphics.printf("Note %d  %d.%dV", raw, raw / 10, raw % 10);
+  if (Buchla251eHasEndMarker(s.stages[edit_stage_])) {
+    graphics.setPrintPos(96, 22);
+    graphics.print("END");
+    graphics.invertRect(95, 21, 22, 10);
+  }
+
+  DrawStageStrip();
+  DrawStageStripCursor();
+
+  graphics.setPrintPos(0, 47);
+  graphics.print("A:end  X/Y:oct");
+  graphics.setPrintPos(0, 56);
+  graphics.print("encL:stg encR:val");
+}
+
+FLASHMEM __attribute__((noinline))
+void AppBus200e::DrawGen() const {
+  using namespace Bus200eAppNS;
+
+  graphics.setPrintPos(0, 13);
+  graphics.printf("Gen Seq %c", 'A' + seq_);
+  // The cap is stated, not enforced silently: the format holds 50 stages and
+  // a user who expects 50 deserves to know why they cannot have them.
+  graphics.setPrintPos(66, 13);
+  graphics.print("(max 32)");
+
+  if (!HaveSequence()) {
+    graphics.setPrintPos(0, 30);
+    graphics.print("Read a bank first.");
+    graphics.setPrintPos(0, 56);
+    graphics.print("encL:back");
+    return;
+  }
+
+  // Two columns of parameters, cursor inverted.
+  const int xs[GEN_COUNT] = {0, 64, 0, 64, 0};
+  const int ys[GEN_COUNT] = {24, 24, 34, 34, 44};
+  for (int i = 0; i < GEN_COUNT; ++i) {
+    graphics.setPrintPos(xs[i], ys[i]);
+    switch (i) {
+      case GEN_LENGTH:   graphics.printf("Len  %d", gen_len_); break;
+      case GEN_FILL:     graphics.printf("Fill %d", gen_fill_); break;
+      case GEN_ROTATION: graphics.printf("Rot  %d", gen_rot_); break;
+      case GEN_NOTE:     graphics.printf("Note %d", gen_note_); break;
+      case GEN_REST:     graphics.printf("Rest %d", gen_rest_); break;
+      default: break;
+    }
+    if (i == gen_cursor_) graphics.invertRect(xs[i] - 1, ys[i] - 1, 56, 10);
+  }
+
+  graphics.setPrintPos(0, 56);
+  graphics.print("encR:APPLY encL:back");
+}
+
+FLASHMEM __attribute__((noinline))
+void AppBus200e::DrawRec() const {
+  using namespace Bus200eAppNS;
+
+  graphics.setPrintPos(0, 13);
+  graphics.printf("Rec Seq %c", 'A' + seq_);
+
+  if (!HaveSequence()) {
+    graphics.setPrintPos(0, 30);
+    graphics.print("Read a bank first.");
+    graphics.setPrintPos(0, 56);
+    graphics.print("encL:back");
+    return;
+  }
+
+  if (rec_armed_) {
+    graphics.setPrintPos(84, 13);
+    graphics.print("ARMED");
+    graphics.invertRect(83, 12, 34, 10);
+  }
+
+  const uint8_t n = rec_count_;
+  graphics.setPrintPos(0, 26);
+  graphics.printf("Notes %d/%d", n, kBuchla251eStagesPerSequence);
+  if (n >= kBuchla251eStagesPerSequence) {
+    graphics.setPrintPos(72, 26);
+    graphics.print("FULL");
+    graphics.invertRect(71, 25, 28, 10);
+  }
+
+  // The live view IS the diagnostic: if the k-board is on a port nothing
+  // polls, this line never changes and that is the symptom to report.
+  graphics.setPrintPos(0, 36);
+  if (rec_any_) {
+    const uint8_t note = rec_last_note_;
+    graphics.printf("Last %d  %d.%dV", note, note / 10, note % 10);
+  } else if (rec_armed_) {
+    graphics.print("waiting for MIDI...");
+  } else {
+    graphics.print("nothing recorded");
+  }
+
+  graphics.setPrintPos(0, 46);
+  graphics.print("USB dev/host, DIN, bus");
+
+  graphics.setPrintPos(0, 56);
+  if (rec_armed_) graphics.print("encR:STOP");
+  else            graphics.print("encR:ARM  encL:back");
 }
 
 // --- 259e parameter viewer -------------------------------------------------
@@ -1133,6 +1526,19 @@ FLASHMEM void AppBus200e::Init() {
   write_block_ = BUCHLA200E_WRITE_OK;
   row_cursor_ = 0;
   row_top_ = 0;
+  edit_stage_ = 0;
+  gen_cursor_ = Bus200eAppNS::GEN_LENGTH;
+  gen_len_ = 16;
+  gen_fill_ = 5;
+  gen_rot_ = 0;
+  gen_note_ = 60;
+  gen_rest_ = 0;
+  // recorder_ holds a pointer into working_slot_; clearing the arm flag is
+  // what makes that pointer unreachable from the ISR.
+  rec_armed_ = false;
+  rec_count_ = 0;
+  rec_last_note_ = 0;
+  rec_any_ = false;
 }
 
 FLASHMEM size_t AppBus200e::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
@@ -1159,6 +1565,10 @@ FLASHMEM void AppBus200e::HandleAppEvent(OC::AppEvent event) {
     // commit a whole-bank write.
     if (screen_ == Bus200eAppNS::SCR_WRITE_CONFIRM)
       screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+    // Likewise never leave the recorder armed: its ISR poll would keep
+    // consuming note-ons that the user is playing at some other app, and
+    // recorder_ holds a pointer into working_slot_.
+    if (rec_armed_) RecStop();
   }
 }
 
@@ -1180,9 +1590,14 @@ FLASHMEM void AppBus200e::DrawMenu() const {
     return;
   }
 #endif
-  if (screen_ == Bus200eAppNS::SCR_WRITE_CONFIRM)    DrawWriteConfirm();
-  else if (screen_ == Bus200eAppNS::SCR_MODULE_HOME) DrawModuleHome();
-  else                                               DrawModuleSelect();
+  switch (screen_) {
+    case Bus200eAppNS::SCR_WRITE_CONFIRM: DrawWriteConfirm(); return;
+    case Bus200eAppNS::SCR_MODULE_HOME:   DrawModuleHome();   return;
+    case Bus200eAppNS::SCR_EDIT:          DrawEdit();         return;
+    case Bus200eAppNS::SCR_GEN:           DrawGen();          return;
+    case Bus200eAppNS::SCR_REC:           DrawRec();          return;
+    default:                              DrawModuleSelect(); return;
+  }
 }
 
 FLASHMEM void AppBus200e::DrawScreensaver() const { DrawMenu(); }
@@ -1203,6 +1618,75 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
         // Everything else is deliberately inert here. A stray A/B/X/Y must
         // not be able to commit a whole-bank write.
         break;
+    }
+    return;
+  }
+
+  // --- stage editor --------------------------------------------------------
+  if (screen_ == Bus200eAppNS::SCR_EDIT) {
+    switch (event.control) {
+      case OC::CONTROL_BUTTON_L:      // encL = back
+      case OC::CONTROL_BUTTON_R:      // encR = done (edits are already applied)
+        screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+        break;
+      case OC::CONTROL_BUTTON_UP:     // A = toggle the loop point
+        EditToggleEnd();
+        break;
+      case OC::CONTROL_BUTTON_DOWN:   // B = cycle sequence, as everywhere else
+        seq_ = (uint8_t)((seq_ + 1) % kBuchla251eSequencesPerSlot);
+        break;
+      case OC::CONTROL_BUTTON_UP2:    // X = down an octave (12 raw = 1.2V)
+        EditNudge(-12);
+        break;
+      case OC::CONTROL_BUTTON_DOWN2:  // Y = up an octave
+        EditNudge(12);
+        break;
+      default: break;
+    }
+    return;
+  }
+
+  // --- generator -----------------------------------------------------------
+  if (screen_ == Bus200eAppNS::SCR_GEN) {
+    switch (event.control) {
+      case OC::CONTROL_BUTTON_L:      // encL = back without applying
+        screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+        break;
+      case OC::CONTROL_BUTTON_R:      // encR = confirm = apply
+      case OC::CONTROL_BUTTON_UP:     // A = primary action, same thing
+        GenApply();
+        break;
+      case OC::CONTROL_BUTTON_DOWN:   // B = cycle sequence
+        seq_ = (uint8_t)((seq_ + 1) % kBuchla251eSequencesPerSlot);
+        break;
+      default: break;
+    }
+    return;
+  }
+
+  // --- recorder ------------------------------------------------------------
+  if (screen_ == Bus200eAppNS::SCR_REC) {
+    switch (event.control) {
+      case OC::CONTROL_BUTTON_R:      // encR = arm, or stop if armed
+        if (rec_armed_) {
+          RecStop();
+          screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+        } else {
+          RecArm();
+        }
+        break;
+      case OC::CONTROL_BUTTON_L:      // encL = leave; stops cleanly if armed
+        // Not called "cancel": notes already recorded have already changed
+        // the working buffer, and Stop() at least leaves a coherent loop
+        // point rather than a half-recorded sequence with a stale marker.
+        RecStop();
+        screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+        break;
+      case OC::CONTROL_BUTTON_DOWN:   // B = cycle sequence, but not mid-record
+        if (!rec_armed_)
+          seq_ = (uint8_t)((seq_ + 1) % kBuchla251eSequencesPerSlot);
+        break;
+      default: break;
     }
     return;
   }
@@ -1231,8 +1715,14 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
           StartRead();
         } else if (action_ == Bus200eAppNS::ACT_SAVE) {
           ArmWrite();
+        } else if (action_ == Bus200eAppNS::ACT_EDIT) {
+          edit_stage_ = 0;
+          screen_ = Bus200eAppNS::SCR_EDIT;
+        } else if (action_ == Bus200eAppNS::ACT_GEN) {
+          screen_ = Bus200eAppNS::SCR_GEN;
+        } else if (action_ == Bus200eAppNS::ACT_REC) {
+          screen_ = Bus200eAppNS::SCR_REC;
         }
-        // Edit/Gen/Rec remain stubs on purpose (see the HomeAction comment).
         break;
       default: break;
     }
@@ -1269,6 +1759,37 @@ FLASHMEM void AppBus200e::HandleEncoderEvent(const UI::Event &event) {
   // action cursor under a confirm prompt would make the prompt describe
   // something other than what a confirm would do.
   if (screen_ == Bus200eAppNS::SCR_WRITE_CONFIRM) return;
+
+  // Stage editor: encL walks the 50 stages, encR edits the one under the
+  // cursor. Clamped rather than wrapped, matching every other cursor in this
+  // app -- and a wrap from stage 50 back to 1 mid-edit is a good way to
+  // change the wrong stage without noticing.
+  if (screen_ == Bus200eAppNS::SCR_EDIT) {
+    if (!HaveSequence()) return;
+    if (event.control == OC::CONTROL_ENCODER_L) {
+      int s = (int)edit_stage_ + event.value;
+      CONSTRAIN(s, 0, kBuchla251eStagesPerSequence - 1);
+      edit_stage_ = (uint8_t)s;
+    } else if (event.control == OC::CONTROL_ENCODER_R) {
+      EditNudge(event.value);
+    }
+    return;
+  }
+
+  if (screen_ == Bus200eAppNS::SCR_GEN) {
+    if (event.control == OC::CONTROL_ENCODER_L) {
+      int c = (int)gen_cursor_ + event.value;
+      CONSTRAIN(c, 0, Bus200eAppNS::GEN_COUNT - 1);
+      gen_cursor_ = (uint8_t)c;
+    } else if (event.control == OC::CONTROL_ENCODER_R) {
+      GenAdjust(event.value);
+    }
+    return;
+  }
+
+  // The recorder takes no encoder input: while armed the only thing that
+  // should change the sequence is the keyboard.
+  if (screen_ == Bus200eAppNS::SCR_REC) return;
 
   if (screen_ == Bus200eAppNS::SCR_MODULE_HOME) {
     if (event.control == OC::CONTROL_ENCODER_R) {
