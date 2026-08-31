@@ -14,7 +14,6 @@
 //   ./build/test_buchla251e_editgenrec
 #include <cassert>
 #include <cstdio>
-#include <cstring>
 
 #include "../src/Buchla251eGenerator.h"
 #include "../src/Buchla251eNoteMap.h"
@@ -114,7 +113,6 @@ static void test_clamp_shrinking_length_drags_dependents() {
 static void test_generate_from_note_numbers() {
   printf("test_generate_from_note_numbers\n");
   Buchla251eSequence seq;
-  memset(&seq, 0, sizeof(seq));
 
   Buchla251eEuclidParams p;
   p.length = 8;
@@ -149,7 +147,6 @@ static void test_generate_from_note_numbers() {
 static void test_record_notes_become_stage_values() {
   printf("test_record_notes_become_stage_values\n");
   Buchla251eSequence seq;
-  memset(&seq, 0, sizeof(seq));
 
   Buchla251eRecorder rec;
   rec.Reset(seq);
@@ -173,7 +170,6 @@ static void test_record_notes_become_stage_values() {
 static void test_velocity_zero_is_not_a_stage() {
   printf("test_velocity_zero_is_not_a_stage\n");
   Buchla251eSequence seq;
-  memset(&seq, 0, sizeof(seq));
   Buchla251eRecorder rec;
   rec.Reset(seq);
 
@@ -190,7 +186,6 @@ static void test_velocity_zero_is_not_a_stage() {
 static void test_record_after_generate_leaves_one_marker() {
   printf("test_record_after_generate_leaves_one_marker\n");
   Buchla251eSequence seq;
-  memset(&seq, 0, sizeof(seq));
 
   Buchla251eEuclidParams p;
   p.length = 16; p.fill = 5; p.rotation = 0;
@@ -216,7 +211,6 @@ static void test_record_after_generate_leaves_one_marker() {
 static void test_record_stops_at_fifty() {
   printf("test_record_stops_at_fifty\n");
   Buchla251eSequence seq;
-  memset(&seq, 0, sizeof(seq));
   Buchla251eRecorder rec;
   rec.Reset(seq);
 
