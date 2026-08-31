@@ -76,6 +76,7 @@ public:
       bus_addr_dirty = false;
     }
     if (invert_display_dirty) {
+#ifdef __IMXRT1062__
       // invert_display lives in the same METADATA_KEY-packed globals struct
       // as current_app_id/encoders_enable_acceleration -- BuildGlobalSettingsValues()
       // (declared in OC_apps.h) is the shared writer both SaveGlobalSettings()
@@ -84,6 +85,11 @@ public:
       PhzConfig::load_config();
       BuildGlobalSettingsValues();
       PhzConfig::save_config();
+#endif
+      // T3.2 has no PhzConfig map and no BuildGlobalSettingsValues(): its
+      // GlobalSettings (invert_display included) persist through the EEPROM
+      // PageStorage path in SaveGlobalSettings() instead, so there is nothing
+      // to flush here -- just clear the flag so it can't latch.
       invert_display_dirty = false;
     }
   }
