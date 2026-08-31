@@ -163,10 +163,21 @@ bool save_config(const char* filename, FS &fs)
     if (dataFile) {
       size_t sz  = save_chunk( 0, "PZ",  cfg_store);
       if (sz) sz = save_chunk(sz, "PX", data_store);
-      if (sz) { // success!
-        dataFile.close();
-      } else {
+      // Close on EVERY path, and fail the save when a chunk short-wrote.
+      // Previously a failed save_chunk left `success` true AND left the
+      // temp file open: the rename below then moved a half-written file
+      // over a good config, and the still-open lfs_file_t (which stays
+      // registered in lfs->mlist, pointing at metadata the rename has
+      // moved) was only closed later, when the next load_config/save_config
+      // reassigned the global `dataFile` -- a delayed write into a stale
+      // metadata pair, i.e. exactly the kind of thing that faults deep in
+      // lfs_dir_commit during some LATER save. save_filtered() below
+      // already got both of these right; this one was the outlier.
+      dataFile.close();
+      if (!sz) {
         HS::PokePopup(HS::MESSAGE_POPUP, "Write ERROR !!");
+        success = false;
+        fs.remove(TEMPFILE);   // never leave a half-written temp behind
       }
     } else {
       SERIAL_PRINTLN("PhzConfig: Error opening %s\n", filename);
