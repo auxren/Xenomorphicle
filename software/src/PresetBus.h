@@ -150,7 +150,14 @@ void DumpCard();
 // refused (a query already in flight, or mod_addr 0 = broadcast). Poll
 // QueryReplyReady()/MasterQueryState() afterwards, or just watch the console
 // -- Task() prints the answer once, as soon as it lands.
-// UNVERIFIED: never yet run against a real module. See Bus200eMaster.h.
+// BENCH-CONFIRMED 2026-08-31 against two real modules (a 251e at 0x5C and a
+// 259e at 0x28); absent addresses stay silent, so this is a reliable
+// presence probe. Note what it does NOT tell you: both modules answer with
+// an identical payload byte 0xFF, which the 251e's own firmware builds as a
+// compile-time literal -- so a completed QUERY proves "something is here and
+// answering", never WHICH module. Map the address through
+// Buchla200eModuleTable.h for a (probable) model; see re-buchla-200e-preset-bus
+// in claude_trix for why identification is address-based on this bus.
 int MasterQuery(uint8_t mod_addr);
 bool QueryReplyReady();        // a reply has been captured (state == DONE)
 // Copy up to `cap` captured version bytes out; returns how many were written
