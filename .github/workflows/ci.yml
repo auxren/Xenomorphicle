@@ -23,6 +23,9 @@ jobs:
           g++ -std=c++17 -Wall -Werror -O2 -o build/test_bus200e_sysex \
               test_bus200e_sysex.cpp ../src/Bus200eSysEx.cpp
           ./build/test_bus200e_sysex
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_bus200e_bridge \
+              test_bus200e_bridge.cpp ../src/Bus200eBridge.cpp ../src/Bus200eSysEx.cpp
+          ./build/test_bus200e_bridge
           g++ -std=c++17 -Wall -Werror -O2 -o build/test_buscard \
               test_buscard.cpp ../src/PresetBusCard.cpp
           ./build/test_buscard
