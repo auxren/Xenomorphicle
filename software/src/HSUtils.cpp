@@ -13,6 +13,10 @@
 #include "SD.h"
 #endif
 
+#include "PhzConfig.h"
+#include "OC_app_switcher.h"
+#include "OC_apps.h"
+
 const int ProportionCV(const int cv_value, const int max_pixels, const int max_cv) {
     int prop = constrain(Proportion(cv_value, max_cv, max_pixels), -max_pixels, max_pixels);
     return prop;
@@ -59,6 +63,72 @@ namespace HS {
   uint8_t midi_msgrx_disable = 0; // Note, CC, etc.
   uint8_t midi_msgtx_disable = 0;
   uint8_t midi_thru_disable = 0;
+
+  // default -1..3 domain: 0 preserves the historical hardcoded behavior
+  // (TR1 always drove sync, unconditionally) as the out-of-box default.
+  int8_t clock_sync_jack = 0;
+
+  // -- clock routing persistence -------------------------------------
+  // GLOBALS.CFG, module-level: like device MIDI bindings, this is rig
+  // infrastructure and must survive both reboots and preset recalls, not
+  // just the app that happens to be on screen when it's edited (Captain's
+  // Clock Router screen and Quadrants' General Settings toggle rows both
+  // just mutate the plain globals above -- this polls for a settled
+  // change rather than requiring every mutation site to mark dirty).
+  static constexpr uint16_t kClockRoutingKey = 10 << 8;
+  static constexpr uint64_t kClockRoutingMagic = 0xA6ULL << 56;
+
+  FLASHMEM void LoadClockRouting() {
+    PhzConfig::VALUE v = 0;
+    if (PhzConfig::getValue(kClockRoutingKey, v) && (v >> 56) == 0xA6) {
+      clock_sync_jack = int8_t((v >> 16) & 0xFF) - 1;  // stored 0 = off
+      midi_clkrx_disable = (v >> 8) & 0xFF;
+      midi_clktx_disable = v & 0xFF;
+    }
+  }
+
+  FLASHMEM static void SaveClockRouting() {
+    PhzConfig::load_config();
+    const uint64_t v = kClockRoutingMagic
+                      | (uint64_t(uint8_t(clock_sync_jack + 1)) << 16)
+                      | (uint64_t(midi_clkrx_disable) << 8)
+                      | uint64_t(midi_clktx_disable);
+    PhzConfig::setValue(kClockRoutingKey, v);
+    PhzConfig::save_config();
+    // Hand the shared config map back to whichever app owns it: a
+    // background writer that skips this corrupts the active app's next
+    // save (the exact bug class PresetEngine's persist_cur_slot hit).
+    if (OC::app_switcher.current_app())
+      OC::app_switcher.current_app()->DispatchAppEvent(OC::APP_EVENT_RESUME);
+  }
+
+  FLASHMEM void ClockRoutingPump() {
+    static int8_t shadow_jack = 0;
+    static uint8_t shadow_clkrx = 0, shadow_clktx = 0;
+    static uint32_t dirty_ms = 0;
+    static bool have_shadow = false;
+
+    if (!have_shadow) {  // seed from LoadClockRouting's result; never save
+      shadow_jack = clock_sync_jack;             // an unchanged value just
+      shadow_clkrx = midi_clkrx_disable;          // because the module
+      shadow_clktx = midi_clktx_disable;          // rebooted
+      have_shadow = true;
+      return;
+    }
+
+    const bool changed = shadow_jack != clock_sync_jack ||
+                          shadow_clkrx != midi_clkrx_disable ||
+                          shadow_clktx != midi_clktx_disable;
+    if (changed) {
+      dirty_ms = millis();
+      shadow_jack = clock_sync_jack;
+      shadow_clkrx = midi_clkrx_disable;
+      shadow_clktx = midi_clktx_disable;
+    } else if (dirty_ms && millis() - dirty_ms > 1500) {
+      dirty_ms = 0;
+      SaveClockRouting();
+    }
+  }
 
   bool cursor_wrap = 0;
   bool auto_save_enabled = false;

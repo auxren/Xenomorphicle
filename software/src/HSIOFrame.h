@@ -485,6 +485,9 @@ struct alignas(32) MIDIFrame {
     bool start_q;
     bool stop_q;
     uint8_t clock_count; // MIDI clock counter (24ppqn)
+    uint32_t last_midi_clock_ms = 0; // millis() of the last 0xF8 byte seen,
+                                      // any interface -- Captain's Clock
+                                      // Router header liveness dot
 
     NoteBuffer note_buffer[16]; // array of buffers to track all held notes on all channels
 

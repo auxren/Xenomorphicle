@@ -297,6 +297,7 @@ public:
     void UnpackSetup(int s);  // out-of-class (FLASHMEM + LTO)
 
     void Suspend() {
+        clock_router = false;  // never come back to a modal screen mid-app-switch
         // Capture dirtiness BEFORE PackSetup: packing copies the live frame
         // into setups[] which is exactly what LiveConfigDirty compares, so
         // checking after packing is always-false (review C1 - edits were
@@ -320,17 +321,7 @@ public:
     }
 
 #ifdef __IMXRT1062__
-    void StoreData() {
-        PhzConfig::load_config("CAPTAIN.DAT");  // own the map before writing
-        PhzConfig::setValue(SETUP_KEY, active_setup);
-        for (int s = 0; s < kNumSetups; ++s) {
-          for (int i = 0; i < MIDIMAP_MAX; ++i)
-            PhzConfig::setValue(INPUT_MAP_KEY + i + s*MIDIMAP_MAX, setups[s].inmaps[i]);
-          for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
-            PhzConfig::setValue(OUTPUT_MAP_KEY + i + s*HS::MIDIFrame::kOutPorts, setups[s].outports[i]);
-        }
-        PhzConfig::save_config("CAPTAIN.DAT");
-    }
+    void StoreData();  // out-of-class (FLASHMEM + LTO)
     void Resume() {
         PhzConfig::load_config("CAPTAIN.DAT");
         uint64_t data = 0;
@@ -398,7 +389,8 @@ public:
 
     void View() const;
     void MainView() const {
-        if (copy_mode) DrawCopyScreen();
+        if (clock_router) DrawClockRouter();
+        else if (copy_mode) DrawCopyScreen();
         else if (display) DrawLogScreen();
         else if (detail_port >= 0) DrawDetail();
         else DrawOverview();
@@ -671,6 +663,42 @@ public:
         else display = 1 - display;
     }
 
+    // ---- Clock Router: dual-press A+B opens it -- the SAME gesture
+    // Quadrants already dedicates to its own Clock Setup overlay
+    // (AppQuadrants::CheckButtonCombo, "dual press A+B for Clock Setup"),
+    // so this is consistent with the one gesture this whole app family
+    // already trains a player to reach for when they want clock controls.
+    // L closes it (matches ToggleDisplay's existing "L goes back" meaning
+    // for the log view / copy mode). While open, it owns every other
+    // button/encoder input (see HandleButtonEvent/HandleEncoderEvent).
+    // One shared clock engine (HS::clock_m) drives every clocked screen in
+    // the app family, so what this edits -- HS::clock_sync_jack,
+    // HS::midi_clkrx_disable, HS::midi_clktx_disable -- are globals, not
+    // Captain-local state; HS::ClockRoutingPump() (Main.cpp loop()) is what
+    // actually persists them, debounced, from wherever they were changed.
+    enum RouterRow : int8_t {
+        ROUTER_SYNC,
+        ROUTER_RX_SERIAL, ROUTER_RX_USBDEV, ROUTER_RX_HOST1,
+        ROUTER_RX_HOST2, ROUTER_RX_BUS,
+        ROUTER_TX_SERIAL, ROUTER_TX_USBDEV, ROUTER_TX_HOST1,
+        ROUTER_TX_HOST2, ROUTER_TX_BUS,
+        ROUTER_ROW_COUNT
+    };
+
+    void ToggleClockRouter() {
+        clock_router = !clock_router;
+        if (clock_router) router_cursor.Init(0, ROUTER_ROW_COUNT - 1);
+    }
+
+    // Turn = edit immediately, no separate edit-mode/commit step. Sync
+    // Source is the one radio group: turn cycles Off->TR1..4, wrapping
+    // both ways. Every Rx/Tx row is directional rather than a flip
+    // (right = On, left = Off) so repeated same-direction turns land
+    // predictably instead of toggling back and forth.
+    void RouterEditFocused(int dir);  // out-of-class (FLASHMEM + LTO)
+
+    void DrawClockRouter() const;  // out-of-class (FLASHMEM survives LTO)
+
     void Reset() {
         // Reset the interface states
         for (int ch = 0; ch < DAC_CHANNEL_COUNT; ch++)
@@ -723,70 +751,7 @@ public:
     }
 
     // full-setup dump as a stream of DUMP_DATA packets + DUMP_END
-    void SendDump(uint8_t s) {
-        if (s == active_setup) PackSetup(s); // canonicalize live edits
-        constexpr int kRecBytes =
-            (2 + kGlobalParamCount) + MIDIMAP_MAX * (2 + kInParamCount)
-            + HS::MIDIFrame::kOutPorts * (2 + kOutParamCount);
-        uint8_t rec[kRecBytes];
-        int rn = 0;
-
-        rec[rn++] = CLS_GLOBAL; rec[rn++] = 0;
-        for (uint8_t par = 0; par < kGlobalParamCount; ++par) {
-            uint8_t v = 0;
-            get_param(CLS_GLOBAL, 0, par, v);
-            rec[rn++] = v;
-        }
-        for (int i = 0; i < MIDIMAP_MAX; ++i) {
-            rec[rn++] = CLS_IN; rec[rn++] = i;
-            InMapParams(setups[s].inmaps[i], &rec[rn]);
-            rn += kInParamCount;
-        }
-        for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) {
-            const bool trig = i >= HS::MIDIFrame::kCVOutPorts;
-            rec[rn++] = trig ? CLS_TR : CLS_CV;
-            rec[rn++] = trig ? (i - HS::MIDIFrame::kCVOutPorts) : i;
-            OutPortParams(setups[s].outports[i], &rec[rn]);
-            rn += kOutParamCount;
-        }
-
-        // chunk whole records into <=49-byte packet payloads
-        uint8_t xorsum = 0;
-        for (int i = 0; i < rn; ++i) xorsum ^= rec[i];
-        // pre-count packets
-        uint8_t total = 0;
-        for (int i = 0; i < rn; ) {
-            int take = 0;
-            while (i + take < rn) {
-                const uint8_t cls = rec[i + take];
-                const int rlen = 2 + ((cls == CLS_GLOBAL) ? kGlobalParamCount
-                               : (cls == CLS_IN) ? kInParamCount : kOutParamCount);
-                if (take + rlen > 49) break;
-                take += rlen;
-            }
-            i += take;
-            ++total;
-        }
-        uint8_t seq = 0;
-        for (int i = 0; i < rn; ) {
-            uint8_t pkt[52];
-            int n = 0;
-            pkt[n++] = s; pkt[n++] = seq; pkt[n++] = total;
-            while (i < rn) {
-                const uint8_t cls = rec[i];
-                const int rlen = 2 + ((cls == CLS_GLOBAL) ? kGlobalParamCount
-                               : (cls == CLS_IN) ? kInParamCount : kOutParamCount);
-                if (n - 3 + rlen > 49) break;
-                memcpy(&pkt[n], &rec[i], rlen);
-                n += rlen;
-                i += rlen;
-            }
-            SendSyxFrame(SYX_DUMP_DATA, pkt, n);
-            ++seq;
-        }
-        const uint8_t endpkt[3] = {s, seq, uint8_t(xorsum & 0x7f)};
-        SendSyxFrame(SYX_DUMP_END, endpkt, 3);
-    }
+    void SendDump(uint8_t s);  // out-of-class (FLASHMEM + LTO)
 
     // ---- auto-save ----
     // Persist every change (UI or SysEx) once edits settle for a few
@@ -864,23 +829,7 @@ public:
         profiles_dirty = true;
         profiles_dirty_ms = millis();
     }
-    FLASHMEM void PersistProfiles() {
-        profiles_dirty = false;
-        PhzConfig::load_config();
-        for (int i = 0; i < kDeviceProfiles; ++i) {
-            uint64_t v = 0;
-            if (profiles[i].vid)
-                v = kProfileMagic | (uint64_t(profiles[i].vid) << 32) |
-                    (uint64_t(profiles[i].pid) << 16) | profiles[i].setup |
-                    (profiles[i].no_bus_thru ? (uint64_t(1) << 8) : 0);
-            PhzConfig::setValue(DEVICE_PROFILE_KEY + i, v);
-            uint64_t nm = 0;
-            memcpy(&nm, profiles[i].name, 8);
-            PhzConfig::setValue(DEVICE_PROFILE_KEY + 16 + i, nm);
-        }
-        PhzConfig::save_config();
-        PhzConfig::load_config("CAPTAIN.DAT");
-    }
+    void PersistProfiles();  // out-of-class (FLASHMEM + LTO)
     // boot-time: other apps' Init may have loaded their own files first,
     // so take the GLOBALS map explicitly rather than assuming residency
     FLASHMEM void LoadProfiles() {
@@ -1086,21 +1035,7 @@ public:
     // forward an incoming message to the other interfaces (source excluded),
     // honoring the same thru mask Quadrants uses -- the bus included, so a
     // keyboard on the USB host jack can play bus-MIDI modules (259e etc.)
-    FLASHMEM void midi_thru(const HS::MIDIMessage &msg, uint8_t exclude) {
-        exclude |= HS::midi_thru_disable;
-        if (~exclude & mMaskUSBDev)
-            usbMIDI.send(msg.message, msg.data1, msg.data2, msg.channel, 0);
-#ifdef ARDUINO_TEENSY41
-        if (~exclude & mMaskUSBHost)
-            usbHostMIDI[0].send(msg.message, msg.data1, msg.data2, msg.channel);
-        if (~exclude & mMaskUSBHost2)
-            usbHostMIDI[1].send(msg.message, msg.data1, msg.data2, msg.channel);
-        if (~exclude & mMaskSerial)
-            MIDI1.send((midi::MidiType)msg.message, msg.data1, msg.data2, msg.channel);
-#endif
-        if (~exclude & mMaskBus)
-            OC::PresetBus::QueueMidiTx(msg.message, msg.channel, msg.data1, msg.data2);
-    }
+    void midi_thru(const HS::MIDIMessage &msg, uint8_t exclude);  // out-of-class (FLASHMEM + LTO)
 
     // runs in the main loop (not the ISR): drains deferred work
 public:
@@ -1108,30 +1043,7 @@ public:
     // Split out of DoLoop so ANOTHER app can keep the MIDI->CV engine alive
     // while Captain is suspended - the Tuner calls this so you can play the
     // note you are tuning. Loop context only: USBHost_t36 is not ISR-safe.
-    FLASHMEM void PollMidiSources() {
-        {   // worst-case poll cadence, for the selftest latency budget.
-            // Gaps over 1s are app-suspension time (menu, other app), not
-            // poll latency - skip them so the metric stays meaningful.
-            const uint32_t now_us = micros();
-            const uint32_t gap = now_us - poll_last_us;
-            if (poll_last_us && gap < 1000000 && gap > poll_gap_max_us)
-                poll_gap_max_us = gap;
-            poll_last_us = now_us;
-        }
-
-        int budget = 8;
-        while (budget-- > 0 && poll_midi(usbMIDI, mMaskUSBDev)) {}
-#ifdef ARDUINO_TEENSY41
-        budget = 8;
-        while (budget-- > 0 && poll_midi(usbHostMIDI[0], mMaskUSBHost)) {}
-        budget = 8;
-        while (budget-- > 0 && poll_midi(usbHostMIDI[1], mMaskUSBHost2)) {}
-        budget = 8;
-        while (budget-- > 0 && poll_midi(MIDI1, mMaskSerial)) {}
-        budget = 8;
-        while (budget-- > 0 && poll_bus_midi()) {}
-#endif
-    }
+    void PollMidiSources();  // out-of-class (FLASHMEM + LTO)
 
     // (this region was already public; restore it rather than privatize
     // everything below, which includes the selftest instrumentation)
@@ -1663,6 +1575,9 @@ private:
     int8_t detail_port; // -1 = overview list, else the open port row
     bool display; // 0=Setup Edit 1=Log
     bool copy_mode; // Copy mode on/off
+    bool clock_router = false; // Clock Router screen open (A+B combo)
+    OC::menu::ScreenCursor<OC::menu::kScreenLines> router_cursor;
+    uint16_t mask = 0, last_mask = 0; // combo edge-detect, mirrors Quadrants
     int active_setup; // index of current setup
     int copy_setup_source; // Which setup is being copied?
     int copy_setup_target; // Which setup is being copied to?
@@ -1717,6 +1632,9 @@ private:
             return trig_out_fn_names[o.function < HS::TRFN_COUNT ? o.function : 0];
         return cv_out_fn_names[o.function < HS::CVFN_COUNT ? o.function : 0];
     }
+
+    const char* RouterRowLabel(int row) const;  // out-of-class (FLASHMEM + LTO)
+    const char* RouterRowValue(int row) const;  // out-of-class (FLASHMEM + LTO)
 
     // live physical-input state, left of the activity area:
     // CV rows get a level bar, trigger rows a gate lamp, MIDI-in rows
@@ -2176,12 +2094,238 @@ void AppCaptainMIDI::DrawMenu() const { BaseView(); }
 FLASHMEM
 void AppCaptainMIDI::View() const { MainView(); }
 
+#ifdef __IMXRT1062__
+FLASHMEM void AppCaptainMIDI::StoreData() {
+    PhzConfig::load_config("CAPTAIN.DAT");  // own the map before writing
+    PhzConfig::setValue(SETUP_KEY, active_setup);
+    for (int s = 0; s < kNumSetups; ++s) {
+      for (int i = 0; i < MIDIMAP_MAX; ++i)
+        PhzConfig::setValue(INPUT_MAP_KEY + i + s*MIDIMAP_MAX, setups[s].inmaps[i]);
+      for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
+        PhzConfig::setValue(OUTPUT_MAP_KEY + i + s*HS::MIDIFrame::kOutPorts, setups[s].outports[i]);
+    }
+    PhzConfig::save_config("CAPTAIN.DAT");
+}
+#endif  // __IMXRT1062__
+
+FLASHMEM void AppCaptainMIDI::SendDump(uint8_t s) {
+    if (s == active_setup) PackSetup(s); // canonicalize live edits
+    constexpr int kRecBytes =
+        (2 + kGlobalParamCount) + MIDIMAP_MAX * (2 + kInParamCount)
+        + HS::MIDIFrame::kOutPorts * (2 + kOutParamCount);
+    uint8_t rec[kRecBytes];
+    int rn = 0;
+
+    rec[rn++] = CLS_GLOBAL; rec[rn++] = 0;
+    for (uint8_t par = 0; par < kGlobalParamCount; ++par) {
+        uint8_t v = 0;
+        get_param(CLS_GLOBAL, 0, par, v);
+        rec[rn++] = v;
+    }
+    for (int i = 0; i < MIDIMAP_MAX; ++i) {
+        rec[rn++] = CLS_IN; rec[rn++] = i;
+        InMapParams(setups[s].inmaps[i], &rec[rn]);
+        rn += kInParamCount;
+    }
+    for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) {
+        const bool trig = i >= HS::MIDIFrame::kCVOutPorts;
+        rec[rn++] = trig ? CLS_TR : CLS_CV;
+        rec[rn++] = trig ? (i - HS::MIDIFrame::kCVOutPorts) : i;
+        OutPortParams(setups[s].outports[i], &rec[rn]);
+        rn += kOutParamCount;
+    }
+
+    // chunk whole records into <=49-byte packet payloads
+    uint8_t xorsum = 0;
+    for (int i = 0; i < rn; ++i) xorsum ^= rec[i];
+    // pre-count packets
+    uint8_t total = 0;
+    for (int i = 0; i < rn; ) {
+        int take = 0;
+        while (i + take < rn) {
+            const uint8_t cls = rec[i + take];
+            const int rlen = 2 + ((cls == CLS_GLOBAL) ? kGlobalParamCount
+                           : (cls == CLS_IN) ? kInParamCount : kOutParamCount);
+            if (take + rlen > 49) break;
+            take += rlen;
+        }
+        i += take;
+        ++total;
+    }
+    uint8_t seq = 0;
+    for (int i = 0; i < rn; ) {
+        uint8_t pkt[52];
+        int n = 0;
+        pkt[n++] = s; pkt[n++] = seq; pkt[n++] = total;
+        while (i < rn) {
+            const uint8_t cls = rec[i];
+            const int rlen = 2 + ((cls == CLS_GLOBAL) ? kGlobalParamCount
+                           : (cls == CLS_IN) ? kInParamCount : kOutParamCount);
+            if (n - 3 + rlen > 49) break;
+            memcpy(&pkt[n], &rec[i], rlen);
+            n += rlen;
+            i += rlen;
+        }
+        SendSyxFrame(SYX_DUMP_DATA, pkt, n);
+        ++seq;
+    }
+    const uint8_t endpkt[3] = {s, seq, uint8_t(xorsum & 0x7f)};
+    SendSyxFrame(SYX_DUMP_END, endpkt, 3);
+}
+
+FLASHMEM void AppCaptainMIDI::midi_thru(const HS::MIDIMessage &msg, uint8_t exclude) {
+    exclude |= HS::midi_thru_disable;
+    if (~exclude & mMaskUSBDev)
+        usbMIDI.send(msg.message, msg.data1, msg.data2, msg.channel, 0);
+#ifdef ARDUINO_TEENSY41
+    if (~exclude & mMaskUSBHost)
+        usbHostMIDI[0].send(msg.message, msg.data1, msg.data2, msg.channel);
+    if (~exclude & mMaskUSBHost2)
+        usbHostMIDI[1].send(msg.message, msg.data1, msg.data2, msg.channel);
+    if (~exclude & mMaskSerial)
+        MIDI1.send((midi::MidiType)msg.message, msg.data1, msg.data2, msg.channel);
+#endif
+    if (~exclude & mMaskBus)
+        OC::PresetBus::QueueMidiTx(msg.message, msg.channel, msg.data1, msg.data2);
+}
+
+FLASHMEM void AppCaptainMIDI::PollMidiSources() {
+    {   // worst-case poll cadence, for the selftest latency budget.
+        // Gaps over 1s are app-suspension time (menu, other app), not
+        // poll latency - skip them so the metric stays meaningful.
+        const uint32_t now_us = micros();
+        const uint32_t gap = now_us - poll_last_us;
+        if (poll_last_us && gap < 1000000 && gap > poll_gap_max_us)
+            poll_gap_max_us = gap;
+        poll_last_us = now_us;
+    }
+
+    int budget = 8;
+    while (budget-- > 0 && poll_midi(usbMIDI, mMaskUSBDev)) {}
+#ifdef ARDUINO_TEENSY41
+    budget = 8;
+    while (budget-- > 0 && poll_midi(usbHostMIDI[0], mMaskUSBHost)) {}
+    budget = 8;
+    while (budget-- > 0 && poll_midi(usbHostMIDI[1], mMaskUSBHost2)) {}
+    budget = 8;
+    while (budget-- > 0 && poll_midi(MIDI1, mMaskSerial)) {}
+    budget = 8;
+    while (budget-- > 0 && poll_bus_midi()) {}
+#endif
+}
+
+#if defined(ARDUINO_TEENSY41)
+FLASHMEM void AppCaptainMIDI::PersistProfiles() {
+    profiles_dirty = false;
+    PhzConfig::load_config();
+    for (int i = 0; i < kDeviceProfiles; ++i) {
+        uint64_t v = 0;
+        if (profiles[i].vid)
+            v = kProfileMagic | (uint64_t(profiles[i].vid) << 32) |
+                (uint64_t(profiles[i].pid) << 16) | profiles[i].setup |
+                (profiles[i].no_bus_thru ? (uint64_t(1) << 8) : 0);
+        PhzConfig::setValue(DEVICE_PROFILE_KEY + i, v);
+        uint64_t nm = 0;
+        memcpy(&nm, profiles[i].name, 8);
+        PhzConfig::setValue(DEVICE_PROFILE_KEY + 16 + i, nm);
+    }
+    PhzConfig::save_config();
+    PhzConfig::load_config("CAPTAIN.DAT");
+}
+#endif  // ARDUINO_TEENSY41
+
+FLASHMEM void AppCaptainMIDI::RouterEditFocused(int dir) {
+    const int row = router_cursor.cursor_pos();
+    if (row == ROUTER_SYNC) {
+        int v = ((int)HS::clock_sync_jack + 1 + dir) % 5;
+        if (v < 0) v += 5;
+        HS::clock_sync_jack = (int8_t)(v - 1);
+        return;
+    }
+    static const uint8_t kBit[5] = {
+        HS::mMaskSerial, HS::mMaskUSBDev, HS::mMaskUSBHost,
+        HS::mMaskUSBHost2, HS::mMaskBus
+    };
+    const bool tx = row >= ROUTER_TX_SERIAL;
+    const int idx = row - (tx ? (int)ROUTER_TX_SERIAL : (int)ROUTER_RX_SERIAL);
+    uint8_t &mask = tx ? HS::midi_clktx_disable : HS::midi_clkrx_disable;
+    if (dir > 0) mask &= ~kBit[idx];       // right = On (bit clear)
+    else if (dir < 0) mask |= kBit[idx];   // left  = Off (bit set)
+}
+
+FLASHMEM const char* AppCaptainMIDI::RouterRowLabel(int row) const {
+    static const char* const kLabels[ROUTER_ROW_COUNT] = {
+        "Sync Src",
+        "Rx  Serial", "Rx  USBDev", "Rx  Host1", "Rx  Host2", "Rx  Bus",
+        "Tx  Serial", "Tx  USBDev", "Tx  Host1", "Tx  Host2", "Tx  Bus",
+    };
+    return kLabels[row];
+}
+
+FLASHMEM const char* AppCaptainMIDI::RouterRowValue(int row) const {
+    if (row == ROUTER_SYNC) {
+        static const char* const kSync[5] = { "Off", "TR1", "TR2", "TR3", "TR4" };
+        return kSync[HS::clock_sync_jack + 1];
+    }
+    static const uint8_t kBit[5] = {
+        HS::mMaskSerial, HS::mMaskUSBDev, HS::mMaskUSBHost,
+        HS::mMaskUSBHost2, HS::mMaskBus
+    };
+    const bool tx = row >= ROUTER_TX_SERIAL;
+    const int idx = row - (tx ? (int)ROUTER_TX_SERIAL : (int)ROUTER_RX_SERIAL);
+    const uint8_t mask = tx ? HS::midi_clktx_disable : HS::midi_clkrx_disable;
+    return captain_off_on[!(mask & kBit[idx])];
+}
+
+// Sync Src / Rx.. / Tx.. rows, reusing the app's own SettingsList idiom
+// (DrawOverview/DrawDetail) so focus/scroll/wording stay consistent with
+// every other screen -- inversion still means exactly one thing.
+FLASHMEM void AppCaptainMIDI::DrawClockRouter() const {
+    gfxHeader("Clock Router");
+    // whether MIDI clock bytes are CURRENTLY arriving on any interface --
+    // MIDI clock always wins over TR sync on a shared tick (PumpTransport),
+    // so this is what explains a TR-sync row that looks selected but idle
+    const bool midi_live = millis() - frame.MIDIState.last_midi_clock_ms < 300;
+    graphics.drawCircle(94, 4, 2);
+    if (midi_live) graphics.drawRect(93, 3, 3, 3);
+    graphics.setPrintPos(99, 1);
+    graphics.print(midi_live ? "MIDI" : "midi");
+
+    OC::menu::SettingsList<OC::menu::kScreenLines, 0, 76> settings_list(router_cursor);
+    OC::menu::SettingsListItem list_item;
+    while (settings_list.available()) {
+        const int current = settings_list.Next(list_item);
+        if (current >= ROUTER_ROW_COUNT) { list_item.DrawCustom(); continue; }
+
+        list_item.SetPrintPos();
+        graphics.print(RouterRowLabel(current));
+        graphics.setPrintPos(0, list_item.y + 2);
+        list_item.DrawDefault(RouterRowValue(current), 0, CaptainSettings[0]);
+    }
+}
+
 FLASHMEM void AppCaptainMIDI::DrawScreensaver() const {
     BaseScreensaver(true);
 }
 void AppCaptainMIDI::DrawDebugInfo() const { }
 
 FLASHMEM void AppCaptainMIDI::HandleButtonEvent(const UI::Event &event) {
+    last_mask = mask;
+    mask = event.mask;
+
+    // dual-press A+B opens the Clock Router -- see the comment above
+    // ToggleClockRouter() for why this gesture, not another one.
+    if (mask == (OC::CONTROL_BUTTON_A | OC::CONTROL_BUTTON_B) && mask != last_mask) {
+        if (!clock_router) ToggleClockRouter();
+        return;
+    }
+    if (clock_router) {
+        // L closes it; every other button is reserved while it's open
+        if (event.control == OC::CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_PRESS)
+            ToggleClockRouter();
+        return;
+    }
+
     if (event.control == OC::CONTROL_BUTTON_R && event.type == UI::EVENT_BUTTON_PRESS)
         ToggleCursor();
     if (event.control == OC::CONTROL_BUTTON_L) {
@@ -2198,6 +2342,12 @@ FLASHMEM void AppCaptainMIDI::HandleButtonEvent(const UI::Event &event) {
 }
 
 FLASHMEM void AppCaptainMIDI::HandleEncoderEvent(const UI::Event &event) {
+    if (clock_router) {
+        if (event.control == OC::CONTROL_ENCODER_L) router_cursor.Scroll(event.value);
+        if (event.control == OC::CONTROL_ENCODER_R) RouterEditFocused(event.value);
+        return;
+    }
+
     if (event.control == OC::CONTROL_ENCODER_R) {
         if (detail_port < 0) {
             cursor.Scroll(event.value); // overview: pick a port

@@ -234,6 +234,24 @@ namespace HS {
   extern uint8_t midi_clktx_disable;
   extern uint8_t midi_msgrx_disable;
   extern uint8_t midi_msgtx_disable;
+
+  // Which physical TR jack (0-3) drives clock_m's external sync input;
+  // -1 = off (free-running / MIDI-clock-only). Shared by every clock-
+  // ticking Controller (ClockSetup, ClockSetupT4, Captain's PumpTransport)
+  // via HSIOFrame.cpp's per-tick synctrig capture -- there is one clock
+  // engine, so this is one global choice, not per-app state.
+  extern int8_t clock_sync_jack;
+
+  // Clock routing (clock_sync_jack + midi_clkrx_disable/midi_clktx_disable,
+  // the CLOCK-relevant bits of the MIDI interface masks) is rig
+  // infrastructure, not preset-scene state -- like device MIDI bindings,
+  // it must survive both reboots and preset recalls. Call LoadClockRouting
+  // once at boot (GLOBALS.CFG must be the loaded PhzConfig map); call
+  // ClockRoutingPump every loop() pass to debounce-persist edits made from
+  // ANY surface (Captain's Clock Router screen, Quadrants' General
+  // Settings toggle rows -- both just mutate the live globals above).
+  void LoadClockRouting();
+  void ClockRoutingPump();
   extern bool cursor_wrap;
   extern bool auto_save_enabled;
   extern uint8_t trig_length;

@@ -50,6 +50,7 @@
 #include "PresetEngine.h"
 #include "PresetBus.h"
 #include "PresetBusUI.h"
+#include "HSUtils.h"
 
 void CaptainDumpProfiles();  // CaptainMIDI.h (global scope)
 void CaptainMidiHealth();    // CaptainMIDI.h (global scope)
@@ -508,6 +509,7 @@ FLASHMEM void setup() {
   OC::PresetEngine::Init();
   OC::PresetBus::Init();
   OC::PresetBusUI::Init();
+  HS::LoadClockRouting();  // GLOBALS.CFG is still the loaded map here
   // restores the last bus preset on any T4.1 (bench units included);
   // no bus traffic is emitted, so non-bus hardware is unaffected
   OC::PresetEngine::BootRecall();  // gated on I2C_Expansion inside
@@ -672,6 +674,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
     OC::PresetEngine::Process();
     OC::PresetBus::Task();
     OC::PresetBusUI::Task();
+    HS::ClockRoutingPump();
 
     // UI events
     if (UI_MODE_APP_SETTINGS == ui_mode) {

@@ -15,6 +15,7 @@ void HS::MIDIFrame::ProcessMIDIMsg(const MIDIMessage msg) {
 
     switch (msg.message) { // System Real Time messages
         case usbMIDI.Clock:
+            last_midi_clock_ms = millis();
             clock_q = (clock_count % (24/MIDI_CLOCK_PPQN) == 0); // for internal sync @ 2ppqn
             ++clock_count;
             for (MIDIMapping& map : mapping) {
@@ -758,8 +759,10 @@ void HS::IOFrame::Load(OC::IOFrame *ioframe) {
 
     auto triggers = ioframe->digital_inputs.triggered();
 
-    // TODO: configurable clock sync input
-    synctrig = triggers & DIGITAL_INPUT_MASK(0);
+    // configurable clock sync input -- HS::clock_sync_jack, edited from
+    // Captain MIDI's Clock Router screen (or Quadrants' General Settings)
+    synctrig = HS::clock_sync_jack >= 0 &&
+               (triggers & DIGITAL_INPUT_MASK(HS::clock_sync_jack));
 
     // hardcoded to the enum...
     gate_high[0] = ioframe->digital_inputs.raised(OC::DIGITAL_INPUT_1);
