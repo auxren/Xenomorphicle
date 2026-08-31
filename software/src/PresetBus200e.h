@@ -209,14 +209,25 @@ int Bus200eBuildTransferFrame(uint8_t op, uint8_t mod_addr, uint8_t card_lo,
 //
 // Reply (what the queried module masters back, and what
 // try_query_reply() masters when WE are the one asked):
-//   [nBytes][0x22][srcAddr][0x13][version chars...]
+//   [nBytes][0x22][srcAddr][0x1C][payload...]
 // Note the dest/src columns are SWAPPED relative to a command frame: the
 // manager's identity 0x22 sits in the DEST slot (it is the addressee), and
 // the answering module's own address in the SRC slot. That swap is what
 // makes a reply unambiguously distinguishable from a command.
+//
+// CONFIRMED on real hardware (bench capture, a live 200e bus with a WPM on
+// it): a Buchla 251e at 0x5C answers [04 5C 22 1A FF] with [04 22 5C 1C FF],
+// and a second module at 0x28 answers [04 22 28 1C FF]. So the payload is a
+// single 0xFF byte, not a version string -- the reply is a presence/identity
+// ACK, and what that 0xFF means is still unknown (it is NOT an echo of the
+// request's argument byte: request arguments 00, 01, 02, 03, 04 and FF all
+// drew the same FF back). Addresses with no module answer nothing at all.
+// The 0x13 command byte and the "30.6" version string this file used to
+// describe were this project's own invention and have never been seen on a
+// bus; 0x13 stays accepted on RX for compatibility with older firmware.
 #define BUS200E_QUERY_FRAME_LEN 5
-// Longest version string a reply can carry through this parser: FRAME_MAX
-// (12) minus the 4 header bytes. Our own reply uses 7 ("30.6" + 3 spaces).
+// Longest payload a reply can carry through this parser: FRAME_MAX (12)
+// minus the 4 header bytes. Real modules use 1.
 #define BUS200E_QUERY_VER_MAX 8
 
 // Build the outgoing QUERY request. cap must be >= BUS200E_QUERY_FRAME_LEN.

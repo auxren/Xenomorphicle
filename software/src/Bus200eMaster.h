@@ -203,13 +203,19 @@ void Bus200eMasterReset(void);
 // Bus200eMasterQueryReply() below. There is no polling of the target and no
 // second bus transaction.
 //
-// STILL UNVERIFIED as of 2026-08-31, unlike the BACKUP/RESTORE FSM above
-// (see the UPDATE note near the top of this file, which is now bench-
-// confirmed): this QUERY path has never run against a real module. The
-// reply-frame shape it recognizes is this project's own established one
-// (what try_query_reply() masters when queried), not a shape traced off a
-// 251e/259e answering. If a live module answers in some other dialect, the
-// timeout below is what will fire.
+// BENCH-CONFIRMED 2026-08-31 against a live 200e bus (251e at 0x5C, a second
+// module at 0x28, a WPM also on the bus): the request frame was always right
+// -- both modules answered it -- but the reply we listened for was not. Real
+// modules answer with command byte 0x1C and a single 0xFF payload byte
+// ([04 22 5C 1C FF]), where this file previously expected 0x13 and a version
+// string, a shape invented here that no module speaks. That is why every
+// query before the fix timed out with stray=0: the answer was on the wire
+// and reached parse_frame(), which classified it as an UNKNOWN short/V2
+// frame instead of a reply. See PresetBus200e.h for the captured bytes.
+//
+// Consequence for callers: the "version string" a reply carries is, on real
+// hardware, one opaque byte. A DONE query means "that address is occupied
+// and answering"; it does not identify the module.
 typedef enum {
   BUS200E_QUERY_IDLE = 0,
   BUS200E_QUERY_SENDING,   // waiting for a quiet bus to master the request

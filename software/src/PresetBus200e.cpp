@@ -167,17 +167,22 @@ BUS_CODE static void parse_frame(void) {
 
   // QUERY REPLY: a queried module answers by mastering a general-call frame
   // of its own, with the dest/src columns SWAPPED relative to a command --
-  // [nBytes, destAddr=0x22, srcAddr=replier, 0x13, version chars...] -- the
-  // manager's identity 0x22 being the ADDRESSEE rather than the sender. This
-  // is exactly the frame try_query_reply() (PresetBus.cpp) masters when we
-  // are the one being queried; here we recognize other modules' answers so a
-  // master-side QUERY can capture them.
+  // [nBytes, destAddr=0x22, srcAddr=replier, cmd, payload...] -- the
+  // manager's identity 0x22 being the ADDRESSEE rather than the sender.
+  //
+  // The reply command byte is 0x1C. Traced off real hardware at the bench: a
+  // Buchla 251e at 0x5C answered [04 5C 22 1A FF] with [04 22 5C 1C FF], and
+  // the module at 0x28 answered identically bar its own address. 0x13 is
+  // accepted alongside it because that is what this firmware itself replied
+  // with before the capture (invented here, never seen on a real bus), so a
+  // Xenomorpher running older firmware is still understood.
   //
   // Checked BEFORE the long/PRIMO branch, but guarded with f[2] != 0x22 so a
   // command frame (srcAddr 0x22) can never be stolen from that branch no
   // matter what it is addressed to -- every frame that parsed as a command
   // before still parses as one now.
-  if (n >= 4 && f[0] == n - 1 && f[1] == 0x22 && f[2] != 0x22 && f[3] == 0x13) {
+  if (n >= 4 && f[0] == n - 1 && f[1] == 0x22 && f[2] != 0x22 &&
+      (f[3] == 0x13 || f[3] == 0x1C)) {
     stats.frames_long++;   // same PRIMO dialect as the command framing below
     const uint8_t vn = (uint8_t) (n - 4);
     c.op = BUS200E_OP_QUERY_REPLY;
@@ -336,7 +341,10 @@ BUS_CODE int Bus200eBuildQueryFrame(uint8_t mod_addr, uint8_t *out,
   out[1] = mod_addr & 0x7F;              // destAddr: the module being asked
   out[2] = 0x22;                         // srcAddr: us, asserting manager identity
   out[3] = 0x1A;                         // QUERY
-  out[4] = 0xFF;                         // unused argument byte, as seen live
+  // Argument byte. A real 251e and the module at 0x28 both ignore it: five
+  // different values (00-04, FF) all drew the identical reply, so 0xFF is
+  // kept only because that is what a real manager was seen sending.
+  out[4] = 0xFF;
   return BUS200E_QUERY_FRAME_LEN;
 }
 

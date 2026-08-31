@@ -610,10 +610,19 @@ FLASHMEM static void report_query() {
   if (s == BUS200E_QUERY_DONE) {
     uint8_t v[BUS200E_QUERY_VER_MAX];
     const uint8_t n = Bus200eMasterQueryVersion(v, sizeof(v));
-    Serial.printf("PresetBus: module %02X says \"", Bus200eMasterQueryModAddr());
+    // A real module's payload is one opaque 0xFF byte, not text (see
+    // PresetBus200e.h), so only quote a string when there is one to quote.
+    bool printable = false;
     for (uint8_t i = 0; i < n; ++i)
-      Serial.printf("%c", (v[i] >= 0x20 && v[i] < 0x7F) ? (char)v[i] : '.');
-    Serial.print("\" (hex:");
+      if (v[i] >= 0x20 && v[i] < 0x7F) printable = true;
+    Serial.printf("PresetBus: module %02X answered", Bus200eMasterQueryModAddr());
+    if (printable) {
+      Serial.print(" \"");
+      for (uint8_t i = 0; i < n; ++i)
+        Serial.printf("%c", (v[i] >= 0x20 && v[i] < 0x7F) ? (char)v[i] : '.');
+      Serial.print("\"");
+    }
+    Serial.print(" (hex:");
     for (uint8_t i = 0; i < n; ++i) Serial.printf(" %02X", v[i]);
     Serial.println(")");
   } else if (s == BUS200E_QUERY_FAILED) {
@@ -815,9 +824,12 @@ static uint8_t query_tries = 0;
 FLASHMEM static void try_query_reply() {
   if (!tx_gate_open()) return;
 
-  // [0A][22][ourAddr][13]["30.6"+3 spaces] — module identity / fw version
-  uint8_t f[11] = { 0x0A, 0x22, Bus200eModuleAddress(), 0x13,
-                    '3', '0', '.', '6', ' ', ' ', ' ' };
+  // [04][22][ourAddr][1C][FF] — module identity ACK, byte-for-byte the shape
+  // a real 251e (0x5C) and the module at 0x28 were captured answering with
+  // at the bench. This used to be an 11-byte [0A][22][addr][13]["30.6   "]
+  // frame of our own invention: no module on a real bus speaks that, so a
+  // preset manager had no reason to recognize us. See PresetBus200e.h.
+  uint8_t f[5] = { 0x04, 0x22, Bus200eModuleAddress(), 0x1C, 0xFF };
 
   Wire.beginTransmission(0);  // general call
   Wire.write(f, sizeof(f));
