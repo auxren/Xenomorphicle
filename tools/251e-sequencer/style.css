@@ -188,22 +188,77 @@ button:not(:disabled):hover {
   font-size: 13px;
 }
 
-.length-control {
+.sequence-caption {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* ---- bank navigation (slot picker + A-D tabs + per-slot/per-sequence fields) */
+
+.navbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+
+.nav-control {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
   color: var(--text-dim);
-  margin-left: auto;
 }
 
-.length-input {
-  width: 56px;
+.seq-tabs {
+  display: flex;
+  gap: 4px;
 }
+
+.seq-tab {
+  width: 34px;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.seq-tab-active {
+  background: var(--accent-2);
+  color: #072620;
+  border-color: var(--accent-2);
+}
+
+.slot-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.meta-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.meta-field input {
+  width: 92px;
+  font-size: 11.5px;
+  padding: 4px 6px;
+}
+
+/* ---- stage grid: 50 stages, wrapping rather than shrinking to nothing ----- */
 
 .steps {
   display: grid;
-  grid-template-columns: repeat(16, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(58px, 1fr));
   gap: 6px;
   overflow-x: auto;
 }
@@ -222,11 +277,6 @@ button:not(:disabled):hover {
   overflow: hidden;
 }
 
-.step-inactive {
-  background: var(--step-inactive);
-  opacity: 0.45;
-}
-
 .step-bar {
   position: absolute;
   left: 0;
@@ -237,11 +287,19 @@ button:not(:disabled):hover {
   pointer-events: none;
 }
 
-.step-gate-on .step-bar {
-  opacity: 0.6;
+.step-index {
+  position: absolute;
+  top: 4px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 9.5px;
+  color: var(--text-dim);
+  pointer-events: none;
 }
 
-.step-voltage {
+.step-value,
+.step-time {
   position: relative;
   z-index: 1;
   width: 100%;
@@ -250,20 +308,9 @@ button:not(:disabled):hover {
   text-align: center;
 }
 
-.step-gate-toggle {
-  position: relative;
-  z-index: 1;
-  width: 100%;
+.step-time {
   font-size: 10px;
-  padding: 3px 2px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.step-gate-on .step-gate-toggle {
-  background: var(--accent);
-  color: #1a1206;
-  border-color: var(--accent);
+  color: var(--text-dim);
 }
 
 #log {

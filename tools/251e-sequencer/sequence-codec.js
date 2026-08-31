@@ -1,190 +1,369 @@
 // sequence-codec.js
 // ---------------------------------------------------------------------------
-// *** PROVISIONAL / PLACEHOLDER BYTE FORMAT -- NOT THE REAL 251E FORMAT ***
+// Buchla 251e preset-BANK codec.
 //
-// The actual Buchla 251e "Quad Sequential Voltage Source" byte layout is
-// being reverse-engineered in parallel and is not yet known to this applet.
-// Everything in this file -- field choices, byte widths, value ranges,
-// scaling -- is an invented, clearly-bounded stand-in so the rest of the
-// app (UI, transport) has a concrete shape to work against.
+// This replaces the old self-invented placeholder layout. Everything below is
+// the container geometry established in
+// `Buchla_FW/docs/251e-SEQUENCE-FORMAT.md`, section
+// "2026-08-30, FIRST REAL 251e CAPTURE" -- derived from a live
+// `MasterBackup(0x5C)` of the owner's own 251e and independently
+// cross-validated against the Studio H `251e.json` reference bank. Read that
+// document before changing anything here; its per-claim confidence levels are
+// mirrored in the comments below and are deliberately NOT upgraded here.
 //
-// ALL format-specific knowledge lives in this one file. When the real
-// format lands, only decodeDump/encodeDump/the constants below need to
-// change -- app.js and sysex-transport.js talk in terms of the decoded
-// {sequences: [...]} shape and raw bytes respectively, never in terms of
-// individual field offsets.
+// UNIT OF TRANSFER: one whole 63120-byte bank
+// -------------------------------------------
+// BACKUP/RESTORE moves the entire bank as one continuous transfer -- it is not
+// addressable per slot (confirmed live). So decode/encode work on a full bank
+// and a RESTORE re-sends all 30 slots even when the user touched one stage.
+// That makes byte-exact preservation of everything we do NOT understand a hard
+// requirement, not a nicety: every unknown field is carried through the state
+// object as raw bytes and written back unchanged.
 //
-// Provisional schema:
-//   - 4 independent sequences (A-D), one per 251e output channel.
-//   - Each sequence holds up to MAX_STEPS steps; `length` (1..MAX_STEPS)
-//     says how many are active/played (matches "sequential" hardware that
-//     runs stages 1..N and wraps).
-//   - Each step has:
-//       voltage    0.00 .. 10.00 V (plausible for a Buchla control voltage
-//                  source; encoded as one 7-bit byte, ~0.0787V/LSB)
-//       gateOn     whether this step fires its gate/trigger output
-//       gateLength 0..100, gate width as % of the step's time slot
-//   - Every dump byte is a plain 7-bit value (0..127), same rule Captain
-//     MIDI's real protocol uses ("no 8-bit packing, no struct dumps") --
-//     these bytes get sliced directly into SysEx payloads by
-//     sysex-transport.js's packDump, which does NOT do 8-to-7-bit
-//     repacking, so nothing in this file may produce a byte >= 0x80.
-//     (gateOn therefore gets its own byte instead of a spare high bit.)
-//   - Byte layout per sequence: [length, step0.voltageByte, step0.gateOn,
-//     step0.gateLength, step1.voltageByte, step1.gateOn, step1.gateLength,
-//     ...].
-//   - Full dump = 4 sequences back-to-back, no header/footer (the
-//     transport layer's SysEx framing carries length/checksum instead).
+// GEOMETRY (confidence: HIGH -- `16 + 4*522 = 2104` exactly, four stride-10
+// runs of exactly 50 separated by three exactly-22-byte gaps, corroborated by
+// a second, independent dump):
+//
+//   bank  = 30 slots x 2104 bytes                                  = 63120
+//   slot  = 16-byte header + 4 blocks x 522 bytes                  = 2104
+//   block = 50 stage entries x 10 bytes + 22-byte trailer          = 522
+//
+// One block is one sequence (A/B/C/D) of the Quad Sequential Voltage Source.
+//
+// FIELD MEANINGS -- what is known and what is not:
+//
+//   header[0:4], header[4:8]  IEEE-754 BIG-endian floats.  Shape: HIGH
+//       confidence (two independent sources, four canonical values: real
+//       module `0.0`/`1.0`, reference `-1.0`/`1.3043053`).  Meaning: MODERATE
+//       -- they read like an offset/scale or range pair sitting at identity on
+//       the real module, but that is a reading, not a fact, so they are named
+//       `floats[0]`/`floats[1]` here and nothing else.
+//   header[8:16]              zero in every sample.  Unknown.  Preserved raw.
+//
+//   stage byte 0    per-stage value, default 0. Full 0..255 range in the
+//       programmed reference block. Structure HIGH confidence; UNITS UNKNOWN
+//       (very likely the stage CV/voltage, but no volts-per-LSB has ever been
+//       measured, so this codec exposes the raw byte and does NOT pretend to
+//       scale it to volts).
+//   stage byte 1    `0x00` in 250/250 observed entries. Might be a pad, might
+//       be the high byte of a 16-bit value at [0:2]. Unresolvable from
+//       defaults. Exposed as `pad`, preserved.
+//   stage [2:4]     uint16 LITTLE-endian, default 4. Structure HIGH
+//       confidence; units unknown. Named `time` after the doc's "per-stage
+//       time/duration" reading -- a descriptive name for the best-supported
+//       reading, NOT a confirmed semantic.
+//   stage [4:10]    all zero in every real entry except one (`251e.json`
+//       block 0, entry 14, byte 7 = 0x0a). Genuinely unknown. Preserved raw
+//       as `reserved`.
+//
+//   block trailer [500:522]   22 bytes, mostly unknown. Byte +1 is a
+//       per-sequence parameter: `0x78` = 120 default, `0x8c` = 140 in the one
+//       programmed reference block. Byte +4 is 0 by default and 2 there.
+//       Everything else is zero in both sources. The whole trailer is kept as
+//       raw bytes; `getSequenceParam`/`setSequenceParam` are a named accessor
+//       for byte +1 only, with no claim about what it controls.
+//
+// Anything a user did not touch survives an edit-and-restore cycle
+// byte-for-byte. `encodeBank(decodeBank(bytes))` is the identity on any
+// 63120-byte input -- that is the invariant the test suite pins down.
+//
+// NOTE ON THE TRANSPORT: a bank is full 8-bit data (`0x78`, `0x80`, `0x3f`
+// all occur in the real capture). It is NOT 7-bit-safe, and must go through
+// sysex-transport.js's packChunk/unpackChunk (Bus200eSysExPack) like any real
+// 200e capture. sequence-codec.js emits plain bytes and takes no view on
+// framing or chunking.
 // ---------------------------------------------------------------------------
 
-export const NUM_SEQUENCES = 4;
-export const MAX_STEPS = 16;
-export const MIN_VOLTAGE = 0;
-export const MAX_VOLTAGE = 10;
+export const SLOTS_PER_BANK = 30;
+export const SEQUENCES_PER_SLOT = 4;
+export const STAGES_PER_SEQUENCE = 50;
+
+export const STAGE_BYTES = 10;
+export const SEQUENCE_TRAILER_BYTES = 22;
+export const SEQUENCE_BLOCK_BYTES = STAGES_PER_SEQUENCE * STAGE_BYTES + SEQUENCE_TRAILER_BYTES; // 522
+export const SLOT_HEADER_BYTES = 16;
+export const SLOT_BYTES = SLOT_HEADER_BYTES + SEQUENCES_PER_SLOT * SEQUENCE_BLOCK_BYTES; // 2104
+export const BANK_BYTES = SLOTS_PER_BANK * SLOT_BYTES; // 63120
+
 export const SEQUENCE_LABELS = ["A", "B", "C", "D"];
 
-const SEVEN_BIT_MAX = 127;
-const BYTES_PER_STEP = 3; // voltage, gateOn, gateLength -- all 7-bit
-const BYTES_PER_SEQUENCE = 1 + MAX_STEPS * BYTES_PER_STEP; // length byte + steps
-export const DUMP_LENGTH = NUM_SEQUENCES * BYTES_PER_SEQUENCE; // 4 * 49 = 196
+// Observed defaults, straight out of the real capture (all 15 intact records).
+export const DEFAULT_STAGE_VALUE = 0;
+export const DEFAULT_STAGE_TIME = 4;
+export const DEFAULT_SEQUENCE_PARAM = 0x78; // 120
+export const DEFAULT_HEADER_FLOATS = Object.freeze([0.0, 1.0]);
 
-const VOLTAGE_TO_BYTE = SEVEN_BIT_MAX / MAX_VOLTAGE;
-const BYTE_TO_VOLTAGE = MAX_VOLTAGE / SEVEN_BIT_MAX;
+export const STAGE_VALUE_MAX = 0xff;
+export const STAGE_TIME_MAX = 0xffff;
+/** Offset, within the 22-byte block trailer, of the per-sequence parameter. */
+export const SEQUENCE_PARAM_OFFSET = 1;
+/** Offset of the other trailer byte ever seen non-zero (2 in the programmed reference block). */
+export const SEQUENCE_TRAILER_FLAG_OFFSET = 4;
 
-function clamp(v, lo, hi) {
-  return Math.min(hi, Math.max(lo, v));
-}
+const STAGE_RESERVED_BYTES = STAGE_BYTES - 4; // bytes 4..9
 
 /**
- * @typedef {{voltage: number, gateOn: boolean, gateLength: number}} Step
- * @typedef {{length: number, steps: Step[]}} Sequence
- * @typedef {{sequences: Sequence[]}} SequencerState
+ * @typedef {{value:number, pad:number, time:number, reserved:Uint8Array}} Stage
+ * @typedef {{stages:Stage[], trailer:Uint8Array}} Sequence
+ * @typedef {{header:{floats:number[], bytes:Uint8Array}, sequences:Sequence[]}} Slot
+ * @typedef {{slots:Slot[]}} Bank
  */
 
-/** Creates a step with sane defaults. */
-function makeStep(voltage = 0, gateOn = false, gateLength = 50) {
-  return { voltage, gateOn, gateLength };
+// ---- small helpers ---------------------------------------------------------
+
+function asBytes(input, what) {
+  if (input instanceof Uint8Array) return input;
+  if (input instanceof ArrayBuffer) return new Uint8Array(input);
+  if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  if (Array.isArray(input)) return Uint8Array.from(input);
+  throw new TypeError(`${what}: expected a Uint8Array of bytes`);
 }
 
-/** Creates an all-zero, all-off state: 4 sequences, all MAX_STEPS long. */
-export function createEmptyState() {
+/** Copy `src` into exactly `len` bytes -- short input zero-pads, long input truncates. */
+function fitBytes(src, len) {
+  const out = new Uint8Array(len);
+  if (src) {
+    const bytes = asBytes(src, "raw field");
+    out.set(bytes.subarray(0, len));
+  }
+  return out;
+}
+
+function clampInt(v, lo, hi) {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return lo;
+  return Math.min(hi, Math.max(lo, n));
+}
+
+// ---- stage entry (10 bytes) ------------------------------------------------
+
+/** A stage at the module's observed defaults: value 0, time 4, rest zero. */
+export function createDefaultStage() {
   return {
-    sequences: Array.from({ length: NUM_SEQUENCES }, () => ({
-      length: MAX_STEPS,
-      steps: Array.from({ length: MAX_STEPS }, () => makeStep()),
-    })),
+    value: DEFAULT_STAGE_VALUE,
+    pad: 0,
+    time: DEFAULT_STAGE_TIME,
+    reserved: new Uint8Array(STAGE_RESERVED_BYTES),
   };
 }
 
-/**
- * Creates a musically-plausible synthetic state for the mock transport and
- * for UI development -- NOT device data, just enough variety to exercise
- * the codec and UI (different lengths, voltages, gate patterns per row).
- */
-export function createSyntheticState() {
-  const state = createEmptyState();
-
-  // Sequence A: ascending 8-step "scale" in 1V/oct-ish steps, gates on.
-  const seqA = state.sequences[0];
-  seqA.length = 8;
-  for (let i = 0; i < seqA.length; i++) {
-    seqA.steps[i] = makeStep((i % 8) * (5 / 7), true, 40);
-  }
-
-  // Sequence B: descending 6-step, alternating gates, longer gate length.
-  const seqB = state.sequences[1];
-  seqB.length = 6;
-  for (let i = 0; i < seqB.length; i++) {
-    seqB.steps[i] = makeStep(8 - i * 1.3, i % 2 === 0, 70);
-  }
-
-  // Sequence C: 16-step random-ish CV pattern with sparse gates.
-  const seqC = state.sequences[2];
-  seqC.length = 16;
-  const cPattern = [0, 2, 1, 5, 3, 7, 2, 6, 4, 8, 1, 3, 9, 0, 6, 2];
-  for (let i = 0; i < seqC.length; i++) {
-    seqC.steps[i] = makeStep(cPattern[i], i % 3 === 0, 25);
-  }
-
-  // Sequence D: 4-step drone, all same voltage, full gates.
-  const seqD = state.sequences[3];
-  seqD.length = 4;
-  for (let i = 0; i < seqD.length; i++) {
-    seqD.steps[i] = makeStep(3.75, true, 95);
-  }
-
-  return state;
-}
-
-/** Deep clone -- editors should mutate a clone, never the live/last-read state directly. */
-export function cloneState(state) {
+function decodeStage(bytes, off) {
   return {
-    sequences: state.sequences.map((seq) => ({
-      length: seq.length,
-      steps: seq.steps.map((s) => ({ ...s })),
-    })),
+    value: bytes[off],
+    pad: bytes[off + 1],
+    time: bytes[off + 2] | (bytes[off + 3] << 8), // little-endian uint16
+    reserved: bytes.slice(off + 4, off + STAGE_BYTES),
   };
 }
 
-/**
- * Decodes a raw device dump into a SequencerState.
- * @param {Uint8Array} bytes
- * @returns {SequencerState}
- */
-export function decodeDump(bytes) {
-  if (bytes.length !== DUMP_LENGTH) {
-    throw new Error(`expected a ${DUMP_LENGTH}-byte dump, got ${bytes.length} bytes`);
+function encodeStage(stage, out, off) {
+  const s = stage ?? createDefaultStage();
+  out[off] = clampInt(s.value ?? 0, 0, STAGE_VALUE_MAX);
+  out[off + 1] = clampInt(s.pad ?? 0, 0, 0xff);
+  const time = clampInt(s.time ?? 0, 0, STAGE_TIME_MAX);
+  out[off + 2] = time & 0xff;
+  out[off + 3] = (time >> 8) & 0xff;
+  out.set(fitBytes(s.reserved, STAGE_RESERVED_BYTES), off + 4);
+}
+
+// ---- sequence block (522 bytes) --------------------------------------------
+
+/** One sequence at the module's observed defaults (50 default stages, param 120). */
+export function createDefaultSequence() {
+  const trailer = new Uint8Array(SEQUENCE_TRAILER_BYTES);
+  trailer[SEQUENCE_PARAM_OFFSET] = DEFAULT_SEQUENCE_PARAM;
+  return {
+    stages: Array.from({ length: STAGES_PER_SEQUENCE }, createDefaultStage),
+    trailer,
+  };
+}
+
+function decodeSequence(bytes, off) {
+  const stages = [];
+  for (let i = 0; i < STAGES_PER_SEQUENCE; i++) {
+    stages.push(decodeStage(bytes, off + i * STAGE_BYTES));
   }
+  const trailerOff = off + STAGES_PER_SEQUENCE * STAGE_BYTES;
+  return { stages, trailer: bytes.slice(trailerOff, trailerOff + SEQUENCE_TRAILER_BYTES) };
+}
+
+function encodeSequence(seq, out, off) {
+  const s = seq ?? createDefaultSequence();
+  for (let i = 0; i < STAGES_PER_SEQUENCE; i++) {
+    encodeStage(s.stages?.[i], out, off + i * STAGE_BYTES);
+  }
+  out.set(fitBytes(s.trailer, SEQUENCE_TRAILER_BYTES), off + STAGES_PER_SEQUENCE * STAGE_BYTES);
+}
+
+/** The per-sequence trailer byte +1 (120 by default). Meaning unknown -- see file header. */
+export function getSequenceParam(seq) {
+  return seq?.trailer?.[SEQUENCE_PARAM_OFFSET] ?? DEFAULT_SEQUENCE_PARAM;
+}
+
+/** Sets the per-sequence trailer byte +1, leaving the other 21 trailer bytes alone. */
+export function setSequenceParam(seq, value) {
+  seq.trailer = fitBytes(seq.trailer, SEQUENCE_TRAILER_BYTES);
+  seq.trailer[SEQUENCE_PARAM_OFFSET] = clampInt(value, 0, 0xff);
+  return seq;
+}
+
+// ---- slot record (2104 bytes) ----------------------------------------------
+
+/** One slot at the module's observed defaults: header (0.0, 1.0), 4 default sequences. */
+export function createDefaultSlot() {
+  const slot = {
+    header: { floats: [...DEFAULT_HEADER_FLOATS], bytes: new Uint8Array(SLOT_HEADER_BYTES) },
+    sequences: Array.from({ length: SEQUENCES_PER_SLOT }, createDefaultSequence),
+  };
+  writeHeaderFloats(slot.header.bytes, slot.header.floats);
+  return slot;
+}
+
+function writeHeaderFloats(bytes, floats) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let i = 0; i < 2; i++) {
+    const v = Number(floats?.[i]);
+    // A NaN (or absent) float keeps whatever raw bytes were already there:
+    // JS canonicalizes NaN payloads, so re-encoding one from a Number would
+    // silently rewrite bytes we were handed. Losslessness wins over tidiness.
+    if (Number.isNaN(v)) continue;
+    view.setFloat32(i * 4, v, false); // big-endian
+  }
+}
+
+/**
+ * Decode one 2104-byte slot record.
+ * @param {Uint8Array|number[]} input
+ * @returns {Slot}
+ */
+export function decodeSlot(input) {
+  const bytes = asBytes(input, "slot");
+  if (bytes.length !== SLOT_BYTES) {
+    throw new Error(`expected a ${SLOT_BYTES}-byte 251e slot record, got ${bytes.length} bytes`);
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const header = {
+    floats: [view.getFloat32(0, false), view.getFloat32(4, false)],
+    bytes: bytes.slice(0, SLOT_HEADER_BYTES),
+  };
   const sequences = [];
-  let offset = 0;
-  for (let s = 0; s < NUM_SEQUENCES; s++) {
-    const length = clamp(bytes[offset], 1, MAX_STEPS);
-    offset += 1;
-    const steps = [];
-    for (let i = 0; i < MAX_STEPS; i++) {
-      const voltageByte = bytes[offset];
-      const gateOnByte = bytes[offset + 1];
-      const gateLengthByte = bytes[offset + 2];
-      offset += 3;
-      steps.push({
-        voltage: Math.round(voltageByte * BYTE_TO_VOLTAGE * 1000) / 1000,
-        gateOn: gateOnByte !== 0,
-        gateLength: clamp(gateLengthByte, 0, 100),
-      });
-    }
-    sequences.push({ length, steps });
+  for (let b = 0; b < SEQUENCES_PER_SLOT; b++) {
+    sequences.push(decodeSequence(bytes, SLOT_HEADER_BYTES + b * SEQUENCE_BLOCK_BYTES));
   }
-  return { sequences };
+  return { header, sequences };
 }
 
 /**
- * Encodes a SequencerState back into a raw device dump.
- * @param {SequencerState} state
+ * Encode one slot record back to its 2104 bytes.
+ * @param {Slot} slot
  * @returns {Uint8Array}
  */
-export function encodeDump(state) {
-  if (!state?.sequences || state.sequences.length !== NUM_SEQUENCES) {
-    throw new Error(`state must have exactly ${NUM_SEQUENCES} sequences`);
+export function encodeSlot(slot) {
+  const out = new Uint8Array(SLOT_BYTES);
+  // Header: the raw 16 bytes are authoritative (that is what preserves
+  // [8:16], whose meaning nobody knows), then the two decoded floats are
+  // written over [0:8] so an edited float actually takes effect.
+  out.set(fitBytes(slot?.header?.bytes, SLOT_HEADER_BYTES), 0);
+  writeHeaderFloats(out.subarray(0, SLOT_HEADER_BYTES), slot?.header?.floats ?? DEFAULT_HEADER_FLOATS);
+  for (let b = 0; b < SEQUENCES_PER_SLOT; b++) {
+    encodeSequence(slot?.sequences?.[b], out, SLOT_HEADER_BYTES + b * SEQUENCE_BLOCK_BYTES);
   }
-  const bytes = new Uint8Array(DUMP_LENGTH);
-  let offset = 0;
-  for (let s = 0; s < NUM_SEQUENCES; s++) {
-    const seq = state.sequences[s];
-    if (!seq || !Array.isArray(seq.steps)) {
-      throw new Error(`sequence ${s} is missing a steps array`);
-    }
-    bytes[offset] = clamp(Math.round(seq.length ?? MAX_STEPS), 1, MAX_STEPS);
-    offset += 1;
-    for (let i = 0; i < MAX_STEPS; i++) {
-      const step = seq.steps[i] ?? makeStep();
-      const voltage = clamp(step.voltage ?? 0, MIN_VOLTAGE, MAX_VOLTAGE);
-      const voltageByte = clamp(Math.round(voltage * VOLTAGE_TO_BYTE), 0, SEVEN_BIT_MAX);
-      const gateLength = clamp(Math.round(step.gateLength ?? 0), 0, 100);
-      bytes[offset] = voltageByte;
-      bytes[offset + 1] = step.gateOn ? 1 : 0;
-      bytes[offset + 2] = gateLength;
-      offset += 3;
-    }
+  return out;
+}
+
+// ---- bank (63120 bytes) ----------------------------------------------------
+
+/** A whole bank of 30 slots at the module's observed defaults. */
+export function createDefaultBank() {
+  return { slots: Array.from({ length: SLOTS_PER_BANK }, createDefaultSlot) };
+}
+
+/**
+ * Decode a full 63120-byte 251e preset bank.
+ * @param {Uint8Array|number[]} input
+ * @returns {Bank}
+ */
+export function decodeBank(input) {
+  const bytes = asBytes(input, "bank");
+  if (bytes.length !== BANK_BYTES) {
+    throw new Error(
+      `expected a ${BANK_BYTES}-byte 251e bank (${SLOTS_PER_BANK} slots x ${SLOT_BYTES} bytes), got ${bytes.length} bytes`
+    );
   }
-  return bytes;
+  const slots = [];
+  for (let s = 0; s < SLOTS_PER_BANK; s++) {
+    slots.push(decodeSlot(bytes.subarray(s * SLOT_BYTES, (s + 1) * SLOT_BYTES)));
+  }
+  return { slots };
+}
+
+/**
+ * Encode a bank back into the 63120 bytes a RESTORE sends.
+ * @param {Bank} bank
+ * @returns {Uint8Array}
+ */
+export function encodeBank(bank) {
+  if (!bank?.slots || bank.slots.length !== SLOTS_PER_BANK) {
+    throw new Error(`a bank must have exactly ${SLOTS_PER_BANK} slots`);
+  }
+  const out = new Uint8Array(BANK_BYTES);
+  for (let s = 0; s < SLOTS_PER_BANK; s++) {
+    out.set(encodeSlot(bank.slots[s]), s * SLOT_BYTES);
+  }
+  return out;
+}
+
+// ---- cloning ---------------------------------------------------------------
+
+export function cloneStage(stage) {
+  return { value: stage.value, pad: stage.pad, time: stage.time, reserved: Uint8Array.from(stage.reserved) };
+}
+
+export function cloneSequence(seq) {
+  return { stages: seq.stages.map(cloneStage), trailer: Uint8Array.from(seq.trailer) };
+}
+
+export function cloneSlot(slot) {
+  return {
+    header: { floats: [...slot.header.floats], bytes: Uint8Array.from(slot.header.bytes) },
+    sequences: slot.sequences.map(cloneSequence),
+  };
+}
+
+/** Deep clone -- editors should mutate a clone, never the last-read bank directly. */
+export function cloneBank(bank) {
+  return { slots: bank.slots.map(cloneSlot) };
+}
+
+// ---- demo / development data -----------------------------------------------
+
+// The 251e.json reference bank's one PROGRAMMED sequence (block 0), as far as
+// the format doc actually records it: the first 15 stage values and the first
+// 26 stage times are real observed numbers, the rest is filler so the applet
+// has something non-flat to draw. This is DEMO data for the mock transport and
+// UI development -- it is not a verbatim capture and must never be presented
+// as one.
+const REFERENCE_STAGE_VALUES = [0x11, 0xf5, 0x91, 0xa1, 0xe4, 0x89, 0xf3, 0x2e, 0x29, 0x99, 0x6a, 0xda, 0x7f, 0xce, 0xb3];
+const REFERENCE_STAGE_TIMES = [
+  1293, 1293, 1293, 1293, 1293, 1293, 1293, 1293, 1293, 1293, 1293, 1293, 1293, 1293, 1293,
+  3, 65, 39, 28, 34, 36, 16, 30, 24, 28, 68,
+];
+
+/**
+ * A bank with one programmed sequence (slot 0, sequence A) shaped like the
+ * reference dump's programmed block, everything else at module defaults --
+ * i.e. exactly the "one sequence written, the rest untouched" state a real
+ * bank is usually in. For the mock transport and UI work only.
+ */
+export function createSyntheticBank() {
+  const bank = createDefaultBank();
+  const seq = bank.slots[0].sequences[0];
+  for (let i = 0; i < STAGES_PER_SEQUENCE; i++) {
+    const stage = seq.stages[i];
+    stage.value = REFERENCE_STAGE_VALUES[i] ?? (i * 37 + 11) % 256;
+    stage.time = REFERENCE_STAGE_TIMES[i] ?? 16 + ((i * 7) % 48);
+  }
+  seq.trailer[SEQUENCE_PARAM_OFFSET] = 0x8c; // 140, the reference block's value
+  seq.trailer[SEQUENCE_TRAILER_FLAG_OFFSET] = 2;
+  return bank;
 }

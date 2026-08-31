@@ -10,7 +10,7 @@
     <header>
       <h1>
         Buchla 251e Sequencer
-        <span class="subtitle">Xenomorpher USB bridge -- 4 sequences, up to 16 steps each</span>
+        <span class="subtitle">Xenomorpher USB bridge &mdash; one 63,120-byte bank: 30 slots &times; 4 sequences &times; 50 stages</span>
       </h1>
       <div class="controls">
         <select id="transport-mode" title="Which transport to use">
@@ -18,7 +18,7 @@
           <option value="webmidi">WebMIDI (real device)</option>
         </select>
         <button id="connect-btn" type="button">Connect</button>
-        <label class="addr-control" title="Which 200e module on the bus to read from / write to. Two hex digits, the same value the firmware console's 'm' and 'q' commands take.">
+        <label class="addr-control" title="Which 200e module on the bus to read from / write to. Two hex digits, the same value the firmware console's 'm' and 'q' commands take. The owner's 251e answers at 5C.">
           module
           <input
             id="module-addr"
@@ -26,35 +26,46 @@
             inputmode="latin"
             maxlength="2"
             size="2"
-            placeholder="2E"
+            placeholder="5C"
             spellcheck="false"
             autocomplete="off"
           />
         </label>
-        <button id="read-btn" type="button" disabled>Read from device</button>
-        <button id="write-btn" type="button" disabled>Write to device</button>
+        <button id="read-btn" type="button" disabled>Read bank</button>
+        <button id="write-btn" type="button" disabled>Write bank</button>
         <span id="dirty-badge" class="dirty-badge" hidden>unsaved edits</span>
         <span id="status" class="status status-info">idle</span>
       </div>
     </header>
 
     <div class="banner">
-      <strong>Everything here is provisional.</strong> The Buchla 251e byte
-      format and the Xenomorpher's SysEx framing are both still being
-      designed/reverse-engineered by firmware in parallel -- see the header
-      comments in <code>sequence-codec.js</code> and
-      <code>sysex-transport.js</code> for exactly what's placeholder and why.
-      This applet is built and tested against the
-      <strong>Mock</strong> transport, which is an in-process model of the
-      firmware's own session FSM (<code>Bus200eBridge.cpp</code>) rather than
-      a stub &mdash; a mock read/write travels through the real framing code.
-      <strong>Nothing here has been run against real hardware yet</strong>:
-      the firmware side (USB&nbsp;MIDI SysEx RX &rarr; card image &rarr;
-      <code>MasterRestore</code>) is host-tested only, and the 200e bus
-      timing it depends on is still unverified. Add
-      <code>?transport=webmidi</code> to the URL to preselect WebMIDI.
-      <strong>Read/Write need a module address</strong> (two hex digits) &mdash;
-      the applet never guesses which module on the bus to touch.
+      <strong>The container is decoded; the field semantics mostly aren't.</strong>
+      The byte layout here is the one established from a live
+      <code>MasterBackup(0x5C)</code> of a real 251e and cross-validated against
+      an independent factory reference dump &mdash; see
+      <code>Buchla_FW/docs/251e-SEQUENCE-FORMAT.md</code>. Geometry (30 &times;
+      2104, header + 4 &times; 522, 50 &times; 10 + 22) is high-confidence.
+      <strong>What the bytes mean is not</strong>: stage byte&nbsp;0 is very
+      likely the stage CV but has no measured scale, bytes&nbsp;2&ndash;3 are a
+      little-endian 16-bit value that reads like a duration, and the header
+      floats, entry bytes&nbsp;4&ndash;9 and the 22-byte block trailer are
+      carried through untouched rather than guessed at. Editing one stage and
+      writing the bank back leaves every other byte exactly as the module
+      reported it. A read pulls the whole bank and a write puts the whole bank
+      back &mdash; 63,120 bytes, 1,503 SysEx packets each way &mdash; because
+      that is the only unit the module's BACKUP/RESTORE moves.
+      <strong>Nothing here has been run against real hardware yet.</strong>
+      Add <code>?transport=webmidi</code> to preselect WebMIDI,
+      <code>?slot=7</code> to open on a slot.
+    </div>
+
+    <div class="navbar">
+      <label class="nav-control" title="Which of the bank's 30 preset slots to edit. The whole bank is held in memory either way -- a write sends all 30 back.">
+        preset
+        <select id="slot-select"></select>
+      </label>
+      <div id="seq-tabs" class="seq-tabs" aria-label="sequence A-D"></div>
+      <div id="slot-meta" class="slot-meta"></div>
     </div>
 
     <main id="grid"></main>
@@ -62,9 +73,12 @@
     <div id="log" aria-label="transport log"></div>
 
     <footer>
-      Voltage 0&ndash;10V per step, quantized to ~78&nbsp;mV (7-bit placeholder
-      encoding). Gate column toggles whether a step fires its trigger output.
-      Sequence length trims how many steps play before the sequence wraps.
+      Per stage: <strong>value</strong> = entry byte&nbsp;0 (raw 0&ndash;255,
+      default&nbsp;0) and <strong>time</strong> = entry bytes&nbsp;2&ndash;3
+      (little-endian uint16, default&nbsp;4). Entry byte&nbsp;1 and
+      bytes&nbsp;4&ndash;9 are undecoded and preserved. Per slot: two big-endian
+      IEEE-754 header floats (0.0 / 1.0 on an untouched module). Per sequence:
+      block-trailer byte&nbsp;+1, 120 by default.
     </footer>
 
     <script type="module" src="app.js"></script>

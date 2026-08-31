@@ -5,7 +5,7 @@
 // *** REAL FIRMWARE FRAMING -- matches software/src/Bus200eSysEx.{h,cpp} ***
 // This mirrors the device-side contract bit-for-bit: same manufacturer ID,
 // family byte, app ID, protocol version, command bytes, 60-byte frame
-// ceiling, and 44-byte DUMP_DATA chunk size. It is the same family as this
+// ceiling, and 42-byte DUMP_DATA chunk size. It is the same family as this
 // repo's other real, shipped SysEx protocol -- Captain MIDI's, documented in
 // docs/hoc-midi-sysex.md and implemented in tools/hoc_sysex.py -- but with
 // one deliberate deviation: a raw 200e card dump is genuinely 8-bit data (it
@@ -20,6 +20,21 @@
 // question (that dump layout is still being reverse-engineered) -- nothing
 // here assumes anything about what the packed bytes mean, only how they're
 // framed/chunked/packed for the wire.
+//
+// ---- PROTOCOL v2: 14-bit packet counters ----------------------------------
+// v1 carried DUMP_DATA's [seq, total] and DUMP_END's [n_packets] as SINGLE
+// 7-bit bytes, capping one transfer at 127 packets * 44 bytes = 5588 raw
+// bytes. A real 251e preset bank is 30 records * 2104 bytes = 63120 -- 11.3x
+// past that -- so the one transfer this whole applet exists for did not fit.
+// v2 widens every packet counter to 14 bits, carried as two 7-bit septets
+// LOW FIRST (the same idiom MIDI uses for pitch bend / song position, and
+// that v1's own INFO_R already used for its dump length). 16383 packets is
+// 687 KB, so the wire is no longer the limit; the device's 64 KB card image
+// is (MAX_DUMP_PACKETS / MAX_DUMP_BYTES below).
+//
+// The cost: DUMP_DATA's header grows 2 -> 4 bytes, so the chunk that still
+// fits the 60-byte frame ceiling shrinks 44 -> 42. 63120 bytes is 1503
+// packets rather than 1435.
 //
 // USB port identity: the firmware DOES ship a product-string override --
 // software/src/usb_name.c defines usb_string_product_name as
@@ -72,21 +87,39 @@ export const SYSEX = Object.freeze({
   MFR_ID: 0x7d, // non-commercial/educational MIDI manufacturer ID (shared w/ Captain MIDI)
   FAMILY_ID: 0x62, // "Beige Maze" family byte, reused for repo consistency
   APP_ID: 0x35, // BUS200E_SYSEX_APP_ID -- "251e sequencer bridge"
-  PROTO_VERSION: 0x01, // BUS200E_SYSEX_PROTO_VER
+  PROTO_VERSION: 0x02, // BUS200E_SYSEX_PROTO_VER -- v2 = 14-bit packet counters
 });
 
 export const CMD = Object.freeze({
   INFO: 0x01, // H->D, no payload
-  INFO_R: 0x41, // D->H: schema n_sequences max_steps dump_len_lo dump_len_hi
+  INFO_R: 0x41, // D->H: schema n_seq max_steps len0 len1 len2 chunk maxpk_lo maxpk_hi serving
   GET_DUMP: 0x04, // H->D, payload = [mod_addr]
   PUT_DUMP: 0x05, // H->D, payload = [mod_addr] -- device replies ACK/NAK then expects DUMP_DATA*/DUMP_END
   STATUS: 0x10, // H->D, no payload -- poll the master FSM's in-progress BACKUP/RESTORE
-  DUMP_DATA: 0x44, // both directions: [seq, total, ...7-bit-PACKED chunk] -- see packChunk/unpackChunk
-  DUMP_END: 0x45, // both directions: [n_packets, xor7] -- xor7 over RAW (pre-pack) bytes
-  ACK: 0x40, // D->H: echoes the command byte (+ context bytes)
+  DUMP_DATA: 0x44, // both: [seq_lo, seq_hi, total_lo, total_hi, ...7-bit-PACKED chunk]
+  DUMP_END: 0x45, // both: [n_lo, n_hi, xor7] -- xor7 over RAW (pre-pack) bytes
+  ACK: 0x40, // D->H: echoes the command byte + context (mod_addr, or a 14-bit lo/hi pair)
   STATUS_R: 0x50, // D->H: [state, error, mod_addr, is_restore] -- reply to STATUS
   NAK: 0x7e, // D->H: [cmd, errcode]
 });
+
+// ---- 14-bit septet pairs (BUS200E_SYSEX_LO7/HI7/FROM14) --------------------
+// Low septet first. Every packet counter on the wire rides one of these.
+
+export const MAX_COUNT_14BIT = 16383; // BUS200E_SYSEX_MAX_COUNT
+
+/** 14-bit value -> [lo7, hi7]. Throws if it doesn't fit. */
+export function septetPair(v) {
+  if (!Number.isInteger(v) || v < 0 || v > MAX_COUNT_14BIT) {
+    throw new RangeError(`${v} does not fit a 14-bit septet pair (0..${MAX_COUNT_14BIT})`);
+  }
+  return [v & 0x7f, (v >> 7) & 0x7f];
+}
+
+/** [lo7, hi7] -> 14-bit value. Mirrors BUS200E_SYSEX_FROM14. */
+export function fromSeptetPair(lo, hi) {
+  return (lo & 0x7f) | ((hi & 0x7f) << 7);
+}
 
 // Matches Bus200eSysExNakReason (Bus200eSysEx.h). 3/4 are not real codes in
 // this protocol (unlike hOC's own NAK table, which this one otherwise
@@ -104,21 +137,24 @@ export const NAK_ERRORS = Object.freeze({
 
 // BUS200E_SYSEX_CHUNK_BYTES / BUS200E_SYSEX_MAX_MESSAGE / hOC's 60-byte
 // ceiling, reused verbatim rather than re-deriving a number for the same
-// hardware. A chunk's packed form (worst case, all bytes >= 0x80) is 51
-// bytes (BUS200E_SYSEX_MAX_PACKED = pack(44) = 7 hibits bytes + 44 data
-// bytes); MAX_FRAME_BYTES = F0 + 5-byte header + 2-byte seq/total + 51-byte
-// packed chunk + F7 = 60.
-export const DUMP_CHUNK_BYTES = 44; // raw bytes per DUMP_DATA chunk
-// DUMP_END's n_packets is a single 7-bit field, so a transfer tops out at 127
-// packets -- BUS200E_BRIDGE_MAX_PACKETS / BUS200E_BRIDGE_MAX_DUMP_BYTES in
-// software/src/Bus200eBridge.h, where a bigger capture is refused (NAK 6)
-// rather than truncated. 127 * 44 = 5588 raw bytes.
-export const MAX_DUMP_PACKETS = 127;
-export const MAX_DUMP_BYTES = MAX_DUMP_PACKETS * DUMP_CHUNK_BYTES;
-export const MAX_PACKED_CHUNK_BYTES = 51; // packChunk(44 raw bytes).length, worst case
-const DUMP_DATA_HEADER_BYTES = 2; // seq, total (not counting F0/mfr/family/app/ver/cmd/F7)
+// hardware. A chunk's packed form (worst case, all bytes >= 0x80) is 48
+// bytes (BUS200E_SYSEX_MAX_PACKED = pack(42) = 6 hibits bytes + 42 data
+// bytes); MAX_FRAME_BYTES = F0 + 5-byte header + 4-byte seq/total + 48-byte
+// packed chunk + F7 = 59. 59, not 60: pack() grows in 8-byte groups
+// (pack(42)=48, pack(43)=50), so nothing lands exactly on the ceiling.
+export const DUMP_CHUNK_BYTES = 42; // raw bytes per DUMP_DATA chunk
+// As of protocol v2 the packet counters are 14-bit, so the wire would carry
+// 16383 packets (687 KB). The real ceiling is the device's card image:
+// BUS200E_BRIDGE_MAX_DUMP_BYTES = BUSCARD_SIZE = 65536, giving
+// BUS200E_BRIDGE_MAX_PACKETS = ceil(65536/42) = 1561 in
+// software/src/Bus200eBridge.h. A 63120-byte 251e bank is 1503 packets.
+export const MAX_DUMP_BYTES = 65536;
+export const MAX_DUMP_PACKETS = Math.ceil(MAX_DUMP_BYTES / DUMP_CHUNK_BYTES); // 1561
+export const MAX_PACKED_CHUNK_BYTES = 48; // packChunk(42 raw bytes).length, worst case
+// seq_lo, seq_hi, total_lo, total_hi (not counting F0/mfr/family/app/ver/cmd/F7)
+const DUMP_DATA_HEADER_BYTES = 4;
 const NON_PAYLOAD_BYTES = 7; // F0 mfr family app ver cmd F7
-export const MAX_FRAME_BYTES = NON_PAYLOAD_BYTES + DUMP_DATA_HEADER_BYTES + MAX_PACKED_CHUNK_BYTES; // 60
+export const MAX_FRAME_BYTES = NON_PAYLOAD_BYTES + DUMP_DATA_HEADER_BYTES + MAX_PACKED_CHUNK_BYTES; // 59
 
 // ---- 7-bit packing (DUMP_DATA chunks only -- see file header) -------------
 // Faithful port of Bus200eSysExPack/Unpack (software/src/Bus200eSysEx.cpp).
@@ -216,25 +252,37 @@ export function parseFrame(bytes) {
  * Split a raw dump byte array (bytes may be full 8-bit -- a captured 200e
  * dump is not guaranteed to be 7-bit-safe) into DUMP_DATA payloads + a
  * trailing DUMP_END payload, mirroring the hOC dump stream shape. Each
- * DUMP_DATA payload is [seq, total, ...packChunk(rawSlice)] -- the seq/total
- * header stays unpacked, only the chunk itself is 7-bit-packed. The DUMP_END
- * xor7 checksum is computed over the RAW (pre-pack) bytes, matching
- * Bus200eSysExXor7.
+ * DUMP_DATA payload is [seq_lo, seq_hi, total_lo, total_hi,
+ * ...packChunk(rawSlice)] -- the counters stay unpacked 7-bit septet pairs,
+ * only the chunk itself is 7-bit-packed. The DUMP_END xor7 checksum is
+ * computed over the RAW (pre-pack) bytes, matching Bus200eSysExXor7.
  * @param {Uint8Array} bytes
  * @returns {{cmd:number, payload:number[]}[]} frame descriptors, in order
  */
 export function packDump(bytes) {
   const chunks = [];
   const total = Math.max(1, Math.ceil(bytes.length / DUMP_CHUNK_BYTES));
+  // The device refuses what it cannot stage (NAK 6); say so here instead, so
+  // a caller learns before 1500 frames go out on the wire. Both bounds are
+  // checked: a dump can exceed MAX_DUMP_BYTES while still rounding down to
+  // MAX_DUMP_PACKETS, since the last chunk is usually a short one.
+  if (bytes.length > MAX_DUMP_BYTES || total > MAX_DUMP_PACKETS) {
+    throw new RangeError(
+      `dump of ${bytes.length} bytes (${total} packets) is over the device's ` +
+        `${MAX_DUMP_BYTES}-byte / ${MAX_DUMP_PACKETS}-packet card image`
+    );
+  }
+  const [totalLo, totalHi] = septetPair(total);
   let checksum = 0;
   for (let seq = 0; seq < total; seq++) {
     const start = seq * DUMP_CHUNK_BYTES;
     const slice = Array.from(bytes.slice(start, start + DUMP_CHUNK_BYTES));
     for (const v of slice) checksum ^= v;
     const packed = packChunk(slice);
-    chunks.push({ cmd: CMD.DUMP_DATA, payload: [seq, total, ...packed] });
+    const [seqLo, seqHi] = septetPair(seq);
+    chunks.push({ cmd: CMD.DUMP_DATA, payload: [seqLo, seqHi, totalLo, totalHi, ...packed] });
   }
-  chunks.push({ cmd: CMD.DUMP_END, payload: [total, checksum & 0x7f] });
+  chunks.push({ cmd: CMD.DUMP_END, payload: [totalLo, totalHi, checksum & 0x7f] });
   return chunks;
 }
 
@@ -268,17 +316,19 @@ export class DumpAssembler {
    */
   feed({ cmd, payload }) {
     if (cmd === CMD.DUMP_DATA) {
-      const [seq, total, ...packed] = payload;
+      const [seqLo, seqHi, totalLo, totalHi, ...packed] = payload;
+      const seq = fromSeptetPair(seqLo, seqHi);
       const data = unpackChunk(packed);
       if (data === null) {
         this._error = `malformed packed chunk at seq ${seq}`;
         this._done = true;
         return this._done;
       }
-      this._total = total;
+      this._total = fromSeptetPair(totalLo, totalHi);
       this._packets.set(seq, data);
     } else if (cmd === CMD.DUMP_END) {
-      const [nPackets, xor7] = payload;
+      const [nLo, nHi, xor7] = payload;
+      const nPackets = fromSeptetPair(nLo, nHi);
       if (this._packets.size !== nPackets) {
         this._error = `expected ${nPackets} packets, received ${this._packets.size}`;
         this._done = true;
@@ -374,6 +424,14 @@ export class Transport {
 // Mirrors software/src/Bus200eBridge.cpp's FSM, which is the other end of
 // every exchange below.
 
+/** A DUMP_DATA frame, or the ACK answering one -- the high-volume traffic. */
+function isDumpTraffic(frame) {
+  return (
+    frame.cmd === CMD.DUMP_DATA ||
+    (frame.cmd === CMD.ACK && frame.payload[0] === CMD.DUMP_DATA)
+  );
+}
+
 function nakMessage(frame, context) {
   const [cmd, err] = frame.payload;
   const why = NAK_ERRORS[err] ?? `unknown NAK code ${err}`;
@@ -386,13 +444,29 @@ export class SysExProtocolTransport extends Transport {
    */
   constructor(opts = {}) {
     super();
-    // A reply to a framing-level request (ACK/NAK/INFO_R/STATUS_R).
+    // A reply to a framing-level request (ACK/NAK/INFO_R/STATUS_R), and to
+    // each individual DUMP_DATA frame. PER-FRAME, not per-transfer: the
+    // device answers a DUMP_DATA out of its own loop() on the very next pass,
+    // so the expected gap is sub-millisecond whether the dump is 8 packets or
+    // 1503. 3000ms is ~1000x that and needs no scaling for a 63 KB bank; what
+    // scaling it WOULD do is make a genuinely dead link take an hour to
+    // notice. Firmware's own inbound gap timeout
+    // (BUS200E_BRIDGE_RX_TIMEOUT_MS, 10s) is deliberately 3x this, so the
+    // browser always gives up first and the device never tears a session
+    // down underneath a host that is still talking.
     this.ackTimeoutMs = opts.ackTimeoutMs ?? 3000;
     // A reply that waits on the 200e bus itself. A foreign-module BACKUP or
     // RESTORE is a transient bus-master job measured in seconds --
     // Bus200eMaster.h's own BUS200E_MASTER_HARD_CAP_MS is 15s -- so anything
-    // gated on one gets its own, much longer budget.
+    // gated on one gets its own, much longer budget. That 15s is an absolute
+    // device-side safety net independent of dump size (it bounds a 63120-byte
+    // 251e BACKUP exactly as it bounds a 500-byte one), so this does not
+    // scale with the transfer either; 20s keeps 5s of slack over it.
     this.jobTimeoutMs = opts.jobTimeoutMs ?? 20000;
+    // One log line per frame was fine for a 5 KB ceiling; a 63120-byte bank
+    // is 1503 frames each way, and app.js appends a DOM node per line. Log
+    // the stream's progress every this-many packets instead, plus a summary.
+    this.dumpLogEveryPackets = opts.dumpLogEveryPackets ?? 128;
   }
 
   // --- subclass hooks ---
@@ -409,9 +483,9 @@ export class SysExProtocolTransport extends Transport {
     if (!this.connected) throw new Error("transport not connected -- call connect() first");
   }
 
-  _send(cmd, payload) {
+  _send(cmd, payload, quiet = false) {
     this._sendFrame(buildFrame(cmd, payload));
-    this._log(`-> cmd 0x${cmd.toString(16)} (${payload.length}B payload)`);
+    if (!quiet) this._log(`-> cmd 0x${cmd.toString(16)} (${payload.length}B payload)`);
   }
 
   _modAddr(modAddr) {
@@ -435,10 +509,12 @@ export class SysExProtocolTransport extends Transport {
       // dump is captured verbatim and sequence-codec.js owns what it means.
       nSequences: p[1],
       maxSteps: p[2],
-      lastDumpBytes: (p[3] ?? 0) | ((p[4] ?? 0) << 7),
-      chunkBytes: p[5],
-      maxPackets: p[6],
-      cardServing: !!p[7],
+      // THREE septets, low first (protocol v2's INFO_R): 14 bits stops at
+      // 16383 and could not report a 63120-byte 251e bank.
+      lastDumpBytes: (p[3] ?? 0) | ((p[4] ?? 0) << 7) | ((p[5] ?? 0) << 14),
+      chunkBytes: p[6],
+      maxPackets: fromSeptetPair(p[7] ?? 0, p[8] ?? 0),
+      cardServing: !!p[9],
       raw: p,
     };
   }
@@ -470,16 +546,24 @@ export class SysExProtocolTransport extends Transport {
     // The first DUMP_DATA only arrives once the BACKUP has actually run on
     // the bus; everything after it is back-to-back USB traffic.
     let budget = this.jobTimeoutMs;
+    let packets = 0;
     while (!assembler.done) {
       const frame = await this._waitForFrame(budget);
       if (frame.cmd === CMD.NAK) throw new Error(nakMessage(frame, "capture failed"));
       if (frame.cmd === CMD.DUMP_DATA || frame.cmd === CMD.DUMP_END) {
         assembler.feed(frame);
         budget = this.ackTimeoutMs;
+        if (frame.cmd === CMD.DUMP_DATA) {
+          // A 251e bank is 1503 packets; one log line each would flood the
+          // UI's log pane (and its DOM) for no added information.
+          if (++packets % this.dumpLogEveryPackets === 0) this._log(`<- ${packets} packets`);
+          continue;
+        }
       }
       this._log(`<- cmd 0x${frame.cmd.toString(16)}`);
     }
     if (assembler.error) throw new Error(`dump reassembly failed: ${assembler.error}`);
+    this._log(`<- dump complete: ${packets} packets, ${assembler.bytes.length} bytes`);
     return assembler.bytes;
   }
 
@@ -497,10 +581,20 @@ export class SysExProtocolTransport extends Transport {
     if (reply.cmd === CMD.NAK)
       throw new Error(nakMessage(reply, `write to module ${formatModuleAddress(addr)} refused`));
 
-    for (const { cmd, payload } of packDump(bytes)) {
-      this._send(cmd, payload);
+    // packDump refuses a dump the device could not stage before a single
+    // frame goes out (see MAX_DUMP_PACKETS).
+    const frames = packDump(bytes);
+    let sentPackets = 0;
+    for (const { cmd, payload } of frames) {
+      // Stop-and-wait, one packet per ACK: that is what lets the device get
+      // away with a single-frame RX staging buffer for a 1503-packet bank
+      // (Bus200eBridgeUsb.cpp's rx_buf drops a second frame in flight).
+      this._send(cmd, payload, /*quiet=*/ cmd === CMD.DUMP_DATA);
       reply = await this._waitForFrame(this.ackTimeoutMs);
       if (reply.cmd === CMD.NAK) throw new Error(nakMessage(reply, "write rejected mid-transfer"));
+      if (cmd === CMD.DUMP_DATA && ++sentPackets % this.dumpLogEveryPackets === 0) {
+        this._log(`-> ${sentPackets}/${frames.length - 1} packets`);
+      }
     }
 
     // DUMP_END's ACK only means "checksum good, RESTORE accepted". The bus
@@ -599,9 +693,10 @@ export class WebMidiTransport extends SysExProtocolTransport {
 // ---- Mock device + transport -------------------------------------------------
 //
 // MockDevice is a frame-level model of software/src/Bus200eBridge.cpp: same
-// commands, same ACK/NAK codes, same session rules (one job at a time, a
-// PUT_DUMP must precede its DUMP_DATA, a bad checksum or a missing packet
-// NAKs 6 and never "restores"). It exists so the whole pipeline -- UI edit ->
+// commands, same ACK/NAK codes, same 14-bit septet-pair counters, same
+// session rules (one job at a time, a PUT_DUMP must precede its DUMP_DATA, a
+// bad checksum or a missing packet NAKs 6 and never "restores"). It exists so
+// the whole pipeline -- UI edit ->
 // encodeDump -> packDump/packChunk -> frames -> reassembly -> stored bytes,
 // and the same path backwards -- is exercisable in Node with no hardware.
 //
@@ -638,13 +733,15 @@ export class MockDevice {
           {
             cmd: CMD.INFO_R,
             payload: [
-              1,
+              2, // schema 2 = protocol v2 layout
               0, // n_sequences: firmware does not decode the 251e layout
               0, // max_steps: ditto
+              // last dump length as THREE septets, low first
               this.bytes.length & 0x7f,
               (this.bytes.length >> 7) & 0x7f,
+              (this.bytes.length >> 14) & 0x7f,
               DUMP_CHUNK_BYTES,
-              MAX_DUMP_PACKETS,
+              ...septetPair(MAX_DUMP_PACKETS),
               1,
             ],
           },
@@ -676,8 +773,12 @@ export class MockDevice {
 
       case CMD.DUMP_DATA: {
         if (!this._session) return this._nak(cmd, 2);
-        const [seq, total] = payload;
-        if (total === 0 || seq >= total || total > MAX_DUMP_PACKETS) {
+        const seq = fromSeptetPair(payload[0], payload[1]);
+        const total = fromSeptetPair(payload[2], payload[3]);
+        // Same guard as Bus200eBridge.cpp's handle_dump_data: seq is what
+        // indexes the firmware's per-packet seen-bitmap, so a 14-bit seq
+        // past the card image's packet count is refused, not stored.
+        if (total === 0 || seq >= total || total > MAX_DUMP_PACKETS || seq >= MAX_DUMP_PACKETS) {
           this._session = null;
           return this._nak(cmd, 6);
         }
@@ -686,7 +787,7 @@ export class MockDevice {
           this._session = null;
           return this._nak(cmd, 6);
         }
-        return [{ cmd: CMD.ACK, payload: [CMD.DUMP_DATA, seq] }];
+        return [{ cmd: CMD.ACK, payload: [CMD.DUMP_DATA, ...septetPair(seq)] }];
       }
 
       case CMD.DUMP_END: {
@@ -698,7 +799,7 @@ export class MockDevice {
         this.bytes = session.assembler.bytes;
         this.restores++;
         return [
-          { cmd: CMD.ACK, payload: [CMD.DUMP_END, payload[0]] },
+          { cmd: CMD.ACK, payload: [CMD.DUMP_END, payload[0], payload[1]] },
           // the "the RESTORE finished on the bus" message the firmware's
           // pump_restore() sends once the master FSM reports DONE
           { cmd: CMD.ACK, payload: [CMD.PUT_DUMP, session.modAddr] },
@@ -760,7 +861,11 @@ export class MockTransport extends SysExProtocolTransport {
     await this._delay();
     if (!this._inbox.length) throw new Error("timeout waiting for device reply");
     const frame = this._inbox.shift();
-    this._log(`<- cmd 0x${frame.cmd.toString(16)} (simulated)`);
+    // Dump traffic is deliberately NOT logged here: a 251e bank is 1503
+    // packets each way, and readDump/writeDump already emit a throttled
+    // progress line for exactly those. Logging them twice would flood the
+    // UI's log pane (and its DOM) with 3000 nodes per transfer.
+    if (!isDumpTraffic(frame)) this._log(`<- cmd 0x${frame.cmd.toString(16)} (simulated)`);
     return frame;
   }
 }

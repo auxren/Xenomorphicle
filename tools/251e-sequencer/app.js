@@ -4,17 +4,39 @@
 // (sysex-transport.js) and only understands sequence data through the
 // codec (sequence-codec.js). It does not know or care whether it's holding
 // a MockTransport or a WebMidiTransport -- same methods either way.
-import { MAX_STEPS, MAX_VOLTAGE, SEQUENCE_LABELS, createSyntheticState, decodeDump, encodeDump } from "./sequence-codec.js";
+//
+// The unit both sides move is a whole 63120-byte BANK: 30 slots x 4 sequences
+// x 50 stages. The UI edits one slot/sequence at a time, but the bank in
+// memory is always complete, so a write puts back all 30 slots with every
+// untouched byte -- including the fields nobody has decoded yet -- intact.
+import {
+  BANK_BYTES,
+  SLOTS_PER_BANK,
+  SEQUENCES_PER_SLOT,
+  STAGES_PER_SEQUENCE,
+  SEQUENCE_LABELS,
+  STAGE_VALUE_MAX,
+  STAGE_TIME_MAX,
+  createSyntheticBank,
+  decodeBank,
+  encodeBank,
+  getSequenceParam,
+  setSequenceParam,
+} from "./sequence-codec.js";
 import {
   MockTransport,
   WebMidiTransport,
   DEFAULT_PORT_NAME_CANDIDATES,
+  MAX_DUMP_BYTES,
   parseModuleAddress,
   formatModuleAddress,
 } from "./sysex-transport.js";
 
 const els = {
   grid: document.getElementById("grid"),
+  slotSelect: document.getElementById("slot-select"),
+  seqTabs: document.getElementById("seq-tabs"),
+  slotMeta: document.getElementById("slot-meta"),
   transportMode: document.getElementById("transport-mode"),
   connectBtn: document.getElementById("connect-btn"),
   moduleAddr: document.getElementById("module-addr"),
@@ -29,8 +51,9 @@ const MODULE_ADDR_STORAGE_KEY = "251e-sequencer.module-addr";
 
 /** @type {import('./sysex-transport.js').Transport} */
 let transport = null;
-let state = createSyntheticState(); // working copy the UI edits
-let lastReadBytes = encodeDump(state); // what the device last reported / last write -- for dirty tracking
+let bank = createSyntheticBank(); // working copy the UI edits (a full 30-slot bank)
+let slotIndex = 0;
+let seqIndex = 0;
 let dirty = false;
 
 function logLine(text) {
@@ -49,6 +72,14 @@ function setStatus(text, kind = "info") {
 function markDirty(isDirty) {
   dirty = isDirty;
   els.dirtyBadge.hidden = !isDirty;
+}
+
+function currentSlot() {
+  return bank.slots[slotIndex];
+}
+
+function currentSequence() {
+  return currentSlot().sequences[seqIndex];
 }
 
 // ---- module address ---------------------------------------------------------
@@ -99,13 +130,32 @@ function storeModuleAddr(addr) {
   }
 }
 
+// ---- transport capability check --------------------------------------------
+// A 251e BACKUP/RESTORE is one continuous 63120-byte transfer -- the module
+// cannot be asked for a single slot. Protocol v2's 14-bit packet counters
+// carry a whole bank in one session (1503 packets x 42 raw bytes), so this
+// check is normally inert. It exists for the case where the device's card
+// image can't stage a bank at all: then saying so up front beats letting the
+// stream die inside packDump/buildFrame with an error that reads like a codec
+// bug, and beats sending a truncated bank to a module that would take it.
+
+/** @returns {string|null} why a bank transfer can't run, or null if it can */
+function bankTransferBlocker() {
+  if (BANK_BYTES <= MAX_DUMP_BYTES) return null;
+  return (
+    `a full 251e bank is ${BANK_BYTES} bytes, which exceeds this transport's ` +
+    `${MAX_DUMP_BYTES}-byte per-session limit -- refusing rather than sending a ` +
+    `partial bank (the codec and UI are ready for the full one)`
+  );
+}
+
 // ---- transport lifecycle ---------------------------------------------------
 
 function buildTransport(mode) {
   if (mode === "webmidi") {
     return new WebMidiTransport({ portNameCandidates: DEFAULT_PORT_NAME_CANDIDATES });
   }
-  return new MockTransport({ initialBytes: encodeDump(createSyntheticState()) });
+  return new MockTransport({ initialBytes: encodeBank(createSyntheticBank()) });
 }
 
 async function connect() {
@@ -137,30 +187,36 @@ async function disconnect() {
 async function readFromDevice() {
   const addr = currentModuleAddr();
   if (!transport || addr === null) return;
+  // The user expressed which module they mean; remember it whether or not the
+  // transfer itself gets off the ground.
+  storeModuleAddr(addr);
+
+  const blocker = bankTransferBlocker();
+  if (blocker) {
+    setStatus("read unavailable -- bank exceeds transport limit", "error");
+    logLine(`read not attempted: ${blocker}`);
+    return;
+  }
+
   setStatus(`reading module ${formatModuleAddress(addr)}...`, "info");
   try {
     // The device masters a BACKUP on the 200e bus, which takes real seconds
     // -- the transport's own jobTimeoutMs covers that, not this call.
     const bytes = await transport.readDump(addr);
-    storeModuleAddr(addr);
     logLine(`read ${bytes.length} bytes from module ${formatModuleAddress(addr)}`);
-    lastReadBytes = bytes;
-    state = decodeDump(bytes);
+    bank = decodeBank(bytes);
+    slotIndex = Math.min(slotIndex, SLOTS_PER_BANK - 1);
     markDirty(false);
-    renderGrid();
+    renderAll();
     setStatus("read complete", "ok");
   } catch (err) {
     setStatus(`read failed: ${err.message}`, "error");
     logLine(`read error: ${err.message}`);
-    // A real 251e dump is very unlikely to be exactly DUMP_LENGTH bytes: the
-    // codec's layout is an admitted placeholder (see sequence-codec.js), so
-    // say so rather than let "expected a 196-byte dump" read as a bug in the
-    // transport, which just delivered whatever the module actually holds.
-    if (/expected a \d+-byte dump/.test(err.message)) {
+    if (/expected a \d+-byte 251e bank/.test(err.message)) {
       logLine(
-        "note: the bytes arrived fine -- it's sequence-codec.js's PLACEHOLDER " +
-          "251e layout that doesn't match them. The real byte format is still " +
-          "being reverse-engineered."
+        `note: the bytes arrived fine -- they just aren't a whole ${BANK_BYTES}-byte ` +
+          "251e bank (30 slots x 2104). A short read usually means the capture buffer " +
+          "wrapped or the transfer was truncated, not that the layout is wrong."
       );
     }
   }
@@ -169,12 +225,21 @@ async function readFromDevice() {
 async function writeToDevice() {
   const addr = currentModuleAddr();
   if (!transport || addr === null) return;
+  storeModuleAddr(addr);
+
+  const blocker = bankTransferBlocker();
+  if (blocker) {
+    setStatus("write unavailable -- bank exceeds transport limit", "error");
+    logLine(`write not attempted: ${blocker}`);
+    return;
+  }
+
   setStatus(`writing module ${formatModuleAddress(addr)}...`, "info");
   try {
-    const bytes = encodeDump(state);
+    // A RESTORE always sends the whole bank -- all 30 slots, every byte the
+    // user didn't touch included.
+    const bytes = encodeBank(bank);
     await transport.writeDump(bytes, addr);
-    storeModuleAddr(addr);
-    lastReadBytes = bytes;
     markDirty(false);
     setStatus("write complete", "ok");
     logLine(`wrote ${bytes.length} bytes to module ${formatModuleAddress(addr)}`);
@@ -184,89 +249,174 @@ async function writeToDevice() {
   }
 }
 
-// ---- grid rendering ---------------------------------------------------------
+// ---- rendering --------------------------------------------------------------
 
-function voltageToPercent(v) {
-  return (v / MAX_VOLTAGE) * 100;
+function renderSlotSelect() {
+  els.slotSelect.innerHTML = "";
+  for (let i = 0; i < SLOTS_PER_BANK; i++) {
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    // The module's own front panel numbers presets 1..30.
+    opt.textContent = `slot ${i + 1}`;
+    els.slotSelect.appendChild(opt);
+  }
+  els.slotSelect.value = String(slotIndex);
+}
+
+function renderSeqTabs() {
+  els.seqTabs.innerHTML = "";
+  for (let s = 0; s < SEQUENCES_PER_SLOT; s++) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "seq-tab";
+    btn.classList.toggle("seq-tab-active", s === seqIndex);
+    btn.textContent = SEQUENCE_LABELS[s];
+    btn.addEventListener("click", () => {
+      seqIndex = s;
+      renderSeqTabs();
+      renderSlotMeta();
+      renderGrid();
+    });
+    els.seqTabs.appendChild(btn);
+  }
+}
+
+function numberField(labelText, value, { min, max, step, title }, onChange) {
+  const label = document.createElement("label");
+  label.className = "meta-field";
+  label.title = title ?? "";
+  const span = document.createElement("span");
+  span.textContent = labelText;
+  label.appendChild(span);
+  const input = document.createElement("input");
+  input.type = "number";
+  input.value = String(value);
+  if (min !== undefined) input.min = String(min);
+  if (max !== undefined) input.max = String(max);
+  if (step !== undefined) input.step = String(step);
+  input.addEventListener("change", () => onChange(Number(input.value), input));
+  label.appendChild(input);
+  return label;
+}
+
+function renderSlotMeta() {
+  const slot = currentSlot();
+  const seq = currentSequence();
+  els.slotMeta.innerHTML = "";
+
+  // The two big-endian header floats. Confirmed as floats; their MEANING
+  // (offset/scale? output range?) is not confirmed, so they are labelled by
+  // position, not by a job.
+  slot.header.floats.forEach((value, i) => {
+    els.slotMeta.appendChild(
+      numberField(
+        `header float ${i}`,
+        value,
+        { step: "any", title: "IEEE-754 big-endian float at slot header byte " + i * 4 + ". Confirmed as a float; its meaning is not decoded (defaults 0.0 / 1.0)." },
+        (v) => {
+          if (!Number.isFinite(v)) return;
+          slot.header.floats[i] = v;
+          markDirty(true);
+        }
+      )
+    );
+  });
+
+  els.slotMeta.appendChild(
+    numberField(
+      `seq ${SEQUENCE_LABELS[seqIndex]} param`,
+      getSequenceParam(seq),
+      { min: 0, max: 255, step: 1, title: "Block-trailer byte +1: a per-sequence parameter, 120 by default. What it controls is not decoded." },
+      (v) => {
+        setSequenceParam(seq, v);
+        markDirty(true);
+      }
+    )
+  );
+}
+
+function valuePercent(v) {
+  return (v / STAGE_VALUE_MAX) * 100;
 }
 
 function renderGrid() {
+  const seq = currentSequence();
   els.grid.innerHTML = "";
-  state.sequences.forEach((seq, seqIndex) => {
-    const row = document.createElement("section");
-    row.className = "sequence-row";
 
-    const header = document.createElement("div");
-    header.className = "sequence-header";
-    header.innerHTML = `
-      <span class="sequence-label">${SEQUENCE_LABELS[seqIndex]}</span>
-      <label class="length-control">
-        length
-        <input type="number" min="1" max="${MAX_STEPS}" value="${seq.length}" data-seq="${seqIndex}" class="length-input" />
-      </label>
-    `;
-    row.appendChild(header);
+  const row = document.createElement("section");
+  row.className = "sequence-row";
 
-    const stepsEl = document.createElement("div");
-    stepsEl.className = "steps";
-    seq.steps.forEach((step, stepIndex) => {
-      const cell = document.createElement("div");
-      cell.className = "step";
-      cell.classList.toggle("step-inactive", stepIndex >= seq.length);
-      cell.classList.toggle("step-gate-on", step.gateOn);
+  const header = document.createElement("div");
+  header.className = "sequence-header";
+  const label = document.createElement("span");
+  label.className = "sequence-label";
+  label.textContent = SEQUENCE_LABELS[seqIndex];
+  header.appendChild(label);
+  const caption = document.createElement("span");
+  caption.className = "sequence-caption";
+  caption.textContent = `slot ${slotIndex + 1} / sequence ${SEQUENCE_LABELS[seqIndex]} -- ${STAGES_PER_SEQUENCE} stages`;
+  header.appendChild(caption);
+  row.appendChild(header);
 
-      const bar = document.createElement("div");
-      bar.className = "step-bar";
-      bar.style.height = `${voltageToPercent(step.voltage)}%`;
-      cell.appendChild(bar);
+  const stepsEl = document.createElement("div");
+  stepsEl.className = "steps";
+  seq.stages.forEach((stage, stageIndex) => {
+    const cell = document.createElement("div");
+    cell.className = "step";
 
-      const num = document.createElement("input");
-      num.type = "number";
-      num.className = "step-voltage";
-      num.min = "0";
-      num.max = String(MAX_VOLTAGE);
-      num.step = "0.05";
-      num.value = step.voltage.toFixed(2);
-      num.addEventListener("input", () => {
-        step.voltage = clampNum(parseFloat(num.value), 0, MAX_VOLTAGE);
-        bar.style.height = `${voltageToPercent(step.voltage)}%`;
-        markDirty(true);
-      });
-      cell.appendChild(num);
+    const bar = document.createElement("div");
+    bar.className = "step-bar";
+    bar.style.height = `${valuePercent(stage.value)}%`;
+    cell.appendChild(bar);
 
-      const gateBtn = document.createElement("button");
-      gateBtn.className = "step-gate-toggle";
-      gateBtn.type = "button";
-      gateBtn.textContent = step.gateOn ? "gate" : "off";
-      gateBtn.addEventListener("click", () => {
-        step.gateOn = !step.gateOn;
-        gateBtn.textContent = step.gateOn ? "gate" : "off";
-        cell.classList.toggle("step-gate-on", step.gateOn);
-        markDirty(true);
-      });
-      cell.appendChild(gateBtn);
+    const idx = document.createElement("div");
+    idx.className = "step-index";
+    idx.textContent = String(stageIndex + 1);
+    cell.appendChild(idx);
 
-      cell.addEventListener("click", (ev) => {
-        if (ev.target === num || ev.target === gateBtn) return;
-      });
-
-      stepsEl.appendChild(cell);
-    });
-    row.appendChild(stepsEl);
-    els.grid.appendChild(row);
-  });
-
-  // wire up length inputs after render (event delegation would also work)
-  els.grid.querySelectorAll(".length-input").forEach((input) => {
-    input.addEventListener("change", () => {
-      const seqIndex = Number(input.dataset.seq);
-      const len = clampNum(Math.round(Number(input.value)), 1, MAX_STEPS);
-      input.value = String(len);
-      state.sequences[seqIndex].length = len;
+    // Stage byte 0: raw 0..255. Very likely the stage CV, but no
+    // volts-per-LSB has ever been measured, so the UI shows the byte.
+    const valueInput = document.createElement("input");
+    valueInput.type = "number";
+    valueInput.className = "step-value";
+    valueInput.min = "0";
+    valueInput.max = String(STAGE_VALUE_MAX);
+    valueInput.step = "1";
+    valueInput.title = "stage byte 0 (raw 0-255; likely the stage CV, units unconfirmed)";
+    valueInput.value = String(stage.value);
+    valueInput.addEventListener("input", () => {
+      stage.value = clampNum(Math.round(Number(valueInput.value)), 0, STAGE_VALUE_MAX);
+      bar.style.height = `${valuePercent(stage.value)}%`;
       markDirty(true);
-      renderGrid();
     });
+    cell.appendChild(valueInput);
+
+    // Stage bytes 2-3: little-endian uint16, default 4.
+    const timeInput = document.createElement("input");
+    timeInput.type = "number";
+    timeInput.className = "step-time";
+    timeInput.min = "0";
+    timeInput.max = String(STAGE_TIME_MAX);
+    timeInput.step = "1";
+    timeInput.title = "stage bytes 2-3 (LE uint16, default 4; reads like a time/duration, units unconfirmed)";
+    timeInput.value = String(stage.time);
+    timeInput.addEventListener("input", () => {
+      stage.time = clampNum(Math.round(Number(timeInput.value)), 0, STAGE_TIME_MAX);
+      markDirty(true);
+    });
+    cell.appendChild(timeInput);
+
+    stepsEl.appendChild(cell);
   });
+  row.appendChild(stepsEl);
+  els.grid.appendChild(row);
+}
+
+function renderAll() {
+  els.slotSelect.value = String(slotIndex);
+  renderSeqTabs();
+  renderSlotMeta();
+  renderGrid();
 }
 
 function clampNum(v, lo, hi) {
@@ -285,6 +435,11 @@ els.connectBtn.addEventListener("click", () => {
 });
 els.readBtn.addEventListener("click", readFromDevice);
 els.writeBtn.addEventListener("click", writeToDevice);
+els.slotSelect.addEventListener("change", () => {
+  slotIndex = clampNum(Math.round(Number(els.slotSelect.value)), 0, SLOTS_PER_BANK - 1);
+  renderSlotMeta();
+  renderGrid();
+});
 els.moduleAddr.addEventListener("input", () => {
   // uppercase as you type, so the field reads like the firmware console's
   // own %02X logging
@@ -316,7 +471,15 @@ if (urlModule) {
     // ignore a junk ?module= rather than blocking the whole applet on it
   }
 }
+// ?slot=1..30 opens straight on a slot (the bench notes refer to slots by
+// their front-panel number).
+const urlSlot = Number(urlParams.get("slot"));
+if (Number.isFinite(urlSlot) && urlSlot >= 1 && urlSlot <= SLOTS_PER_BANK) {
+  slotIndex = Math.round(urlSlot) - 1;
+}
 
 updateActionButtons();
-renderGrid();
+markDirty(false);
+renderSlotSelect();
+renderAll();
 setStatus("idle -- press Connect", "info");
