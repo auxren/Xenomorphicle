@@ -36,6 +36,7 @@ public:
 
   bool reflash = false;
   bool bus_addr_dirty = false;
+  bool invert_display_dirty = false;
   bool calibration_mode = false;
   bool calibration_complete = true;
   bool cal_save_q = false;
@@ -73,6 +74,17 @@ public:
       OC::PresetBus::SetModuleAddress(OC::PresetBus::ModuleAddress());
       PhzConfig::save_config();
       bus_addr_dirty = false;
+    }
+    if (invert_display_dirty) {
+      // invert_display lives in the same METADATA_KEY-packed globals struct
+      // as current_app_id/encoders_enable_acceleration -- BuildGlobalSettingsValues()
+      // (declared in OC_apps.h) is the shared writer both SaveGlobalSettings()
+      // and this app use, so the two can never diverge (same reasoning as
+      // the bus_addr_dirty block above).
+      PhzConfig::load_config();
+      BuildGlobalSettingsValues();
+      PhzConfig::save_config();
+      invert_display_dirty = false;
     }
   }
 
@@ -456,6 +468,16 @@ public:
           OC::calibration_data.toggle_flipmode();
           display::SetFlipMode(OC::calibration_data.flipscreen());
           cal_save_q = true;
+        }
+
+        // solo UP press (not the UP+DOWN flip-screen chord above) toggles
+        // pixel invert -- the inversion itself, visible instantly, is the
+        // confirmation; persisted to GLOBALS.CFG on app exit like bus_addr
+        if (event.control == OC::CONTROL_BUTTON_UP && event.type == UI::EVENT_BUTTON_PRESS) {
+          bool inverted = !OC::global_settings.invert_display;
+          display::SetInverted(inverted);
+          OC::global_settings.invert_display = inverted;
+          invert_display_dirty = true;
         }
 
         return;

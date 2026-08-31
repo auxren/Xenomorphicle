@@ -675,10 +675,6 @@ bool Ui::AppSettings(bool drawmenu) {
     // assumes this is called from within a graphics frame context
     if (global_settings.encoders_enable_acceleration)
       graphics.drawBitmap8(120, 1, 4, bitmap_indicator_4x8);
-    if (global_settings.invert_display) {
-      graphics.setPrintPos(96, 1);
-      graphics.print("INV");
-    }
 
     menu::SettingsListItem item;
     item.x = menu::kIndentDx + 8;
@@ -736,13 +732,6 @@ bool Ui::AppSettings(bool drawmenu) {
         if (UI::EVENT_BUTTON_LONG_PRESS == event.type || UI::EVENT_BUTTON_DOWN == event.type) {
           VBiasManager *vbias_m = vbias_m->get();
           vbias_m->AdvanceBias();
-        }
-#else
-        if (UI::EVENT_BUTTON_PRESS == event.type) {
-            bool inverted = !global_settings.invert_display;
-            APPS_SERIAL_PRINTLN("Invert display: %s", inverted ? "on" : "off");
-            display::SetInverted(inverted);
-            global_settings.invert_display = inverted;
         }
 #endif
         break;
