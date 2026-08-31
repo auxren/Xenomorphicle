@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>251e Sequencer</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>
+        Buchla 251e Sequencer
+        <span class="subtitle">Xenomorpher USB bridge -- 4 sequences, up to 16 steps each</span>
+      </h1>
+      <div class="controls">
+        <select id="transport-mode" title="Which transport to use">
+          <option value="mock" selected>Mock (synthetic data)</option>
+          <option value="webmidi">WebMIDI (real device)</option>
+        </select>
+        <button id="connect-btn" type="button">Connect</button>
+        <button id="read-btn" type="button" disabled>Read from device</button>
+        <button id="write-btn" type="button" disabled>Write to device</button>
+        <span id="dirty-badge" class="dirty-badge" hidden>unsaved edits</span>
+        <span id="status" class="status status-info">idle</span>
+      </div>
+    </header>
+
+    <div class="banner">
+      <strong>Everything here is provisional.</strong> The Buchla 251e byte
+      format and the Xenomorpher's SysEx framing are both still being
+      designed/reverse-engineered by firmware in parallel -- see the header
+      comments in <code>sequence-codec.js</code> and
+      <code>sysex-transport.js</code> for exactly what's placeholder and why.
+      This applet is built and tested against the
+      <strong>Mock</strong> transport's synthetic dump; the live 200e bus
+      isn't yet cleared as electrically safe to attach, so
+      <strong>WebMIDI mode is untested against real hardware</strong>. Add
+      <code>?transport=webmidi</code> to the URL to preselect it.
+    </div>
+
+    <main id="grid"></main>
+
+    <div id="log" aria-label="transport log"></div>
+
+    <footer>
+      Voltage 0&ndash;10V per step, quantized to ~78&nbsp;mV (7-bit placeholder
+      encoding). Gate column toggles whether a step fires its trigger output.
+      Sequence length trims how many steps play before the sequence wraps.
+    </footer>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
