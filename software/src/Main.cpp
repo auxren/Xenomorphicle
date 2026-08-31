@@ -861,6 +861,30 @@ FLASHMEM __attribute__((noinline)) void loop() {
       static bool save_slot_pending = false;
       static uint8_t save_slot_digits = 0;
       static uint8_t save_slot_value = 0;
+      // 'R' bench trigger: bus-wide broadcast RECALL from a specific slot
+      // (0-29), same 2-DECIMAL-digit convention as 'S'.
+      static bool recall_slot_pending = false;
+      static uint8_t recall_slot_digits = 0;
+      static uint8_t recall_slot_value = 0;
+      // 'w' bench trigger: patch ONE byte in the resident card image (the
+      // last MasterBackup capture) -- 4 hex digits for the offset (0-0xFFFF,
+      // covers the whole card), then 2 hex digits for the new byte value.
+      // Read-modify-verify only: never touches the bus by itself. Pairs
+      // with 'x' below to actually push the patched image back out.
+      static bool patch_pending = false;
+      static uint8_t patch_digits = 0;
+      static uint16_t patch_offset = 0;
+      static uint8_t patch_value = 0;
+      // 'x' bench trigger: MasterRestore() the resident (possibly just-'w'-
+      // patched) card image out to a foreign module -- the first time this
+      // codebase has ever pushed bytes TO a real module rather than only
+      // reading them. Same double-press-within-3s guard as C/F/Z, on
+      // purpose: this is the one bench command that can actually change
+      // what a real, physical Buchla module has stored. 2 hex digits for
+      // the target address, same convention as 'm'/'q'.
+      static bool restore_addr_pending = false;
+      static uint8_t restore_addr_digits = 0;
+      static uint8_t restore_addr_value = 0;
       do {
         int cmd = Serial.read();
         if (!console_unlocked) {
@@ -937,6 +961,90 @@ FLASHMEM __attribute__((noinline)) void loop() {
                         "module on the bus stores its current state here "
                         "now\n", save_slot_value);
           OC::PresetBus::BroadcastSave(save_slot_value);
+#endif
+          continue;
+        }
+        if (recall_slot_pending) {
+          if (cmd < '0' || cmd > '9') {
+            Serial.println("broadcast recall: cancelled (not a decimal digit)");
+            recall_slot_pending = false;
+            continue;
+          }
+          recall_slot_value = (uint8_t)(recall_slot_value * 10 + (cmd - '0'));
+          if (++recall_slot_digits < 2) continue;  // wait for the 2nd digit
+          recall_slot_pending = false;
+          if (recall_slot_value > 29) {
+            Serial.printf("broadcast recall: slot %d out of range (0-29), "
+                          "cancelled\n", recall_slot_value);
+            continue;
+          }
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+          Serial.printf("broadcast RECALL: slot %d\n", recall_slot_value);
+          OC::PresetBus::BroadcastRecall(recall_slot_value);
+#endif
+          continue;
+        }
+        if (patch_pending) {
+          int v = -1;
+          if (cmd >= '0' && cmd <= '9') v = cmd - '0';
+          else if (cmd >= 'a' && cmd <= 'f') v = cmd - 'a' + 10;
+          else if (cmd >= 'A' && cmd <= 'F') v = cmd - 'A' + 10;
+          if (v < 0) {
+            Serial.println("patch: cancelled (not a hex digit)");
+            patch_pending = false;
+            continue;
+          }
+          if (patch_digits < 4) {
+            patch_offset = (uint16_t)((patch_offset << 4) | v);
+          } else {
+            patch_value = (uint8_t)((patch_value << 4) | v);
+          }
+          if (++patch_digits < 6) continue;  // 4 offset digits + 2 value digits
+          patch_pending = false;
+#if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
+          uint8_t *img = OC::PresetBus::MasterCardImage();
+          if (!img) {
+            Serial.println("patch: no card image resident (not CardServing())");
+          } else if (patch_offset >= 65536) {
+            Serial.printf("patch: offset %04X out of range\n", patch_offset);
+          } else {
+            const uint8_t old = img[patch_offset];
+            img[patch_offset] = patch_value;
+            Serial.printf("patch: offset %04X (%u): %02X -> %02X\n",
+                          patch_offset, patch_offset, old, patch_value);
+          }
+#endif
+          continue;
+        }
+        if (restore_addr_pending) {
+          int v = -1;
+          if (cmd >= '0' && cmd <= '9') v = cmd - '0';
+          else if (cmd >= 'a' && cmd <= 'f') v = cmd - 'a' + 10;
+          else if (cmd >= 'A' && cmd <= 'F') v = cmd - 'A' + 10;
+          if (v < 0) {
+            Serial.println("master restore: cancelled (not a hex digit)");
+            restore_addr_pending = false;
+            continue;
+          }
+          restore_addr_value = (uint8_t)((restore_addr_value << 4) | v);
+          if (++restore_addr_digits < 2) continue;  // wait for the 2nd digit
+          restore_addr_pending = false;
+          if (millis() - destructive_arm_ms >= 3000 || destructive_arm_key != 'x') {
+            destructive_arm_ms = millis();
+            destructive_arm_key = 'x';
+            Serial.printf("master restore: target %02X armed -- press 'x' "
+                          "then the SAME 2 hex digits again within 3s to "
+                          "actually push the card image to the module\n",
+                          restore_addr_value);
+            continue;
+          }
+          destructive_arm_ms = 0;
+#if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
+          Serial.printf("master restore: pushing card image to module %02X "
+                        "NOW\n", restore_addr_value);
+          const int rrc = OC::PresetBus::MasterRestore(restore_addr_value);
+          Serial.printf("  MasterRestore() returned %d (0=accepted; "
+                        "watch 'b' for progress)\n", rrc);
 #endif
           continue;
         }
@@ -1043,6 +1151,24 @@ FLASHMEM __attribute__((noinline)) void loop() {
             query_addr_value = 0;
             break;
           case 'c': OC::PresetBus::DumpCard(); break;  // hex-dump the last capture
+          case 'w':  // patch one byte in the resident card image: 4 hex
+                     // digits offset + 2 hex digits value, no bus traffic
+            Serial.println("patch: type 4 hex digits for the offset, then "
+                           "2 hex digits for the new byte value");
+            patch_pending = true;
+            patch_digits = 0;
+            patch_offset = 0;
+            patch_value = 0;
+            break;
+          case 'x':  // MasterRestore() the resident card image to a module.
+                     // 2 hex digits for the address; press 'x' + the SAME
+                     // 2 digits again within 3s to actually fire.
+            Serial.println("master restore: type 2 hex digits for the "
+                           "target module address");
+            restore_addr_pending = true;
+            restore_addr_digits = 0;
+            restore_addr_value = 0;
+            break;
           case 'y':  // browser bridge status; toggles the fallback usbMIDI poll
             OC::Bus200eBridgeUsb::SetPolling(!OC::Bus200eBridgeUsb::Polling());
             Serial.printf("bridge fallback poll = %s (leave OFF under any app "
@@ -1069,6 +1195,13 @@ FLASHMEM __attribute__((noinline)) void loop() {
             save_slot_pending = true;
             save_slot_digits = 0;
             save_slot_value = 0;
+            break;
+          case 'R':  // broadcast RECALL from slot NN (2 decimal digits, 00-29)
+            Serial.println("broadcast recall: type 2 decimal digits for the "
+                           "target slot (00-29)");
+            recall_slot_pending = true;
+            recall_slot_digits = 0;
+            recall_slot_value = 0;
             break;
 #endif
           // destructive keys need a second press within 3s ('pew!' stops
