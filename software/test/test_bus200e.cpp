@@ -400,6 +400,72 @@ static void test_bus_midi(void) {
   CHECK(last_op() == BUS200E_OP_MIDI);
 }
 
+static void test_build_transfer_frame(void) {
+  printf("test_build_transfer_frame\n");
+  uint8_t f[BUS200E_XFER_FRAME_LEN];
+
+  // bad op
+  CHECK(Bus200eBuildTransferFrame(BUS200E_OP_RECALL, 0x3C, 0, 0, f, sizeof(f)) == -1);
+  // undersized buffer
+  CHECK(Bus200eBuildTransferFrame(BUS200E_OP_BACKUP, 0x3C, 0, 0, f, BUS200E_XFER_FRAME_LEN - 1) == -1);
+
+  // exact byte shape
+  CHECK(Bus200eBuildTransferFrame(BUS200E_OP_BACKUP, 0x3C, 0x02, 0x1234, f, sizeof(f))
+        == BUS200E_XFER_FRAME_LEN);
+  const uint8_t want_backup[] = { 0x07, 0x00, 0x22, 0x04, 0x3C, 0x02, 0x34, 0x12 };
+  CHECK(memcmp(f, want_backup, sizeof(want_backup)) == 0);
+
+  CHECK(Bus200eBuildTransferFrame(BUS200E_OP_RESTORE, 0x3C, 0x02, 0x1234, f, sizeof(f))
+        == BUS200E_XFER_FRAME_LEN);
+  const uint8_t want_restore[] = { 0x07, 0x00, 0x22, 0x05, 0x3C, 0x02, 0x34, 0x12 };
+  CHECK(memcmp(f, want_restore, sizeof(want_restore)) == 0);
+
+  // args get masked to 7 bits, same as every other payload field in this parser
+  CHECK(Bus200eBuildTransferFrame(BUS200E_OP_BACKUP, 0xFF, 0xFF, 0xBEEF, f, sizeof(f))
+        == BUS200E_XFER_FRAME_LEN);
+  CHECK(f[4] == 0x7F && f[5] == 0x7F && f[6] == 0xEF && f[7] == 0xBE);
+}
+
+static void test_build_transfer_frame_round_trips_through_parser(void) {
+  printf("test_build_transfer_frame_round_trips_through_parser\n");
+  reset(&fake_ops);
+  uint8_t f[BUS200E_XFER_FRAME_LEN];
+
+  CHECK(Bus200eBuildTransferFrame(BUS200E_OP_BACKUP, BUS200E_DEFAULT_MODULE_ADDR,
+                                   0x03, 0x0100, f, sizeof(f)) == BUS200E_XFER_FRAME_LEN);
+  frame(f, sizeof(f));
+  CHECK(last_op() == BUS200E_OP_BACKUP);
+  CHECK(Bus200eJobActive());
+  {
+    Bus200eCmd c;
+    CHECK(Bus200eLogRead(0, &c));
+    CHECK(c.mod_addr == BUS200E_DEFAULT_MODULE_ADDR);
+    CHECK(c.card_lo == 0x03);
+    CHECK(c.mem_off == 0x0100);
+  }
+  for (int i = 0; i < BUS200E_BUS_PRESETS; i++) Bus200eTask();
+  CHECK(!Bus200eJobActive());
+  CHECK(n_cw == BUS200E_BUS_PRESETS);
+  CHECK(cw_calls[0].card7 == (BUS200E_CARD_BASE | 0x03));
+  CHECK(cw_calls[0].off == 0x0100);
+
+  reset(&fake_ops);
+  CHECK(Bus200eBuildTransferFrame(BUS200E_OP_RESTORE, BUS200E_DEFAULT_MODULE_ADDR,
+                                   0x00, 0x0000, f, sizeof(f)) == BUS200E_XFER_FRAME_LEN);
+  frame(f, sizeof(f));
+  CHECK(last_op() == BUS200E_OP_RESTORE);
+  for (int i = 0; i < BUS200E_BUS_PRESETS; i++) Bus200eTask();
+  CHECK(n_sw == BUS200E_BUS_PRESETS);
+
+  // a backup addressed to a DIFFERENT module is observed but not acted on
+  reset(&fake_ops);
+  CHECK(Bus200eBuildTransferFrame(BUS200E_OP_BACKUP, 0x44, 0x00, 0, f, sizeof(f))
+        == BUS200E_XFER_FRAME_LEN);
+  frame(f, sizeof(f));
+  CHECK(last_op() == BUS200E_OP_BACKUP);
+  CHECK(!Bus200eJobActive());
+}
+
 int main() {
   test_short_recall_save();
   test_long_recall_save();
@@ -419,6 +485,9 @@ int main() {
   test_log_ring();
 
   test_bus_midi();
+
+  test_build_transfer_frame();
+  test_build_transfer_frame_round_trips_through_parser();
 
   printf("\ntest_bus200e: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;

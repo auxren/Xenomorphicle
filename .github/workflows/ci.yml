@@ -17,6 +17,12 @@ jobs:
           g++ -std=c++17 -Wall -Werror -O2 -o build/test_bus200e \
               test_bus200e.cpp ../src/PresetBus200e.cpp
           ./build/test_bus200e
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_bus200e_master \
+              test_bus200e_master.cpp ../src/Bus200eMaster.cpp ../src/PresetBus200e.cpp
+          ./build/test_bus200e_master
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_bus200e_sysex \
+              test_bus200e_sysex.cpp ../src/Bus200eSysEx.cpp
+          ./build/test_bus200e_sysex
           g++ -std=c++17 -Wall -Werror -O2 -o build/test_buscard \
               test_buscard.cpp ../src/PresetBusCard.cpp
           ./build/test_buscard

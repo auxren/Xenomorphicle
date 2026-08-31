@@ -151,4 +151,27 @@ void Bus200eClearQueryPending(void);
 uint32_t Bus200eLogTotal(void);
 int Bus200eLogRead(uint32_t n_back, Bus200eCmd *out);   // 1 = ok, 0 = gone
 
+// ---------------------------------------------------------------------------
+// Master-side frame building (new): the mirror image of the long/PRIMO
+// BACKUP/RESTORE parse above (parse_frame(), cmd 0x04/0x05 case), built in
+// reverse so a transient master (Bus200eMaster.cpp) can issue the same
+// command a preset manager would. Long/PRIMO framing only -- every existing
+// master path in this codebase (pump_broadcast, pump_midi_tx, the QUERY
+// reply) speaks long/PRIMO exclusively, so this stays consistent; nothing
+// here masters the short/V2 dialect.
+//
+// Frame shape (8 bytes, general-call payload):
+//   [0x07][0x00][0x22][cmd][modAddr][cardLo][memLSB][memMSB]
+// where 0x07 = nBytes (bytes after itself), 0x00 = destAddr (broadcast --
+// only modAddr, a payload field, singles out the target), 0x22 = our
+// asserted srcAddr (matches every other master path here), cmd is 0x04
+// (BACKUP: module -> card) or 0x05 (RESTORE: card -> module).
+#define BUS200E_XFER_FRAME_LEN 8
+
+// op must be BUS200E_OP_BACKUP or BUS200E_OP_RESTORE. cap must be >=
+// BUS200E_XFER_FRAME_LEN. Returns BUS200E_XFER_FRAME_LEN on success, -1 on
+// a bad op or an undersized buffer.
+int Bus200eBuildTransferFrame(uint8_t op, uint8_t mod_addr, uint8_t card_lo,
+                               uint16_t mem_off, uint8_t *out, uint8_t cap);
+
 #endif  // PRESETBUS200E_H_

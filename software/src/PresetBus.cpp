@@ -7,6 +7,7 @@
 
 #include <LittleFS.h>
 
+#include "Bus200eMaster.h"
 #include "MidiTxRing.h"
 #include "PresetBus.h"
 #include "PresetBus200e.h"
@@ -384,6 +385,71 @@ FLASHMEM int CardServeEnable(bool on) {
 
 bool CardServing() { return card_serving; }
 
+// ---- foreign-module BACKUP/RESTORE (transient master; new) -----------------
+// Adapter wiring Bus200eMaster (BSP-free FSM, see Bus200eMaster.h/.cpp) onto
+// this file's real Wire master and BusCard stats. Every op here is a thin
+// call into machinery this file already has and already masters the bus
+// with elsewhere (tx_gate_open, Bus200eSuppressFrame, the polled Wire
+// master) -- no new hardware surface, just new orchestration.
+// UNVERIFIED against a live BACKUP/RESTORE exchange: see Bus200eMaster.h.
+
+static uint32_t master_now_ms() { return millis(); }
+static int master_tx_gate_open() { return tx_gate_open() ? 1 : 0; }
+
+// Only card_lo 0 (address 0x50) is ever offered as a candidate today (the
+// card-serving hardware's SAMR ADDR1 is hardcoded to BUS200E_CARD_BASE in
+// slave_reconfig() -- see Bus200eMaster.h). Reuse the cached WPM-presence
+// flag rather than a fresh probe: it already answers "is something else
+// ACKing 0x50 right now", at no extra bus traffic/risk.
+static int master_probe_card(uint8_t addr7) {
+  (void) addr7;
+  return wpm_present ? 1 : 0;
+}
+
+static int master_send_frame(const uint8_t *bytes, uint8_t n) {
+  Wire.beginTransmission(0);
+  Wire.write(bytes, n);
+  return Wire.endTransmission();
+}
+
+static void master_suppress_echo(const uint8_t *bytes, uint8_t n) {
+  Bus200eSuppressFrame(bytes, n);
+}
+
+// Which BusCardStats counter reflects "the target is touching our card"
+// depends on job direction: a BACKUP has the target WRITING into our card
+// (bytes_written), a RESTORE has it READING (bytes_read). Bus200eMaster
+// already knows its own job's direction; asking it back here is simpler
+// than threading a second flag through the ops table.
+static uint32_t master_card_activity() {
+  const BusCardStats *cs = BusCardGetStats();
+  if (!cs) return 0;
+  return Bus200eMasterIsRestore() ? cs->bytes_read : cs->bytes_written;
+}
+
+static const Bus200eMasterOps kMasterOps = {
+  master_now_ms, master_tx_gate_open, master_probe_card,
+  master_send_frame, master_suppress_echo, master_card_activity,
+};
+
+FLASHMEM int MasterBackup(uint8_t mod_addr) {
+  if (!card_serving) {
+    const int err = CardServeEnable(true);
+    if (err != 0) return -BUS200E_MASTER_ERR_NO_FREE_CARD;
+  }
+  return Bus200eMasterBackup(mod_addr, 0);
+}
+
+FLASHMEM int MasterRestore(uint8_t mod_addr) {
+  if (!card_serving) return -BUS200E_MASTER_ERR_BAD_ARGS;
+  return Bus200eMasterRestore(mod_addr, 0);
+}
+
+Bus200eMasterState MasterState() { return Bus200eMasterGetState(); }
+Bus200eMasterError MasterError() { return Bus200eMasterLastError(); }
+uint8_t *MasterCardImage() { return card_serving ? card_image : nullptr; }
+void MasterReset() { Bus200eMasterReset(); }
+
 // Flush the image 3s after a write burst goes quiet (a module BACKUP is a
 // stream of write transactions; don't thrash LittleFS mid-transfer).
 static void card_task() {
@@ -595,6 +661,7 @@ FLASHMEM void Init() {
   if (!I2C_Expansion) return;  // no I2C header on this hardware
 
   Bus200eInit(&kOps);
+  Bus200eMasterInit(&kMasterOps);
 
   // persisted module address (GLOBALS.CFG must be the loaded map here)
   uint64_t addr = 0;
@@ -674,6 +741,7 @@ void Task() {
 
   if (Bus200eQueryPending()) try_query_reply();
   Bus200eTask();   // card-transfer job engine (self-clears with null hooks)
+  Bus200eMasterTask();  // foreign-module BACKUP/RESTORE orchestration (new)
   pump_broadcast();
   pump_midi_tx();
   probe_wpm();

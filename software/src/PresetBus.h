@@ -20,6 +20,8 @@
 // ---------------------------------------------------------------------------
 #include <stdint.h>
 
+#include "Bus200eMaster.h"
+
 namespace OC {
 namespace PresetBus {
 
@@ -77,6 +79,38 @@ bool WpmPresent();
 int CardServeEnable(bool on);
 bool CardServing();
 
+// ---- foreign-module BACKUP/RESTORE (transient master; new) ----
+// Capture (BACKUP) or write back (RESTORE) another 200e module's preset
+// dump -- e.g. a 251e for a browser applet -- by transiently mastering the
+// bus. This composes existing mechanisms rather than adding new hardware
+// surface: MasterBackup claims card address 0x50 the same way manual card
+// serving does (CardServeEnable's WPM-presence gate and self-test both
+// apply), then hands off to Bus200eMaster (see Bus200eMaster.h) to send the
+// BACKUP/RESTORE frame and watch the resulting card traffic. Only card_lo 0
+// (address 0x50) is offered today -- see Bus200eMaster.h's header comment
+// on why. UNRESOLVED DESIGN QUESTION: this reuses the SAME card image/file
+// (PBCARD.BIN) as ordinary WPM-less card serving, so a foreign-module
+// capture will overwrite whatever local-backup image was there; whoever
+// wires the USB bridge in front of this should decide whether a foreign
+// dump needs its own image/file before this ships to real use.
+//
+// MasterBackup: returns 0 if accepted, <0 (negated Bus200eMasterError) if
+// refused outright (a job is already running, or the card claim failed --
+// WPM present, no memory, self-test). Poll MasterState()/MasterError()
+// afterward; once MasterState() reports BUS200E_MASTER_DONE, the captured
+// bytes are at MasterCardImage() (32K, valid only while CardServing()).
+//
+// MasterRestore: the caller must already have (re)populated the card image
+// with the bytes to write back (there is no USB-bridge wiring here to do
+// that yet -- see Bus200eSysEx.h) and be CardServing() before calling;
+// returns <0 immediately otherwise.
+int MasterBackup(uint8_t mod_addr);
+int MasterRestore(uint8_t mod_addr);
+Bus200eMasterState MasterState();
+Bus200eMasterError MasterError();
+uint8_t *MasterCardImage();   // the 32K card buffer; NULL unless CardServing()
+void MasterReset();           // acknowledge a DONE/FAILED result, back to IDLE
+
 // ---- bus MIDI ----
 // TX: queue a message for mastering onto the bus (ISR-safe; sent from
 // Task() when the bus is quiet). channel 1 -> 200e bus A, 2 -> bus B,
@@ -106,6 +140,12 @@ inline void BroadcastRecall(uint8_t) {}
 inline bool WpmPresent() { return false; }
 inline int CardServeEnable(bool) { return -1; }
 inline bool CardServing() { return false; }
+inline int MasterBackup(uint8_t) { return -1; }
+inline int MasterRestore(uint8_t) { return -1; }
+inline Bus200eMasterState MasterState() { return BUS200E_MASTER_IDLE; }
+inline Bus200eMasterError MasterError() { return BUS200E_MASTER_ERR_NONE; }
+inline uint8_t *MasterCardImage() { return nullptr; }
+inline void MasterReset() {}
 inline const Stats &GetStats() { static Stats s = {}; return s; }
 inline void DebugDump() {}
 inline void SetVerbose(bool) {}

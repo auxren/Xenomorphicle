@@ -281,6 +281,24 @@ BUS_CODE void Bus200eFeedEvent(uint16_t ev) {
 
 // ---- card transfer job (phase 2: runs only when all hooks are supplied) ----
 
+// ---- master-side frame building (new) --------------------------------------
+
+BUS_CODE int Bus200eBuildTransferFrame(uint8_t op, uint8_t mod_addr,
+                                        uint8_t card_lo, uint16_t mem_off,
+                                        uint8_t *out, uint8_t cap) {
+  if (cap < BUS200E_XFER_FRAME_LEN) return -1;
+  if (op != BUS200E_OP_BACKUP && op != BUS200E_OP_RESTORE) return -1;
+  out[0] = BUS200E_XFER_FRAME_LEN - 1;  // nBytes: bytes after itself
+  out[1] = 0x00;                        // destAddr: broadcast
+  out[2] = 0x22;                        // srcAddr: matches every other master path
+  out[3] = (op == BUS200E_OP_BACKUP) ? 0x04 : 0x05;
+  out[4] = mod_addr & 0x7F;
+  out[5] = card_lo & 0x7F;
+  out[6] = (uint8_t) (mem_off & 0xFF);
+  out[7] = (uint8_t) (mem_off >> 8);
+  return BUS200E_XFER_FRAME_LEN;
+}
+
 BUS_CODE void Bus200eTask(void) {
   if (!job.active) return;
 
