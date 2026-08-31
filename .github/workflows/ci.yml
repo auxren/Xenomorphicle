@@ -46,6 +46,10 @@ jobs:
               ../src/Buchla251eRecorder.cpp
           ./build/test_buchla251e_recorder
           g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_buchla259e_slot_codec \
+              test_buchla259e_slot_codec.cpp ../src/Buchla259eSlotCodec.cpp
+          ./build/test_buchla259e_slot_codec
+          g++ -std=c++17 -Wall -Werror -O2 \
               -o build/test_buchla200e_module_table \
               test_buchla200e_module_table.cpp ../src/Buchla200eModuleTable.cpp
           ./build/test_buchla200e_module_table

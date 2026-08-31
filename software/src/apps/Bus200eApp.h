@@ -41,6 +41,7 @@
 
 #include "../Buchla200eModuleTable.h"
 #include "../Buchla251eSlotCodec.h"
+#include "../Buchla259eSlotCodec.h"
 #include "../PresetBus.h"
 
 namespace Bus200eAppNS {
@@ -75,6 +76,7 @@ enum ReadState : uint8_t {
 enum ModuleType : uint8_t {
   MODTYPE_UNKNOWN = 0,
   MODTYPE_251E,
+  MODTYPE_259E,
 };
 
 // Scan pacing. One query in flight at a time; the FSM below is the whole
@@ -113,6 +115,68 @@ static const char kActionNames[ACT_COUNT][5] PROGMEM = {
   "Read", "Edit", "Gen", "Rec"
 };
 static const uint8_t kActionWidths[ACT_COUNT] = {4, 4, 3, 3};  // chars
+
+// --- 259e parameter list ---------------------------------------------------
+// How a value is rendered, which is NOT a property of its width: a 12-bit
+// field can be a signed attenuverter, an exponential pitch, or a scan-width
+// percentage with a floor, and showing any of them as a bare 0-4095 count
+// would be actively misleading. See Buchla_FW/docs/259e-PRESET-FORMAT.md.
+enum RowKind : uint8_t {
+  ROW_PITCH = 0,   // exponential, 512 counts/octave
+  ROW_BIPOLAR,     // offset-binary attenuverter, signed percent
+  ROW_UNIPOLAR,    // plain percent of range
+  ROW_MODFREQ,     // absolute, or a tracking interval when mod_freq_mode == 2
+  ROW_DUAL,        // meaning switches on the paired timbre index
+  ROW_MORPH,       // linear crossfade, red -> green
+  ROW_WARP,        // has a floor: knob spans 20%..60% of scan width
+  ROW_ENGINE,      // 4-way modulator sync, one state of which can be inert
+  ROW_MODDEST,     // 3-bit destination mask
+  ROW_WAVEFORM,
+  ROW_FREQMODE,
+  ROW_WAVEBTN,
+  ROW_TIMBRE,
+};
+
+// `idx` is a param index for the 12-bit kinds, and a record byte offset for
+// the discrete ones. ROW_DUAL draws its own label (that is the whole point of
+// the dual use), so its table label is only a placeholder.
+struct Row259e {
+  char label[9];
+  uint8_t kind;
+  uint8_t idx;
+};
+
+// Grouped by what the musician is thinking about -- principal voice, then
+// shaping, then timbre, then the modulator, then FM -- not by byte order.
+static const Row259e kRows259e[] PROGMEM = {
+  {"Pitch",    ROW_PITCH,    1},
+  {"PitchCV",  ROW_BIPOLAR,  0},
+  {"Morph",    ROW_MORPH,    8},
+  {"MorphCV",  ROW_BIPOLAR,  6},
+  {"Warp",     ROW_WARP,     9},
+  {"WarpCV",   ROW_BIPOLAR,  7},
+  {"TimbreR",  ROW_TIMBRE,  31},
+  {"TimbreG",  ROW_TIMBRE,  32},
+  {"WaveBtn",  ROW_WAVEBTN, 30},
+  {"ModFreq",  ROW_MODFREQ,  3},
+  {"ModFrqCV", ROW_BIPOLAR,  2},
+  {"ModWave",  ROW_WAVEFORM,28},
+  {"ModRate",  ROW_FREQMODE,29},
+  {"Sync",     ROW_ENGINE,  26},
+  {"FM Index", ROW_UNIPOLAR,10},
+  {"FM IdxCV", ROW_BIPOLAR, 11},
+  {"ModDest",  ROW_MODDEST, 27},
+  {"dual4",    ROW_DUAL,     4},
+  {"dual5",    ROW_DUAL,     5},
+};
+static constexpr int kRow259eCount =
+    (int)(sizeof(kRows259e) / sizeof(kRows259e[0]));
+
+// Three rows fit between the header and the provenance line at y=46.
+static constexpr int kRows259eVisible = 3;
+static constexpr int kRow259eY0 = 21;
+static constexpr int kRow259eDY = 8;
+static constexpr int kRow259eValueX = 74;   // char column 12 of 21
 
 }  // namespace Bus200eAppNS
 
@@ -160,6 +224,13 @@ private:
   // stack.
   Buchla251eSlot working_slot_;
 
+  // --- 259e home screen ---
+  // 33 bytes, so unlike the 251e slot this one is cheap wherever it lives --
+  // kept a member for the same reason regardless (RAM2, not DTCM).
+  Buchla259eSlot working_259e_;
+  uint8_t row_cursor_ = 0;     // index into kRows259e
+  uint8_t row_top_ = 0;        // scroll offset
+
   static bool IsFound(const uint8_t *bits, int i) {
     return (bits[i >> 3] >> (i & 7)) & 1;
   }
@@ -175,8 +246,14 @@ private:
   void StartRead();
   void PumpRead();
   bool DecodeSlotFromCardImage();
+  Bus200eAppNS::ModuleType CurrentModuleType() const;
   void DrawModuleSelect() const;
   void DrawModuleHome() const;
+  void DrawModule251e() const;
+  void DrawModule259e() const;
+  void DrawRow259e(int row, int y) const;
+  void DrawTenths(int tenths, const char *suffix) const;
+  void ScrollRows(int delta);
   void DrawStageStrip() const;
   void DrawReadState() const;
   int SeqEndStage() const;     // 0-indexed stage holding the end marker, or -1
@@ -314,22 +391,48 @@ void AppBus200e::StartRead() {
 #endif
 }
 
+// Identification is the address->model table, not a protocol answer (see the
+// header comment). Matching on the model string keeps every instance of a
+// model working: the table carries 259 A..D at 0x28-0x2B and 251 A at 0x5C.
+FLASHMEM __attribute__((noinline))
+Bus200eAppNS::ModuleType AppBus200e::CurrentModuleType() const {
+  const char *model = Buchla200eModelForAddress(target_);
+  if (!model) return Bus200eAppNS::MODTYPE_UNKNOWN;
+  if (model[0] != '2' || model[1] != '5') return Bus200eAppNS::MODTYPE_UNKNOWN;
+  if (model[2] == '1') return Bus200eAppNS::MODTYPE_251E;
+  if (model[2] == '9') return Bus200eAppNS::MODTYPE_259E;
+  return Bus200eAppNS::MODTYPE_UNKNOWN;
+}
+
 // Decode slot_ out of the resident card image. False if the image is gone
 // (CardServing() dropped) or the transfer was too short to contain this
 // slot -- in either case the caller must NOT present stale bytes as live.
+//
+// The record size is per module type and they are wildly different (2104 vs
+// 33). Getting this wrong would not fail loudly -- it would decode the wrong
+// bytes and draw them as parameters -- so the size comes from the same type
+// decision the drawing does, never from a default.
 FLASHMEM __attribute__((noinline))
 bool AppBus200e::DecodeSlotFromCardImage() {
 #ifdef PRESET_BUS
   const uint8_t *img = OC::PresetBus::MasterCardImage();
   if (!img) return false;
 
-  const uint32_t off = (uint32_t)slot_ * (uint32_t)kBuchla251eSlotBytes;
-  const uint32_t need = off + (uint32_t)kBuchla251eSlotBytes;
+  const Bus200eAppNS::ModuleType type = CurrentModuleType();
+  const uint32_t rec = (type == Bus200eAppNS::MODTYPE_259E)
+                           ? (uint32_t)kBuchla259eRecordBytes
+                           : (uint32_t)kBuchla251eSlotBytes;
+  const uint32_t off = (uint32_t)slot_ * rec;
   // A short transfer would otherwise decode whatever else is in the 64K
-  // buffer and draw it as this module's sequence.
-  if (Bus200eMasterBytesTransferred() < need) return false;
+  // buffer and draw it as this module's data. One real capture during this
+  // module's bring-up came back exactly one record short while still
+  // reporting success, so this check is not theoretical.
+  if (Bus200eMasterBytesTransferred() < off + rec) return false;
 
-  Buchla251eDecodeSlot(img + off, working_slot_);
+  if (type == Bus200eAppNS::MODTYPE_259E)
+    Buchla259eDecodeSlot(img + off, working_259e_);
+  else
+    Buchla251eDecodeSlot(img + off, working_slot_);
   return true;
 #else
   return false;
@@ -380,6 +483,21 @@ uint8_t AppBus200e::SeqPeakRaw() const {
   for (int i = 0; i < kBuchla251eStagesPerSequence; ++i)
     if (s.stages[i].value > peak) peak = s.stages[i].value;
   return peak;
+}
+
+// Move the 259e list cursor, dragging the 3-row window along with it.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::ScrollRows(int delta) {
+  using namespace Bus200eAppNS;
+  int c = (int)row_cursor_ + delta;
+  CONSTRAIN(c, 0, kRow259eCount - 1);
+  row_cursor_ = (uint8_t)c;
+
+  int top = (int)row_top_;
+  if (c < top) top = c;
+  if (c >= top + kRows259eVisible) top = c - kRows259eVisible + 1;
+  CONSTRAIN(top, 0, kRow259eCount - kRows259eVisible);
+  row_top_ = (uint8_t)top;
 }
 
 // nth responder -> its index in the module table, or -1.
@@ -513,14 +631,6 @@ void AppBus200e::DrawModuleHome() const {
   using namespace Bus200eAppNS;
   const char *model = Buchla200eModelForAddress(target_);
 
-  // --- SEAM: per-module-type handlers hang off this switch ----------------
-  // Identification is by address (see header), so this is a table lookup,
-  // not a protocol answer. Adding a module type = add a ModuleType enum
-  // value + a case here.
-  ModuleType type = MODTYPE_UNKNOWN;
-  if (model && model[0] == '2' && model[1] == '5' && model[2] == '1')
-    type = MODTYPE_251E;
-
   // Line 1: what we are talking to, and which preset. "~" because the
   // address only implies the model by convention -- clones squat addresses.
   graphics.setPrintPos(0, 13);
@@ -528,15 +638,27 @@ void AppBus200e::DrawModuleHome() const {
   graphics.setPrintPos(80, 13);
   graphics.printf("Slot %d", slot_ + 1);          // 1-indexed for humans
 
-  if (type != MODTYPE_251E) {
-    graphics.setPrintPos(0, 30);
-    graphics.print("no handler for this");
-    graphics.setPrintPos(0, 40);
-    graphics.print("module type yet");
-    graphics.setPrintPos(0, 56);
-    graphics.print("L:back");
-    return;
+  // --- SEAM: per-module-type handlers hang off this switch ----------------
+  // Identification is by address (see header), so this is a table lookup,
+  // not a protocol answer. Adding a module type = add a ModuleType enum
+  // value, a case here, and its own Draw function.
+  switch (CurrentModuleType()) {
+    case MODTYPE_251E: DrawModule251e(); return;
+    case MODTYPE_259E: DrawModule259e(); return;
+    default: break;
   }
+
+  graphics.setPrintPos(0, 30);
+  graphics.print("no handler for this");
+  graphics.setPrintPos(0, 40);
+  graphics.print("module type yet");
+  graphics.setPrintPos(0, 56);
+  graphics.print("L:back");
+}
+
+FLASHMEM __attribute__((noinline))
+void AppBus200e::DrawModule251e() const {
+  using namespace Bus200eAppNS;
 
   // Line 2: sequence, loop point, peak. Peak comes from the raw byte
   // (volts*10 exactly), so no float formatting is needed.
@@ -572,6 +694,184 @@ void AppBus200e::DrawModuleHome() const {
   }
 }
 
+// --- 259e parameter viewer -------------------------------------------------
+
+// Signed tenths as "-12.3st". Printed by hand because the fractional digit
+// of a negative value is not -(t%10) once the whole part is 0: -0.5 would
+// come out "0.5" and silently flip the sign of a CV inversion.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::DrawTenths(int tenths, const char *suffix) const {
+  const int whole = tenths / 10;
+  const int frac = (tenths < 0 ? -tenths : tenths) % 10;
+  const bool needs_sign = (tenths < 0 && whole == 0);
+  graphics.printf("%s%d.%d%s", needs_sign ? "-" : "", whole, frac, suffix);
+}
+
+FLASHMEM __attribute__((noinline))
+void AppBus200e::DrawRow259e(int row, int y) const {
+  using namespace Bus200eAppNS;
+  const Row259e &r = kRows259e[row];
+  const Buchla259eSlot &s = working_259e_;
+  const bool have = (read_state_ == READ_OK);
+
+  // Label. ROW_DUAL overrides it: which of the two meanings is live depends
+  // on the paired timbre index, so a fixed label would be wrong half the
+  // time -- and wrong in a way that reads as authoritative.
+  graphics.setPrintPos(2, y);
+  if (r.kind == ROW_DUAL) {
+    const bool skew = (r.idx == 4) ? Buchla259eParam4IsSkew(s)
+                                    : Buchla259eParam5IsSkew(s);
+    if (r.idx == 4) graphics.print(skew ? "RedSkew" : "ModCVat");
+    else            graphics.print(skew ? "GrnSkew" : "PrnCVat");
+  } else {
+    graphics.print(r.label);
+  }
+
+  graphics.setPrintPos(kRow259eValueX, y);
+  if (!have) { graphics.print("--"); return; }
+
+  const uint16_t w = (r.idx < kBuchla259eParamCount) ? s.param[r.idx] : 0;
+
+  switch (r.kind) {
+    case ROW_PITCH:
+      DrawTenths(Buchla259eSemitoneTenths(w), "st");
+      break;
+
+    case ROW_BIPOLAR:
+      // Signed: negative means the CV is inverted, not merely turned down.
+      graphics.printf("%+d%%", Buchla259eBipolarPercent(w));
+      break;
+
+    case ROW_UNIPOLAR:
+      graphics.printf("%d%%", Buchla259eUnipolarPercent(w));
+      break;
+
+    case ROW_MODFREQ:
+      // Absolute, unless the modulator is tracking the principal, in which
+      // case the same bytes are an interval either side of unison.
+      if (s.mod_freq_mode == 2) {
+        const int t = Buchla259eIntervalTenths(w);
+        if (t > 0) graphics.print("+");
+        DrawTenths(t, "st");
+      } else {
+        graphics.printf("%d", (int)Buchla259eParam12(w));
+      }
+      break;
+
+    case ROW_DUAL: {
+      const bool skew = (r.idx == 4) ? Buchla259eParam4IsSkew(s)
+                                      : Buchla259eParam5IsSkew(s);
+      if (skew) graphics.printf("b%lu", (unsigned long)Buchla259eSkewBase(w));
+      else      graphics.printf("%d%%", Buchla259eUnipolarPercent(w));
+      break;
+    }
+
+    case ROW_MORPH:
+      // A crossfade between the two timbre tables, so name the destination
+      // rather than leaving a bare percentage pointing nowhere.
+      graphics.printf("%d%%grn", Buchla259eUnipolarPercent(w));
+      break;
+
+    case ROW_WARP:
+      // The real scan width, not the stored count: the knob bottoms out at
+      // 20%, so showing 0 here would read as "off" when it is not.
+      graphics.printf("%d%%scan", Buchla259eWarpScanPercent(w));
+      break;
+
+    case ROW_ENGINE:
+      if (Buchla259eEngineModeIsInert(s)) {
+        // Mode 1 does nothing while the modulator is slow. Say so.
+        graphics.print("1 INERT");
+      } else {
+        switch (s.engine_mode) {
+          case 0:  graphics.print("0 off"); break;
+          case 1:  graphics.print("1 mirror"); break;
+          case 2:  graphics.print("2 sync"); break;
+          default: graphics.print("3 free"); break;
+        }
+      }
+      break;
+
+    case ROW_MODDEST: {
+      // 3-bit mask, drawn as present/absent letters so all three states are
+      // visible at once instead of hidden behind a number.
+      const uint8_t m = s.mod_dest_mask;
+      graphics.printf("%c%c%c",
+                      (m & kBuchla259eModDestFreq)  ? 'F' : '-',
+                      (m & kBuchla259eModDestWarp)  ? 'W' : '-',
+                      (m & kBuchla259eModDestMorph) ? 'M' : '-');
+      break;
+    }
+
+    case ROW_WAVEFORM:
+      switch (s.mod_waveform) {
+        case 0:  graphics.print("Tri"); break;
+        case 1:  graphics.print("Sqr"); break;
+        case 2:  graphics.print("Saw"); break;
+        default: graphics.printf("?%d", s.mod_waveform); break;
+      }
+      break;
+
+    case ROW_FREQMODE:
+      switch (s.mod_freq_mode) {
+        case 0:  graphics.print("slow"); break;
+        case 1:  graphics.print("norm"); break;
+        case 2:  graphics.print("track"); break;
+        default: graphics.printf("?%d", s.mod_freq_mode); break;
+      }
+      break;
+
+    case ROW_WAVEBTN:
+      graphics.print(s.wave_button_target ? "red" : "green");
+      break;
+
+    case ROW_TIMBRE:
+      graphics.printf("%d", (r.idx == 31) ? s.red_timbre : s.green_timbre);
+      break;
+
+    default:
+      graphics.print("?");
+      break;
+  }
+}
+
+FLASHMEM __attribute__((noinline))
+void AppBus200e::DrawModule259e() const {
+  using namespace Bus200eAppNS;
+
+  for (int i = 0; i < kRows259eVisible; ++i) {
+    const int row = row_top_ + i;
+    if (row >= kRow259eCount) break;
+    const int y = kRow259eY0 + i * kRow259eDY;
+    DrawRow259e(row, y);
+    if (row == row_cursor_) graphics.invertRect(0, y - 1, 124, kRow259eDY + 1);
+  }
+
+  // Scrollbar: 19 rows in 3 makes position worth showing, and a bar costs no
+  // characters on a line that has none to spare. The guard is for the day
+  // someone trims the table to 3 rows or fewer -- the span would be 0 and
+  // this would divide by it.
+  const int span = kRow259eCount - kRows259eVisible;
+  if (span > 0) {
+    const int track_h = kRows259eVisible * kRow259eDY;
+    const int knob_h = (track_h * kRows259eVisible) / kRow259eCount + 1;
+    const int knob_y =
+        kRow259eY0 - 1 + (track_h - knob_h) * (int)row_top_ / span;
+    graphics.drawVLine(126, kRow259eY0 - 1, track_h);
+    graphics.drawRect(125, knob_y, 3, knob_h);
+  }
+
+  DrawReadState();
+
+  // Only Read applies to a 259e: there is no editor, generator or MIDI
+  // recorder for it. Drawing the other three would advertise nothing.
+  graphics.setPrintPos(0, 56);
+  graphics.print("Read");
+  graphics.invertRect(-1, 55, 26, 10);
+  graphics.setPrintPos(36, 56);
+  graphics.print("L:back  encL:scroll");
+}
+
 // --- app interface ---------------------------------------------------------
 
 FLASHMEM void AppBus200e::Init() {
@@ -583,6 +883,8 @@ FLASHMEM void AppBus200e::Init() {
   read_state_ = Bus200eAppNS::READ_NONE;
   read_err_ = BUS200E_MASTER_ERR_NONE;
   edited_ = false;
+  row_cursor_ = 0;
+  row_top_ = 0;
 }
 
 FLASHMEM size_t AppBus200e::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
@@ -634,19 +936,24 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
   if (event.type != UI::EVENT_BUTTON_PRESS) return;
 
   if (screen_ == Bus200eAppNS::SCR_MODULE_HOME) {
+    const bool is259 = (CurrentModuleType() == Bus200eAppNS::MODTYPE_259E);
     switch (event.control) {
       case OC::CONTROL_BUTTON_L:
         screen_ = Bus200eAppNS::SCR_MODULE_SELECT;
         break;
       case OC::CONTROL_BUTTON_DOWN:
         // Cycle A-D. Only four values, so a button beats an encoder and
-        // leaves the left encoder free to drive the action cursor.
-        seq_ = (uint8_t)((seq_ + 1) % kBuchla251eSequencesPerSlot);
+        // leaves the left encoder free to drive the action cursor. The
+        // 259e has no sequences, so this does nothing there rather than
+        // being repurposed into a gesture nothing on screen advertises.
+        if (!is259)
+          seq_ = (uint8_t)((seq_ + 1) % kBuchla251eSequencesPerSlot);
         break;
       case OC::CONTROL_BUTTON_R:
         // Read is the only action wired up; the others are stubs on
-        // purpose (see the HomeAction comment).
-        if (action_ == Bus200eAppNS::ACT_READ) StartRead();
+        // purpose (see the HomeAction comment). On a 259e it is the only
+        // action that exists at all.
+        if (is259 || action_ == Bus200eAppNS::ACT_READ) StartRead();
         break;
       default: break;
     }
@@ -690,9 +997,16 @@ FLASHMEM void AppBus200e::HandleEncoderEvent(const UI::Event &event) {
         }
       }
     } else if (event.control == OC::CONTROL_ENCODER_L) {
-      int a = (int)action_ + event.value;
-      CONSTRAIN(a, 0, Bus200eAppNS::ACT_COUNT - 1);
-      action_ = (uint8_t)a;
+      // On a 259e the action row is a single entry, so the left encoder is
+      // free for what that page actually needs: scrolling 19 parameters
+      // through a 3-row window.
+      if (CurrentModuleType() == Bus200eAppNS::MODTYPE_259E) {
+        ScrollRows(event.value);
+      } else {
+        int a = (int)action_ + event.value;
+        CONSTRAIN(a, 0, Bus200eAppNS::ACT_COUNT - 1);
+        action_ = (uint8_t)a;
+      }
     }
     return;
   }
