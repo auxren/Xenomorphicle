@@ -194,93 +194,7 @@ public:
     void store_to_preset(int id);  // out-of-class (FLASHMEM + LTO)
 
     void LoadFromPreset(int id);
-    FLASHMEM void load_from_preset(int id) {
-        preset_id = id;
-
-        uint16_t preset_key = id << 11;
-        uint64_t data;
-
-        // applet ids + misc
-        if (!PhzConfig::getValue(preset_key | APPLET_METADATA_KEY, data)) return;
-        if (!data) return;
-
-        for (size_t h = 0; h < APPLET_SLOTS; h++)
-        {
-            int index = HS::get_applet_index_by_id( Unpack(data, PackLocation{h*8, 8}) );
-
-            // applet data
-            PhzConfig::getValue(preset_key | (APPLET_L1_DATA_KEY + h), applet_data[h]);
-            SetApplet(HEM_SIDE(h), index);
-            HS::get_applet(index, HEM_SIDE(h))->OnDataReceive(applet_data[h]);
-        }
-
-        // clock data
-        if (!PhzConfig::getValue(preset_key | CLOCK_DATA_KEY, clock_data)) return;
-        ClockSetup_instance.OnDataReceive(clock_data);
-        // if the first key exists, we are assuming the rest are present...
-
-        // vague globals
-        PhzConfig::getValue(preset_key | GLOBALS_KEY, global_data);
-        ClockSetup_instance.SetGlobals(global_data);
-
-        // Input Mappings
-        if (PhzConfig::getValue(preset_key | TRIGMAP_KEY, data)) {
-          for (size_t i = 0; i < ADC_CHANNEL_COUNT/2; ++i) {
-            UnpackPackables(data, HS::trigmap[i*2], HS::trigmap[i*2+1]);
-            if (!PhzConfig::getValue(preset_key | (TRIGMAP_KEY + i+1), data)) break;
-          }
-        } else if (PhzConfig::getValue(preset_key | OLD_TRIGMAP_KEY, data)) {
-          // migrate from v1.x
-          uint16_t mapdata[4];
-          UnpackPackables(data, mapdata[0], mapdata[1], mapdata[2], mapdata[3]);
-          HS::trigmap[0].Unpack(mapdata[0]);
-          HS::trigmap[1].Unpack(mapdata[1]);
-          HS::trigmap[2].Unpack(mapdata[2]);
-          HS::trigmap[3].Unpack(mapdata[3]);
-          PhzConfig::getValue(preset_key | (OLD_TRIGMAP_KEY + 1), data);
-          UnpackPackables(data, mapdata[0], mapdata[1], mapdata[2], mapdata[3]);
-          HS::trigmap[4].Unpack(mapdata[0]);
-          HS::trigmap[5].Unpack(mapdata[1]);
-          HS::trigmap[6].Unpack(mapdata[2]);
-          HS::trigmap[7].Unpack(mapdata[3]);
-        }
-
-        if (PhzConfig::getValue(preset_key | CVMAP_KEY, data)) {
-          for (size_t i = 0; i < ADC_CHANNEL_COUNT/4; ++i) {
-            UnpackPackables(data, HS::cvmap[i*4], HS::cvmap[i*4+1], HS::cvmap[i*4+2], HS::cvmap[i*4+3]);
-            if (!PhzConfig::getValue(preset_key | (CVMAP_KEY + i+1), data)) break;
-          }
-        }
-
-        data = 0;
-        PhzConfig::getValue(preset_key | INSKIP_KEY, data);
-        for (size_t i = 0; i < 8; ++i) {
-          HS::frame.clockinskip[i] = Unpack(data, PackLocation{i*8, 8});
-        }
-
-        PhzConfig::getValue(preset_key | OUTSKIP_KEY, data);
-        for (size_t i = 0; i < 8; ++i)
-        {
-          HS::frame.clockoutskip[i] = Unpack(data, PackLocation{i*8, 8});
-        }
-
-        PhzConfig::getValue(preset_key | OUTSLEW_KEY, data);
-        for (size_t i = 0; i < 8; ++i)
-        {
-          HS::frame.output_slew[i] = Unpack(data, PackLocation{i*8, 8});
-        }
-
-        const bool has_output_atten = PhzConfig::getValue(preset_key | OUTATTEN_KEY, data);
-        for (size_t i = 0; i < 8; ++i)
-        {
-          HS::frame.output_atten[i] = has_output_atten ? Unpack(data, PackLocation{i*8, 8}) : 60;
-        }
-
-        //LoadGlobals();
-
-        audio_app.LoadPreset(id);
-        PokePopup(PRESET_POPUP);
-    }
+    void load_from_preset(int id);  // out-of-class (FLASHMEM + LTO)
     void LoadGlobals() {
         // applet filtering
         PhzConfig::getValue(FILTERMASK1_KEY, HS::hidden_applets[0]);
@@ -1978,6 +1892,94 @@ void AppQuadrants::HandleButtonEvent(const UI::Event &event) {
 FLASHMEM
 void AppQuadrants::HandleEncoderEvent(const UI::Event &event) {
     DelegateEncoderMovement(event);
+}
+
+FLASHMEM void AppQuadrants::load_from_preset(int id) {
+    preset_id = id;
+
+    uint16_t preset_key = id << 11;
+    uint64_t data;
+
+    // applet ids + misc
+    if (!PhzConfig::getValue(preset_key | APPLET_METADATA_KEY, data)) return;
+    if (!data) return;
+
+    for (size_t h = 0; h < APPLET_SLOTS; h++)
+    {
+        int index = HS::get_applet_index_by_id( Unpack(data, PackLocation{h*8, 8}) );
+
+        // applet data
+        PhzConfig::getValue(preset_key | (APPLET_L1_DATA_KEY + h), applet_data[h]);
+        SetApplet(HEM_SIDE(h), index);
+        HS::get_applet(index, HEM_SIDE(h))->OnDataReceive(applet_data[h]);
+    }
+
+    // clock data
+    if (!PhzConfig::getValue(preset_key | CLOCK_DATA_KEY, clock_data)) return;
+    ClockSetup_instance.OnDataReceive(clock_data);
+    // if the first key exists, we are assuming the rest are present...
+
+    // vague globals
+    PhzConfig::getValue(preset_key | GLOBALS_KEY, global_data);
+    ClockSetup_instance.SetGlobals(global_data);
+
+    // Input Mappings
+    if (PhzConfig::getValue(preset_key | TRIGMAP_KEY, data)) {
+      for (size_t i = 0; i < ADC_CHANNEL_COUNT/2; ++i) {
+        UnpackPackables(data, HS::trigmap[i*2], HS::trigmap[i*2+1]);
+        if (!PhzConfig::getValue(preset_key | (TRIGMAP_KEY + i+1), data)) break;
+      }
+    } else if (PhzConfig::getValue(preset_key | OLD_TRIGMAP_KEY, data)) {
+      // migrate from v1.x
+      uint16_t mapdata[4];
+      UnpackPackables(data, mapdata[0], mapdata[1], mapdata[2], mapdata[3]);
+      HS::trigmap[0].Unpack(mapdata[0]);
+      HS::trigmap[1].Unpack(mapdata[1]);
+      HS::trigmap[2].Unpack(mapdata[2]);
+      HS::trigmap[3].Unpack(mapdata[3]);
+      PhzConfig::getValue(preset_key | (OLD_TRIGMAP_KEY + 1), data);
+      UnpackPackables(data, mapdata[0], mapdata[1], mapdata[2], mapdata[3]);
+      HS::trigmap[4].Unpack(mapdata[0]);
+      HS::trigmap[5].Unpack(mapdata[1]);
+      HS::trigmap[6].Unpack(mapdata[2]);
+      HS::trigmap[7].Unpack(mapdata[3]);
+    }
+
+    if (PhzConfig::getValue(preset_key | CVMAP_KEY, data)) {
+      for (size_t i = 0; i < ADC_CHANNEL_COUNT/4; ++i) {
+        UnpackPackables(data, HS::cvmap[i*4], HS::cvmap[i*4+1], HS::cvmap[i*4+2], HS::cvmap[i*4+3]);
+        if (!PhzConfig::getValue(preset_key | (CVMAP_KEY + i+1), data)) break;
+      }
+    }
+
+    data = 0;
+    PhzConfig::getValue(preset_key | INSKIP_KEY, data);
+    for (size_t i = 0; i < 8; ++i) {
+      HS::frame.clockinskip[i] = Unpack(data, PackLocation{i*8, 8});
+    }
+
+    PhzConfig::getValue(preset_key | OUTSKIP_KEY, data);
+    for (size_t i = 0; i < 8; ++i)
+    {
+      HS::frame.clockoutskip[i] = Unpack(data, PackLocation{i*8, 8});
+    }
+
+    PhzConfig::getValue(preset_key | OUTSLEW_KEY, data);
+    for (size_t i = 0; i < 8; ++i)
+    {
+      HS::frame.output_slew[i] = Unpack(data, PackLocation{i*8, 8});
+    }
+
+    const bool has_output_atten = PhzConfig::getValue(preset_key | OUTATTEN_KEY, data);
+    for (size_t i = 0; i < 8; ++i)
+    {
+      HS::frame.output_atten[i] = has_output_atten ? Unpack(data, PackLocation{i*8, 8}) : 60;
+    }
+
+    //LoadGlobals();
+
+    audio_app.LoadPreset(id);
+    PokePopup(PRESET_POPUP);
 }
 
 FLASHMEM void AppQuadrants::store_to_preset(int id) {

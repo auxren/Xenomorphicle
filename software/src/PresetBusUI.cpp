@@ -106,7 +106,15 @@ FLASHMEM static void commit_name() {
   PresetEngine::SetSlotName(sel, out);
 }
 
-FLASHMEM bool HandleEvent(const UI::Event &event) {
+// noinline so FLASHMEM sticks (free-function LTO rule -- same treatment as
+// Main.cpp's BootMenu/SelfTest/loop and PresetBus.cpp's bus_stuck_recover).
+// Without it LTO is free to inline all ~800 bytes of this overlay handler
+// into OC::Ui::DispatchEvents, which lives in ITCM: the FLASHMEM annotation
+// is silently defeated and, on the tightest build (T41_audio_dbg, which sits
+// ~1KB under a 32KB ITCM block boundary), that inline costs a whole extra
+// 32KB bank and overflows RAM1. Whether LTO takes that inline was, until
+// now, decided by unrelated code churn elsewhere in the image.
+FLASHMEM __attribute__((noinline)) bool HandleEvent(const UI::Event &event) {
   if (!active) return false;
   if (sel_stored < 0) sel_stored = PresetEngine::SlotUsed(sel) ? 1 : 0;
 

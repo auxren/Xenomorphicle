@@ -138,6 +138,20 @@ void FASTRUN Ui::Poll() {
   button_state_ = button_state;
 }
 
+// Loop context only, and only ever from Main.cpp's loop() -- which is itself
+// FLASHMEM. The ISR half of the UI is Ui::Poll() above (it fills the event
+// queue); this is the half that DRAINS it, so it does nothing at all unless a
+// human moved an encoder or pressed a button. Flash is the right home for it.
+//
+// FLASHMEM + noinline for the reason PresetBusUI.cpp's HandleEvent already
+// documents, seen from the other side: without an explicit placement here,
+// whether these ~1.5KB land in ITCM was decided by LTO's inlining mood. When
+// LTO folded it into FLASHMEM loop() the ITCM cost was zero; when unrelated
+// churn elsewhere in the image (a bigger Bus200e bridge, say) pushed it back
+// out of line, it reappeared as a 1544-byte ITCM function -- which on
+// T41_audio_dbg, sitting ~1KB under a 32KB ITCM bank boundary, cost a whole
+// extra bank and overflowed RAM1. Pinning it makes that deterministic.
+FLASHMEM __attribute__((noinline))
 UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
   AppBase* app = static_cast<AppBase*>(appslot.instance);
   if (!app) return UiMode::UI_MODE_APP_SETTINGS;
