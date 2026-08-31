@@ -4,8 +4,8 @@
 // send/retry/timeout FSM and activity-based done-detection, all against a
 // fake I2C transport (no hardware, no real bus).
 // Standalone (no gtest): g++ -std=c++17 -Wall -Werror -O2 (one line:)
-//   -o build/test_bus200e_master test_bus200e_master.cpp \
-//      ../src/Bus200eMaster.cpp ../src/PresetBus200e.cpp && \
+//   -o build/test_bus200e_master test_bus200e_master.cpp
+//      ../src/Bus200eMaster.cpp ../src/PresetBus200e.cpp &&
 //   ./build/test_bus200e_master
 #include <cassert>
 #include <cstdio>

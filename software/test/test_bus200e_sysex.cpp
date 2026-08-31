@@ -5,7 +5,7 @@
 // pattern as test_bus200e.cpp. See Bus200eSysEx.h for why this protocol
 // packs (unlike hOC's docs/hoc-midi-sysex.md, which it otherwise mirrors).
 // Standalone (no gtest): g++ -std=c++17 -Wall -Werror -O2 (one line:)
-//   -o build/test_bus200e_sysex test_bus200e_sysex.cpp \
+//   -o build/test_bus200e_sysex test_bus200e_sysex.cpp
 //      ../src/Bus200eSysEx.cpp && ./build/test_bus200e_sysex
 #include <cassert>
 #include <cstdio>

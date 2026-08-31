@@ -6,7 +6,7 @@
 // No USB, no MIDI, no I2C: a fake Bus200eBridgeOps table stands in for
 // usbMIDI and OC::PresetBus, exactly the way test_bus200e_master.cpp fakes
 // the I2C transport. Same standalone (no gtest) shape as its neighbours:
-//   g++ -std=c++17 -Wall -Werror -O2 -o build/test_bus200e_bridge \
+//   g++ -std=c++17 -Wall -Werror -O2 -o build/test_bus200e_bridge
 //       test_bus200e_bridge.cpp ../src/Bus200eBridge.cpp ../src/Bus200eSysEx.cpp
 //   ./build/test_bus200e_bridge
 #include <cassert>
