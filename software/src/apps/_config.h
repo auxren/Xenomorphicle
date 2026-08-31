@@ -45,6 +45,9 @@ namespace menu = OC::menu;
 #ifdef ENABLE_APP_TUNER
 #include "TunerApp.h"
 #endif
+#ifdef ENABLE_APP_BUS200E
+#include "Bus200eApp.h"
+#endif
 #include "Backup.h"
 #include "SETTINGS.h"
 
@@ -139,6 +142,9 @@ static DMAMEM AppContainer<void // this space intentionally left blank
 #endif
 #ifdef ENABLE_APP_TUNER
   , AppTuner
+#endif
+#ifdef ENABLE_APP_BUS200E
+  , AppBus200e
 #endif
   , AppScaleEditor
 #ifndef NO_HEMISPHERE
