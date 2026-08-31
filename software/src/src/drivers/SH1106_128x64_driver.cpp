@@ -108,6 +108,7 @@ static uint8_t SH1106_init_seq[] = {
 static constexpr int CONTRAST_VALUE = 17;
 static constexpr int FLIP_CMD_A = 12;
 static constexpr int FLIP_CMD_B = 13;
+static constexpr int INVERT_CMD = 24;
 
 static uint8_t SH1106_display_on_seq[] = {
   0xaf
@@ -431,6 +432,20 @@ void SH1106_128x64_Driver::SetFlipMode(bool flip180) {
 /*static*/
 void SH1106_128x64_Driver::SetContrast(uint8_t contrast) {
   SH1106_init_seq[CONTRAST_VALUE] = contrast;
+}
+
+/*static*/
+void SH1106_128x64_Driver::SetInverted(bool inverted) {
+  // Update the init sequence so a future Init() (reset/reboot) keeps this
+  // setting, then send the SSD1306/SH1106 INVERTDISPLAY/NORMALDISPLAY
+  // command (0xA7/0xA6) live -- same single-command-frame pattern as
+  // Clear()'s display-on command, so it takes effect immediately.
+  SH1106_init_seq[INVERT_CMD] = inverted ? 0x0a7 : 0x0a6;
+  uint8_t cmd = SH1106_init_seq[INVERT_CMD];
+  digitalWriteFast(OLED_DC, LOW);
+  digitalWriteFast(OLED_CS, OLED_CS_ACTIVE);
+  SPI_send(&cmd, 1);
+  digitalWriteFast(OLED_CS, OLED_CS_INACTIVE);
 }
 
 #if defined(__MK20DX256__)

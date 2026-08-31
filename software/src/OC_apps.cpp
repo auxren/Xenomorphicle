@@ -51,6 +51,7 @@
 #include "OC_calibration.h"
 #include "OC_patterns.h"
 #include "src/drivers/FreqMeasure/OC_FreqMeasure.h"
+#include "src/drivers/display.h"
 #include "util/util_pagestorage.h"
 #include "src/drivers/EEPROMStorage.h"
 #include "PhzConfig.h"
@@ -116,6 +117,7 @@ void BuildGlobalSettingsValues() {
   Pack(data, PackLocation{0, 16}, global_settings.current_app_id);
   Pack(data, PackLocation{16, 1}, global_settings.encoders_enable_acceleration);
   Pack(data, PackLocation{17, 1}, 1); // v2.0 first-run validation
+  Pack(data, PackLocation{18, 1}, global_settings.invert_display);
   PhzConfig::setValue(METADATA_KEY, data);
 
   // User Scales
@@ -491,7 +493,7 @@ bool AppSwitcher::Init(bool reset_settings) {
 
   global_settings.Init();
   global_settings.encoders_enable_acceleration = OC_ENCODERS_ENABLE_ACCELERATION_DEFAULT;
-  global_settings.reserved0 = false;
+  global_settings.invert_display = false;
   global_settings.reserved1 = false;
   global_settings.reserved2 = 0U;
   global_settings.current_app_id = DEFAULT_APP_ID;
@@ -505,6 +507,7 @@ bool AppSwitcher::Init(bool reset_settings) {
     global_settings.current_app_id = Unpack(data, PackLocation{0, 16});
     global_settings.encoders_enable_acceleration = Unpack(data, PackLocation{16, 1});
     global_settings.valid = Unpack(data, PackLocation{17, 1});
+    global_settings.invert_display = Unpack(data, PackLocation{18, 1});
     gs_restored = global_settings.valid;
     // 15 bits empty...
     // TODO:
@@ -634,6 +637,7 @@ bool AppSwitcher::Init(bool reset_settings) {
 
   APPS_SERIAL_PRINTLN("Encoder acceleration: %s", global_settings.encoders_enable_acceleration ? "enabled" : "disabled");
   ui.encoders_enable_acceleration(global_settings.encoders_enable_acceleration);
+  display::SetInverted(global_settings.invert_display);
 
   set_current_app(current_app_index);
 
@@ -671,6 +675,10 @@ bool Ui::AppSettings(bool drawmenu) {
     // assumes this is called from within a graphics frame context
     if (global_settings.encoders_enable_acceleration)
       graphics.drawBitmap8(120, 1, 4, bitmap_indicator_4x8);
+    if (global_settings.invert_display) {
+      graphics.setPrintPos(96, 1);
+      graphics.print("INV");
+    }
 
     menu::SettingsListItem item;
     item.x = menu::kIndentDx + 8;
@@ -728,6 +736,13 @@ bool Ui::AppSettings(bool drawmenu) {
         if (UI::EVENT_BUTTON_LONG_PRESS == event.type || UI::EVENT_BUTTON_DOWN == event.type) {
           VBiasManager *vbias_m = vbias_m->get();
           vbias_m->AdvanceBias();
+        }
+#else
+        if (UI::EVENT_BUTTON_PRESS == event.type) {
+            bool inverted = !global_settings.invert_display;
+            APPS_SERIAL_PRINTLN("Invert display: %s", inverted ? "on" : "off");
+            display::SetInverted(inverted);
+            global_settings.invert_display = inverted;
         }
 #endif
         break;

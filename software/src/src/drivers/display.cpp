@@ -44,5 +44,8 @@ void SetFlipMode(bool flip180) {
 void SetContrast(uint8_t contrast) {
     SH1106_128x64_Driver::SetContrast(contrast);
 }
+void SetInverted(bool inverted) {
+    SH1106_128x64_Driver::SetInverted(inverted);
+}
 
 };
