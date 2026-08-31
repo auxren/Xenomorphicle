@@ -45,6 +45,10 @@ jobs:
               test_buchla251e_recorder.cpp ../src/Buchla251eSlotCodec.cpp \
               ../src/Buchla251eRecorder.cpp
           ./build/test_buchla251e_recorder
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_buchla200e_module_table \
+              test_buchla200e_module_table.cpp ../src/Buchla200eModuleTable.cpp
+          ./build/test_buchla200e_module_table
 
   firmware:
     runs-on: ubuntu-latest
