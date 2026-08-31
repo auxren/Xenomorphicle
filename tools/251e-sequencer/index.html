@@ -18,6 +18,19 @@
           <option value="webmidi">WebMIDI (real device)</option>
         </select>
         <button id="connect-btn" type="button">Connect</button>
+        <label class="addr-control" title="Which 200e module on the bus to read from / write to. Two hex digits, the same value the firmware console's 'm' and 'q' commands take.">
+          module
+          <input
+            id="module-addr"
+            type="text"
+            inputmode="latin"
+            maxlength="2"
+            size="2"
+            placeholder="2E"
+            spellcheck="false"
+            autocomplete="off"
+          />
+        </label>
         <button id="read-btn" type="button" disabled>Read from device</button>
         <button id="write-btn" type="button" disabled>Write to device</button>
         <span id="dirty-badge" class="dirty-badge" hidden>unsaved edits</span>
@@ -32,10 +45,16 @@
       comments in <code>sequence-codec.js</code> and
       <code>sysex-transport.js</code> for exactly what's placeholder and why.
       This applet is built and tested against the
-      <strong>Mock</strong> transport's synthetic dump; the live 200e bus
-      isn't yet cleared as electrically safe to attach, so
-      <strong>WebMIDI mode is untested against real hardware</strong>. Add
-      <code>?transport=webmidi</code> to the URL to preselect it.
+      <strong>Mock</strong> transport, which is an in-process model of the
+      firmware's own session FSM (<code>Bus200eBridge.cpp</code>) rather than
+      a stub &mdash; a mock read/write travels through the real framing code.
+      <strong>Nothing here has been run against real hardware yet</strong>:
+      the firmware side (USB&nbsp;MIDI SysEx RX &rarr; card image &rarr;
+      <code>MasterRestore</code>) is host-tested only, and the 200e bus
+      timing it depends on is still unverified. Add
+      <code>?transport=webmidi</code> to the URL to preselect WebMIDI.
+      <strong>Read/Write need a module address</strong> (two hex digits) &mdash;
+      the applet never guesses which module on the bus to touch.
     </div>
 
     <main id="grid"></main>

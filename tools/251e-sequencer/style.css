@@ -58,6 +58,7 @@ h1 .subtitle {
 
 select,
 button,
+input[type="text"],
 input[type="number"] {
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -107,6 +108,27 @@ button:not(:disabled):hover {
 
 .status-info {
   color: var(--text-dim);
+}
+
+.addr-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+#module-addr {
+  width: 48px;
+  text-align: center;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+#module-addr.invalid {
+  border-color: var(--error);
+  color: var(--error);
 }
 
 .dirty-badge {
