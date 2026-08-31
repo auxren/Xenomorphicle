@@ -29,14 +29,20 @@
 // sequencer B transport through this exact QueueMidiTx/pump_midi_tx path,
 // "proven obeyed" per its own commit history (2026-08-28). That is real
 // corroboration for the gating/echo-suppression *mechanism* this module
-// reuses. It is NOT corroboration for BACKUP/RESTORE specifically -- a
-// different opcode, never bench-traced -- so this module's own timing
-// constants below remain UNVERIFIED against a live BACKUP/RESTORE exchange:
+// reuses.
+//
+// UPDATE (2026-08-31): BACKUP/RESTORE itself is now bench-CONFIRMED, not
+// just host-tested -- repeated live MasterBackup/MasterRestore cycles
+// against a real 251e (mod_addr 0x5C), including a full 198-byte-patch,
+// 4-sequence composition written and independently read back byte-exact.
+// The timing constants below turned out generous enough in practice (no
+// activity/hard-cap timeouts observed across that session), but they were
+// never bench-TRACED to see how close a real 251e actually runs to them --
+// treat them as "proven sufficient", not "proven tight". Retune only with
+// real trace data, not by guessing:
 //   - the timing constants below (how fast a real 225e/251e starts touching
 //     the card after a BACKUP/RESTORE command, and how long its own
-//     internal per-preset write/read gaps run). Generous and reviewable;
-//     tune from a bench trace before relying on them against a live case --
-//     this module was written and tested host-side only, never bench-run.
+//     internal per-preset write/read gaps run).
 //   - the address model: PresetBus.cpp's card-serving hardware (SAMR ADDR1)
 //     is now parameterized -- slave_reconfig() takes the 7-bit address to
 //     claim -- and MasterBackup()/MasterRestore() there offer
@@ -197,11 +203,13 @@ void Bus200eMasterReset(void);
 // Bus200eMasterQueryReply() below. There is no polling of the target and no
 // second bus transaction.
 //
-// UNVERIFIED, like everything else in this file: this has never run against a
-// real module. The reply-frame shape it recognizes is this project's own
-// established one (what try_query_reply() masters when queried), not a shape
-// traced off a 251e/259e answering. If a live module answers in some other
-// dialect, the timeout below is what will fire.
+// STILL UNVERIFIED as of 2026-08-31, unlike the BACKUP/RESTORE FSM above
+// (see the UPDATE note near the top of this file, which is now bench-
+// confirmed): this QUERY path has never run against a real module. The
+// reply-frame shape it recognizes is this project's own established one
+// (what try_query_reply() masters when queried), not a shape traced off a
+// 251e/259e answering. If a live module answers in some other dialect, the
+// timeout below is what will fire.
 typedef enum {
   BUS200E_QUERY_IDLE = 0,
   BUS200E_QUERY_SENDING,   // waiting for a quiet bus to master the request

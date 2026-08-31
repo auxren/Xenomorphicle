@@ -41,20 +41,34 @@
 //   header[8:16]              zero in every sample.  Unknown.  Preserved raw.
 //
 //   stage byte 0    per-stage value, default 0. Full 0..255 range in the
-//       programmed reference block. Structure HIGH confidence; UNITS UNKNOWN
-//       (very likely the stage CV/voltage, but no volts-per-LSB has ever been
-//       measured, so this codec exposes the raw byte and does NOT pretend to
-//       scale it to volts).
+//       programmed reference block. CONFIRMED (2026-08-30/31, live single-
+//       variable diff on a real 251e): raw value = volts x 10 exactly, zero
+//       offset -- one LSB = 0.1V = one semitone, matching the owner's manual
+//       ("each .1 volts adds 1 semitone"). This codec still exposes the raw
+//       byte rather than a volts field, so callers doing the volts<->raw
+//       conversion should use `value / 10` / `Math.round(volts * 10)`
+//       themselves -- kept explicit rather than silently baked into the
+//       codec's data model.
 //   stage byte 1    `0x00` in 250/250 observed entries. Might be a pad, might
 //       be the high byte of a 16-bit value at [0:2]. Unresolvable from
 //       defaults. Exposed as `pad`, preserved.
 //   stage [2:4]     uint16 LITTLE-endian, default 4. Structure HIGH
 //       confidence; units unknown. Named `time` after the doc's "per-stage
 //       time/duration" reading -- a descriptive name for the best-supported
-//       reading, NOT a confirmed semantic.
-//   stage [4:10]    all zero in every real entry except one (`251e.json`
-//       block 0, entry 14, byte 7 = 0x0a). Genuinely unknown. Preserved raw
-//       as `reserved`.
+//       reading, NOT a confirmed semantic. NOTE: setting `time = 0` to try to
+//       "skip" a stage does NOT cleanly skip it on real hardware -- the
+//       module still briefly steps through it (confirmed live, audible
+//       glitch). Use the end marker below for clean looping instead.
+//   stage [4:10]    `reserved[3]` (stage byte 7) CONFIRMED (2026-08-31, live
+//       diff: setting the panel's "end" field to "Always" on a stage and
+//       saving flips exactly this byte 0x00 -> 0x0a, nothing else in the
+//       stage) as the loop-termination / "end: Always" marker -- 0x0a = 10
+//       decimal, consistent with the manual's end-count field taking values
+//       1-9 or the letter "A" (Always) as the next value after 9. The
+//       remaining 5 bytes of `reserved` (indices 0,1,2,4,5) are still
+//       unknown and preserved raw. See
+//       `~/Documents/GitHub/claude_trix/tricks/reverse-engineering/re-buchla-251e-sequence-format.md`
+//       for the full live-diff methodology and writeup.
 //
 //   block trailer [500:522]   22 bytes, mostly unknown. Byte +1 is a
 //       per-sequence parameter: `0x78` = 120 default, `0x8c` = 140 in the one
@@ -62,6 +76,16 @@
 //       Everything else is zero in both sources. The whole trailer is kept as
 //       raw bytes; `getSequenceParam`/`setSequenceParam` are a named accessor
 //       for byte +1 only, with no claim about what it controls.
+//       Live note (2026-08-31): setting the "end: Always" marker above and
+//       saving also flipped trailer byte +4 from 0x00 to 0x02 on ALL FOUR
+//       sequences in the slot, even though only one sequence's end marker was
+//       touched -- possibly a save-revision/session stamp similar to the
+//       header floats above, possibly load-bearing for the end marker to
+//       actually take effect. Genuinely ambiguous either way: do not
+//       deliberately clear or set it, just preserve whatever a fresh backup
+//       already has (the codec's raw-passthrough behavior already does this
+//       correctly by default -- this note is a warning against "cleaning it
+//       up", not an instruction to change any code).
 //
 // Anything a user did not touch survives an edit-and-restore cycle
 // byte-for-byte. `encodeBank(decodeBank(bytes))` is the identity on any

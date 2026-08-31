@@ -105,19 +105,26 @@ bool CardServing();
 // WPM present, no memory, self-test). Poll MasterState()/MasterError()
 // afterward; once MasterState() reports BUS200E_MASTER_DONE, the captured
 // bytes are at MasterCardImage()[0 .. Bus200eMasterBytesTransferred())
-// (image itself is 32K, valid only while CardServing()).
+// (image itself is 64K -- BUSCARD_SIZE, see PresetBusCard.h -- valid only
+// while CardServing()).
 //
 // MasterRestore: the caller must already have (re)populated the card image
 // with the bytes to write back and be CardServing() before calling; returns
 // <0 immediately otherwise. Bus200eBridge.cpp is the caller that does that
 // today -- it CardServeEnable()s on PUT_DUMP, writes each verified
 // DUMP_DATA chunk into MasterCardImage(), and only calls this once DUMP_END
-// checks out. Nothing has been run against real hardware yet.
+// checks out. CONFIRMED live (2026-08-31): both MasterBackup and
+// MasterRestore against a real 251e (mod_addr 0x5C) -- repeated single-byte
+// and full-sequence writes, each independently read back byte-exact via a
+// fresh MasterBackup after the RESTORE completed. See the console commands
+// in Main.cpp (`m`/`c`/`w`/`x`) for the reference write-safety procedure
+// (fresh backup -> diff -> patch -> verify -> write -> verify) any new
+// caller (UI or otherwise) should preserve.
 int MasterBackup(uint8_t mod_addr);
 int MasterRestore(uint8_t mod_addr);
 Bus200eMasterState MasterState();
 Bus200eMasterError MasterError();
-uint8_t *MasterCardImage();   // the 32K card buffer; NULL unless CardServing()
+uint8_t *MasterCardImage();   // the 64K card buffer; NULL unless CardServing()
 void MasterReset();           // acknowledge a DONE/FAILED result, back to IDLE
 // hex-dump the last completed master transfer's bytes (0..
 // Bus200eMasterBytesTransferred()) from MasterCardImage() -- NOT
