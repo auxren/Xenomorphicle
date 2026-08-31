@@ -35,6 +35,11 @@ jobs:
           g++ -std=c++17 -Wall -Werror -O2 -o build/test_miditxring \
               test_miditxring.cpp
           ./build/test_miditxring
+          g++ -std=c++17 -Wall -Werror -O2 -I host_stubs \
+              -o build/test_buchla251e_slot_codec \
+              test_buchla251e_slot_codec.cpp ../src/Buchla251eSlotCodec.cpp \
+              ../src/Buchla251eGenerator.cpp ../src/src/extern/bjorklund.cpp
+          ./build/test_buchla251e_slot_codec
 
   firmware:
     runs-on: ubuntu-latest
