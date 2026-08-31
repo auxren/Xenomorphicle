@@ -33,13 +33,24 @@
 // still matches the module -- NO DATA / LIVE / EDITED* -- rather than showing
 // stage values with no provenance.
 //
-// READ ONLY, DELIBERATELY: this pass reaches MasterBackup and nothing else.
-// MasterRestore is not reachable from any code path here. Writing
-// permanently overwrites a real module's presets and gets its own pass with
-// the arm-then-confirm gesture the console's `x` command established.
+// WRITING REWRITES THE WHOLE BANK. MasterRestore transfers all 30 slots --
+// the card image is the unit of transfer -- so Save is guarded by
+// Buchla200eCheckWrite() (its own file, its own tests) and an arm-then-confirm
+// gesture, mirroring the console's `x` command. The confirm screen states the
+// whole-bank consequence and the changed-byte count outright, because "save
+// this preset" is what the user thinks they are doing and it is not what
+// happens on the wire.
+//
+// CONTROLS (the panel has A, B, X, Y and both encoder pushes; CONTROL_BUTTON_M
+// /"Z" is NOT wired on this hardware -- the grey clock button fires no UI
+// control, confirmed by watching events on the bench, so nothing binds to it):
+//   encR push = confirm/enter     encL push = back/cancel
+//   A = primary action (Save)     B = cycle sequence A-D
+//   X / Y = per-screen context
 // ---------------------------------------------------------------------------
 
 #include "../Buchla200eModuleTable.h"
+#include "../Buchla200eWriteGuard.h"
 #include "../Buchla251eSlotCodec.h"
 #include "../Buchla259eSlotCodec.h"
 #include "../PresetBus.h"
@@ -49,9 +60,10 @@ namespace Bus200eAppNS {
 enum Screen : uint8_t {
   SCR_MODULE_SELECT = 0,
   SCR_MODULE_HOME,
+  SCR_WRITE_CONFIRM,   // armed; nothing has gone on the wire yet
 };
 
-// Home-screen action row. Only READ is implemented this pass; the rest are
+// Home-screen action row. READ and SAVE are implemented; Edit/Gen/Rec are
 // deliberate stubs so the row's shape (and the muscle memory) is settled
 // before the phases that fill them in.
 enum HomeAction : uint8_t {
@@ -59,6 +71,7 @@ enum HomeAction : uint8_t {
   ACT_EDIT,
   ACT_GEN,
   ACT_REC,
+  ACT_SAVE,
   ACT_COUNT,
 };
 
@@ -68,6 +81,16 @@ enum ReadState : uint8_t {
   READ_ACTIVE,     // transfer in flight
   READ_OK,         // working_slot_ decoded from a completed read
   READ_FAIL,       // see read_err_
+};
+
+// A whole-bank MasterRestore, pumped from Loop(). Mirrors ReadState so the
+// provenance line can speak about writes in the same voice it speaks about
+// reads -- and so a failed write can never be drawn as a successful one.
+enum WriteState : uint8_t {
+  WRITE_NONE = 0,
+  WRITE_ACTIVE,
+  WRITE_OK,
+  WRITE_FAIL,
 };
 
 // Module types this app has a handler for. Identification is by address (see
@@ -112,9 +135,9 @@ static constexpr int kStripMinFullScale = 12;
 // included) lands in DTCM by default, which this build cannot spare. Same
 // pattern as Buchla200eModuleTable.cpp.
 static const char kActionNames[ACT_COUNT][5] PROGMEM = {
-  "Read", "Edit", "Gen", "Rec"
+  "Read", "Edit", "Gen", "Rec", "Save"
 };
-static const uint8_t kActionWidths[ACT_COUNT] = {4, 4, 3, 3};  // chars
+static const uint8_t kActionWidths[ACT_COUNT] = {4, 4, 3, 3, 4};  // chars
 
 // --- 259e parameter list ---------------------------------------------------
 // How a value is rendered, which is NOT a property of its width: a 12-bit
@@ -217,6 +240,18 @@ private:
   uint32_t read_ms_ = 0;       // millis() when the bank read completed
   bool edited_ = false;        // working_slot_ diverges from the module
 
+  // Which module the resident card image actually came from. Without these a
+  // read of 0x5C followed by a retarget to 0x28 would look writable, and
+  // would push a 251e bank at a 259e.
+  uint8_t read_addr_ = 0;
+  uint8_t read_type_ = Bus200eAppNS::MODTYPE_UNKNOWN;
+
+  // write path
+  uint8_t write_state_ = Bus200eAppNS::WRITE_NONE;
+  Bus200eMasterError write_err_ = BUS200E_MASTER_ERR_NONE;
+  int pending_changes_ = 0;    // diff size shown on the confirm screen
+  Buchla200eWriteBlock write_block_ = BUCHLA200E_WRITE_OK;
+
   // The decoded slot under the cursor. 2104 bytes, and deliberately a MEMBER:
   // app instances live in RAM2 (see the DMAMEM app_container in _config.h),
   // where 2KB is free, whereas a file-scope static would land in DTCM, which
@@ -246,6 +281,13 @@ private:
   void StartRead();
   void PumpRead();
   bool DecodeSlotFromCardImage();
+  uint32_t ExpectedBankBytes() const;
+  int ComputeSlotDiff();       // changed bytes for slot_, or <0 on overflow
+  Buchla200eWriteBlock CheckWrite(int changed) const;
+  void ArmWrite();
+  void CommitWrite();
+  void PumpWrite();
+  void DrawWriteConfirm() const;
   Bus200eAppNS::ModuleType CurrentModuleType() const;
   void DrawModuleSelect() const;
   void DrawModuleHome() const;
@@ -274,6 +316,15 @@ void AppBus200e::StartScan() {
   list_top_ = 0;
   scan_index_ = 0;
   scan_state_ = Bus200eAppNS::SCAN_NEXT;
+#ifdef PRESET_BUS
+  // Silence the per-address console line. It is not free: Teensy's
+  // usb_serial_write spins in `while (!tx_available)` for up to 120ms when
+  // the USB TX buffer is full and the host is not draining, and a scan emits
+  // ~59 of those lines. That is what starved loop() to a 57ms poll gap on the
+  // bench -- the display stopped updating and the abort press went unseen.
+  // The results are on screen anyway; the console 'q' command is unaffected.
+  OC::PresetBus::MasterQuerySetQuiet(true);
+#endif
 }
 
 FLASHMEM __attribute__((noinline))
@@ -282,6 +333,7 @@ void AppBus200e::StopScan() {
   scan_state_ = Bus200eAppNS::SCAN_IDLE;
 #ifdef PRESET_BUS
   OC::PresetBus::MasterQueryReset();
+  OC::PresetBus::MasterQuerySetQuiet(false);
 #endif
 }
 
@@ -350,11 +402,16 @@ void AppBus200e::PumpScan() {
   }
   if (scan_index_ >= count) {
     scan_state_ = Bus200eAppNS::SCAN_IDLE;
+    OC::PresetBus::MasterQuerySetQuiet(false);
     return;
   }
 
   const Buchla200eModuleEntry *e = Buchla200eModuleAt(scan_index_);
-  if (!e) { scan_state_ = Bus200eAppNS::SCAN_IDLE; return; }
+  if (!e) {
+    scan_state_ = Bus200eAppNS::SCAN_IDLE;
+    OC::PresetBus::MasterQuerySetQuiet(false);
+    return;
+  }
   if (OC::PresetBus::MasterQuery(e->addr) == 0) {
     scan_state_ = Bus200eAppNS::SCAN_WAITING;
   } else {
@@ -450,6 +507,10 @@ void AppBus200e::PumpRead() {
       read_state_ = Bus200eAppNS::READ_OK;
       read_ms_ = millis();
       edited_ = false;
+      // Stamp WHOSE bank is now resident. The write guard refuses unless this
+      // still matches the target at Save time.
+      read_addr_ = target_;
+      read_type_ = (uint8_t)CurrentModuleType();
     } else {
       // Transfer reported success but the bytes aren't usable. Say so --
       // a failed read must never be shown as a good one.
@@ -460,6 +521,133 @@ void AppBus200e::PumpRead() {
   } else if (st == BUS200E_MASTER_FAILED) {
     read_state_ = Bus200eAppNS::READ_FAIL;
     read_err_ = OC::PresetBus::MasterError();
+    OC::PresetBus::MasterReset();
+  }
+#endif
+}
+
+// --- writing a bank -------------------------------------------------------
+// MasterRestore sends the WHOLE bank. Everything below exists to make that
+// safe: size it, diff it, check it, arm it, then send it -- and verify after.
+
+FLASHMEM __attribute__((noinline))
+uint32_t AppBus200e::ExpectedBankBytes() const {
+  switch (CurrentModuleType()) {
+    case Bus200eAppNS::MODTYPE_251E:
+      return (uint32_t)Bus200eAppNS::kSlotCount * kBuchla251eSlotBytes;
+    case Bus200eAppNS::MODTYPE_259E:
+      return (uint32_t)Bus200eAppNS::kSlotCount * kBuchla259eRecordBytes;
+    default:
+      return 0;   // unknown type: the guard treats 0 as "cannot size" = refuse
+  }
+}
+
+// Changed bytes between the resident image's copy of this slot and the
+// working copy. <0 means the diff overflowed its buffer, which the guard
+// treats as unverifiable rather than as zero.
+FLASHMEM __attribute__((noinline))
+int AppBus200e::ComputeSlotDiff() {
+#ifdef PRESET_BUS
+  if (CurrentModuleType() != Bus200eAppNS::MODTYPE_251E) return 0;
+  const uint8_t *img = OC::PresetBus::MasterCardImage();
+  if (!img) return 0;
+  const uint32_t off = (uint32_t)slot_ * kBuchla251eSlotBytes;
+  if (Bus200eMasterBytesTransferred() < off + kBuchla251eSlotBytes) return 0;
+  // Only the count is wanted here; the patch buffer is a scratch the caller
+  // never reads, so a small one is fine -- overflow reports -1, which the
+  // guard blocks on.
+  Buchla251eBytePatch patches[32];
+  return Buchla251eDiffSlot(img + off, working_slot_, patches, 32);
+#else
+  return 0;
+#endif
+}
+
+FLASHMEM __attribute__((noinline))
+Buchla200eWriteBlock AppBus200e::CheckWrite(int changed) const {
+  Buchla200eWriteContext c;
+  c.have_read = (read_state_ == Bus200eAppNS::READ_OK);
+  c.read_addr = read_addr_;
+  c.read_type = read_type_;
+  c.target_addr = target_;
+  c.target_type = (uint8_t)CurrentModuleType();
+  c.expected_bank_bytes = ExpectedBankBytes();
+  c.changed_bytes = changed;
+#ifdef PRESET_BUS
+  c.bytes_transferred = Bus200eMasterBytesTransferred();
+  c.card_serving = OC::PresetBus::CardServing();
+  c.image_valid = (OC::PresetBus::MasterCardImage() != nullptr);
+  c.master_idle = (scan_state_ == Bus200eAppNS::SCAN_IDLE) && !probe_active_ &&
+                  (read_state_ != Bus200eAppNS::READ_ACTIVE) &&
+                  (write_state_ != Bus200eAppNS::WRITE_ACTIVE);
+#else
+  c.bytes_transferred = 0;
+  c.card_serving = false;
+  c.image_valid = false;
+  c.master_idle = false;
+#endif
+  return Buchla200eCheckWrite(c);
+}
+
+// Step 1 of 2. Computes the diff and runs the guard, but touches nothing on
+// the bus -- if this refuses, the reason is shown and no wire activity has
+// happened.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::ArmWrite() {
+  pending_changes_ = ComputeSlotDiff();
+  write_block_ = CheckWrite(pending_changes_);
+  screen_ = Bus200eAppNS::SCR_WRITE_CONFIRM;
+}
+
+// Step 2 of 2. Re-runs the guard rather than trusting the arm-time verdict:
+// the card image can be dropped, or a transfer started, in between.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::CommitWrite() {
+#ifdef PRESET_BUS
+  const int changed = ComputeSlotDiff();
+  write_block_ = CheckWrite(changed);
+  if (write_block_ != BUCHLA200E_WRITE_OK) {
+    pending_changes_ = changed;
+    return;   // stay on the confirm screen showing why
+  }
+
+  uint8_t *img = OC::PresetBus::MasterCardImage();
+  if (!img) { write_block_ = BUCHLA200E_WRITE_NO_IMAGE; return; }
+
+  // Encode the edited slot into the resident image. Only this slot's bytes
+  // move; the other 29 stay exactly as they were read, which is what makes a
+  // whole-bank transfer non-destructive to them.
+  Buchla251eEncodeSlot(working_slot_, img + (uint32_t)slot_ * kBuchla251eSlotBytes);
+
+  OC::PresetBus::MasterReset();
+  const int rc = OC::PresetBus::MasterRestore(target_);
+  if (rc == 0) {
+    write_state_ = Bus200eAppNS::WRITE_ACTIVE;
+    write_err_ = BUS200E_MASTER_ERR_NONE;
+  } else {
+    write_state_ = Bus200eAppNS::WRITE_FAIL;
+    write_err_ = (Bus200eMasterError)(-rc);
+  }
+  screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+#endif
+}
+
+FLASHMEM __attribute__((noinline))
+void AppBus200e::PumpWrite() {
+#ifdef PRESET_BUS
+  if (write_state_ != Bus200eAppNS::WRITE_ACTIVE) return;
+
+  const Bus200eMasterState st = OC::PresetBus::MasterState();
+  if (st == BUS200E_MASTER_DONE) {
+    write_state_ = Bus200eAppNS::WRITE_OK;
+    // The module now holds what working_slot_ holds, so this is no longer a
+    // divergence. Verification is a deliberate follow-up Read, not an
+    // automatic one -- see the comment on the confirm screen.
+    edited_ = false;
+    OC::PresetBus::MasterReset();
+  } else if (st == BUS200E_MASTER_FAILED) {
+    write_state_ = Bus200eAppNS::WRITE_FAIL;
+    write_err_ = OC::PresetBus::MasterError();
     OC::PresetBus::MasterReset();
   }
 #endif
@@ -527,7 +715,7 @@ void AppBus200e::DrawModuleSelect() const {
 
   graphics.setPrintPos(0, 26);
   if (scan_state_ != Bus200eAppNS::SCAN_IDLE) {
-    graphics.printf("Scan %d/%d  L:stop", scan_index_,
+    graphics.printf("Scan %d/%d encL:stop", scan_index_,
                     Buchla200eModuleCount());
   } else if (probe_active_) {
     graphics.printf("Probe %02X ...", probe_addr_);
@@ -535,7 +723,7 @@ void AppBus200e::DrawModuleSelect() const {
     graphics.printf("Probe %02X %s", probe_addr_,
                     probe_result_ ? "answered" : "silent");
   } else {
-    graphics.printf("L:scan D:probe  %d hit", found_count_);
+    graphics.printf("encL:scan B:probe %d", found_count_);
   }
 
   // responder list
@@ -592,6 +780,25 @@ void AppBus200e::DrawStageStrip() const {
 FLASHMEM __attribute__((noinline))
 void AppBus200e::DrawReadState() const {
   graphics.setPrintPos(0, 46);
+
+  // A write in flight or just finished outranks the read line: it is the more
+  // recent, and more consequential, thing that happened to the module.
+  switch (write_state_) {
+    case Bus200eAppNS::WRITE_ACTIVE:
+      graphics.printf("WRITING %02X ...", target_);
+      graphics.invertRect(0, 45, 128, 10);
+      return;
+    case Bus200eAppNS::WRITE_OK:
+      // Not "verified" -- only that the transfer completed. Re-Read to check.
+      graphics.print("WROTE ok - Read to chk");
+      return;
+    case Bus200eAppNS::WRITE_FAIL:
+      graphics.printf("WRITE FAILED (err %d)", (int)write_err_);
+      graphics.invertRect(0, 45, 128, 10);
+      return;
+    default: break;
+  }
+
   switch (read_state_) {
     case Bus200eAppNS::READ_ACTIVE:
       graphics.printf("reading %02X ...", target_);
@@ -626,6 +833,40 @@ void AppBus200e::DrawReadState() const {
   }
 }
 
+// The confirm screen. Nothing has touched the bus yet when this is drawn.
+//
+// It says "rewrites all 30" out loud because the user's mental model is
+// "save this preset", and that is not what goes on the wire -- the card image
+// is the unit of transfer. Being vague here would be the single most
+// expensive omission in the app.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::DrawWriteConfirm() const {
+  graphics.setPrintPos(0, 13);
+  graphics.printf("WRITE to %02X slot %d", target_, slot_ + 1);
+  graphics.invertRect(0, 12, 128, 10);
+
+  if (write_block_ != BUCHLA200E_WRITE_OK) {
+    graphics.setPrintPos(0, 26);
+    graphics.print("BLOCKED:");
+    graphics.setPrintPos(0, 36);
+    graphics.print(Buchla200eWriteBlockText(write_block_));
+    graphics.setPrintPos(0, 56);
+    graphics.print("encL:back");
+    return;
+  }
+
+  graphics.setPrintPos(0, 26);
+  graphics.printf("%d byte%s change", pending_changes_,
+                  pending_changes_ == 1 ? "" : "s");
+  graphics.setPrintPos(0, 36);
+  graphics.print("Rewrites ALL 30 slots");
+  graphics.setPrintPos(0, 46);
+  graphics.print("from what was read.");
+
+  graphics.setPrintPos(0, 56);
+  graphics.print("encR:CONFIRM  encL:no");
+}
+
 FLASHMEM __attribute__((noinline))
 void AppBus200e::DrawModuleHome() const {
   using namespace Bus200eAppNS;
@@ -653,7 +894,7 @@ void AppBus200e::DrawModuleHome() const {
   graphics.setPrintPos(0, 40);
   graphics.print("module type yet");
   graphics.setPrintPos(0, 56);
-  graphics.print("L:back");
+  graphics.print("encL:back");
 }
 
 FLASHMEM __attribute__((noinline))
@@ -683,14 +924,15 @@ void AppBus200e::DrawModule251e() const {
 
   DrawReadState();
 
-  // Action row. Only Read does anything this pass.
+  // Action row. Read and Save are wired; Edit/Gen/Rec are stubs.
+  // 4px gaps, not 6: five entries at 6px spill to 132px on a 128px screen.
   int x = 0;
   for (int i = 0; i < ACT_COUNT; ++i) {
     graphics.setPrintPos(x, 56);
     graphics.print(kActionNames[i]);
     const int w = (int)kActionWidths[i] * 6;
     if (i == action_) graphics.invertRect(x - 1, 55, w + 2, 10);
-    x += w + 6;
+    x += w + 4;
   }
 }
 
@@ -869,7 +1111,7 @@ void AppBus200e::DrawModule259e() const {
   graphics.print("Read");
   graphics.invertRect(-1, 55, 26, 10);
   graphics.setPrintPos(36, 56);
-  graphics.print("L:back  encL:scroll");
+  graphics.print("encL:back/scroll");
 }
 
 // --- app interface ---------------------------------------------------------
@@ -883,6 +1125,12 @@ FLASHMEM void AppBus200e::Init() {
   read_state_ = Bus200eAppNS::READ_NONE;
   read_err_ = BUS200E_MASTER_ERR_NONE;
   edited_ = false;
+  read_addr_ = 0;
+  read_type_ = Bus200eAppNS::MODTYPE_UNKNOWN;
+  write_state_ = Bus200eAppNS::WRITE_NONE;
+  write_err_ = BUS200E_MASTER_ERR_NONE;
+  pending_changes_ = 0;
+  write_block_ = BUCHLA200E_WRITE_OK;
   row_cursor_ = 0;
   row_top_ = 0;
 }
@@ -906,6 +1154,11 @@ FLASHMEM void AppBus200e::HandleAppEvent(OC::AppEvent event) {
   // background when the app goes away.
   if (event == OC::APP_EVENT_SUSPEND || event == OC::APP_EVENT_SCREENSAVER_ON) {
     if (scan_state_ != Bus200eAppNS::SCAN_IDLE) StopScan();
+    // Never leave a write armed across a suspend or a screensaver: the
+    // confirm prompt would be gone but the next encR press would still
+    // commit a whole-bank write.
+    if (screen_ == Bus200eAppNS::SCR_WRITE_CONFIRM)
+      screen_ = Bus200eAppNS::SCR_MODULE_HOME;
   }
 }
 
@@ -915,6 +1168,7 @@ FLASHMEM void AppBus200e::Loop() {
   PumpScan();
   PumpProbe();
   PumpRead();
+  PumpWrite();
 }
 
 FLASHMEM void AppBus200e::DrawMenu() const {
@@ -926,8 +1180,9 @@ FLASHMEM void AppBus200e::DrawMenu() const {
     return;
   }
 #endif
-  if (screen_ == Bus200eAppNS::SCR_MODULE_HOME) DrawModuleHome();
-  else                                          DrawModuleSelect();
+  if (screen_ == Bus200eAppNS::SCR_WRITE_CONFIRM)    DrawWriteConfirm();
+  else if (screen_ == Bus200eAppNS::SCR_MODULE_HOME) DrawModuleHome();
+  else                                               DrawModuleSelect();
 }
 
 FLASHMEM void AppBus200e::DrawScreensaver() const { DrawMenu(); }
@@ -935,25 +1190,49 @@ FLASHMEM void AppBus200e::DrawScreensaver() const { DrawMenu(); }
 FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
   if (event.type != UI::EVENT_BUTTON_PRESS) return;
 
+  // --- armed write: only two answers, and one of them is "no" -------------
+  if (screen_ == Bus200eAppNS::SCR_WRITE_CONFIRM) {
+    switch (event.control) {
+      case OC::CONTROL_BUTTON_R:      // encR = confirm
+        if (write_block_ == BUCHLA200E_WRITE_OK) CommitWrite();
+        break;
+      case OC::CONTROL_BUTTON_L:      // encL = back/cancel
+        screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+        break;
+      default:
+        // Everything else is deliberately inert here. A stray A/B/X/Y must
+        // not be able to commit a whole-bank write.
+        break;
+    }
+    return;
+  }
+
   if (screen_ == Bus200eAppNS::SCR_MODULE_HOME) {
     const bool is259 = (CurrentModuleType() == Bus200eAppNS::MODTYPE_259E);
     switch (event.control) {
-      case OC::CONTROL_BUTTON_L:
+      case OC::CONTROL_BUTTON_L:      // encL = back
         screen_ = Bus200eAppNS::SCR_MODULE_SELECT;
         break;
-      case OC::CONTROL_BUTTON_DOWN:
-        // Cycle A-D. Only four values, so a button beats an encoder and
-        // leaves the left encoder free to drive the action cursor. The
-        // 259e has no sequences, so this does nothing there rather than
+      case OC::CONTROL_BUTTON_DOWN:   // B = cycle sequence A-D
+        // The 259e has no sequences, so this does nothing there rather than
         // being repurposed into a gesture nothing on screen advertises.
         if (!is259)
           seq_ = (uint8_t)((seq_ + 1) % kBuchla251eSequencesPerSlot);
         break;
-      case OC::CONTROL_BUTTON_R:
-        // Read is the only action wired up; the others are stubs on
-        // purpose (see the HomeAction comment). On a 259e it is the only
-        // action that exists at all.
-        if (is259 || action_ == Bus200eAppNS::ACT_READ) StartRead();
+      case OC::CONTROL_BUTTON_UP:     // A = primary action (Save)
+        // Arms only; nothing reaches the bus until the confirm screen is
+        // answered. A 259e has no write path yet, so A does nothing there.
+        if (!is259) ArmWrite();
+        break;
+      case OC::CONTROL_BUTTON_R:      // encR = confirm/enter = run the action
+        if (is259) {
+          StartRead();               // the only action a 259e page has
+        } else if (action_ == Bus200eAppNS::ACT_READ) {
+          StartRead();
+        } else if (action_ == Bus200eAppNS::ACT_SAVE) {
+          ArmWrite();
+        }
+        // Edit/Gen/Rec remain stubs on purpose (see the HomeAction comment).
         break;
       default: break;
     }
@@ -961,18 +1240,22 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
   }
 
   switch (event.control) {
-    case OC::CONTROL_BUTTON_L:
+    case OC::CONTROL_BUTTON_L:        // encL = start/stop scan
       if (scan_state_ != Bus200eAppNS::SCAN_IDLE) StopScan();
       else                                        StartScan();
       break;
-    case OC::CONTROL_BUTTON_DOWN:
+    case OC::CONTROL_BUTTON_DOWN:     // B = probe one address
       StartProbe();
       break;
-    case OC::CONTROL_BUTTON_R:
+    case OC::CONTROL_BUTTON_R:        // encR = confirm/enter = pick target
       if (addr_ != target_) {
-        // New module: anything previously read belongs to the old one.
+        // New module: anything previously read belongs to the old one, and
+        // the write guard must not be able to mistake it for this one's.
         read_state_ = Bus200eAppNS::READ_NONE;
         edited_ = false;
+        read_addr_ = 0;
+        read_type_ = Bus200eAppNS::MODTYPE_UNKNOWN;
+        write_state_ = Bus200eAppNS::WRITE_NONE;
       }
       target_ = addr_;
       screen_ = Bus200eAppNS::SCR_MODULE_HOME;
@@ -982,6 +1265,11 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
 }
 
 FLASHMEM void AppBus200e::HandleEncoderEvent(const UI::Event &event) {
+  // An armed write ignores the encoders outright: changing the slot or the
+  // action cursor under a confirm prompt would make the prompt describe
+  // something other than what a confirm would do.
+  if (screen_ == Bus200eAppNS::SCR_WRITE_CONFIRM) return;
+
   if (screen_ == Bus200eAppNS::SCR_MODULE_HOME) {
     if (event.control == OC::CONTROL_ENCODER_R) {
       int s = (int)slot_ + event.value;

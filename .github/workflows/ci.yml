@@ -53,6 +53,10 @@ jobs:
               -o build/test_buchla200e_module_table \
               test_buchla200e_module_table.cpp ../src/Buchla200eModuleTable.cpp
           ./build/test_buchla200e_module_table
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_buchla200e_write_guard \
+              test_buchla200e_write_guard.cpp ../src/Buchla200eWriteGuard.cpp
+          ./build/test_buchla200e_write_guard
 
   firmware:
     runs-on: ubuntu-latest

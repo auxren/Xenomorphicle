@@ -167,6 +167,16 @@ Bus200eQueryState MasterQueryState();
 Bus200eMasterError MasterQueryError();
 void MasterQueryReset();       // acknowledge a DONE/FAILED query, back to IDLE
 
+// Silence report_query()'s per-result Serial line. A UI-driven scan walks
+// ~61 addresses and shows its own results on screen, so the console copy is
+// pure cost -- and NOT a cheap one: Teensy's usb_serial_write blocks in a
+// `while (!tx_available)` loop for up to TX_TIMEOUT_MSEC (120ms) whenever the
+// USB TX buffer is full and the host is not draining it. That is what starved
+// loop() to a 57ms poll gap during a bench scan. The console 'q' command
+// leaves this off, so a hand-typed query still prints.
+void MasterQuerySetQuiet(bool on);
+bool MasterQueryQuiet();
+
 // ---- bus MIDI ----
 // TX: queue a message for mastering onto the bus (ISR-safe; sent from
 // Task() when the bus is quiet). channel 1 -> 200e bus A, 2 -> bus B,
@@ -209,6 +219,8 @@ inline uint8_t MasterQueryVersion(uint8_t *, uint8_t) { return 0; }
 inline Bus200eQueryState MasterQueryState() { return BUS200E_QUERY_IDLE; }
 inline Bus200eMasterError MasterQueryError() { return BUS200E_MASTER_ERR_NONE; }
 inline void MasterQueryReset() {}
+inline void MasterQuerySetQuiet(bool) {}
+inline bool MasterQueryQuiet() { return false; }
 inline const Stats &GetStats() { static Stats s = {}; return s; }
 inline void DebugDump() {}
 inline void SetVerbose(bool) {}

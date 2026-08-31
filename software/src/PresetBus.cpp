@@ -594,6 +594,11 @@ uint8_t MasterQueryVersion(uint8_t *out, uint8_t cap) {
 Bus200eQueryState MasterQueryState() { return Bus200eMasterQueryGetState(); }
 Bus200eMasterError MasterQueryError() { return Bus200eMasterQueryLastError(); }
 void MasterQueryReset() { Bus200eMasterQueryReset(); }
+// Declared here rather than beside report_query() below, which uses it: the
+// accessors are part of the API block and the definition has to precede them.
+static bool query_quiet = false;
+void MasterQuerySetQuiet(bool on) { query_quiet = on; }
+bool MasterQueryQuiet() { return query_quiet; }
 
 // One-shot console report the moment a QUERY resolves. The whole point of
 // the command is the answer, and at the bench it lands asynchronously (the
@@ -606,6 +611,9 @@ FLASHMEM static void report_query() {
   const Bus200eQueryState s = Bus200eMasterQueryGetState();
   if (s == query_reported) return;
   query_reported = s;
+
+  // Still edge-tracked above, so leaving quiet mode does not dump a backlog.
+  if (query_quiet) return;
 
   if (s == BUS200E_QUERY_DONE) {
     uint8_t v[BUS200E_QUERY_VER_MAX];
