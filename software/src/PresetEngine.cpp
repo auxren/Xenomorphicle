@@ -1,4 +1,15 @@
 // Whole-module preset engine for the 200e preset bus. See PresetEngine.h.
+//
+// ROUND 4 -- the Store crash is CLOSED, and it was never in this file. The
+// fault is in the USB audio input path; the full write-up lives at the top of
+// src/Audio/USB_F32.cpp. Short version: a Store blocks loop() for seconds
+// across LittleFS program-flash writes, the USB audio transport's stream-stall
+// recovery (USBAudioInInterface::resetBuffer) then computes its ring write
+// index from a smoothed DWT timestamp with no modulo and no bound, and the
+// receive ISR dereferences whatever .bss word that out-of-range index lands
+// on. Nothing below needs to change; the guards are in USB_F32.cpp, where the
+// buffers actually live. The round-1..3 history is kept below because the
+// ruling-out is still valid and worth not repeating.
 #if defined(ARDUINO_TEENSY41)
 
 #include <Arduino.h>
@@ -16,10 +27,82 @@
 #include "OC_gpio.h"
 #include "OC_ui.h"
 #include "PhzConfig.h"
+#include "PresetBus.h"   // GetStats(): bus-slave ISR count, for the save report
 #include "HSUtils.h"
 #include "src/drivers/FreqMeasure/OC_FreqMeasure.h"
 
 extern uint_fast8_t MENU_REDRAW;  // Main.cpp
+// ---------------------------------------------------------------------------
+// The Store-crash investigation, round 3. Read this before theorising again.
+//
+// SYMPTOM: an ordinary Store resets the module, reliably, at the same point:
+// right after Captain's CAPTAIN.DAT save prints its last chunk checksum --
+// i.e. inside save_config()'s close/remove/rename tail, or step 4's copy_file
+// chain immediately after it. Both are LittleFS-on-program-flash write paths.
+//
+// WHAT IS RULED OUT, with evidence:
+//
+// * WDOG timeout. SRC_SRSR bit 4 was never set. Still true. The watchdog_feed()
+//   calls below stay as cheap insurance, but they were never the fix.
+//
+// * "SRSR 0x02 proves a CPU lockup." It does NOT. RT1060 RM 21.6.3 names the
+//   bit lockup_sysresetreq: set by a CPU lockup OR by any software write of
+//   SYSRESETREQ to SCB_AIRCR -- which is exactly how the Teensy core's own
+//   default fault handler reboots (startup.c, after parking ~8s). The core
+//   itself disambiguates with SRC_GPR5 == 0x0BAD00F1 (CrashReport.cpp). We
+//   were never reading GPR5; Main.cpp now captures it at boot and 't' prints
+//   [FAULT-REBOOT] vs [LOCKUP or SW-RESET].
+//
+// * "CrashReport has nothing for this one." It may well have had plenty:
+//   CrashReportClass::printTo() calls clear() on its way OUT, so Main.cpp's
+//   print-to-Serial-then-print-to-buffer sequence threw the report away and
+//   wrote "No Crash Data To Report" into CRASH.LOG every single time. Fixed
+//   in Main.cpp (capture first, echo the buffer).
+//
+// * Round 2's fix: CORE::app_isr_enabled left true across
+//   DispatchAppEvent(FLUSH)/(RESUME). Flashed and tested live -- SAME CRASH,
+//   same point. The freeze is kept below (it matches RecallSlot and is
+//   defensible on its own), but it is NOT the cause, and the premise was
+//   unsupported: nothing CORE_timer_ISR reaches touches PhzConfig at all.
+//
+// * ISR-vs-main-thread data races generally. Every interrupt live on a T4.1
+//   build was audited: CORE timer, UI timer (ui.Poll -> GPIO + event ring
+//   only, never gated by anything), LPI2C1 general-call slave, ADC DMA,
+//   display LPSPI, audio I2S DMA + software_isr, USB device/host, Serial8.
+//   NONE of them touch PhzConfig::cfg_store, PresetEngine state, `capture`,
+//   LittleFS, or the heap. In particular PresetBus's lpi2c1_slave_isr only
+//   pushes into its own SPSC ring (and, while card-serving, into the RAM-only
+//   BusCard image) -- it shares nothing with SaveSlot's call chain.
+//
+// * "The race is inside the flash window." There is no window: LittleFS's
+//   program-flash driver (eepromemu_flash_write/erase_sector in the core's
+//   eeprom.c) runs from ITCM with __disable_irq() held across the whole
+//   erase/program, so every interrupt above is masked while flash is busy.
+//
+// * Stack exhaustion. Measured, not estimated: the crashing boot's SelfTest
+//   reported 6200 bytes of DTCM stack never touched, nowhere near the guard.
+//
+// WHAT IT ACTUALLY WAS (round 4, from the first real CrashReport):
+//
+//   reset_cause SRC_SRSR=00000002 SRC_GPR5=0BAD00F1  (a CAUGHT fault, not a
+//   lockup -- GPR5 is the core fault handler's own marker)
+//   Code was executing from 0x8E8, CFSR 0x82 = DACCVIOL + MMARVALID,
+//   accessed 0x80000C on one run and 0x1B4 on another.
+//
+//   addr2line against the exact ELF: AudioInputUSB_F32::copy_to_buffers, and
+//   0x8E8 is the `vstr s15, [lr, #4]` that writes rxBuffer[bIdx][j]->data[].
+//   Not our call chain at all -- an ISR that keeps running while a Store
+//   blocks loop(), on a wild block pointer. See src/Audio/USB_F32.cpp.
+//
+// So the save path is a TRIGGER, not the bug: it is simply the longest thing
+// in the firmware that stops loop() and repeatedly masks interrupts, which is
+// exactly the condition the transport's stall recovery gets wrong. Guards are
+// in USB_F32.cpp; the 't' selftest prints their trip counts. If a Store ever
+// crashes again, check that line first -- non-zero counts with no crash means
+// the guards are doing their job, zero counts means look somewhere new.
+// ---------------------------------------------------------------------------
+extern void watchdog_feed();      // Main.cpp
+extern uint32_t stack_low_water();  // Main.cpp: unused DTCM stack, in bytes
 
 namespace OC {
 
@@ -202,14 +285,30 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   uint8_t flags = 0;
   char name[12], name2[12];
 
-  // 1. capture the app-data chunk stream to RAM (fast; ISR-bracketed)
+  // Instrumentation for the Store-crash hunt (see the note at the top of
+  // this file): how long the save blocked loop(), how much interrupt traffic
+  // the bus slave took while it did, and -- the number that matters -- how
+  // much DTCM stack was still unused afterwards. A save that survives with
+  // a low_water in the low hundreds of bytes means the next one may not,
+  // and that a fault taken during exception stacking is the mechanism.
+  const uint32_t t_start = millis();
+  const uint32_t isr_start = PresetBus::GetStats().isr_count;
+
+  // 1. capture the app-data chunk stream to RAM (fast; ISR-bracketed).
+  // app_isr stays OFF clear through step 7's APP_EVENT_RESUME below, so the
+  // app's Process() cannot run on top of its own FLUSH/RESUME handler --
+  // the same bracket RecallSlot() already puts around its equivalent region.
+  // DEFENSIVE ONLY: this was round 2's candidate fix for the Store crash and
+  // it did NOT fix it (see the note at the top of this file). Kept for
+  // symmetry with RecallSlot, not as a diagnosis.
   CORE::app_isr_enabled = false;
   delay(1);
   BuildAppData(capture);
-  CORE::app_isr_enabled = true;
 
-  // 2. ask the active app to flush its file-backed state
+  // 2. ask the active app to flush its file-backed state (Captain, e.g.,
+  // does its own load_config+save_config("CAPTAIN.DAT") right here)
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_FLUSH);
+  watchdog_feed();
 
   // 3. Quadrants active: extract its live preset + bank globals from the map
   if (app_id == kQuadrantsAppId) {
@@ -220,14 +319,17 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
       if (PhzConfig::save_filtered(name, slot_fs(), bank_pred, bank_remap))
         flags |= CONTENT_BANK;
     }
+    watchdog_feed();
   }
 
   // 4. copy the file-backed app stores
   slot_name(name, slot, 'S', "DAT");
   if (copy_file(slot_fs(), "SCENERY.DAT", name)) flags |= CONTENT_SCENERY;
   else if (!SDcard_Ready && copy_file(PhzConfig::myfs, "SCENERY.DAT", name)) flags |= CONTENT_SCENERY;
+  watchdog_feed();
   slot_name(name, slot, 'C', "DAT");
   if (copy_file(slot_fs(), "CAPTAIN.DAT", name)) flags |= CONTENT_CAPTAIN;
+  watchdog_feed();
 
   // 5. globals + manifest into PB_NN_G.CFG
   PhzConfig::load_config();  // base map = GLOBALS.CFG
@@ -236,6 +338,7 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   PhzConfig::setValue(kFlagsKey, flags);
   slot_name(name, slot, 'G', "CFG");
   bool ok = PhzConfig::save_config(name, slot_fs());
+  watchdog_feed();
   // verify on disk: LittleFS has produced 0-byte files while save_config
   // reported success (full/degraded FS) — a slot that can't recall is worse
   // than a failed save
@@ -247,9 +350,14 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
 
   // 6. app-data chunk stream
   bool ok2 = write_appdata_file(slot);
+  watchdog_feed();
 
-  // 7. hand the config map back to the active app (Resume reloads its file)
+  // 7. hand the config map back to the active app (Resume reloads its file).
+  // Same hazard as step 2 -- Captain's Resume() also touches PhzConfig's
+  // cfg_store and setups[] -- so app_isr stays off until this returns too.
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
+  CORE::app_isr_enabled = true;
+  watchdog_feed();
 
   last_slot = slot;
   last_was_save = true;
@@ -261,6 +369,11 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   HS::PokePopup(HS::MESSAGE_POPUP, (ok && ok2) ? "Bus save OK" : "Bus save ERR");
   serial_printf("PresetEngine: save slot %d %s (flags %02x)\n",
                 slot, (ok && ok2) ? "ok" : "FAILED", flags);
+  serial_printf("PresetEngine: save took %lums, bus ISRs %lu, "
+                "stack unused %lu bytes\n",
+                (unsigned long)(millis() - t_start),
+                (unsigned long)(PresetBus::GetStats().isr_count - isr_start),
+                (unsigned long)stack_low_water());
   return ok && ok2;
 }
 
@@ -319,16 +432,19 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   CORE::app_loop_enabled = false;
   delay(1);
 
-  // 3. stage the file-backed stores
+  // 3. stage the file-backed stores (same multi-write LittleFS chain as
+  // SaveSlot's step 4 -- see the watchdog note at the top of this file)
   if (flags & CONTENT_BANK) {
     slot_name(name, slot, 'B', "DAT");
     copy_file(slot_fs(), name, "BANK_255.DAT");
     if (SDcard_Ready) copy_file(SD, name, "BANK_255.DAT");
     quad_recall_hint = kScratchBank;
+    watchdog_feed();
   }
   if (flags & CONTENT_SCENERY) {
     slot_name(name, slot, 'S', "DAT");
     copy_file(slot_fs(), name, "SCENERY.DAT");
+    watchdog_feed();
   }
   // Boot recall deliberately keeps the LIVE Captain config: it's the
   // module's MIDI-interface setup (autosaved continuously), not scene
@@ -337,6 +453,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   if ((flags & CONTENT_CAPTAIN) && !skip_captain_restore) {
     slot_name(name, slot, 'C', "DAT");
     copy_file(slot_fs(), name, "CAPTAIN.DAT");
+    watchdog_feed();
   }
 
   // 4. apply global settings (map still holds PB_NN_G.CFG) + app chunks
@@ -346,6 +463,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   for (int i = 0; i < HS::TURING_MACHINE_COUNT; ++i)
     HS::user_turing_machines[i].Validate();
   ApplyAppData(capture);
+  watchdog_feed();
 
   // 5. switch to the slot's app (missing app: stay put, partial recall)
   const size_t idx = ResolveAppIndexByID(slot_app_id);
@@ -357,6 +475,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   app_switcher.set_current_app(idx);
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
   AudioInterrupts();
+  watchdog_feed();
 
   // 6. run
   CORE::app_isr_enabled = true;

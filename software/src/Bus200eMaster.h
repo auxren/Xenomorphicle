@@ -37,12 +37,17 @@
 //     internal per-preset write/read gaps run). Generous and reviewable;
 //     tune from a bench trace before relying on them against a live case --
 //     this module was written and tested host-side only, never bench-run.
-//   - the address model: today PresetBus.cpp's card-serving hardware can
-//     only claim 0x50 (card_lo 0) -- SAMR ADDR1 is hardcoded to
-//     BUS200E_CARD_BASE in slave_reconfig(). Bus200eMasterFindFreeCard()
-//     here is written address-agnostic (any card_lo candidate list) so it
-//     is ready if/when that hardware gate is parameterized; the real
-//     adapter today only ever offers it the single candidate {0}.
+//   - the address model: PresetBus.cpp's card-serving hardware (SAMR ADDR1)
+//     is now parameterized -- slave_reconfig() takes the 7-bit address to
+//     claim -- and MasterBackup()/MasterRestore() there offer
+//     Bus200eMasterFindFreeCard() the candidate list {0x00, 0x01} (0x50
+//     then 0x51), so a capture can still succeed at 0x51 when a live WPM
+//     holds 0x50. Ordinary manual card serving (CardServeEnable(), the
+//     console 'e' toggle) is unchanged and still only ever claims 0x50 --
+//     it emulates the canonical card address other modules expect, not a
+//     transient capture. Every candidate past 0x50 has no cached presence
+//     flag of its own (unlike wpm_present for 0x50), so it is probed fresh
+//     via Bus200eMasterOps::probe_card before being claimed.
 // ---------------------------------------------------------------------------
 
 #include "PresetBus200e.h"  // BUS200E_OP_BACKUP / BUS200E_OP_RESTORE
@@ -136,6 +141,20 @@ uint8_t Bus200eMasterCardAddr(void);   // card_lo of the active/last job
 uint8_t Bus200eMasterModAddr(void);    // target module of the active/last job
 int Bus200eMasterIsRestore(void);      // 1 = RESTORE, 0 = BACKUP, of the active/last job
 
+// Bytes moved by ops->card_activity() during the active/last job -- the
+// delta between the value sampled right after the command was sent and the
+// most recent value observed (frozen once the job leaves TRANSFERRING, so
+// it still reads correctly after DONE/FAILED, right up until the NEXT job
+// reaches WAIT_ACTIVITY and rebaselines). 0 before any job has started, and
+// 0 for a job that failed before WAIT_ACTIVITY (SEND_TIMEOUT/BAD_ARGS) --
+// start_job() clears both samples so a stale previous-job delta can never
+// leak through. This is deliberately NOT BusCardStats::bytes_written/
+// bytes_read -- those are lifetime cumulative counters across every
+// transaction ever served, not "how much this job moved" (see
+// PresetBusCard.h). Callers wanting "how big was the capture I just did"
+// (e.g. PresetBus.cpp's DumpCard()) want this, not BusCardGetStats().
+uint32_t Bus200eMasterBytesTransferred(void);
+
 // Acknowledge a DONE/FAILED result and return to IDLE. Starting a new job
 // (Backup/Restore) also implicitly does this once the FSM allows it (only
 // from DONE/FAILED/IDLE -- see Bus200eMasterError::BUSY).
@@ -151,5 +170,84 @@ void Bus200eMasterReset(void);
                                                   // (matches PresetBus.cpp's
                                                   // own card-transfer holdoff)
 #define BUS200E_MASTER_HARD_CAP_MS        15000  // absolute safety net
+
+// ---------------------------------------------------------------------------
+// QUERY: ask ONE module who it is, capture the version string it answers with.
+//
+// A deliberate SIBLING of the BACKUP/RESTORE FSM above rather than another
+// state inside it: a QUERY is a single request and a single reply frame, with
+// no card to claim, no card address to probe, no multi-kilobyte transfer to
+// watch go quiet. Folding it into Bus200eMasterState would mean four of that
+// FSM's states and three of its timing constants never applying. It shares
+// what it genuinely shares -- the same Bus200eMasterOps table installed by
+// Bus200eMasterInit(), so there is nothing extra to wire up -- and uses only
+// four of the six ops (now_ms, tx_gate_open, send_frame, suppress_echo);
+// probe_card and card_activity are meaningless here.
+//
+// The two FSMs hold independent state and neither blocks the other; the
+// shared tx_gate_open() is what keeps their bus access from colliding, the
+// same way pump_broadcast/pump_midi_tx/try_query_reply already coexist in
+// PresetBus.cpp.
+//
+// THE REPLY ARRIVES BY A DIFFERENT ROUTE THAN THE REQUEST LEFT BY. We master
+// the request; the answer comes back as the queried module's OWN general-call
+// broadcast, which our slave ISR hears like any other bus frame. So the reply
+// path is: ISR -> event ring -> Bus200eFeedEvent -> parse_frame's QUERY REPLY
+// case -> Bus200eOps::query_reply -> (PresetBus.cpp adapter) ->
+// Bus200eMasterQueryReply() below. There is no polling of the target and no
+// second bus transaction.
+//
+// UNVERIFIED, like everything else in this file: this has never run against a
+// real module. The reply-frame shape it recognizes is this project's own
+// established one (what try_query_reply() masters when queried), not a shape
+// traced off a 251e/259e answering. If a live module answers in some other
+// dialect, the timeout below is what will fire.
+typedef enum {
+  BUS200E_QUERY_IDLE = 0,
+  BUS200E_QUERY_SENDING,   // waiting for a quiet bus to master the request
+  BUS200E_QUERY_WAITING,   // request sent; waiting for the module's reply
+  BUS200E_QUERY_DONE,      // reply captured (Bus200eMasterQueryVersion())
+  BUS200E_QUERY_FAILED,    // see Bus200eMasterQueryLastError()
+} Bus200eQueryState;
+
+// Reuses Bus200eMasterError: BUSY (a query is already in flight), BAD_ARGS
+// (ops incomplete, or mod_addr 0 -- broadcast, see Bus200eBuildQueryFrame),
+// SEND_TIMEOUT (never got a quiet bus), NO_RESPONSE (no reply in time).
+#define BUS200E_MASTER_QUERY_SEND_TIMEOUT_MS  2000  // matches the BACKUP send
+                                                    // gate: same bus, same
+                                                    // contention story
+#define BUS200E_MASTER_QUERY_REPLY_TIMEOUT_MS 1000  // bus turnaround only --
+                                                    // no card work follows,
+                                                    // so nowhere near
+                                                    // ACTIVITY_TIMEOUT's 3s
+
+// Start a QUERY against mod_addr. Returns 0 if accepted, <0 (a negated
+// Bus200eMasterError) if refused: busy, ops incomplete, or mod_addr 0.
+int Bus200eMasterQuery(uint8_t mod_addr);
+
+// Pump the QUERY FSM. Call every loop tick alongside Bus200eMasterTask();
+// a no-op while IDLE/DONE/FAILED.
+void Bus200eMasterQueryTask(void);
+
+// Feed a QUERY reply seen on the bus (the Bus200eOps::query_reply hook).
+// Ignored unless a query is in flight; a reply from an address we did not
+// ask counts as a stray (Bus200eMasterQueryStrayReplies) and is NOT taken as
+// the answer -- reporting some other module's identity as the queried one's
+// would be worse than timing out.
+void Bus200eMasterQueryReply(uint8_t from_addr, const uint8_t *ver, uint8_t n);
+
+Bus200eQueryState  Bus200eMasterQueryGetState(void);
+Bus200eMasterError Bus200eMasterQueryLastError(void);
+uint8_t  Bus200eMasterQueryModAddr(void);       // target of the active/last query
+uint32_t Bus200eMasterQueryStrayReplies(void);  // replies from other addresses
+
+// Copy up to `cap` captured version bytes into `out` (NOT NUL-terminated --
+// the bytes are whatever the module sent, spaces and all). Returns how many
+// were written; 0 when no reply has been captured.
+uint8_t Bus200eMasterQueryVersion(uint8_t *out, uint8_t cap);
+
+// Acknowledge a DONE/FAILED query and return to IDLE. Starting a new query
+// also implicitly does this (only from DONE/FAILED/IDLE -- see BUSY).
+void Bus200eMasterQueryReset(void);
 
 #endif  // BUS200EMASTER_H_

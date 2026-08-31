@@ -13,9 +13,12 @@
 //
 // Nothing in this file touches USB, MIDI libraries, or interrupts -- it is
 // pure encode/decode/chunk/checksum logic, host-testable exactly like
-// PresetBus200e.cpp (see test_bus200e_sysex.cpp). Wiring a live device-side
-// USB MIDI SysEx RX handler that calls into this is NOT done here (out of
-// scope for this pass).
+// PresetBus200e.cpp (see test_bus200e_sysex.cpp). The live device-side USB
+// MIDI SysEx RX handler and the multi-message session state that calls into
+// this now exist ONE LAYER UP: Bus200eBridge.{h,cpp} owns the FSM (and is
+// host-tested in test_bus200e_bridge.cpp), Bus200eBridgeUsb.{h,cpp} owns the
+// usbMIDI registration and the OC::PresetBus-backed ops. Neither has been
+// run against real hardware yet.
 //
 // THIS IS THE CONTRACT a web-app developer needs to match exactly. It is
 // deliberately the SAME FAMILY as this repo's one other real, shipped SysEx

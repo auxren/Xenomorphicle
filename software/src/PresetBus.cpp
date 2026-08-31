@@ -58,7 +58,13 @@ static void push_event(uint16_t ev) {
 // card_serving false the ISR behaves byte-identically to the GC-only build:
 // SASR is never read and no BusCard entry point is reachable.
 static volatile bool card_serving = false;
-static volatile bool in_card_txn = false;   // current txn targets 0x50
+// 7-bit address currently served (SAMR ADDR1), meaningful only while
+// card_serving: 0x50 for ordinary/manual card serving, or 0x51 when
+// MasterBackup()/MasterRestore() claimed the alternate candidate because a
+// live WPM held 0x50 (see card_serve_enable_at() below). Read from the ISR,
+// so volatile; a plain byte read/write is atomic on this core.
+static volatile uint8_t card_addr7 = BUS200E_CARD_BASE;
+static volatile bool in_card_txn = false;   // current txn targets card_addr7
 static volatile bool card_tx_open = false;  // read leg started (stats only)
 static volatile uint16_t staged_addr = 0xFFFF;  // latest SASR RADDR (addr<<1|R)
 
@@ -99,7 +105,7 @@ static void lpi2c1_slave_isr() {
         in_card_txn = false;
         card_tx_open = false;
       }
-      if (card_serving && (staged_addr >> 1) == BUS200E_CARD_BASE) {
+      if (card_serving && (staged_addr >> 1) == card_addr7) {
         in_card_txn = true;
         BusCardStart(0);        // SOF byte implies a master write
       } else {
@@ -130,12 +136,12 @@ static void lpi2c1_slave_isr() {
     card_tx_open = false;
     stats.stops++;
   }
-  // Slave transmit: normally only 0x50 reads request TX data, but a
+  // Slave transmit: normally only card_addr7 reads request TX data, but a
   // malformed/glitched read at another matched address would leave TDF
   // pending with TXDSTALL stretching SCL forever and TDIE storming this
   // ISR - so an unroutable TDF is fed 0xFF (floating-bus semantics).
   if (status & LPI2C_SSR_TDF) {
-    if (card_serving && (staged_addr >> 1) == BUS200E_CARD_BASE
+    if (card_serving && (staged_addr >> 1) == card_addr7
         && (staged_addr & 1)) {
       if (!card_tx_open) {   // reads have no SOF: open the txn here
         card_tx_open = true;
@@ -184,13 +190,73 @@ static void cb_midi(uint8_t status, uint8_t d1, uint8_t d2) {
   if (d > stats.midi_rx_hw) stats.midi_rx_hw = d;
 }
 
+// Another module answering a QUERY. The reply is a general-call broadcast
+// like any other bus frame, so it reaches us through the ordinary slave RX
+// path; all this does is hand it to the master-side QUERY FSM, which decides
+// whether it is the answer to the question WE asked (see Bus200eMaster.h).
+static void cb_query_reply(uint8_t from_addr, const uint8_t *ver, uint8_t n) {
+  Bus200eMasterQueryReply(from_addr, ver, n);
+  if (verbose) {
+    Serial.printf("PresetBus: QUERY reply from %02X (%u bytes)\n", from_addr, n);
+  }
+}
+
 static const Bus200eOps kOps = {
   cb_save, cb_recall,
   0, nullptr, nullptr, nullptr, nullptr,  // card transfers: phase 2
   cb_midi,
+  cb_query_reply,
 };
 
 static bool tx_gate_open();  // defined with Task() below
+
+// Drain whatever the ISR has queued into `ring`, same loop Task() runs at
+// the top of its own pass. Factored out so a frame-mastering helper below
+// can force an immediate drain right after Bus200eSuppressFrame() -- the
+// egress Wire.beginTransmission()/write()/endTransmission() call is itself
+// on the same physical bus our slave listens on, so our own slave ISR
+// queues that exact frame's bytes into `ring` as a "self-echo" *during* the
+// blocking send (tx_gate_open() already requires the ring be empty before
+// any TX starts, so nothing else can land in there in the meantime).
+// Bus200eSuppressFrame()'s match window is only 50ms (parse_frame() expires
+// it past that, on purpose, so a stale registration can never eat a later
+// genuine identical frame). Task()'s own drain loop runs BEFORE pump_*(), so
+// left alone the self-echo would sit undrained until the *next* Task()
+// call -- for pump_broadcast() specifically, that next call can be
+// arbitrarily far off: RequestSave()/RequestRecall() below is consumed by
+// PresetEngine::Process() on the very next loop() iteration, which runs
+// *before* Task() and blocks it for 100s of ms doing the actual LittleFS
+// save/recall. By the time Task() finally got to drain the ring, the
+// suppression had long expired and the self-echoed SAVE/RECALL frame was
+// mistaken for a second, genuine bus command -- reproduced live: an
+// un-suppressed self-echo re-armed pending_save and fired a second,
+// unprompted SaveSlot() right after the first one had already finished.
+// Draining right here, while the registration is still fresh, closes that.
+static void drain_ring() {
+  if (ring_ovf) {
+    ring_ovf = false;
+    stats.ring_ovf++;
+    Bus200eFeedEvent(BUS200E_EV_OVF);
+  }
+  bool got = false;
+  while (ring_r != ring_w) {
+    if (ring_ovf) {
+      ring_ovf = false;
+      stats.ring_ovf++;
+      Bus200eFeedEvent(BUS200E_EV_OVF);
+    }
+    const uint16_t ev = ring[ring_r & (kRingSize - 1)];
+    ring_r = ring_r + 1;
+    got = true;
+    if (verbose) {
+      if (ev & BUS200E_EV_START) Serial.print("\n[S] ");
+      else if (ev & BUS200E_EV_STOP) Serial.print("[P]");
+      else Serial.printf("%02X ", ev & 0xFF);
+    }
+    Bus200eFeedEvent(ev);
+  }
+  if (got) last_rx_ms = millis();
+}
 
 // ---- commander mode: bus-wide preset commands -------------------------------
 // One pending command, last wins (matches the engine's own request model).
@@ -219,14 +285,18 @@ FLASHMEM static void pump_broadcast() {
   Wire.beginTransmission(0);
   Wire.write(f, sizeof(f));
   const uint8_t err = Wire.endTransmission();
-  if (err == 0) Bus200eSuppressFrame(f, sizeof(f));
+  if (err == 0) {
+    Bus200eSuppressFrame(f, sizeof(f));
+    drain_ring();  // consume our own self-echo while suppression is fresh
+  }
 
   if (err == 0) {
     pending_bcast = -1;
     bcast_tries = 0;
     bcast_tx++;
-    // our slave never hears our own TX: dispatch locally so this module
-    // saves/recalls in lockstep with the rest of the bus
+    // our slave never hears our own TX (the self-echo above was just
+    // suppressed and dropped): dispatch locally so this module saves/
+    // recalls in lockstep with the rest of the bus
     if ((cmd >> 8) == 0x02) PresetEngine::RequestSave(cmd & 0x1F);
     else PresetEngine::RequestRecall(cmd & 0x1F);
     if (verbose) Serial.printf("PresetBus: broadcast %s %d\n",
@@ -253,7 +323,12 @@ static uint32_t wpm_probes = 0;
 bool WpmPresent() { return wpm_present; }
 
 FLASHMEM static void probe_wpm() {
-  if (card_serving) return;  // we own 0x50 ourselves: the probe would self-ACK
+  // Only skip while WE ACK 0x50 ourselves (the probe would self-ACK). If a
+  // MasterBackup/MasterRestore claimed the alternate 0x51 candidate instead
+  // (because a live WPM already held 0x50), 0x50 tracking must keep running
+  // -- that's the exact presence flag CardServeEnable()'s hard gate and
+  // master_probe_card() below still key off of.
+  if (card_serving && card_addr7 == BUS200E_CARD_BASE) return;
   if (millis() - wpm_last_probe_ms < 5000) return;
   if (!tx_gate_open()) return;
   wpm_last_probe_ms = millis();
@@ -279,7 +354,7 @@ FLASHMEM static void probe_wpm() {
 
 // ---- 0x50 card serving -------------------------------------------------------
 // Serve the storage-card address for WPM-less systems: 200e modules can then
-// BACKUP/RESTORE against our 32K image (PBCARD.BIN on LittleFS) exactly as
+// BACKUP/RESTORE against our 64K image (PBCARD.BIN on LittleFS) exactly as
 // they would against a WPM or a real card.
 //
 // HARD GATE, in three layers: enabling is REFUSED while a real preset
@@ -293,9 +368,18 @@ static uint8_t *card_image = nullptr;
 static uint32_t card_flush_arm_ms = 0;
 static uint32_t card_seen_writes = 0;
 static constexpr const char *kCardFile = "PBCARD.BIN";
+// The card_lo that produced card_addr7 (card_addr7 == BUS200E_CARD_BASE |
+// card_addr_lo), so MasterBackup()/MasterRestore() can hand Bus200eMaster
+// back whichever candidate is actually being served without recomputing it.
+// Meaningful only while card_serving.
+static uint8_t card_addr_lo = 0;
 
-// SCFGR1/SAMR may only change while the slave engine is disabled.
-FLASHMEM static void slave_reconfig(bool serve) {
+// SCFGR1/SAMR may only change while the slave engine is disabled. `addr7`
+// is the 7-bit card address to claim as ADDR1 while serve is true (ignored
+// otherwise); callers not claiming a specific address (Init()'s startup
+// disable, bus_stuck_recover()'s rebuild) pass the module's currently-active
+// card_addr7 or don't care.
+FLASHMEM static void slave_reconfig(bool serve, uint8_t addr7 = BUS200E_CARD_BASE) {
   LPI2C1_SCR = 0;
   LPI2C1_SIER = 0;
   uint32_t cfg1 = LPI2C_SCFGR1_GCEN | LPI2C_SCFGR1_RXSTALL;
@@ -304,7 +388,7 @@ FLASHMEM static void slave_reconfig(bool serve) {
   if (serve) {
     cfg1 |= LPI2C_SCFGR1_ADDRCFG(2)   // match ADDR0 (7-bit) OR ADDR1 (7-bit)
           | LPI2C_SCFGR1_TXDSTALL;    // stretch SCL until STDR is fed
-    samr |= LPI2C_SAMR_ADDR1(BUS200E_CARD_BASE);
+    samr |= LPI2C_SAMR_ADDR1(addr7 & 0x7F);
     sier |= LPI2C_SIER_TDIE;
   }
   LPI2C1_SCFGR1 = cfg1;
@@ -326,7 +410,15 @@ FLASHMEM static void card_image_flush(const char *why) {
                 ok ? "saved" : "SAVE FAILED", why);
 }
 
-FLASHMEM int CardServeEnable(bool on) {
+// Parameterized enable: `card_lo` selects which candidate address to claim
+// (BUS200E_CARD_BASE | card_lo). CardServeEnable() (the public API, the
+// console 'e' toggle, and everything that predates foreign-module capture)
+// always passes 0 -- it emulates the canonical card address other modules
+// expect and must stay exactly as gated/tested as before. MasterBackup()/
+// MasterRestore() are the only callers that ever pass something else, after
+// Bus200eMasterFindFreeCard() has already picked a candidate nothing else
+// is ACKing.
+FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   if (!enabled) return -1;
   if (on == (bool)card_serving) return 0;
 
@@ -340,7 +432,17 @@ FLASHMEM int CardServeEnable(bool on) {
     return 0;
   }
 
-  if (wpm_present) {  // THE gate: never contest a live preset manager
+  const uint8_t addr7 = (uint8_t)((BUS200E_CARD_BASE | (card_lo & 0x7F)) & 0x7F);
+
+  // THE gate for the canonical card address: never contest a live preset
+  // manager (two card slaves on one bus corrupt each other's ACKs). This is
+  // untouched from before -- card_lo 0 (address 0x50) still refuses on
+  // wpm_present exactly as it always did. A non-zero candidate has no
+  // cached presence flag of its own (unlike wpm_present for 0x50): callers
+  // reaching here with one are expected to have just probed it fresh via
+  // Bus200eMasterFindFreeCard(); the self-test below is the final,
+  // authoritative check regardless of which address was requested.
+  if (addr7 == BUS200E_CARD_BASE && wpm_present) {
     Serial.println("PresetBus: card serve REFUSED - WPM owns 0x50");
     return -2;
   }
@@ -358,15 +460,19 @@ FLASHMEM int CardServeEnable(bool on) {
   BusCardInit(card_image, BUSCARD_SIZE);
   card_seen_writes = 0;
   card_flush_arm_ms = 0;
-  slave_reconfig(true);
+  card_addr7 = addr7;
+  card_addr_lo = card_lo & 0x7F;
+  slave_reconfig(true, addr7);
   card_serving = true;
 
   // Self-test through the wire: the polled Wire master and our slave engine
-  // share the pads, so an empty write to 0x50 must self-ACK and a probe of
+  // share the pads, so an empty write to addr7 must self-ACK and a probe of
   // an unrelated address must still NACK (a mislaid SAMR ADDR1 field would
-  // ACK the wrong address -- fail safe by reverting).
+  // ACK the wrong address -- fail safe by reverting). 0x29 is fixed and
+  // outside the {0x50, 0x51} candidate range, so it's never the address
+  // under test either way.
   delayMicroseconds(200);
-  Wire.beginTransmission(BUS200E_CARD_BASE);
+  Wire.beginTransmission(addr7);
   const uint8_t at_card = Wire.endTransmission();
   Wire.beginTransmission(0x29);
   const uint8_t at_other = Wire.endTransmission();
@@ -375,13 +481,15 @@ FLASHMEM int CardServeEnable(bool on) {
     in_card_txn = false;
     card_tx_open = false;
     slave_reconfig(false);
-    Serial.printf("PresetBus: card serve self-test FAILED (0x50=%u 0x29=%u), reverted\n",
-                  at_card, at_other);
+    Serial.printf("PresetBus: card serve self-test FAILED (%02X=%u 0x29=%u), reverted\n",
+                  addr7, at_card, at_other);
     return -4;
   }
-  Serial.println("PresetBus: serving 0x50 (32K card image)");
+  Serial.printf("PresetBus: serving %02X (32K card image)\n", addr7);
   return 0;
 }
+
+FLASHMEM int CardServeEnable(bool on) { return card_serve_enable_at(on, 0); }
 
 bool CardServing() { return card_serving; }
 
@@ -396,14 +504,21 @@ bool CardServing() { return card_serving; }
 static uint32_t master_now_ms() { return millis(); }
 static int master_tx_gate_open() { return tx_gate_open() ? 1 : 0; }
 
-// Only card_lo 0 (address 0x50) is ever offered as a candidate today (the
-// card-serving hardware's SAMR ADDR1 is hardcoded to BUS200E_CARD_BASE in
-// slave_reconfig() -- see Bus200eMaster.h). Reuse the cached WPM-presence
-// flag rather than a fresh probe: it already answers "is something else
-// ACKing 0x50 right now", at no extra bus traffic/risk.
+// The canonical card address (0x50) reuses the cached WPM-presence flag
+// rather than a fresh probe: it already answers "is something else ACKing
+// 0x50 right now", at no extra bus traffic/risk -- same as CardServeEnable's
+// own gate. Every other candidate (today only 0x51, MasterBackup()'s
+// fallback for reaching a foreign module past a live WPM) has no cached
+// flag of its own, so probe it fresh; fail closed (report claimed) if the
+// bus isn't quiet enough to probe safely right now rather than risk it. If
+// we're already the one serving addr7 ourselves, the probe below self-ACKs
+// (same mechanism the enable-time self-test relies on) and correctly comes
+// back "claimed".
 static int master_probe_card(uint8_t addr7) {
-  (void) addr7;
-  return wpm_present ? 1 : 0;
+  if (addr7 == BUS200E_CARD_BASE) return wpm_present ? 1 : 0;
+  if (!tx_gate_open()) return 1;
+  Wire.beginTransmission(addr7);
+  return Wire.endTransmission() == 0 ? 1 : 0;
 }
 
 static int master_send_frame(const uint8_t *bytes, uint8_t n) {
@@ -432,23 +547,85 @@ static const Bus200eMasterOps kMasterOps = {
   master_send_frame, master_suppress_echo, master_card_activity,
 };
 
+// Candidates tried, in order: 0x50 first (the canonical/expected card
+// address), then 0x51 -- lets a capture still succeed with a live WPM
+// occupying 0x50 (the whole point of this fix: that used to mean the only
+// way to test was physically unplugging the WPM). Add more here if a bus
+// ever has both 0x50 and 0x51 contested.
+static const uint8_t kMasterCardCandidates[] = { 0x00, 0x01 };
+
 FLASHMEM int MasterBackup(uint8_t mod_addr) {
+  uint8_t card_lo = card_addr_lo;
   if (!card_serving) {
-    const int err = CardServeEnable(true);
+    if (!Bus200eMasterFindFreeCard(kMasterCardCandidates,
+                                    sizeof(kMasterCardCandidates), &card_lo))
+      return -BUS200E_MASTER_ERR_NO_FREE_CARD;
+    const int err = card_serve_enable_at(true, card_lo);
     if (err != 0) return -BUS200E_MASTER_ERR_NO_FREE_CARD;
   }
-  return Bus200eMasterBackup(mod_addr, 0);
+  return Bus200eMasterBackup(mod_addr, card_lo);
 }
 
 FLASHMEM int MasterRestore(uint8_t mod_addr) {
   if (!card_serving) return -BUS200E_MASTER_ERR_BAD_ARGS;
-  return Bus200eMasterRestore(mod_addr, 0);
+  return Bus200eMasterRestore(mod_addr, card_addr_lo);
 }
 
 Bus200eMasterState MasterState() { return Bus200eMasterGetState(); }
 Bus200eMasterError MasterError() { return Bus200eMasterLastError(); }
 uint8_t *MasterCardImage() { return card_serving ? card_image : nullptr; }
 void MasterReset() { Bus200eMasterReset(); }
+
+// ---- module identification (QUERY; transient master; new) ------------------
+// Thinner than MasterBackup by design: a QUERY claims no card address and
+// needs none of card_serve_enable_at()'s gating, so there is nothing to set
+// up first -- it is one mastered frame out (through the same kMasterOps
+// adapter above) and one reply frame back in through the ordinary slave RX
+// path (cb_query_reply near the top of this file).
+FLASHMEM int MasterQuery(uint8_t mod_addr) {
+  return Bus200eMasterQuery(mod_addr);
+}
+bool QueryReplyReady() {
+  return Bus200eMasterQueryGetState() == BUS200E_QUERY_DONE;
+}
+uint8_t MasterQueryVersion(uint8_t *out, uint8_t cap) {
+  return Bus200eMasterQueryVersion(out, cap);
+}
+Bus200eQueryState MasterQueryState() { return Bus200eMasterQueryGetState(); }
+Bus200eMasterError MasterQueryError() { return Bus200eMasterQueryLastError(); }
+void MasterQueryReset() { Bus200eMasterQueryReset(); }
+
+// One-shot console report the moment a QUERY resolves. The whole point of
+// the command is the answer, and at the bench it lands asynchronously (the
+// reply is a separate bus frame arriving some milliseconds later), so
+// printing it here beats making the operator poll 'b' at the right instant.
+// Edge-triggered on the FSM's state, so it prints exactly once per query.
+static Bus200eQueryState query_reported = BUS200E_QUERY_IDLE;
+
+FLASHMEM static void report_query() {
+  const Bus200eQueryState s = Bus200eMasterQueryGetState();
+  if (s == query_reported) return;
+  query_reported = s;
+
+  if (s == BUS200E_QUERY_DONE) {
+    uint8_t v[BUS200E_QUERY_VER_MAX];
+    const uint8_t n = Bus200eMasterQueryVersion(v, sizeof(v));
+    Serial.printf("PresetBus: module %02X says \"", Bus200eMasterQueryModAddr());
+    for (uint8_t i = 0; i < n; ++i)
+      Serial.printf("%c", (v[i] >= 0x20 && v[i] < 0x7F) ? (char)v[i] : '.');
+    Serial.print("\" (hex:");
+    for (uint8_t i = 0; i < n; ++i) Serial.printf(" %02X", v[i]);
+    Serial.println(")");
+  } else if (s == BUS200E_QUERY_FAILED) {
+    const Bus200eMasterError e = Bus200eMasterQueryLastError();
+    Serial.printf("PresetBus: QUERY %02X failed - %s (stray replies: %lu)\n",
+                  Bus200eMasterQueryModAddr(),
+                  e == BUS200E_MASTER_ERR_SEND_TIMEOUT ? "never got a quiet bus"
+                  : e == BUS200E_MASTER_ERR_NO_RESPONSE ? "no reply"
+                  : "bad request",
+                  (unsigned long)Bus200eMasterQueryStrayReplies());
+  }
+}
 
 // Flush the image 3s after a write burst goes quiet (a module BACKUP is a
 // stream of write transactions; don't thrash LittleFS mid-transfer).
@@ -511,7 +688,7 @@ FLASHMEM __attribute__((noinline)) static void bus_stuck_recover() {
   // stage 3: hand the pads back to LPI2C and rebuild both engines
   Wire.begin();
   Wire.setClock(100000);
-  slave_reconfig(card_serving);
+  slave_reconfig(card_serving, card_addr7);
   in_card_txn = false;
   card_tx_open = false;
   Bus200eFeedEvent(BUS200E_EV_OVF);  // poison anything half-parsed
@@ -606,7 +783,14 @@ FLASHMEM static void pump_midi_tx() {
     Wire.beginTransmission(0);
     Wire.write(f, sizeof(f));
     const uint8_t err = Wire.endTransmission();
-    if (err == 0) Bus200eSuppressFrame(f, sizeof(f));
+    if (err == 0) {
+      Bus200eSuppressFrame(f, sizeof(f));
+      // drain our own self-echo now: tx_gate_open() refuses to send again
+      // (or SaveSlot/RecallSlot's caller-side use of this same pending-op
+      // pattern would risk the same stale-suppression race pump_broadcast()
+      // hit) while the ring holds unconsumed bytes.
+      drain_ring();
+    }
 
     if (err == 0) {
       midi_tx.pop();
@@ -638,7 +822,10 @@ FLASHMEM static void try_query_reply() {
   Wire.beginTransmission(0);  // general call
   Wire.write(f, sizeof(f));
   const uint8_t err = Wire.endTransmission();
-  if (err == 0) Bus200eSuppressFrame(f, sizeof(f));
+  if (err == 0) {
+    Bus200eSuppressFrame(f, sizeof(f));
+    drain_ring();  // consume our own self-echo while suppression is fresh
+  }
 
   if (err == 0) {
     Bus200eClearQueryPending();
@@ -714,34 +901,15 @@ void Task() {
     rate_l0 = loop_counter;
   }
 
-  if (ring_ovf) {
-    ring_ovf = false;
-    stats.ring_ovf++;
-    Bus200eFeedEvent(BUS200E_EV_OVF);
-  }
-
-  bool got = false;
-  while (ring_r != ring_w) {
-    if (ring_ovf) {  // overflow mid-drain: poison before the gap parses
-      ring_ovf = false;
-      stats.ring_ovf++;
-      Bus200eFeedEvent(BUS200E_EV_OVF);
-    }
-    const uint16_t ev = ring[ring_r & (kRingSize - 1)];
-    ring_r = ring_r + 1;
-    got = true;
-    if (verbose) {
-      if (ev & BUS200E_EV_START) Serial.print("\n[S] ");
-      else if (ev & BUS200E_EV_STOP) Serial.print("[P]");
-      else Serial.printf("%02X ", ev & 0xFF);
-    }
-    Bus200eFeedEvent(ev);
-  }
-  if (got) last_rx_ms = millis();
+  drain_ring();
 
   if (Bus200eQueryPending()) try_query_reply();
   Bus200eTask();   // card-transfer job engine (self-clears with null hooks)
   Bus200eMasterTask();  // foreign-module BACKUP/RESTORE orchestration (new)
+  Bus200eMasterQueryTask();  // foreign-module QUERY orchestration (new).
+  report_query();            // Runs AFTER drain_ring() above, so a reply that
+                             // arrived this pass is already captured and the
+                             // result prints on the same tick it lands.
   pump_broadcast();
   pump_midi_tx();
   probe_wpm();
@@ -790,12 +958,14 @@ FLASHMEM void DebugDump() {
         : "unknown";
     Serial.printf("wpm=%s owner_0x50=%s dialect=%s (long=%lu short=%lu) probes=%lu\n",
                   wpm_present ? "present" : "absent",
-                  wpm_present ? "WPM" : (card_serving ? "US(card)" : "none"),
+                  wpm_present ? "WPM"
+                  : (card_serving && card_addr7 == BUS200E_CARD_BASE) ? "US(card)"
+                  : "none",
                   dialect, d->frames_long, d->frames_short, wpm_probes);
     if (card_serving || BusCardAttached()) {
       const BusCardStats *cs = BusCardGetStats();
-      Serial.printf("card: serving=%d dirty=%d ptr=%04lX w_txn=%lu r_txn=%lu wr=%lu rd=%lu\n",
-                    (int)card_serving, BusCardDirty(),
+      Serial.printf("card: serving=%d addr=%02X dirty=%d ptr=%04lX w_txn=%lu r_txn=%lu wr=%lu rd=%lu\n",
+                    (int)card_serving, card_addr7, BusCardDirty(),
                     (unsigned long)BusCardPointer(),
                     cs->txns_write, cs->txns_read,
                     cs->bytes_written, cs->bytes_read);
@@ -819,17 +989,82 @@ FLASHMEM void DebugDump() {
   Serial.printf("engine: last_slot=%d was_save=%d busy=%d\n",
                 PresetEngine::LastSlot(), PresetEngine::LastWasSave(),
                 PresetEngine::Busy());
+  {
+    static const char *const mstates[] = {
+      "IDLE", "FINDING_CARD", "SENDING", "WAIT_ACTIVITY",
+      "TRANSFERRING", "DONE", "FAILED",
+    };
+    static const char *const merrs[] = {
+      "NONE", "BUSY", "BAD_ARGS", "NO_FREE_CARD", "SEND_TIMEOUT", "NO_RESPONSE",
+    };
+    const Bus200eMasterState ms = Bus200eMasterGetState();
+    const Bus200eMasterError me = Bus200eMasterLastError();
+    Serial.printf("master: state=%s error=%s mod=%02X card_lo=%02X restore=%d bytes=%lu\n",
+                  ms <= 6 ? mstates[ms] : "?", me <= 5 ? merrs[me] : "?",
+                  Bus200eMasterModAddr(), Bus200eMasterCardAddr(),
+                  Bus200eMasterIsRestore(),
+                  (unsigned long)Bus200eMasterBytesTransferred());
+  }
+  {
+    static const char *const qstates[] = {
+      "IDLE", "SENDING", "WAITING", "DONE", "FAILED",
+    };
+    static const char *const merrs[] = {
+      "NONE", "BUSY", "BAD_ARGS", "NO_FREE_CARD", "SEND_TIMEOUT", "NO_RESPONSE",
+    };
+    const Bus200eQueryState qs = Bus200eMasterQueryGetState();
+    const Bus200eMasterError qe = Bus200eMasterQueryLastError();
+    uint8_t v[BUS200E_QUERY_VER_MAX];
+    const uint8_t vn = Bus200eMasterQueryVersion(v, sizeof(v));
+    Serial.printf("query: state=%s error=%s mod=%02X stray=%lu ver=\"",
+                  qs <= 4 ? qstates[qs] : "?", qe <= 5 ? merrs[qe] : "?",
+                  Bus200eMasterQueryModAddr(),
+                  (unsigned long)Bus200eMasterQueryStrayReplies());
+    for (uint8_t i = 0; i < vn; ++i)
+      Serial.printf("%c", (v[i] >= 0x20 && v[i] < 0x7F) ? (char)v[i] : '.');
+    Serial.println("\"");
+  }
   static const char *const opnames[] = {
     "none", "RECALL", "SAVE", "REMOTE_EN", "REMOTE_DIS", "POLL_DONE",
     "QUERY", "BACKUP", "RESTORE", "MIDI", "CLOCK", "UNKNOWN", "DROPPED",
+    "QRY_REPLY",
   };
   const uint32_t total = Bus200eLogTotal();
   Serial.printf("decoded commands (%lu total, newest first):\n", total);
   Bus200eCmd c;
   for (uint32_t i = 0; i < 10 && Bus200eLogRead(i, &c); ++i) {
     Serial.printf("  %-10s arg=%u mod=%02X card=%02X off=%04X\n",
-                  c.op <= 12 ? opnames[c.op] : "?", c.arg, c.mod_addr,
+                  c.op <= BUS200E_OP_QUERY_REPLY ? opnames[c.op] : "?",
+                  c.arg, c.mod_addr,
                   c.card_lo, c.mem_off);
+  }
+}
+
+FLASHMEM void DumpCard() {
+  if (!card_serving || !card_image) {
+    Serial.println("PresetBus: no card image (not serving)");
+    return;
+  }
+  // Bus200eMasterBytesTransferred() -- NOT BusCardGetStats()->bytes_written
+  // -- is the extent of the last completed master job specifically:
+  // bytes_written/bytes_read are lifetime-cumulative counters across every
+  // transaction the card slave has ever served (see PresetBusCard.h), so
+  // capturing the same module twice back to back would otherwise double the
+  // reported length on the second dump even though the image content is
+  // byte-identical (990 real bytes, then 990 more of misleadingly-included
+  // 0xFF filler).
+  const uint32_t n = Bus200eMasterBytesTransferred();
+  if (n == 0) {
+    Serial.println("PresetBus: no completed master transfer yet (0 bytes)");
+    return;
+  }
+  Serial.printf("PresetBus: card image dump, %lu bytes (last master transfer)\n",
+                (unsigned long)n);
+  for (uint32_t off = 0; off < n && off < BUSCARD_SIZE; off += 16) {
+    Serial.printf("%04lX:", (unsigned long)off);
+    for (uint32_t i = off; i < off + 16 && i < n && i < BUSCARD_SIZE; ++i)
+      Serial.printf(" %02X", card_image[i]);
+    Serial.println();
   }
 }
 

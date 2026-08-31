@@ -74,15 +74,31 @@ static void f_midi(uint8_t status, uint8_t d1, uint8_t d2) {
   n_midi++;
 }
 
+static int n_qreply = 0;
+static uint8_t qreply_from;
+static uint8_t qreply_ver[16];
+static uint8_t qreply_len;
+static void f_query_reply(uint8_t from_addr, const uint8_t *ver, uint8_t n) {
+  qreply_from = from_addr;
+  qreply_len = n;
+  if (qreply_len > sizeof(qreply_ver)) qreply_len = sizeof(qreply_ver);
+  memcpy(qreply_ver, ver, qreply_len);
+  n_qreply++;
+}
+
 static const Bus200eOps fake_ops = {
   f_save, f_recall, kRecSize, f_slot_read, f_slot_write, f_card_write, f_card_read,
-  f_midi,
+  f_midi, f_query_reply,
 };
 
 static void reset(const Bus200eOps *ops) {
   Bus200eInit(ops);
   Bus200eSetModuleAddress(BUS200E_DEFAULT_MODULE_ADDR);
   n_save = n_recall = n_cw = n_sw = n_sr = n_cr = n_midi = 0;
+  n_qreply = 0;
+  qreply_from = 0;
+  qreply_len = 0;
+  memset(qreply_ver, 0, sizeof(qreply_ver));
   fail_card_write = 0;
   reject_odd_writes = 0;
 }
@@ -466,6 +482,155 @@ static void test_build_transfer_frame_round_trips_through_parser(void) {
   CHECK(!Bus200eJobActive());
 }
 
+static void test_build_query_frame(void) {
+  printf("test_build_query_frame\n");
+  uint8_t f[BUS200E_QUERY_FRAME_LEN];
+
+  // undersized buffer
+  CHECK(Bus200eBuildQueryFrame(0x28, f, BUS200E_QUERY_FRAME_LEN - 1) == -1);
+  // destAddr 0 is the broadcast address: every module would answer at once
+  CHECK(Bus200eBuildQueryFrame(0x00, f, sizeof(f)) == -1);
+  CHECK(Bus200eBuildQueryFrame(0x80, f, sizeof(f)) == -1);  // masks to 0 too
+
+  // exact byte shape: [0x04][modAddr][0x22][0x1A][0xFF]
+  CHECK(Bus200eBuildQueryFrame(0x28, f, sizeof(f)) == BUS200E_QUERY_FRAME_LEN);
+  const uint8_t want[] = { 0x04, 0x28, 0x22, 0x1A, 0xFF };
+  CHECK(memcmp(f, want, sizeof(want)) == 0);
+
+  // address masked to 7 bits, same as every other payload field
+  CHECK(Bus200eBuildQueryFrame(0xC4, f, sizeof(f)) == BUS200E_QUERY_FRAME_LEN);
+  CHECK(f[1] == 0x44);
+}
+
+static void test_build_query_frame_round_trips_through_parser(void) {
+  printf("test_build_query_frame_round_trips_through_parser\n");
+  reset(&fake_ops);
+  uint8_t f[BUS200E_QUERY_FRAME_LEN];
+
+  // a query aimed at somebody else: decoded, logged, not ours to answer
+  CHECK(Bus200eBuildQueryFrame(0x28, f, sizeof(f)) == BUS200E_QUERY_FRAME_LEN);
+  frame(f, sizeof(f));
+  CHECK(last_op() == BUS200E_OP_QUERY);
+  {
+    Bus200eCmd c;
+    CHECK(Bus200eLogRead(0, &c) && c.mod_addr == 0x28);
+  }
+  CHECK(!Bus200eQueryPending());
+
+  // the same builder aimed at US sets query_pending, exactly as the
+  // hand-written vectors in test_query_pending() do
+  CHECK(Bus200eBuildQueryFrame(BUS200E_DEFAULT_MODULE_ADDR, f, sizeof(f))
+        == BUS200E_QUERY_FRAME_LEN);
+  frame(f, sizeof(f));
+  CHECK(last_op() == BUS200E_OP_QUERY);
+  CHECK(Bus200eQueryPending());
+}
+
+static void test_query_reply_parse(void) {
+  printf("test_query_reply_parse\n");
+  reset(&fake_ops);
+
+  // The shape PresetBus.cpp's try_query_reply() masters, with a foreign
+  // module's address in the src slot: [0A][22][srcAddr][13][7 version chars]
+  FRAME(0x0A, 0x22, 0x28, 0x13, '2', '5', '1', 'e', ' ', ' ', ' ');
+  CHECK(last_op() == BUS200E_OP_QUERY_REPLY);
+  CHECK(n_qreply == 1);
+  CHECK(qreply_from == 0x28);
+  CHECK(qreply_len == 7);
+  CHECK(memcmp(qreply_ver, "251e   ", 7) == 0);
+  {
+    Bus200eCmd c;
+    CHECK(Bus200eLogRead(0, &c));
+    CHECK(c.mod_addr == 0x28);
+    CHECK(c.arg == 7);                     // version length
+    CHECK(c.card_lo == '2');               // first three chars, field-reused
+    CHECK(c.mem_off == (uint16_t)('5' | ('1' << 8)));
+  }
+  // a reply is PRIMO-dialect framing, counted as such
+  CHECK(Bus200eGetStats()->frames_long == 1);
+  CHECK(Bus200eGetStats()->frames_short == 0);
+
+  // our own reply frame shape (module addr in src) parses identically --
+  // this is what a second Xenomorpher on the bus would send
+  reset(&fake_ops);
+  FRAME(0x0A, 0x22, BUS200E_DEFAULT_MODULE_ADDR, 0x13,
+        '3', '0', '.', '6', ' ', ' ', ' ');
+  CHECK(n_qreply == 1 && qreply_from == BUS200E_DEFAULT_MODULE_ADDR);
+  CHECK(memcmp(qreply_ver, "30.6   ", 7) == 0);
+  // ...and hearing one must NOT arm our own reply machinery
+  CHECK(!Bus200eQueryPending());
+
+  // a minimal reply with no version bytes at all is still decoded
+  reset(&fake_ops);
+  FRAME(0x03, 0x22, 0x29, 0x13);
+  CHECK(last_op() == BUS200E_OP_QUERY_REPLY);
+  CHECK(n_qreply == 1 && qreply_from == 0x29 && qreply_len == 0);
+  {
+    Bus200eCmd c;
+    CHECK(Bus200eLogRead(0, &c) && c.arg == 0 && c.card_lo == 0 && c.mem_off == 0);
+  }
+
+  // the longest reply this parser can carry (FRAME_MAX): 8 version bytes
+  reset(&fake_ops);
+  FRAME(0x0B, 0x22, 0x28, 0x13, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H');
+  CHECK(n_qreply == 1 && qreply_len == BUS200E_QUERY_VER_MAX);
+  CHECK(memcmp(qreply_ver, "ABCDEFGH", 8) == 0);
+
+  // hookless build: decoded and logged, nothing called
+  Bus200eOps no_qr = fake_ops;
+  no_qr.query_reply = 0;
+  reset(&no_qr);
+  FRAME(0x0A, 0x22, 0x28, 0x13, '2', '5', '1', 'e', ' ', ' ', ' ');
+  CHECK(n_qreply == 0);
+  CHECK(last_op() == BUS200E_OP_QUERY_REPLY);
+}
+
+// The reply branch is checked ahead of the long/PRIMO command branch, so it
+// must not be able to swallow anything that used to parse as a command.
+static void test_query_reply_does_not_shadow_commands(void) {
+  printf("test_query_reply_does_not_shadow_commands\n");
+  reset(&fake_ops);
+
+  // a command frame addressed TO the manager (destAddr 0x22, srcAddr 0x22):
+  // srcAddr 0x22 keeps it on the command path, where 0x13 is just unknown
+  FRAME(0x04, 0x22, 0x22, 0x13, 0xFF);
+  CHECK(last_op() == BUS200E_OP_UNKNOWN);
+  CHECK(n_qreply == 0);
+
+  // an ordinary broadcast RECALL still recalls
+  FRAME(0x04, 0x00, 0x22, 0x01, 7);
+  CHECK(n_recall == 1 && recall_calls[0] == 7);
+  CHECK(n_qreply == 0);
+
+  // right shape, wrong command byte: not a reply, and not a command either
+  // (srcAddr is not 0x22), so it falls through to the short/V2 branch
+  reset(&fake_ops);
+  FRAME(0x0A, 0x22, 0x28, 0x14, '2', '5', '1', 'e', ' ', ' ', ' ');
+  CHECK(n_qreply == 0);
+  CHECK(last_op() == BUS200E_OP_UNKNOWN);
+
+  // right command byte, wrong dest (not the manager): also not a reply
+  reset(&fake_ops);
+  FRAME(0x0A, 0x23, 0x28, 0x13, '2', '5', '1', 'e', ' ', ' ', ' ');
+  CHECK(n_qreply == 0);
+  CHECK(last_op() == BUS200E_OP_UNKNOWN);
+
+  // length byte inconsistent with the frame: not a reply
+  reset(&fake_ops);
+  FRAME(0x09, 0x22, 0x28, 0x13, '2', '5', '1', 'e', ' ', ' ', ' ');
+  CHECK(n_qreply == 0);
+
+  // a reply we mastered ourselves is dropped by echo suppression, once
+  reset(&fake_ops);
+  const uint8_t echo[] = { 0x0A, 0x22, BUS200E_DEFAULT_MODULE_ADDR, 0x13,
+                           '3', '0', '.', '6', ' ', ' ', ' ' };
+  Bus200eSuppressFrame(echo, sizeof(echo));
+  frame(echo, sizeof(echo));
+  CHECK(n_qreply == 0);
+  frame(echo, sizeof(echo));
+  CHECK(n_qreply == 1);
+}
+
 int main() {
   test_short_recall_save();
   test_long_recall_save();
@@ -488,6 +653,11 @@ int main() {
 
   test_build_transfer_frame();
   test_build_transfer_frame_round_trips_through_parser();
+
+  test_build_query_frame();
+  test_build_query_frame_round_trips_through_parser();
+  test_query_reply_parse();
+  test_query_reply_does_not_shadow_commands();
 
   printf("\ntest_bus200e: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;

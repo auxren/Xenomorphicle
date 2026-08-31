@@ -165,6 +165,32 @@ BUS_CODE static void parse_frame(void) {
     return;
   }
 
+  // QUERY REPLY: a queried module answers by mastering a general-call frame
+  // of its own, with the dest/src columns SWAPPED relative to a command --
+  // [nBytes, destAddr=0x22, srcAddr=replier, 0x13, version chars...] -- the
+  // manager's identity 0x22 being the ADDRESSEE rather than the sender. This
+  // is exactly the frame try_query_reply() (PresetBus.cpp) masters when we
+  // are the one being queried; here we recognize other modules' answers so a
+  // master-side QUERY can capture them.
+  //
+  // Checked BEFORE the long/PRIMO branch, but guarded with f[2] != 0x22 so a
+  // command frame (srcAddr 0x22) can never be stolen from that branch no
+  // matter what it is addressed to -- every frame that parsed as a command
+  // before still parses as one now.
+  if (n >= 4 && f[0] == n - 1 && f[1] == 0x22 && f[2] != 0x22 && f[3] == 0x13) {
+    stats.frames_long++;   // same PRIMO dialect as the command framing below
+    const uint8_t vn = (uint8_t) (n - 4);
+    c.op = BUS200E_OP_QUERY_REPLY;
+    c.mod_addr = f[2];                    // who answered
+    c.arg = vn;                           // version-string length
+    c.card_lo = (vn > 0) ? f[4] : 0;      // first three version chars, for the
+    c.mem_off = (uint16_t) (((vn > 1) ? f[5] : 0) |   // debug ring (field
+                            (((vn > 2) ? f[6] : 0) << 8));  // reuse, as above)
+    if (bus_ops && bus_ops->query_reply) bus_ops->query_reply(f[2], f + 4, vn);
+    dispatch(&c);
+    return;
+  }
+
   // LONG / PRIMO framing: [nBytes, destAddr, srcAddr=0x22, cmd, args...],
   // where nBytes counts the bytes that follow it. No short command collides
   // with this shape.
@@ -297,6 +323,21 @@ BUS_CODE int Bus200eBuildTransferFrame(uint8_t op, uint8_t mod_addr,
   out[6] = (uint8_t) (mem_off & 0xFF);
   out[7] = (uint8_t) (mem_off >> 8);
   return BUS200E_XFER_FRAME_LEN;
+}
+
+BUS_CODE int Bus200eBuildQueryFrame(uint8_t mod_addr, uint8_t *out,
+                                     uint8_t cap) {
+  if (cap < BUS200E_QUERY_FRAME_LEN) return -1;
+  // destAddr 0 is the broadcast address: a broadcast QUERY would have every
+  // module on the bus answer at once, colliding. Refuse it rather than
+  // wedging the bus (see PresetBus200e.h).
+  if ((mod_addr & 0x7F) == 0) return -1;
+  out[0] = BUS200E_QUERY_FRAME_LEN - 1;  // nBytes: bytes after itself
+  out[1] = mod_addr & 0x7F;              // destAddr: the module being asked
+  out[2] = 0x22;                         // srcAddr: us, asserting manager identity
+  out[3] = 0x1A;                         // QUERY
+  out[4] = 0xFF;                         // unused argument byte, as seen live
+  return BUS200E_QUERY_FRAME_LEN;
 }
 
 BUS_CODE void Bus200eTask(void) {

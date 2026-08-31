@@ -69,6 +69,13 @@ typedef enum {
   BUS200E_OP_CLOCK,       // arg = 0xF8/0xFA/0xFB/0xFC (log only)
   BUS200E_OP_UNKNOWN,     // arg = first frame byte
   BUS200E_OP_DROPPED,     // frame poisoned/truncated/preempted; arg = length
+  // A QUERY answer from SOME OTHER module (cmd 0x13). Appended at the end of
+  // this enum deliberately: every value above keeps the number it has always
+  // had, so nothing that already logged/serialized an op code shifts meaning.
+  // mod_addr = the replying module; arg = version-string length; card_lo and
+  // mem_off carry the first three version characters for the debug ring (the
+  // same field reuse the bus-MIDI case makes -- see parse_frame()).
+  BUS200E_OP_QUERY_REPLY,
 } Bus200eOp;
 
 typedef struct {
@@ -99,6 +106,14 @@ typedef struct {
   // bus mask in its low nibble (0x8 = bus A, 0x4 = bus B); realtime
   // (>= 0xF8) arrives with data1 = data2 = 0. NULL = log-only.
   void (*midi_rx)(uint8_t status, uint8_t data1, uint8_t data2);
+  // Another module's answer to a QUERY (cmd 0x13, see BUS200E_OP_QUERY_REPLY).
+  // `from_addr` is the replying module's own address; `ver` points at the
+  // version-string bytes (NOT NUL-terminated, `n` of them, n <=
+  // BUS200E_QUERY_VER_MAX) and is only valid for the duration of the call.
+  // NULL = log-only, exactly like midi_rx. Appended at the end of this struct
+  // so existing positional initializers keep initializing what they always
+  // did.
+  void (*query_reply)(uint8_t from_addr, const uint8_t *ver, uint8_t n);
 } Bus200eOps;
 
 typedef struct {
@@ -173,5 +188,40 @@ int Bus200eLogRead(uint32_t n_back, Bus200eCmd *out);   // 1 = ok, 0 = gone
 // a bad op or an undersized buffer.
 int Bus200eBuildTransferFrame(uint8_t op, uint8_t mod_addr, uint8_t card_lo,
                                uint16_t mem_off, uint8_t *out, uint8_t cap);
+
+// ---------------------------------------------------------------------------
+// QUERY (cmd 0x1A) -- asking a module "who are you", and hearing the answer.
+//
+// The INCOMING half has always been here (parse_frame()'s 0x1A case ->
+// BUS200E_OP_QUERY -> Bus200eQueryPending(), answered by PresetBus.cpp's
+// try_query_reply()). These two additions are the OUTGOING half: build the
+// request frame a preset manager would send, and recognize the reply frame a
+// module sends back.
+//
+// Request (long/PRIMO, 5 bytes -- same shape as the RECALL/SAVE broadcast
+// pump_broadcast() masters, and as the real-world vectors in
+// test_bus200e.cpp's test_query_pending):
+//   [0x04][modAddr][0x22][0x1A][0xFF]
+// modAddr is the DESTINATION field here (not a payload argument the way
+// BACKUP/RESTORE's is), so it singles out one module directly -- which is
+// also why modAddr 0 is refused below: destAddr 0 is the broadcast address,
+// and a broadcast QUERY would have every module on the bus answer at once.
+//
+// Reply (what the queried module masters back, and what
+// try_query_reply() masters when WE are the one asked):
+//   [nBytes][0x22][srcAddr][0x13][version chars...]
+// Note the dest/src columns are SWAPPED relative to a command frame: the
+// manager's identity 0x22 sits in the DEST slot (it is the addressee), and
+// the answering module's own address in the SRC slot. That swap is what
+// makes a reply unambiguously distinguishable from a command.
+#define BUS200E_QUERY_FRAME_LEN 5
+// Longest version string a reply can carry through this parser: FRAME_MAX
+// (12) minus the 4 header bytes. Our own reply uses 7 ("30.6" + 3 spaces).
+#define BUS200E_QUERY_VER_MAX 8
+
+// Build the outgoing QUERY request. cap must be >= BUS200E_QUERY_FRAME_LEN.
+// Returns BUS200E_QUERY_FRAME_LEN on success, -1 on an undersized buffer or
+// mod_addr 0 (broadcast; see above).
+int Bus200eBuildQueryFrame(uint8_t mod_addr, uint8_t *out, uint8_t cap);
 
 #endif  // PRESETBUS200E_H_
