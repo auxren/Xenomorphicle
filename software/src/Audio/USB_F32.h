@@ -17,6 +17,18 @@
 #include "usb_audio_interface.h"
 #include "AudioStream_F32.h"
 
+// Guard trips in the ISR callbacks below. All four should stay at 0 forever;
+// a non-zero count means the transport handed us a ring index or a block
+// pointer it had already invalidated -- see the long note in USB_F32.cpp.
+// Printed by the 't' console selftest.
+struct UsbAudioF32Guards {
+  uint32_t rx_bad_index;   // ring/channel index outside rxBuffer
+  uint32_t rx_null_block;  // asked to fill a block that was never allocated
+  uint32_t tx_bad_index;   // ring/channel index outside txBuffer
+  uint32_t tx_null_block;  // asked to drain a block that was never allocated
+};
+extern volatile UsbAudioF32Guards usb_audio_f32_guards;
+
 class AudioInputUSB_F32 : public AudioStream_F32 {
 public:
   AudioInputUSB_F32(float kp = 400.f, float ki = .2f);
@@ -30,6 +42,7 @@ public:
 
 private:
   static void copy_to_buffers(const uint8_t *src, uint16_t bIdx, uint16_t noChannels, unsigned int count, unsigned int len);
+  static bool rxRow(uint16_t bIdx, uint16_t noChannels, audio_block_f32_t **out);
   static bool setBlockQuite(uint16_t bIdx, uint16_t channel);
   static void releaseBlock(uint16_t bIdx, uint16_t channel);
   static bool allocateBlock(uint16_t bIdx, uint16_t channel);
@@ -51,6 +64,7 @@ public:
 
 private:
   static void copy_from_buffers(uint8_t *dst, uint16_t bIdx, uint16_t noChannels, unsigned int count, unsigned int len);
+  static bool txRow(uint16_t bIdx, uint16_t noChannels, audio_block_f32_t **out);
   static void releaseBlocks(uint16_t bIdx, uint16_t noChannels);
   static bool isBlockReady(uint16_t bIdx, uint16_t channel);
 
