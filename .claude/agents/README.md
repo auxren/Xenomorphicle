@@ -35,10 +35,10 @@ explicitly if you want one to patch code directly.
 
 ## 251e-sequencer build team
 
-A second, build-oriented team for a separate initiative: a web applet that
-programs all 4 sequences of a Buchla 251e over the 200e bus, from a
-Xenomorpher plugged into a Mac via USB. Modeled on a flatter "VP + solo
-desks" structure (one lead, four independent specialists, no further
+A second, build-oriented team for a separate initiative, originally scoped
+as a web applet that programs all 4 sequences of a Buchla 251e over the 200e
+bus, from a Xenomorpher plugged into a Mac via USB. Modeled on a flatter "VP
++ solo desks" structure (one lead, four independent specialists, no further
 delegation) rather than the review team's flat roster.
 
 | Agent | Domain |
@@ -49,6 +49,22 @@ delegation) rather than the review team's flat roster.
 | `sequencer-webapp-engineer` | Builds the actual browser UI (WebMIDI SysEx transport, sequence editor) |
 | `hw-bringup-gatekeeper` | Standing safety gate — blocks live-bus work until the Phase 0 electrical check (3.3V vs 5V) is confirmed; also owns local flashing |
 
-The live 200e bus is **not yet cleared for use** — `hw-bringup-gatekeeper`
-holds that line. Everything else in this team can and should proceed as
-design/host-tested work in the meantime.
+**Status as of 2026-08-31: the original charter is DONE, not blocked.** The
+Phase 0 electrical check passed and the live bus has been in active use for
+an extended real-hardware session — reading and writing a real 251e (bus
+address 0x5C) repeatedly with no electrical issues (a separate, unrelated
+USB-audio driver bug caused reboots during that session and has since been
+root-caused and fixed; it was never an electrical/bring-up problem). The
+251e's full preset-bank byte format is fully decoded and verified
+(`tools/251e-sequencer/sequence-codec.js`; written up at
+`~/Documents/GitHub/claude_trix/tricks/reverse-engineering/re-buchla-251e-sequence-format.md`).
+Bus-mastering BACKUP/RESTORE of another module's card is working and
+committed (`software/src/Main.cpp` console commands `m`/`c`/`w`/`x`/`S`/`R`,
+built on `OC::PresetBus`). The web applet (`tools/251e-sequencer/`) programs
+a full bank over WebMIDI SysEx and works end-to-end. A full 4-sequence
+musical composition was written to a real 251e and independently read back
+byte-exact.
+
+The team's next phase is a **different, on-device app** — generating and
+pushing 251e sequences from the Xenomorpher's own OLED/encoder UI, no
+laptop required — see `sequencer-lead.md` for the updated brief.
