@@ -1147,14 +1147,25 @@ FLASHMEM __attribute__((noinline)) void loop() {
           // Console-only for now -- there is deliberately no panel gesture
           // yet, because a half-built one would be worse than none.
           case 'E': {   // export every used slot
-            int n = 0, fail = 0;
+            int n = 0, fail = 0, legacy = 0, nocard = 0;
             for (uint8_t i = 0; i < OC::PresetEngine::kNumSlots; ++i) {
-              const OC::PresetEngine::ExportResult r =
-                  OC::PresetEngine::ExportSlot(i);
-              if (r == OC::PresetEngine::EXPORT_OK) ++n;
-              else if (r != OC::PresetEngine::EXPORT_EMPTY) ++fail;
+              switch (OC::PresetEngine::ExportSlot(i)) {
+                case OC::PresetEngine::EXPORT_OK:     ++n; break;
+                case OC::PresetEngine::EXPORT_EMPTY:  break;
+                case OC::PresetEngine::EXPORT_LEGACY: ++legacy; break;
+                case OC::PresetEngine::EXPORT_NO_CARD: ++nocard; break;
+                default: ++fail; break;
+              }
             }
-            Serial.printf("exported %d slot(s), %d failed\n", n, fail);
+            // Report each cause separately. "N failed" alone sent someone
+            // looking at the card when the real answer was that every slot
+            // predated the container format.
+            if (nocard) { Serial.println("no card"); break; }
+            Serial.printf("exported %d slot(s)\n", n);
+            if (legacy)
+              Serial.printf("%d slot(s) are pre-container: save each one once "
+                            "to convert it, then export again\n", legacy);
+            if (fail) Serial.printf("%d slot(s) FAILED to copy\n", fail);
             break;
           }
           // 'J', not 'I': 'I' is the app-ISR toggle thirty lines up, and this

@@ -1240,6 +1240,20 @@ FLASHMEM ExportResult ExportSlot(uint8_t slot) {
 
   char name[12];
   container_name(name, slot);
+
+  // A container is the portable unit; the pre-container layout is not.
+  // SlotUsed() answers for BOTH -- it has to, so old slots still recall --
+  // so a legacy slot arrives here looking exportable and then fails on a
+  // source file that was never going to exist. Found on hardware: a module
+  // holding seven pre-container presets reported "7 failed", which names no
+  // cause and reads like the card is broken. Say what is actually true, and
+  // what to do about it: re-saving the slot converts it.
+  {
+    File c; SectionEntry sec[kMaxSections]; int n = 0;
+    if (!container_open(slot, c, sec, n)) return EXPORT_LEGACY;
+    c.close();
+  }
+
   if (!copy_file(preset_fs(), name, *card, name)) return EXPORT_FAILED;
 
   // Prove it landed. A card that reports a successful write and stores

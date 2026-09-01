@@ -103,6 +103,7 @@ enum ExportResult : uint8_t {
   EXPORT_EMPTY,      // nothing in that slot on the source side
   EXPORT_BAD_SLOT,   // slot >= kNumSlots
   EXPORT_BAD_FILE,   // the card's file is not a container we understand
+  EXPORT_LEGACY,     // pre-container slot; re-save it to convert, then export
   EXPORT_FAILED,     // the copy did not land
 };
 ExportResult ExportSlot(uint8_t slot);   // internal -> card
@@ -132,7 +133,7 @@ inline bool LastWasSave() { return false; }
 inline bool Busy() { return false; }
 enum ExportResult : uint8_t {
   EXPORT_OK = 0, EXPORT_NO_CARD, EXPORT_EMPTY,
-  EXPORT_BAD_SLOT, EXPORT_BAD_FILE, EXPORT_FAILED,
+  EXPORT_BAD_SLOT, EXPORT_BAD_FILE, EXPORT_LEGACY, EXPORT_FAILED,
 };
 inline ExportResult ExportSlot(uint8_t) { return EXPORT_NO_CARD; }
 inline ExportResult ImportSlot(uint8_t) { return EXPORT_NO_CARD; }
