@@ -44,6 +44,14 @@ static int8_t sel_stored = -1;
 // store/recall feedback: hold-progress while L is held, then a worded
 // confirmation banner once the engine finishes the operation
 static uint32_t hold_start_ms = 0;        // 0 = not holding
+// RECALL used to fire on a bare press, which made it far too easy to trigger
+// by accident while chording both encoders to open this overlay -- and a
+// stray recall is bus-wide and immediate. It now wants a hold too, half the
+// length STORE asks for: deliberate, but still clearly the lighter gesture.
+// Derived from kLongPressTicks so the two can never drift apart.
+static const uint32_t kRecallHoldMs = OC::Ui::kLongPressTicks / 2;
+static uint32_t recall_hold_ms = 0;       // 0 = not holding
+static bool recall_fired = false;         // one shot per hold
 static int8_t pending_slot = -1;          // op we're waiting on
 static bool pending_was_save = false;
 static uint32_t pending_start_ms = 0;
@@ -182,14 +190,10 @@ FLASHMEM __attribute__((noinline)) bool HandleEvent(const UI::Event &event) {
     }
     return true;
   }
-  if (event.control == CONTROL_BUTTON_R && event.type == UI::EVENT_BUTTON_PRESS) {
-    recall_selected();
-    pending_slot = sel;
-    pending_was_save = false;
-    pending_start_ms = millis();
-    pending_opcount = PresetEngine::OpCount();
-    return true;
-  }
+  // RECALL is NOT fired here any more -- a bare press was too easy to trigger
+  // by accident. The hold is timed in Task() against kRecallHoldMs; this only
+  // swallows the event so nothing else acts on it.
+  if (event.control == CONTROL_BUTTON_R) return true;
   if (event.control == CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_LONG_PRESS) {
     if (cursor == 1 && sel_stored == 1) return true;  // STORE legend hidden here
     PresetBus::BroadcastSave(sel);
@@ -253,7 +257,7 @@ FLASHMEM void Draw() {
 
   // edge legends: contextual (turns are unlabeled, presses are labeled)
   const char *l_top = "STORE", *l_hint = "hold";
-  const char *r_top = "RECALL", *r_hint = "press";
+  const char *r_top = "RECALL", *r_hint = "hold";
   if (edit_mode) {
     l_top = "DONE"; l_hint = "click";
     r_top = "CHAR"; r_hint = "turn";
@@ -318,6 +322,17 @@ FLASHMEM void Draw() {
       uint32_t w = (held >= 500) ? 32 : ((held - 120) * 32) / 380;
       if (w) graphics.drawRect(5, 36, w, 3);
     }
+  }
+
+  // the same bar under RECALL, scaled to its shorter hold. Sits above the
+  // WPM dot (y=35 is taken on this side) and starts filling immediately --
+  // at 250ms there is no room for a flicker guard, and the bar appearing at
+  // all is the feedback that the hold registered.
+  if (recall_hold_ms && !edit_mode) {
+    const uint32_t held = millis() - recall_hold_ms;
+    graphics.drawFrame(90, 29, 34, 5);
+    uint32_t w = (held >= kRecallHoldMs) ? 32 : (held * 32) / kRecallHoldMs;
+    if (w) graphics.drawRect(91, 30, w, 3);
   }
 
   // one focus grammar: invert exactly what the right encoder will change
@@ -392,6 +407,28 @@ void Task() {
       if (!hold_start_ms) hold_start_ms = millis() | 1;
     } else {
       hold_start_ms = 0;
+    }
+
+    // RECALL: same idea, half the hold, and it fires the moment the
+    // threshold is reached rather than on release -- so the gesture ends
+    // when the bar fills, matching how STORE feels. Never in edit_mode:
+    // a bus-wide recall must not fall out of a rename gesture.
+    if (!edit_mode && ui.read_immediate(CONTROL_BUTTON_R)) {
+      if (!recall_hold_ms) {
+        recall_hold_ms = millis() | 1;
+        recall_fired = false;
+      } else if (!recall_fired &&
+                 (millis() - recall_hold_ms) >= kRecallHoldMs) {
+        recall_fired = true;              // one shot; released to re-arm
+        recall_selected();
+        pending_slot = sel;
+        pending_was_save = false;
+        pending_start_ms = millis();
+        pending_opcount = PresetEngine::OpCount();
+      }
+    } else {
+      recall_hold_ms = 0;
+      recall_fired = false;
     }
 
     // completion watch: the engine bumps OpCount when the op finishes
