@@ -273,6 +273,11 @@ def main():
     ap.add_argument("--bus-off", action="store_true")
     ap.add_argument("--capture-251e")
     ap.add_argument("--capture-259e")
+    ap.add_argument("--write-fault",
+                    choices=["none", "ignore", "drop-tail",
+                             "flip-first", "flip-last"],
+                    help="make the simulated modules mishandle a RESTORE, to "
+                         "see the write path's read-back verification refuse")
     args = ap.parse_args()
 
     if not os.access(EXE, os.X_OK):
@@ -287,6 +292,8 @@ def main():
         argv += ["--capture-251e", args.capture_251e]
     if args.capture_259e:
         argv += ["--capture-259e", args.capture_259e]
+    if args.write_fault:
+        argv += ["--write-fault", args.write_fault]
 
     Handler.sim = Sim(argv)
 
