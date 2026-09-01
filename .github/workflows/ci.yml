@@ -57,6 +57,10 @@ jobs:
               -o build/test_buchla200e_write_guard \
               test_buchla200e_write_guard.cpp ../src/Buchla200eWriteGuard.cpp
           ./build/test_buchla200e_write_guard
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_buchla200e_uigate \
+              test_buchla200e_uigate.cpp ../src/Buchla200eUiGate.cpp
+          ./build/test_buchla200e_uigate
           g++ -std=c++17 -Wall -Werror -O2 -I host_stubs \
               -o build/test_buchla251e_editgenrec \
               test_buchla251e_editgenrec.cpp ../src/Buchla251eSlotCodec.cpp \

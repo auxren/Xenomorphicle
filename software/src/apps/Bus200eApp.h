@@ -50,6 +50,7 @@
 // ---------------------------------------------------------------------------
 
 #include "../Buchla200eModuleTable.h"
+#include "../Buchla200eUiGate.h"
 #include "../Buchla200eWriteGuard.h"
 #include "../Buchla251eGenerator.h"
 #include "../Buchla251eNoteMap.h"
@@ -273,6 +274,13 @@ private:
   uint8_t probe_addr_ = 0;
   int8_t probe_result_ = -1;   // -1 none, 0 silent, 1 answered
   bool probe_active_ = false;
+  uint32_t probe_ms_ = 0;      // millis() the probe was fired; bounds it
+  uint32_t scan_step_ms_ = 0;  // millis() the current scan query was fired
+
+  // Why the last button press did nothing. A refusal the user cannot see is
+  // indistinguishable from a dead button -- which is exactly how the Read
+  // bug presented. Cleared when an action actually starts.
+  Buchla200eReadBlock last_refusal_ = BUCHLA200E_READ_OK;
 
   // --- 251e home screen ---
   uint8_t slot_ = 0;           // WIRE index 0-29; displayed as slot_+1
@@ -281,6 +289,12 @@ private:
   uint8_t read_state_ = Bus200eAppNS::READ_NONE;
   Bus200eMasterError read_err_ = BUS200E_MASTER_ERR_NONE;
   uint32_t read_ms_ = 0;       // millis() when the bank read completed
+  uint32_t read_started_ms_ = 0;   // millis() the transfer was accepted
+  uint32_t write_started_ms_ = 0;  // ditto for a restore
+  // Set when a job vanished instead of finishing, so the status line can say
+  // "lost" rather than blaming the module for an error it never reported.
+  bool read_lost_ = false;
+  bool write_lost_ = false;
   bool edited_ = false;        // working_slot_ diverges from the module
 
   // Which module the resident card image actually came from. Without these a
@@ -430,6 +444,19 @@ private:
 
 FLASHMEM __attribute__((noinline))
 void AppBus200e::StartScan() {
+#ifdef PRESET_BUS
+  // A scan drives the same query FSM a probe uses and calls
+  // MasterQueryReset() as it goes, so starting one on top of a probe (or a
+  // transfer) stranded the other job. Refuse visibly instead.
+  Buchla200eReadContext rc;
+  rc.bus_enabled = OC::PresetBus::Enabled();
+  rc.read_active = (read_state_ == Bus200eAppNS::READ_ACTIVE);
+  rc.write_active = (write_state_ == Bus200eAppNS::WRITE_ACTIVE);
+  rc.scan_idle = true;   // starting one is what we are here to do
+  rc.probe_active = probe_active_;
+  last_refusal_ = Buchla200eCheckRead(rc);
+  if (last_refusal_ != BUCHLA200E_READ_OK) return;
+#endif
   for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i) found_[i] = 0;
   found_count_ = 0;
   list_top_ = 0;
@@ -459,14 +486,30 @@ void AppBus200e::StopScan() {
 FLASHMEM __attribute__((noinline))
 void AppBus200e::StartProbe() {
 #ifdef PRESET_BUS
-  if (scan_state_ != Bus200eAppNS::SCAN_IDLE) return;  // scan owns the FSM
-  if (!OC::PresetBus::Enabled()) return;
-  if (addr_ == 0 || addr_ == OC::PresetBus::ModuleAddress()) return;
+  // Same treatment as StartRead: no silent refusals. A probe also may not
+  // start on top of a read/write, because MasterQueryReset() below would
+  // disturb a job those own.
+  Buchla200eReadContext rc;
+  rc.bus_enabled = OC::PresetBus::Enabled();
+  rc.read_active = (read_state_ == Bus200eAppNS::READ_ACTIVE);
+  rc.write_active = (write_state_ == Bus200eAppNS::WRITE_ACTIVE);
+  rc.scan_idle = (scan_state_ == Bus200eAppNS::SCAN_IDLE);
+  rc.probe_active = probe_active_;
+  last_refusal_ = Buchla200eCheckRead(rc);
+  if (last_refusal_ == BUCHLA200E_READ_OK &&
+      (addr_ == 0 || addr_ == OC::PresetBus::ModuleAddress()))
+    last_refusal_ = BUCHLA200E_READ_BAD_ADDR;
+  if (last_refusal_ != BUCHLA200E_READ_OK) return;
+
   OC::PresetBus::MasterQueryReset();
   if (OC::PresetBus::MasterQuery(addr_) == 0) {
     probe_addr_ = addr_;
     probe_result_ = -1;
     probe_active_ = true;
+    probe_ms_ = millis();
+  } else {
+    // Refused by the query FSM itself. Previously this left no trace at all.
+    last_refusal_ = BUCHLA200E_READ_BUSY_PROBE;
   }
 #endif
 }
@@ -475,14 +518,19 @@ FLASHMEM __attribute__((noinline))
 void AppBus200e::PumpProbe() {
 #ifdef PRESET_BUS
   if (!probe_active_) return;
+  // StopScan() and StartProbe() both call MasterQueryReset(), so a scan
+  // started while a probe was in flight used to strand probe_active_ true
+  // forever -- and a stuck probe silently blocked every subsequent Read.
+  // Treat idle-underneath-us and overrun as terminal, not as "still waiting".
   const Bus200eQueryState st = OC::PresetBus::MasterQueryState();
-  if (st == BUS200E_QUERY_DONE) {
-    probe_result_ = 1;
-  } else if (st == BUS200E_QUERY_FAILED) {
-    probe_result_ = 0;
-  } else {
-    return;  // still in flight
-  }
+  const Buchla200eJobFate fate = Buchla200eQueryProgress(
+      st, millis() - probe_ms_, BUCHLA200E_QUERY_TIMEOUT_MS);
+  if (fate == BUCHLA200E_JOB_PENDING) return;
+
+  if (fate == BUCHLA200E_JOB_DONE)        probe_result_ = 1;
+  else if (fate == BUCHLA200E_JOB_FAILED) probe_result_ = 0;
+  else                                    probe_result_ = -1;  // lost/timeout
+
   OC::PresetBus::MasterQueryReset();
   probe_active_ = false;
 #endif
@@ -497,13 +545,17 @@ void AppBus200e::PumpScan() {
   const int count = Buchla200eModuleCount();
 
   if (scan_state_ == Bus200eAppNS::SCAN_WAITING) {
+    // Bounded, so a query that never terminates advances the sweep instead
+    // of parking the scan (and with it the whole app) on one address.
     const Bus200eQueryState st = OC::PresetBus::MasterQueryState();
-    if (st == BUS200E_QUERY_DONE) {
+    const Buchla200eJobFate fate = Buchla200eQueryProgress(
+        st, millis() - scan_step_ms_, BUCHLA200E_QUERY_TIMEOUT_MS);
+    if (fate == BUCHLA200E_JOB_PENDING) return;  // come back next Loop()
+    if (fate == BUCHLA200E_JOB_DONE) {
       SetFound(found_, scan_index_);
       ++found_count_;
-    } else if (st != BUS200E_QUERY_FAILED) {
-      return;  // SENDING or WAITING -- come back next Loop()
     }
+    // FAILED / LOST / TIMEOUT all mean "no answer recorded here" -- move on.
     OC::PresetBus::MasterQueryReset();
     ++scan_index_;
     scan_state_ = Bus200eAppNS::SCAN_NEXT;
@@ -533,6 +585,7 @@ void AppBus200e::PumpScan() {
   }
   if (OC::PresetBus::MasterQuery(e->addr) == 0) {
     scan_state_ = Bus200eAppNS::SCAN_WAITING;
+    scan_step_ms_ = millis();
   } else {
     // Refused (bus busy, or a job already running) -- skip rather than spin.
     ++scan_index_;
@@ -549,20 +602,29 @@ void AppBus200e::PumpScan() {
 FLASHMEM __attribute__((noinline))
 void AppBus200e::StartRead() {
 #ifdef PRESET_BUS
-  if (read_state_ == Bus200eAppNS::READ_ACTIVE) return;
-  if (scan_state_ != Bus200eAppNS::SCAN_IDLE || probe_active_) return;
-  if (!OC::PresetBus::Enabled()) return;
+  // Every refusal is now a value the status line prints. These used to be
+  // three bare returns, which made a blocked Read indistinguishable from a
+  // dead button -- the bug this app was reported with.
+  Buchla200eReadContext rc;
+  rc.bus_enabled = OC::PresetBus::Enabled();
+  rc.read_active = (read_state_ == Bus200eAppNS::READ_ACTIVE);
+  rc.write_active = (write_state_ == Bus200eAppNS::WRITE_ACTIVE);
+  rc.scan_idle = (scan_state_ == Bus200eAppNS::SCAN_IDLE);
+  rc.probe_active = probe_active_;
+  last_refusal_ = Buchla200eCheckRead(rc);
+  if (last_refusal_ != BUCHLA200E_READ_OK) return;
 
   // Clear any DONE/FAILED left over from a previous job, otherwise the
   // master FSM refuses the new one as busy.
   OC::PresetBus::MasterReset();
-  const int rc = OC::PresetBus::MasterBackup(target_);
-  if (rc == 0) {
+  const int rc2 = OC::PresetBus::MasterBackup(target_);
+  if (rc2 == 0) {
     read_state_ = Bus200eAppNS::READ_ACTIVE;
     read_err_ = BUS200E_MASTER_ERR_NONE;
+    read_started_ms_ = millis();   // bounds the wait; see PumpRead
   } else {
     read_state_ = Bus200eAppNS::READ_FAIL;
-    read_err_ = (Bus200eMasterError)(-rc);
+    read_err_ = (Bus200eMasterError)(-rc2);
   }
 #endif
 }
@@ -620,7 +682,23 @@ void AppBus200e::PumpRead() {
 #ifdef PRESET_BUS
   if (read_state_ != Bus200eAppNS::READ_ACTIVE) return;
 
+  // The master FSM is shared with the console commands and the USB bridge.
+  // Waiting only on DONE/FAILED meant any other outcome hung here forever,
+  // which then made the Read button silently refuse. Bounded and explicit.
   const Bus200eMasterState st = OC::PresetBus::MasterState();
+  const Buchla200eJobFate fate = Buchla200eJobProgress(
+      st, millis() - read_started_ms_, BUCHLA200E_JOB_TIMEOUT_MS);
+  if (fate == BUCHLA200E_JOB_PENDING) return;
+
+  if (fate == BUCHLA200E_JOB_LOST || fate == BUCHLA200E_JOB_TIMEOUT) {
+    read_state_ = Bus200eAppNS::READ_FAIL;
+    read_err_ = BUS200E_MASTER_ERR_NONE;   // nobody reported one; don't invent
+    read_lost_ = true;
+    OC::PresetBus::MasterReset();
+    return;
+  }
+  read_lost_ = false;
+
   if (st == BUS200E_MASTER_DONE) {
     if (DecodeSlotFromCardImage()) {
       read_state_ = Bus200eAppNS::READ_OK;
@@ -743,6 +821,7 @@ void AppBus200e::CommitWrite() {
   if (rc == 0) {
     write_state_ = Bus200eAppNS::WRITE_ACTIVE;
     write_err_ = BUS200E_MASTER_ERR_NONE;
+    write_started_ms_ = millis();
   } else {
     write_state_ = Bus200eAppNS::WRITE_FAIL;
     write_err_ = (Bus200eMasterError)(-rc);
@@ -756,7 +835,23 @@ void AppBus200e::PumpWrite() {
 #ifdef PRESET_BUS
   if (write_state_ != Bus200eAppNS::WRITE_ACTIVE) return;
 
+  // Same bound as the read path. A write that vanishes is worse than one that
+  // fails: the module's state is then unknown, so say so and make the user
+  // re-Read rather than leaving a hopeful "writing..." on screen forever.
   const Bus200eMasterState st = OC::PresetBus::MasterState();
+  const Buchla200eJobFate fate = Buchla200eJobProgress(
+      st, millis() - write_started_ms_, BUCHLA200E_JOB_TIMEOUT_MS);
+  if (fate == BUCHLA200E_JOB_PENDING) return;
+
+  if (fate == BUCHLA200E_JOB_LOST || fate == BUCHLA200E_JOB_TIMEOUT) {
+    write_state_ = Bus200eAppNS::WRITE_FAIL;
+    write_err_ = BUS200E_MASTER_ERR_NONE;
+    write_lost_ = true;
+    OC::PresetBus::MasterReset();
+    return;
+  }
+  write_lost_ = false;
+
   if (st == BUS200E_MASTER_DONE) {
     write_state_ = Bus200eAppNS::WRITE_OK;
     // The module now holds what working_slot_ holds, so this is no longer a
@@ -1042,6 +1137,14 @@ FLASHMEM __attribute__((noinline))
 void AppBus200e::DrawReadState() const {
   graphics.setPrintPos(0, 46);
 
+  // A refusal outranks everything: the user just pressed a button and needs
+  // to know why nothing happened. It clears as soon as an action starts.
+  if (last_refusal_ != BUCHLA200E_READ_OK) {
+    graphics.print(Buchla200eReadBlockText(last_refusal_));
+    graphics.invertRect(0, 45, 128, 10);
+    return;
+  }
+
   // A write in flight or just finished outranks the read line: it is the more
   // recent, and more consequential, thing that happened to the module.
   switch (write_state_) {
@@ -1054,7 +1157,10 @@ void AppBus200e::DrawReadState() const {
       graphics.print("WROTE ok - Read to chk");
       return;
     case Bus200eAppNS::WRITE_FAIL:
-      graphics.printf("WRITE FAILED (err %d)", (int)write_err_);
+      // "lost" is not the same as "the module rejected it": the transfer
+      // vanished, so what the module now holds is unknown. Say that.
+      if (write_lost_) graphics.print("WRITE LOST - Read to chk");
+      else             graphics.printf("WRITE FAILED (err %d)", (int)write_err_);
       graphics.invertRect(0, 45, 128, 10);
       return;
     default: break;
@@ -1075,6 +1181,13 @@ void AppBus200e::DrawReadState() const {
       }
       break;
     case Bus200eAppNS::READ_FAIL:
+      if (read_lost_) {
+        // Nobody reported an error -- the job was reset out from under us
+        // (console command, USB bridge). Retrying is the right move.
+        graphics.print("READ LOST - try again");
+        graphics.invertRect(0, 45, 128, 10);
+        break;
+      }
       switch (read_err_) {
         case BUS200E_MASTER_ERR_NO_FREE_CARD:
           graphics.print("READ FAIL: no card"); break;
@@ -1604,6 +1717,11 @@ FLASHMEM void AppBus200e::DrawScreensaver() const { DrawMenu(); }
 
 FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
   if (event.type != UI::EVENT_BUTTON_PRESS) return;
+
+  // A refusal belongs to the press that caused it. Clear it here so the next
+  // press starts clean -- the Start* calls below set it again if they refuse,
+  // and a stale reason on screen would be its own kind of lie.
+  last_refusal_ = BUCHLA200E_READ_OK;
 
   // --- armed write: only two answers, and one of them is "no" -------------
   if (screen_ == Bus200eAppNS::SCR_WRITE_CONFIRM) {
