@@ -1,0 +1,81 @@
+# xeno-sim -- host simulator for the Xenomorpher's "200e Modules" app.
+#
+#   make            build build/xeno-sim
+#   make run        build and run it interactively
+#   make clean
+#
+# Nothing here is part of the firmware build: no platformio.ini env references
+# this directory, and no file under software/src is modified.
+
+SRC   = ../../software/src
+STUBS = ../../software/test/host_stubs
+BUILD = build
+
+CXX      ?= g++
+CXXFLAGS ?= -std=c++17 -Wall -Werror -O2
+INCLUDES  = -I. -I$(SRC) -I$(STUBS)
+
+# ARDUINO_TEENSY41 + PRESET_BUS are what the real T41 firmware builds with, and
+# what makes Bus200eApp.h compile its MIDI-record ISR path and reach the real
+# OC::PresetBus declarations. They apply only to the TUs that include the app or
+# PresetBus.h -- the firmware sources below are built exactly as the existing
+# host test suites build them.
+APPFLAGS = -DARDUINO_TEENSY41 -DPRESET_BUS
+
+# Linked for real, unmodified, straight out of the firmware tree.
+FW_SRCS = \
+  $(SRC)/Buchla200eModuleTable.cpp \
+  $(SRC)/Buchla200eUiGate.cpp \
+  $(SRC)/Buchla200eWriteGuard.cpp \
+  $(SRC)/Buchla251eGenerator.cpp \
+  $(SRC)/Buchla251eRecorder.cpp \
+  $(SRC)/Buchla251eSlotCodec.cpp \
+  $(SRC)/Buchla259eSlotCodec.cpp \
+  $(SRC)/Bus200eMaster.cpp \
+  $(SRC)/PresetBus200e.cpp \
+  $(SRC)/src/extern/bjorklund.cpp
+
+SIM_SRCS = main.cpp sim_bus.cpp sim_capture.cpp sim_term.cpp \
+           shim/oc_shim.cpp shim/weegfx_host.cpp
+
+FW_OBJS  = $(patsubst %,$(BUILD)/fw_%.o,$(notdir $(basename $(FW_SRCS))))
+SIM_OBJS = $(patsubst %,$(BUILD)/%.o,$(basename $(notdir $(SIM_SRCS))))
+
+EXE = $(BUILD)/xeno-sim
+
+.PHONY: all run clean
+all: $(EXE)
+
+$(EXE): $(SIM_OBJS) $(FW_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
+$(BUILD):
+	@mkdir -p $(BUILD)
+
+# --- simulator sources (see APPFLAGS) ---
+$(BUILD)/main.o: main.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(APPFLAGS) -c $< -o $@
+$(BUILD)/sim_bus.o: sim_bus.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(APPFLAGS) -c $< -o $@
+$(BUILD)/sim_capture.o: sim_capture.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+$(BUILD)/sim_term.o: sim_term.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+$(BUILD)/oc_shim.o: shim/oc_shim.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+# The real renderer. See the header comment in weegfx_host.cpp for why this one
+# translation unit needs its own macro adjustments.
+$(BUILD)/weegfx_host.o: shim/weegfx_host.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# --- firmware sources, built bare as the host test suites build them ---
+$(BUILD)/fw_%.o: $(SRC)/%.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+$(BUILD)/fw_%.o: $(SRC)/src/extern/%.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+run: $(EXE)
+	@$(EXE)
+
+clean:
+	@rm -rf $(BUILD)
