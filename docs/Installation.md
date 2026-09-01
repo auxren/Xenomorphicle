@@ -33,8 +33,10 @@ uploading the HEX file
 - make sure a USB cable is connected to the Teensy, and that the O+C module is powered up
 - press the program push switch on the Teensy board (on the back of the O+C module) **OR if you are updating from Phazerville v1.8.1 or later, you can reflash _without_ accessing the back of the module:**
 1. Navigate to the Setup / About App
-2. Turn the LEFT encoder — the display should read "Reflash"
-3. Press the LEFT encoder to enter Flash Upgrade Mode, and proceed with the remaining instructions
+2. **Hold** the LEFT encoder button — the bottom row reads `keep holding: Reflash` while you hold it
+3. Keep holding past the long-press. A confirmation screen appears (`REFLASH: BOOTLOADER`); press **B** to enter Flash Upgrade Mode, or the LEFT encoder button to cancel. The yes is ignored for the first 350 ms.
+
+  _(Older Phazerville builds latched "Reflash" on a **turn** of the left encoder and rebooted on the next press. This fork replaced that with the held gesture above, because a stray nudge in a rack could latch it — and while latched, it hid the `[RESET]` label while the right encoder still performed a factory reset. On a Xenomorpher the Teensy's PROGRAM button is not reachable once mounted, so this is the only front-panel way in.)_
 - click the Program icon, or choose Program from the Operation menu in Teensy Loader
 - (you should briefly see a progress bar as the firmware is uploaded)
 - click the reboot icon or choose Operation > Reboot

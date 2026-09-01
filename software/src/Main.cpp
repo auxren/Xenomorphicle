@@ -1142,6 +1142,35 @@ FLASHMEM __attribute__((noinline)) void loop() {
           case ')': OC::PresetEngine::RequestRecall(0); break;
           case '{': OC::PresetEngine::RequestSave(1); break;
           case '}': OC::PresetEngine::RequestRecall(1); break;
+          // Preset export/import to the SD card. Presets themselves always
+          // live on internal flash; the card is how one moves between modules.
+          // Console-only for now -- there is deliberately no panel gesture
+          // yet, because a half-built one would be worse than none.
+          case 'E': {   // export every used slot
+            int n = 0, fail = 0;
+            for (uint8_t i = 0; i < OC::PresetEngine::kNumSlots; ++i) {
+              const OC::PresetEngine::ExportResult r =
+                  OC::PresetEngine::ExportSlot(i);
+              if (r == OC::PresetEngine::EXPORT_OK) ++n;
+              else if (r != OC::PresetEngine::EXPORT_EMPTY) ++fail;
+            }
+            Serial.printf("exported %d slot(s), %d failed\n", n, fail);
+            break;
+          }
+          case 'I': {   // import every slot the card holds
+            const int have = OC::PresetEngine::CardSlotCount();
+            if (have < 0) { Serial.println("no card"); break; }
+            int n = 0, fail = 0;
+            for (uint8_t i = 0; i < OC::PresetEngine::kNumSlots; ++i) {
+              const OC::PresetEngine::ExportResult r =
+                  OC::PresetEngine::ImportSlot(i);
+              if (r == OC::PresetEngine::EXPORT_OK) ++n;
+              else if (r != OC::PresetEngine::EXPORT_EMPTY) ++fail;
+            }
+            Serial.printf("card holds %d, imported %d, %d failed\n",
+                          have, n, fail);
+            break;
+          }
           case 'g':
             Serial.println("Saving global settings + app data...");
             OC::SaveAppData();

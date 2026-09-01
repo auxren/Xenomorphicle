@@ -89,6 +89,13 @@ enum SimWriteFault {
   SIM_WRITE_SHORT_READBACK,
 };
 void SimBusSetWriteFault(SimWriteFault f);
+
+// Make the fault above apply to the FIRST restore only, after which the module
+// behaves. This is what makes the recovery path testable end to end: the undo
+// write is an ordinary write, and through a permanently broken module it can
+// only ever land as BAD -- so "the pre-write bank really does come back" could
+// not be asserted at all without it.
+void SimBusSetWriteFaultOnce(bool once);
 SimWriteFault SimBusWriteFault();
 const char *SimWriteFaultName(SimWriteFault f);
 

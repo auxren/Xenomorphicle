@@ -177,7 +177,29 @@ static uint8_t extract_preset;
 
 // ---- helpers ---------------------------------------------------------------
 
-static FS &slot_fs() { return SDcard_Ready ? (FS &)SD : (FS &)PhzConfig::myfs; }
+// Where preset containers live: ALWAYS internal flash, card or no card.
+//
+// This used to be `SDcard_Ready ? SD : myfs`, which made the instrument's
+// preset memory depend on whether a card happened to be seated. Inserting one
+// made all 30 slots read "Empty preset"; pulling it brought them back. Nothing
+// was lost, but a musician cannot tell that from the front panel, and a preset
+// store that answers differently depending on an accessory is not a preset
+// store. The card is for carrying presets between modules, not for holding
+// them -- see ExportSlot/ImportSlot at the end of this file.
+//
+// It fits: 30 containers is 30 of the 64 blocks LittleFS_Program gives us on
+// T4.1, and the whole steady-state budget lands near 43. The old routing was
+// never a capacity decision anyway; SD was simply the newer, roomier disk.
+static FS &preset_fs() { return PhzConfig::myfs; }
+
+// Where QUADRANTS keeps its banks, which is a genuinely different question:
+// banks are numerous and it prefers SD when there is one (Quadrants.h:99-103,
+// 2104-2107). The preset engine only touches this to hand a recalled bank back
+// to the place Quadrants will look for it.
+static FS &quad_fs() { return SDcard_Ready ? (FS &)SD : (FS &)PhzConfig::myfs; }
+
+// Removable media the export/import path uses. Null when no card is seated.
+static FS *card_fs() { return SDcard_Ready ? (FS *)&SD : nullptr; }
 static void load_names();  // defined with the name store below
 
 FLASHMEM static void slot_name(char *buf, uint8_t slot, char kind, const char *ext) {
@@ -189,7 +211,7 @@ FLASHMEM static void slot_name(char *buf, uint8_t slot, char kind, const char *e
 }
 
 // Source and destination filesystems are separate on purpose. Slot files live
-// on slot_fs() (SD when there is a card), but the live names they restore to
+// on preset_fs() (SD when there is a card), but the live names they restore to
 // belong to whichever FS the owning app actually reads -- and Captain and
 // Scenery only ever read myfs. Copying within one FS silently put their state
 // on the card, where neither app looks.
@@ -245,7 +267,7 @@ FLASHMEM static bool read_appdata_stream(File &f) {
 FLASHMEM static bool read_appdata_file(uint8_t slot) {
   char name[12];
   slot_name(name, slot, 'A', "BIN");
-  File f = slot_fs().open(name);
+  File f = preset_fs().open(name);
   if (!f) return false;
   const bool ok = read_appdata_stream(f);
   f.close();
@@ -323,8 +345,8 @@ FLASHMEM static bool cw_begin(ContainerWriter &w, const char *tmp) {
   w.n = 0;
   w.pos = kPayloadStart;
   w.ok = false;
-  slot_fs().remove(tmp);
-  w.f = slot_fs().open(tmp, FILE_WRITE_BEGIN);
+  preset_fs().remove(tmp);
+  w.f = preset_fs().open(tmp, FILE_WRITE_BEGIN);
   if (!w.f) return false;
   // Reserve the directory by WRITING placeholder bytes, not by seeking past
   // them: seeking beyond EOF on a freshly created file is not portable (the
@@ -333,7 +355,7 @@ FLASHMEM static bool cw_begin(ContainerWriter &w, const char *tmp) {
   const uint8_t zero[kPayloadStart] = { 0 };
   if (w.f.write(zero, sizeof(zero)) != sizeof(zero)) {
     w.f.close();
-    slot_fs().remove(tmp);
+    preset_fs().remove(tmp);
     return false;
   }
   w.ok = true;
@@ -406,13 +428,13 @@ FLASHMEM static bool cw_commit(ContainerWriter &w, const char *tmp, const char *
     ok = w.f.write((const uint8_t *)&e, sizeof(e)) == sizeof(e);
   }
   if (w.f) w.f.close();
-  if (!ok) { slot_fs().remove(tmp); return false; }
+  if (!ok) { preset_fs().remove(tmp); return false; }
   // verify the bytes actually landed: LittleFS has produced 0-byte files
   // while reporting success on a degraded FS
-  File v = slot_fs().open(tmp, FILE_READ);
+  File v = preset_fs().open(tmp, FILE_READ);
   ok = v && v.size() >= kPayloadStart;
   if (v) v.close();
-  if (!ok) { slot_fs().remove(tmp); return false; }
+  if (!ok) { preset_fs().remove(tmp); return false; }
   // Rename FIRST. littlefs's rename atomically replaces an existing
   // destination, so on internal flash the old slot is never absent: it is
   // either the previous container or the new one. The previous
@@ -421,10 +443,10 @@ FLASHMEM static bool cw_commit(ContainerWriter &w, const char *tmp, const char *
   // since those were retired on the earlier commit. The only survivor was
   // the temp file, which the next save of ANY slot deletes in cw_begin.
   // The fallback remove is for SD, where replace-on-rename is not promised.
-  ok = slot_fs().rename(tmp, final_name);
+  ok = preset_fs().rename(tmp, final_name);
   if (!ok) {
-    slot_fs().remove(final_name);
-    ok = slot_fs().rename(tmp, final_name);
+    preset_fs().remove(final_name);
+    ok = preset_fs().rename(tmp, final_name);
     // If THAT failed we have already removed the old container, so the tmp
     // file is now the only copy of this slot in existence. Leave it alone:
     // cw_begin reclaims the name on the next save, which is a block we can
@@ -448,7 +470,7 @@ FLASHMEM static bool cw_commit(ContainerWriter &w, const char *tmp, const char *
 FLASHMEM static bool container_open(uint8_t slot, File &f, SectionEntry *sec, int &n) {
   char name[12];
   container_name(name, slot);
-  f = slot_fs().open(name, FILE_READ);
+  f = preset_fs().open(name, FILE_READ);
   if (!f) return false;
   ContainerHeader h;
   if (f.read((uint8_t *)&h, sizeof(h)) != sizeof(h) ||
@@ -482,7 +504,7 @@ FLASHMEM static void remove_legacy_slot(uint8_t slot) {
   char name[12];
   for (unsigned i = 0; i < sizeof(kinds); ++i) {
     slot_name(name, slot, kinds[i], exts[i]);
-    slot_fs().remove(name);
+    preset_fs().remove(name);
   }
 }
 
@@ -549,7 +571,11 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   busy = true;
   serial_printf("PresetEngine: save slot %d\n", slot);
 
-  // Free-space guard (LittleFS only; SD is effectively unbounded).
+  // Free-space guard. UNCONDITIONAL now: presets always land on internal
+  // flash, so there is no longer an "SD is effectively unbounded" case to
+  // skip it for. Leaving the old !SDcard_Ready gate in place would have
+  // disabled the only thing standing between a full filesystem and a torn
+  // write, for every user with a card seated.
   //
   // This MUST be denominated in blocks, not bytes. LittleFS_Program hands out
   // whole erase sectors -- kLfsBlockBytes below -- so a slot that needs one
@@ -564,7 +590,7 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   //
   // usedSize() has been observed reporting == totalSize() on a healthy FS,
   // so treat that state as "unknown" and rely on post-write verification.
-  if (!SDcard_Ready) {
+  {
     const uint64_t total = PhzConfig::myfs.totalSize();
     const uint64_t used = PhzConfig::myfs.usedSize();
     if (used < total &&
@@ -624,10 +650,10 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
     uint64_t p = 0;
     if (PhzConfig::getValue(kQuadLivePresetKey, p) && p < 32) {
       extract_preset = (uint8_t)p;
-      if (PhzConfig::save_filtered(kSecTmp, slot_fs(), bank_pred, bank_remap) &&
-          cw_add_file(w, 'B', slot_fs(), kSecTmp))
+      if (PhzConfig::save_filtered(kSecTmp, preset_fs(), bank_pred, bank_remap) &&
+          cw_add_file(w, 'B', preset_fs(), kSecTmp))
         flags |= CONTENT_BANK;
-      slot_fs().remove(kSecTmp);
+      preset_fs().remove(kSecTmp);
     }
     watchdog_feed();
   }
@@ -635,18 +661,21 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   // 4. the file-backed app stores go straight in -- they are already files,
   // so unlike the config sections they need no staging round-trip.
   //
-  // These come from myfs EXPLICITLY, not slot_fs(). Scenery and Captain call
+  // These come from myfs EXPLICITLY, not preset_fs(). Scenery and Captain call
   // PhzConfig::load_config/save_config without an FS argument, which defaults
   // to myfs -- so those two files only ever exist on internal flash, whatever
-  // slot_fs() happens to be. Sourcing them from slot_fs() meant that with an
+  // preset_fs() happens to be. Sourcing them from preset_fs() meant that with an
   // SD card inserted the open simply failed and both apps' state was silently
   // absent from every preset. (The old !SDcard_Ready fallback below could not
-  // catch it: when !SDcard_Ready, slot_fs() ALREADY is myfs, so it re-tried
+  // catch it: when !SDcard_Ready, preset_fs() ALREADY is myfs, so it re-tried
   // the call that had just failed, and when SD was present -- the only case
   // that needed a fallback -- the condition blocked it.)
   //
-  // BANK_255.DAT is different and stays on slot_fs(): Quadrants genuinely
-  // prefers SD (Quadrants.h:99-103, 2104-2107).
+  // BANK_255.DAT is the exception, and it goes to quad_fs(): the recalled
+  // bank has to land where QUADRANTS will look for it, and Quadrants genuinely
+  // prefers SD (Quadrants.h:99-103, 2104-2107). The container itself, and the
+  // scratch file this stages through, stay on internal flash like every other
+  // part of a slot.
   if (cw_add_file(w, 'S', PhzConfig::myfs, "SCENERY.DAT")) flags |= CONTENT_SCENERY;
   watchdog_feed();
   if (cw_add_file(w, 'C', PhzConfig::myfs, "CAPTAIN.DAT")) flags |= CONTENT_CAPTAIN;
@@ -658,9 +687,9 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   BuildGlobalSettingsValues();
   PhzConfig::setValue(kSchemaKey, kSchemaVersion);
   PhzConfig::setValue(kFlagsKey, flags);
-  bool ok = PhzConfig::save_config(kSecTmp, slot_fs()) &&
-            cw_add_file(w, 'G', slot_fs(), kSecTmp);
-  slot_fs().remove(kSecTmp);
+  bool ok = PhzConfig::save_config(kSecTmp, preset_fs()) &&
+            cw_add_file(w, 'G', preset_fs(), kSecTmp);
+  preset_fs().remove(kSecTmp);
   watchdog_feed();
 
   // 6. app-data chunk stream, straight from the RAM capture
@@ -675,7 +704,7 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
     // Nothing renamed the staging file away, so remove it here: it is holding
     // a whole 64 KB block and cw_begin would not clear it until the next save.
     if (w.f) w.f.close();
-    slot_fs().remove(kCtrTmp);
+    preset_fs().remove(kCtrTmp);
   }
   ok = committed;
   ok2 = committed;
@@ -748,15 +777,15 @@ FLASHMEM static RecallStage recall_stage_head(uint8_t slot, bool &from_container
     const SectionEntry *a = find_section(sec, n, 'A');
     const SectionEntry *g = find_section(sec, n, 'G');
     bool ok = a && g && f.seek(a->offset) && read_appdata_stream(f);
-    if (ok) ok = section_to_file(f, *g, kGlbTmp, slot_fs());
+    if (ok) ok = section_to_file(f, *g, kGlbTmp, preset_fs());
     f.close();
     // The container exists, so a failure here is corruption, not emptiness.
-    if (!ok) { slot_fs().remove(kGlbTmp); return STAGE_BAD; }
-    const bool loaded = PhzConfig::load_config(kGlbTmp, slot_fs());
+    if (!ok) { preset_fs().remove(kGlbTmp); return STAGE_BAD; }
+    const bool loaded = PhzConfig::load_config(kGlbTmp, preset_fs());
     // The scratch file has served its purpose the moment the map is loaded.
     // Left behind it pinned a whole 64 KB block -- 1 of the 64 the internal
     // filesystem has -- permanently, from the first container recall onwards.
-    slot_fs().remove(kGlbTmp);
+    preset_fs().remove(kGlbTmp);
     return loaded ? STAGE_OK : STAGE_BAD;
   }
 
@@ -764,7 +793,7 @@ FLASHMEM static RecallStage recall_stage_head(uint8_t slot, bool &from_container
   if (!read_appdata_file(slot)) return STAGE_EMPTY;
   char name[12];
   slot_name(name, slot, 'G', "CFG");
-  return PhzConfig::load_config(name, slot_fs()) ? STAGE_OK : STAGE_BAD;
+  return PhzConfig::load_config(name, preset_fs()) ? STAGE_OK : STAGE_BAD;
 }
 
 // Stage the file-backed stores into their live names. Runs with the app world
@@ -777,12 +806,12 @@ FLASHMEM static void recall_stage_files(uint8_t slot, bool from_container,
     int n = 0;
     if (!container_open(slot, f, sec, n)) return;
     // Destination FS per file, mirroring the save side: the bank goes where
-    // Quadrants looks (slot_fs()), Scenery and Captain go where THEY look
+    // Quadrants looks (preset_fs()), Scenery and Captain go where THEY look
     // (myfs, always). Restoring these to the SD card put them somewhere
     // neither app ever reads.
     const SectionEntry *e;
     if ((flags & CONTENT_BANK) && (e = find_section(sec, n, 'B')) != nullptr) {
-      if (section_to_file(f, *e, "BANK_255.DAT", slot_fs()))
+      if (section_to_file(f, *e, "BANK_255.DAT", quad_fs()))
         quad_recall_hint = kScratchBank;
       watchdog_feed();
     }
@@ -804,13 +833,13 @@ FLASHMEM static void recall_stage_files(uint8_t slot, bool from_container,
   char name[12];
   if (flags & CONTENT_BANK) {
     slot_name(name, slot, 'B', "DAT");
-    copy_file(slot_fs(), name, slot_fs(), "BANK_255.DAT");
+    copy_file(preset_fs(), name, quad_fs(), "BANK_255.DAT");
     quad_recall_hint = kScratchBank;
     watchdog_feed();
   }
   if (flags & CONTENT_SCENERY) {
     slot_name(name, slot, 'S', "DAT");
-    copy_file(slot_fs(), name, PhzConfig::myfs, "SCENERY.DAT");
+    copy_file(preset_fs(), name, PhzConfig::myfs, "SCENERY.DAT");
     watchdog_feed();
   }
   // Boot recall deliberately keeps the LIVE Captain config: it's the
@@ -819,7 +848,7 @@ FLASHMEM static void recall_stage_files(uint8_t slot, bool from_container,
   // the owner's mapping edits. Explicit recalls still restore it.
   if ((flags & CONTENT_CAPTAIN) && !skip_captain_restore) {
     slot_name(name, slot, 'C', "DAT");
-    copy_file(slot_fs(), name, PhzConfig::myfs, "CAPTAIN.DAT");
+    copy_file(preset_fs(), name, PhzConfig::myfs, "CAPTAIN.DAT");
     watchdog_feed();
   }
 }
@@ -923,6 +952,21 @@ FLASHMEM void Init() {
   pending_save = pending_recall = -1;
   quad_recall_hint = -1;
   load_names();
+
+  // Say what is on the card, if anything.
+  //
+  // Presets used to follow SDcard_Ready, so any saved while a card was seated
+  // are sitting on that card and are no longer where the engine looks. They
+  // are not lost -- ImportSlot() pulls one back into the same numbered slot --
+  // but nothing else would ever mention them, and a preset you cannot see is
+  // indistinguishable from a preset you do not have. This line is how someone
+  // finds out they have something to import.
+  const int on_card = CardSlotCount();
+  if (on_card > 0)
+    serial_printf("PresetEngine: %d preset%s on the card, import to load "
+                  "%s into internal storage\n",
+                  on_card, on_card == 1 ? "" : "s",
+                  on_card == 1 ? "it" : "them");
 }
 
 void RequestSave(uint8_t slot) {
@@ -1012,7 +1056,7 @@ static char name_cache[kNumSlots][kNameLen + 1];  // +1: always NUL-safe
 
 FLASHMEM static void load_names() {
   memset(name_cache, 0, sizeof(name_cache));
-  File f = slot_fs().open("PBNAMES.BIN", FILE_READ);
+  File f = preset_fs().open("PBNAMES.BIN", FILE_READ);
   if (!f) return;
   for (int i = 0; i < kNumSlots; ++i) {
     if (f.read((uint8_t *)name_cache[i], kNameLen) != kNameLen) break;
@@ -1033,7 +1077,7 @@ FLASHMEM void SetSlotName(uint8_t slot, const char *name) {
   for (int i = (int)strlen(name_cache[slot]) - 1;
        i >= 0 && name_cache[slot][i] == ' '; --i)
     name_cache[slot][i] = 0;
-  File f = slot_fs().open("PBNAMES.BIN", FILE_WRITE_BEGIN);
+  File f = preset_fs().open("PBNAMES.BIN", FILE_WRITE_BEGIN);
   if (!f) return;
   for (int i = 0; i < kNumSlots; ++i)
     f.write((const uint8_t *)name_cache[i], kNameLen);
@@ -1045,20 +1089,215 @@ FLASHMEM bool SlotUsed(uint8_t slot) {
   char name[12];
   container_name(name, slot);
   {
-    File c = slot_fs().open(name, FILE_READ);
+    File c = preset_fs().open(name, FILE_READ);
     const bool have = c && c.size() >= (int)kPayloadStart;
     if (c) c.close();
     if (have) return true;
   }
   // pre-container layout
   slot_name(name, slot, 'G', "CFG");
-  File f = slot_fs().open(name, FILE_READ);
+  File f = preset_fs().open(name, FILE_READ);
   const bool used = f && f.size() > 16;
   if (f) f.close();
   return used;
 }
 bool LastWasSave() { return last_was_save; }
 bool Busy() { return busy; }
+
+// ---- pre-write bank snapshot -----------------------------------------------
+//
+// The last good copy of a 200e module's bank, taken before we overwrite it.
+//
+// Why this exists: the bus has no per-slot write, so editing one preset means
+// re-sending all thirty. The app is careful about that -- it fingerprints the
+// bank at Read, re-checks at Save, proves the patch byte-for-byte, and reads
+// the whole bank back to verify. What it could not do was RECOVER. CommitWrite
+// keeps only hashes of the other 29 slots, and the verify read-back overwrites
+// the card image with the module's now-corrupt contents, so the last correct
+// copy was destroyed by the verification step itself. The app could detect
+// collateral damage, could never locate it (a CRC cannot name a slot), and
+// could never repair it: the screen said "BAD: OTHER PRESETS!" and one press
+// later said "No changes to write".
+//
+// A 251e bank is 63,120 bytes -- 96.3% of one 64 KB LittleFS block, so this
+// costs exactly one of the 64 we have. That only became affordable when slots
+// stopped costing 3-5 files each; it is the same discovery paying off twice.
+//
+// Deliberately ONE snapshot, not a history: it is a safety net for the write
+// happening right now, not a backup system. Naming it after the address it
+// came from is what stops it being restored onto the wrong module.
+
+static constexpr uint32_t kSnapFourcc = 0x50414E53UL;  // 'S','N','A','P'
+struct SnapHeader {
+  uint32_t fourcc;
+  uint8_t  addr;        // the module this came from
+  uint8_t  pad[3];
+  uint32_t length;      // payload bytes
+  uint32_t crc;         // over the payload
+};
+static_assert(sizeof(SnapHeader) == 16, "SnapHeader must stay 16 bytes");
+static const char *const kSnapFile = "PBSNAP.BIN";
+
+FLASHMEM bool SnapshotBank(uint8_t addr, const uint8_t *bank, uint32_t len,
+                           uint32_t crc) {
+  if (!bank || !len) return false;
+  static const char *const kSnapTmp = "PB_SNP.TMP";
+  preset_fs().remove(kSnapTmp);
+  File f = preset_fs().open(kSnapTmp, FILE_WRITE_BEGIN);
+  if (!f) return false;
+  const SnapHeader h = { kSnapFourcc, addr, {0, 0, 0}, len, crc };
+  bool ok = f.write((const uint8_t *)&h, sizeof(h)) == sizeof(h);
+  uint32_t left = len;
+  const uint8_t *p = bank;
+  while (ok && left) {
+    const uint32_t n = left < 512 ? left : 512;
+    ok = f.write(p, n) == n;
+    p += n; left -= n;
+    watchdog_feed();
+  }
+  f.close();
+  if (!ok) { preset_fs().remove(kSnapTmp); return false; }
+  // Rename-first, as everywhere else here: a torn snapshot must not replace
+  // a good one, and a failed publish must not leave us with neither.
+  if (!preset_fs().rename(kSnapTmp, kSnapFile)) {
+    preset_fs().remove(kSnapFile);
+    if (!preset_fs().rename(kSnapTmp, kSnapFile)) return false;
+  }
+  serial_printf("PresetEngine: snapshot %lu bytes from %02X\n",
+                (unsigned long)len, addr);
+  return true;
+}
+
+FLASHMEM bool SnapshotInfo(uint8_t *addr_out, uint32_t *len_out) {
+  File f = preset_fs().open(kSnapFile, FILE_READ);
+  if (!f) return false;
+  SnapHeader h;
+  const bool ok = f.read((uint8_t *)&h, sizeof(h)) == (int)sizeof(h) &&
+                  h.fourcc == kSnapFourcc && h.length &&
+                  (uint64_t)h.length + sizeof(h) <= (uint64_t)f.size();
+  f.close();
+  if (!ok) return false;
+  if (addr_out) *addr_out = h.addr;
+  if (len_out) *len_out = h.length;
+  return true;
+}
+
+FLASHMEM bool LoadSnapshot(uint8_t addr, uint8_t *dest, uint32_t cap,
+                           uint32_t *len_out) {
+  if (!dest) return false;
+  File f = preset_fs().open(kSnapFile, FILE_READ);
+  if (!f) return false;
+  SnapHeader h;
+  bool ok = f.read((uint8_t *)&h, sizeof(h)) == (int)sizeof(h) &&
+            h.fourcc == kSnapFourcc && h.length && h.length <= cap &&
+            (uint64_t)h.length + sizeof(h) <= (uint64_t)f.size();
+  // Refuse to hand a bank back to a module it did not come from. Restoring
+  // 63,120 bytes of a 251e's presets into whatever now answers at a different
+  // address is the single worst thing this file could do.
+  if (ok && h.addr != addr) ok = false;
+  if (ok) ok = (uint32_t)f.read(dest, h.length) == h.length;
+  f.close();
+  if (!ok) return false;
+  if (len_out) *len_out = h.length;
+  return true;
+}
+
+FLASHMEM void DiscardSnapshot() { preset_fs().remove(kSnapFile); }
+
+// ---- export / import -------------------------------------------------------
+//
+// The SD card's actual job, now that it is not the preset store. A container
+// is self-contained -- header, section directory, payloads, checksums -- so
+// moving one between filesystems is a byte copy and nothing else. That is the
+// whole reason the one-file-per-slot layout was worth building: the old 3-5
+// files per slot had no single thing to hand somebody.
+//
+// Names are the same on both sides (PB_NN.PBS), so a card carrying slot 07
+// drops into slot 07 on another module. Both directions verify by re-opening
+// and parsing the destination: a copy that lands corrupt must not be reported
+// as success, and on import it must never retire a good local container.
+
+FLASHMEM ExportResult ExportSlot(uint8_t slot) {
+  if (slot >= kNumSlots) return EXPORT_BAD_SLOT;
+  FS *card = card_fs();
+  if (!card) return EXPORT_NO_CARD;
+  if (!SlotUsed(slot)) return EXPORT_EMPTY;
+
+  char name[12];
+  container_name(name, slot);
+  if (!copy_file(preset_fs(), name, *card, name)) return EXPORT_FAILED;
+
+  // Prove it landed. A card that reports a successful write and stores
+  // nothing is the exact failure this whole engine is built to notice.
+  File v = card->open(name, FILE_READ);
+  const bool ok = v && v.size() >= (int)kPayloadStart;
+  if (v) v.close();
+  if (!ok) { card->remove(name); return EXPORT_FAILED; }
+
+  serial_printf("PresetEngine: exported slot %d to card\n", slot);
+  return EXPORT_OK;
+}
+
+FLASHMEM ExportResult ImportSlot(uint8_t slot) {
+  if (slot >= kNumSlots) return EXPORT_BAD_SLOT;
+  FS *card = card_fs();
+  if (!card) return EXPORT_NO_CARD;
+
+  char name[12];
+  container_name(name, slot);
+  {
+    File s = card->open(name, FILE_READ);
+    const bool have = s && s.size() >= (int)kPayloadStart;
+    if (s) s.close();
+    if (!have) return EXPORT_EMPTY;
+  }
+
+  // Stage through a scratch name and only publish after the copy parses as a
+  // container. Writing straight to PB_NN.PBS would destroy a good local
+  // preset on the strength of a card we have not read yet.
+  static const char *const kImpTmp = "PB_IMP.TMP";
+  preset_fs().remove(kImpTmp);
+  if (!copy_file(*card, name, preset_fs(), kImpTmp)) {
+    preset_fs().remove(kImpTmp);
+    return EXPORT_FAILED;
+  }
+  {
+    File v = preset_fs().open(kImpTmp, FILE_READ);
+    ContainerHeader h;
+    const bool ok = v && v.size() >= (int)kPayloadStart &&
+                    v.read((uint8_t *)&h, sizeof(h)) == (int)sizeof(h) &&
+                    h.fourcc == kContainerFourcc &&
+                    h.version == kContainerVersion &&
+                    h.count <= kMaxSections;
+    if (v) v.close();
+    if (!ok) { preset_fs().remove(kImpTmp); return EXPORT_BAD_FILE; }
+  }
+
+  // Rename-first, same discipline as cw_commit: on LittleFS the slot is
+  // never absent, and if the fallback also fails the scratch file is left
+  // standing rather than deleted alongside the original.
+  if (!preset_fs().rename(kImpTmp, name)) {
+    preset_fs().remove(name);
+    if (!preset_fs().rename(kImpTmp, name)) return EXPORT_FAILED;
+  }
+  remove_legacy_slot(slot);   // an imported container supersedes them
+  serial_printf("PresetEngine: imported slot %d from card\n", slot);
+  return EXPORT_OK;
+}
+
+FLASHMEM int CardSlotCount() {
+  FS *card = card_fs();
+  if (!card) return -1;
+  int n = 0;
+  char name[12];
+  for (int i = 0; i < kNumSlots; ++i) {
+    container_name(name, (uint8_t)i);
+    File f = card->open(name, FILE_READ);
+    if (f && f.size() >= (int)kPayloadStart) ++n;
+    if (f) f.close();
+  }
+  return n;
+}
 
 }  // namespace PresetEngine
 }  // namespace OC

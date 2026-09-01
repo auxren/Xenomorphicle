@@ -22,6 +22,8 @@
 
 #include <string.h>
 
+#include "sim_host.h"   // SimPanelFrameComplete: the deferred-capture hook
+
 namespace {
 uint8_t g_panel[SH1106_128x64_Driver::kFrameSize];
 bool g_inverted = false;
@@ -51,6 +53,13 @@ void SH1106_128x64_Driver::Flush() {}
 bool SH1106_128x64_Driver::SendPage(uint_fast8_t index, const uint8_t *data) {
   if (index < kNumPages)
     memcpy(g_panel + index * kPageSize, data, kPageSize);
+  // The last page of the eight completes a frame. That is the ONLY instant at
+  // which g_panel holds one whole picture rather than a blend of two, so it is
+  // where a deferred capture has to happen -- see SimSnapArm(). Capturing on a
+  // timer alone would sample mid-walk and produce a torn frame that differs
+  // run to run, which in a determinism-first simulator is worse than no
+  // capture at all.
+  if (index == kNumPages - 1) SimPanelFrameComplete();
   return true;
 }
 

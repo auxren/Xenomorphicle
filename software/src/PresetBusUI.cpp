@@ -56,8 +56,6 @@ static bool recall_fired = false;         // one shot per hold
 // Set on Enter(): the opening chord holds both encoders, so a hold that was
 // already in progress when the overlay appeared must not count. Cleared once
 // the button in question has actually been let go.
-static bool store_needs_release = false;
-static bool recall_needs_release = false;
 static int8_t pending_slot = -1;          // op we're waiting on
 static bool pending_was_save = false;
 static uint32_t pending_start_ms = 0;
@@ -101,14 +99,25 @@ FLASHMEM void Enter() {
   // buttons are already down -- and the STORE/RECALL hold timers would start
   // counting immediately and fire the moment their thresholds pass. That is
   // the accidental recall Oren reported, and adding a hold to RECALL only
-  // delayed it rather than preventing it. Neither hold arms until its button
-  // has been seen released at least once, so the entry chord can never roll
-  // straight into a bus-wide operation no matter how long it is held.
+  // delayed it rather than preventing it.
+  //
+  // The local store_needs_release/recall_needs_release flags that used to live
+  // here were NOT the fix they were documented as being. They gated the
+  // progress BARS, which are drawn from these timers -- but STORE does not
+  // fire from a timer. It fires from the LONG_PRESS event in HandleEvent, so
+  // it went straight past them, and the entry chord could commit a store on
+  // its own: press encR a millisecond before encL, hold, and the overlay
+  // opened and wrote slot 1. RECALL, which IS timer-driven, was genuinely
+  // protected -- which is why an attack that released the encoders in the
+  // other order found nothing wrong.
   hold_start_ms = 0;
   recall_hold_ms = 0;
   recall_fired = false;
-  store_needs_release = true;
-  recall_needs_release = true;
+  // The chord that opened this overlay is still physically held. Arming the
+  // UI layer's release-first rule is what stops it leaking in -- see
+  // Ui::IgnoreUntilRelease. Both encoder buttons are named because either may
+  // still be down, and over-naming costs only a swallowed release.
+  ui.IgnoreUntilRelease(CONTROL_BUTTON_L | CONTROL_BUTTON_R);
 }
 
 FLASHMEM void Exit() {
@@ -439,9 +448,12 @@ void Task() {
   if (active) {
     // hold-progress source: sample the left encoder button directly
     const bool store_context = !edit_mode && !(cursor == 1 && sel_stored == 1);
-    if (!ui.read_immediate(CONTROL_BUTTON_L)) store_needs_release = false;
-    if (store_context && !store_needs_release &&
-        ui.read_immediate(CONTROL_BUTTON_L)) {
+    // read_deliberate, not read_immediate: the UI layer's release-first rule
+    // is authoritative now, and it covers what the local flags could not.
+    // store_needs_release only ever gated the PROGRESS BAR -- STORE itself
+    // fires from the LONG_PRESS event in HandleEvent, so the entry chord could
+    // and did commit a store on its own (r-down, l-down, hold: "STORED 1").
+    if (store_context && ui.read_deliberate(CONTROL_BUTTON_L)) {
       if (!hold_start_ms) hold_start_ms = millis() | 1;
     } else {
       hold_start_ms = 0;
@@ -451,9 +463,7 @@ void Task() {
     // threshold is reached rather than on release -- so the gesture ends
     // when the bar fills, matching how STORE feels. Never in edit_mode:
     // a bus-wide recall must not fall out of a rename gesture.
-    if (!ui.read_immediate(CONTROL_BUTTON_R)) recall_needs_release = false;
-    if (!edit_mode && !recall_needs_release &&
-        ui.read_immediate(CONTROL_BUTTON_R)) {
+    if (!edit_mode && ui.read_deliberate(CONTROL_BUTTON_R)) {
       if (!recall_hold_ms) {
         recall_hold_ms = millis() | 1;
         recall_fired = false;

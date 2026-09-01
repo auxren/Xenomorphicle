@@ -14,7 +14,7 @@
   </style>
 </helmet>
 
-<div style="width: 880px; height: 1180px; background: #14161a; color: #e6e9ee; padding: 44px 48px; box-sizing: border-box; display: flex; flex-direction: column; gap: 30px">
+<div style="width: 880px; height: 1320px; background: #14161a; color: #e6e9ee; padding: 44px 48px; box-sizing: border-box; display: flex; flex-direction: column; gap: 30px">
 
   <div style="display: flex; flex-direction: column; gap: 10px">
     <div style="font: 700 11px/1 'JetBrains Mono', monospace; letter-spacing: .3em; color: #7d8794; text-transform: uppercase">Xenomorpher · 200e app</div>
@@ -23,6 +23,14 @@
       Findings from building and bench-testing the 200e app, plus what I would
       change. Every defect below was observed — on hardware or in the simulator —
       not inferred.
+    </div>
+    <div style="display: flex; gap: 16px; align-items: center; margin-top: 4px; font: 700 11px/1 'JetBrains Mono', monospace; letter-spacing: .08em">
+      <span style="color: #6fae78">■ SHIPPED</span>
+      <span style="color: #cf9153">■ OPEN / PROPOSED</span>
+      <span style="color: #7d8794; font-weight: 400; letter-spacing: 0; font-family: 'Space Grotesk', sans-serif; font-size: 12.5px">
+        Every artboard is marked. A recommendation that has shipped says so; one that
+        has not is labelled proposed, even where it is half built.
+      </span>
     </div>
   </div>
 
@@ -94,11 +102,12 @@
       </div>
 
       <div style="background: #1b1f25; border: 1px solid #2b313a; border-left: 3px solid #a9713a; border-radius: 6px; padding: 16px 18px">
-        <div style="font: 700 11px/1 'JetBrains Mono', monospace; color: #cf9153; letter-spacing: .1em">OPEN</div>
+        <div style="font: 700 11px/1 'JetBrains Mono', monospace; color: #cf9153; letter-spacing: .1em">HALF FIXED</div>
         <div style="font-weight: 600; font-size: 16px; margin: 8px 0 6px">Modules are addresses, not names</div>
         <div style="font-size: 13.5px; line-height: 1.6; color: #98a1ab">
-          You dial hex to choose a module, and a scan is part of the everyday path
-          rather than setup.
+          The scan result now persists, so the ~49 s sweep is paid once rather than
+          every power-up, and responders are listed by name. You still dial hex to
+          pick one.
         </div>
         <div style="font-size: 13px; line-height: 1.5; color: #c8b280; margin-top: 10px">
           <b>Pattern:</b> the instrument should remember what's in the case.
@@ -115,19 +124,19 @@
     <div style="display: flex; flex-direction: column; gap: 11px; font-size: 14.5px; line-height: 1.6">
       <div style="display: flex; gap: 14px">
         <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; color: #b06a3b; min-width: 26px">01</div>
-        <div style="color: #c3cad3"><b style="color: #fff">Open on your case, not on an address.</b> A remembered list of modules by name. Scan becomes setup you run when hardware changes.</div>
+        <div style="color: #c3cad3"><b style="color: #fff">Open on your case, not on an address.</b> A remembered list of modules by name. Scan becomes setup you run when hardware changes. <span style="color:#6fae78; font: 700 11px/1 'JetBrains Mono', monospace">MOSTLY SHIPPED</span> — the memory and the names landed; the list is still not the handle.</div>
       </div>
       <div style="display: flex; gap: 14px">
         <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; color: #b06a3b; min-width: 26px">02</div>
-        <div style="color: #c3cad3"><b style="color: #fff">Say why an action is unavailable, in place.</b> The action row already knows; it just doesn't tell you until you press.</div>
+        <div style="color: #c3cad3"><b style="color: #fff">Say why an action is unavailable, in place.</b> The action row already knows; it just doesn't tell you until you press. <span style="color:#6fae78; font: 700 11px/1 'JetBrains Mono', monospace">HALF SHIPPED</span> — the state line names the remedy; the row still marks nothing.</div>
       </div>
       <div style="display: flex; gap: 14px">
         <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; color: #b06a3b; min-width: 26px">03</div>
-        <div style="color: #c3cad3"><b style="color: #fff">Make the write's blast radius the headline.</b> A save rewrites all 30 presets. That fact currently shares a line with everything else.</div>
+        <div style="color: #c3cad3"><b style="color: #fff">Make the write's blast radius the headline.</b> A save rewrites all 30 presets. That fact still shares a line with everything else. <span style="color:#cf9153; font: 700 11px/1 'JetBrains Mono', monospace">OPEN</span></div>
       </div>
       <div style="display: flex; gap: 14px">
         <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; color: #b06a3b; min-width: 26px">04</div>
-        <div style="color: #c3cad3"><b style="color: #fff">Make release-first a global rule.</b> Every screen opened by a chord can be entered with its own buttons still held. One of those already fired a bus-wide recall.</div>
+        <div style="color: #c3cad3"><b style="color: #fff">Make release-first a global rule.</b> Every screen opened by a chord could be entered with its own buttons still held. One of those fired a bus-wide recall. <span style="color:#6fae78; font: 700 11px/1 'JetBrains Mono', monospace">SHIPPED</span> — one rule at the point screens are entered; see Navigation for the two places it does not reach.</div>
       </div>
     </div>
   </div>

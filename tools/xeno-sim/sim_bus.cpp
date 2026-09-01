@@ -40,6 +40,8 @@ std::vector<SimModule> g_modules;
 // How the simulated modules treat a RESTORE. Faithful unless a test or the
 // operator asks otherwise -- see SimBusSetWriteFault.
 SimWriteFault g_write_fault = SIM_WRITE_FAITHFUL;
+// See the note at the clear site: the fault applies to the first RESTORE only.
+bool g_write_fault_once = false;
 
 // Armed by a RESTORE under SIM_WRITE_SHORT_READBACK and consumed by the very
 // next BACKUP, which is the firmware's post-write read-back. Only that one
@@ -181,6 +183,13 @@ int ops_send_frame(const uint8_t *b, uint8_t n) {
       }
       SimLog("RESTORE %02X: %u bytes stored (%s)", mod, (unsigned)bytes,
              SimWriteFaultName(g_write_fault));
+      // A module that mishandles ONE write and then behaves. Without this, a
+      // fault is permanent and the UNDO that the pre-write snapshot exists for
+      // can never be seen to work: the recovery write goes out through the
+      // same broken module and lands as BAD again, so the one thing worth
+      // proving -- that the bank really does come back -- is unreachable.
+      // A transient is also the honest shape of the bug this recovers from.
+      if (g_write_fault_once) g_write_fault = SIM_WRITE_FAITHFUL;
       SimLog("  SIMULATED ONLY. No hardware was written.");
     } else {
       if (g_short_next_backup) {
@@ -281,6 +290,7 @@ void SimBusSetRealTiming(bool on) { g_real_timing = on; }
 bool SimBusRealTiming() { return g_real_timing; }
 
 void SimBusSetWriteFault(SimWriteFault f) { g_write_fault = f; }
+void SimBusSetWriteFaultOnce(bool once) { g_write_fault_once = once; }
 SimWriteFault SimBusWriteFault() { return g_write_fault; }
 
 const char *SimWriteFaultName(SimWriteFault f) {

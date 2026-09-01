@@ -137,7 +137,7 @@ void LoopPass() {
 void SimRuntimePoke() { MENU_REDRAW = 1; }
 
 // Main.cpp:411-620, setup(), in order, minus everything with no host meaning.
-void SimRuntimeBoot(bool reset_settings) {
+void SimRuntimeBoot(bool reset_settings, bool answer_cancel) {
   g_background_ready = false;
   OC::Pinout_Detect();          // sets the real pin map from the ID voltage
   SimInputInit();               // ...which is what the panel's pins are bound to
@@ -175,8 +175,13 @@ void SimRuntimeBoot(bool reset_settings) {
 
   g_io_frame.Reset();
 
-  // SDcard_Ready stays false: the simulator has no card, which is the same
-  // path a module with an empty slot takes. LittleFS is RAM-backed (FS.h).
+  // Main.cpp:522, and it is a real decision rather than a constant now: the
+  // card is absent by default (the path a module with an empty slot takes) and
+  // --sd-card seats one. SDcard_Ready is what routes storage in PhzConfig and
+  // used to route it in PresetEngine, so a simulator that can only ever be the
+  // no-card machine cannot see the class of bug where the two disagree.
+  // LittleFS is RAM-backed (FS.h), optionally seeded from a --state image.
+  SDcard_Ready = SD.begin(BUILTIN_SDCARD);
   PhzConfig::Init();
 
   // Main.cpp:534. Real code, and it blocks for SPLASHSCREEN_DELAY_MS while
@@ -212,10 +217,11 @@ void SimRuntimeBoot(bool reset_settings) {
   // OK (erase and re-save) under --reset-settings. Nothing reaches into the
   // firmware to skip the screen; --keys "" with a breakpoint will show it.
   if (reset_settings || firstrun) {
-    const uint16_t answer = reset_settings ? OC::CONTROL_BUTTON_R : OC::CONTROL_BUTTON_L;
+    const bool say_ok = reset_settings && !answer_cancel;
+    const uint16_t answer = say_ok ? OC::CONTROL_BUTTON_R : OC::CONTROL_BUTTON_L;
     SimInputScheduleTap(answer, 120, 60);
     SimLog("boot: settings absent -> ConfirmReset answered %s automatically",
-           reset_settings ? "OK (erase)" : "CANCEL (keep defaults)");
+           say_ok ? "OK (erase)" : "CANCEL (keep defaults)");
   }
   firstrun |= !OC::app_switcher.Init(reset_settings || firstrun);
 

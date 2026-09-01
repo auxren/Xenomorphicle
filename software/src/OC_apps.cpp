@@ -70,6 +70,13 @@
 #include "OC_scale_edit.h"
 #include "OC_visualfx.h"
 
+// Bus200eApp.h calls into the preset engine but does not include it; in full
+// builds Quadrants.h happens to pull the header in first, in reduced builds
+// (the simulator's, for one) nothing does, and this file is where the app
+// headers are actually compiled. Included here so app instantiation does not
+// depend on which apps are enabled above it.
+#include "PresetEngine.h"
+
 // actual apps are included and instantiated here
 #include "apps/_config.h"
 
@@ -471,10 +478,112 @@ void AppSwitcher::set_current_app(size_t index)
   #endif
 }
 
+// Factory defaults for the global settings themselves. One definition shared
+// by the reset branch and the nothing-in-storage branch of Init() so the two
+// cannot drift apart.
+FLASHMEM
+static void SeedGlobalSettingsDefaults() {
+  global_settings.Init();
+  global_settings.encoders_enable_acceleration = OC_ENCODERS_ENABLE_ACCELERATION_DEFAULT;
+  global_settings.invert_display = false;
+  global_settings.reserved1 = false;
+  global_settings.reserved2 = 0U;
+  global_settings.current_app_id = DEFAULT_APP_ID;
+}
+
+// True once Init() has completed. It tells the boot call (nothing is live
+// yet, so ConfirmReset is the user's only say in the matter) apart from
+// runtime re-inits, where live state exists and Setup's FactoryReset()
+// arrives already confirmed by its own arm+confirm screen.
+static bool s_init_has_run = false;
+
 FLASHMEM
 bool AppSwitcher::Init(bool reset_settings) {
 
   APPS_SERIAL_PRINTLN("Init");
+
+  // -------------------------------------------------------------------------
+  // Phase 1: DECIDE. Nothing is erased or overwritten until the outcome --
+  // reset or restore -- is settled. This function used to run InitDefaults()
+  // on every app and re-default global_settings *before* asking ConfirmReset,
+  // so a "no" at the prompt could win back no more than whatever the last
+  // SaveAppData() had written; the question has to be asked while the state
+  // it protects still exists.
+  // -------------------------------------------------------------------------
+
+  const bool runtime_call = s_init_has_run;
+
+  // reset_settings=true at runtime comes only from Setup's FactoryReset(),
+  // which fronts its own arm+confirm screen -- asking ConfirmReset() again
+  // here would be a second prompt for one decision, and "no" the second time
+  // after "ERASE" the first is not a flow anyone designed. At boot the same
+  // flag comes from the A+B splash gesture, which is a request, not a
+  // confirmation: that path keeps the prompt below.
+  const bool caller_confirmed = reset_settings && runtime_call;
+
+  // Find out whether storage holds valid settings, touching no live state.
+  // Skipped once a reset is already confirmed: the answer couldn't change it.
+  bool stored_valid = false;
+#ifdef __IMXRT1062__
+  // Peeking the already-loaded PhzConfig map is a pure read.
+  uint64_t metadata = 0;
+  bool have_metadata = false;
+  if (!caller_confirmed) {
+    have_metadata = PhzConfig::getValue(METADATA_KEY, metadata);
+    if (have_metadata)
+      stored_valid = Unpack(metadata, PackLocation{17, 1}); // v2.0 first-run bit
+  }
+#else
+  // Teensy 3.x has no cheap validity peek: only PageStorage::Load can tell,
+  // and it fills global_settings as a side effect. That is still observation,
+  // not destruction: Load leaves the struct untouched on failure, and on
+  // success writes exactly what the restore branch below would apply anyway.
+  bool gs_loaded = false;
+  if (!caller_confirmed) {
+    APPS_SERIAL_PRINTLN("Load global settings: size: %u, PAGESIZE=%u, PAGES=%u, LENGTH=%u",
+                  sizeof(GlobalSettings),
+                  GlobalSettingsStorage::PAGESIZE,
+                  GlobalSettingsStorage::PAGES,
+                  GlobalSettingsStorage::LENGTH);
+    gs_loaded = global_settings_storage.Load(global_settings);
+    if (!gs_loaded)
+      APPS_SERIAL_PRINTLN("Settings invalid, using defaults!");
+    // .valid rides inside the stored struct; gs_loaded alone is not enough
+    // because a failed load leaves whatever the field already held.
+    stored_valid = gs_loaded && global_settings.valid;
+  }
+#endif
+
+  bool do_reset;
+  if (caller_confirmed) {
+    do_reset = true;
+  } else if (reset_settings || !stored_valid) {
+    // One prompt covers both ways of getting here -- the boot A+B gesture and
+    // absent/invalid storage (first run, or a corrupted restore) -- exactly as
+    // before, so the first-run flow still asks once and only once.
+    do_reset = ui.ConfirmReset();
+  } else {
+    do_reset = false;
+  }
+
+  if (!do_reset && runtime_call && !stored_valid) {
+    // A reset declined while the instrument is running, with nothing valid in
+    // storage to load (a botched Backup restore is how you get here): the only
+    // state worth anything is what is already live, so leave all of it alone.
+    // Falling through would re-default every app and then find nothing to
+    // restore -- the wipe the user just refused, minus the EEPROM write.
+    return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 2: ACT. Exactly one of two things happens below: reset to defaults
+  // and erase storage, or seed defaults and restore from storage. Both
+  // branches share the seeding pass because apps expect their fields
+  // initialised before Restore() runs, and ApplyAppData() re-runs
+  // InitDefaults() only on a chunk *underflow* -- an app whose chunk is
+  // absent from storage must arrive there already at defaults.
+  // -------------------------------------------------------------------------
+
   app_container.for_each([](RuntimeSlot app) {
     APPS_SERIAL_PRINTLN("> %s", static_cast<AppBase *>(app.instance)->name());
     app.InitDefaults(app.instance);
@@ -490,69 +599,43 @@ bool AppSwitcher::Init(bool reset_settings) {
   HS::showhide_cursor.Init(0, HEMISPHERE_AVAILABLE_APPLETS - 1);
 #endif
   HS::frame.Init();
-
-  global_settings.Init();
-  global_settings.encoders_enable_acceleration = OC_ENCODERS_ENABLE_ACCELERATION_DEFAULT;
-  global_settings.invert_display = false;
-  global_settings.reserved1 = false;
-  global_settings.reserved2 = 0U;
-  global_settings.current_app_id = DEFAULT_APP_ID;
   memset(HS::user_turing_machines, 0, sizeof(HS::user_turing_machines));
 
   bool gs_restored = false;
+  if (do_reset) {
+    SeedGlobalSettingsDefaults();
+    APPS_SERIAL_PRINTLN("Erase EEPROM ...");
+    EEPtr d = EEPROM_GLOBALSETTINGS_START;
+    size_t len = EEPROMStorage::LENGTH - EEPROM_GLOBALSETTINGS_START;
+    while (len--)
+      *d++ = 0;
+    APPS_SERIAL_PRINTLN("...done");
+    APPS_SERIAL_PRINTLN("Skip settings, using defaults...");
 #ifdef __IMXRT1062__
-  uint64_t data = 0;
-  // check metadata for validity
-  if (PhzConfig::getValue(METADATA_KEY, data)) {
-    global_settings.current_app_id = Unpack(data, PackLocation{0, 16});
-    global_settings.encoders_enable_acceleration = Unpack(data, PackLocation{16, 1});
-    global_settings.valid = Unpack(data, PackLocation{17, 1});
-    global_settings.invert_display = Unpack(data, PackLocation{18, 1});
-    gs_restored = global_settings.valid;
-    // 15 bits empty...
-    // TODO:
-    //global_settings.DAC_scaling = Unpack(data, PackLocation{32, 32});
-    //OC::DAC::restore_scaling(global_settings.DAC_scaling);
-  }
+    PhzConfig::eraseFiles();
 #else
-  // Teensy 3.x: load global settings from EEPROM before the reset check,
-  // so .valid and current_app_id are seeded. PageStorage::Load leaves
-  // global_settings (defaults) untouched on failure.
-  APPS_SERIAL_PRINTLN("Load global settings: size: %u, PAGESIZE=%u, PAGES=%u, LENGTH=%u",
-                sizeof(GlobalSettings),
-                GlobalSettingsStorage::PAGESIZE,
-                GlobalSettingsStorage::PAGES,
-                GlobalSettingsStorage::LENGTH);
-  gs_restored = global_settings_storage.Load(global_settings);
-  if (!gs_restored)
-    APPS_SERIAL_PRINTLN("Settings invalid, using defaults!");
+    global_settings_storage.Init();
 #endif
-
-  if (reset_settings || !global_settings.valid) {
-    if (ui.ConfirmReset()) {
-      APPS_SERIAL_PRINTLN("Erase EEPROM ...");
-      EEPtr d = EEPROM_GLOBALSETTINGS_START;
-      size_t len = EEPROMStorage::LENGTH - EEPROM_GLOBALSETTINGS_START;
-      while (len--)
-        *d++ = 0;
-      APPS_SERIAL_PRINTLN("...done");
-      APPS_SERIAL_PRINTLN("Skip settings, using defaults...");
+    app_data_storage.Init();
+    global_settings.valid = true;
+    SaveGlobalSettings();
+    // gs_restored stays false: a confirmed reset reports firstrun so the
+    // caller shows the welcome splash over factory defaults.
+  } else {
 #ifdef __IMXRT1062__
-      PhzConfig::eraseFiles();
-#else
-      global_settings_storage.Init();
-#endif
-      app_data_storage.Init();
-      global_settings.valid = true;
-      SaveGlobalSettings();
-      gs_restored = false; // report firstrun after a confirmed reset
-    } else {
-      reset_settings = false;
+    SeedGlobalSettingsDefaults();
+    if (have_metadata) {
+      global_settings.current_app_id = Unpack(metadata, PackLocation{0, 16});
+      global_settings.encoders_enable_acceleration = Unpack(metadata, PackLocation{16, 1});
+      global_settings.valid = Unpack(metadata, PackLocation{17, 1});
+      global_settings.invert_display = Unpack(metadata, PackLocation{18, 1});
+      gs_restored = global_settings.valid;
+      // 15 bits empty...
+      // TODO:
+      //global_settings.DAC_scaling = Unpack(metadata, PackLocation{32, 32});
+      //OC::DAC::restore_scaling(global_settings.DAC_scaling);
     }
-  }
 
-  if (!reset_settings) {
-#ifdef __IMXRT1062__
     // User Scales from SD Scala files take precedence over config values
     char filename[] = "000.SCL";
     uint8_t scala_loaded_mask = 0;
@@ -574,8 +657,16 @@ bool AppSwitcher::Init(bool reset_settings) {
 
 
 #else // Teensy 3.2
-    // global_settings_storage.Load() already ran before the reset check
-    if (gs_restored) {
+    // global_settings already holds the stored struct: the decide phase ran
+    // PageStorage::Load to learn validity. global_settings.Init() must NOT
+    // run over it here -- it would reset the autotune calibration member the
+    // load just filled (the old ordering got away with Init-then-Load; this
+    // ordering would be Load-then-clobber). Chords::Init() is the one piece
+    // of live-array seeding Init() also did that nothing below repeats on
+    // every build, so it runs by itself.
+    if (gs_loaded) {
+      Chords::Init();
+      gs_restored = true;
       APPS_SERIAL_PRINTLN("Loaded settings from page_index %d, current_app_id is %02x",
                     global_settings_storage.page_index(),global_settings.current_app_id);
       memcpy(user_scales, global_settings.user_scales, sizeof(user_scales));
@@ -602,6 +693,10 @@ bool AppSwitcher::Init(bool reset_settings) {
       }
       HS::frame.MIDIState.UpdateMidiChannelFilter();
       HS::frame.MIDIState.UpdateMaxPolyphony();
+    } else {
+      // Load failed (and the prompt was declined, or this is a quiet boot
+      // with blank EEPROM): nothing stored, so factory-default the globals.
+      SeedGlobalSettingsDefaults();
     }
 #endif
 
@@ -643,6 +738,7 @@ bool AppSwitcher::Init(bool reset_settings) {
 
   delay(100);
 
+  s_init_has_run = true;
   return gs_restored;
 }
 

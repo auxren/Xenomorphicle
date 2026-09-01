@@ -50,9 +50,14 @@ void Ui::Init() {
   for (size_t i = 0; i < count; ++i) {
     buttons_[i].Init(button_pins[i], OC_GPIO_BUTTON_PINMODE);
   }
-  std::fill(button_press_time_, button_press_time_ + 4, 0);
+  // ...+ CONTROL_BUTTON_LAST, not + 4: on T4.1 the array is seven long, and
+  // the three tail entries (Z/X/Y) were left uninitialised, so the first
+  // long-press decision for those buttons compared `now` against garbage.
+  std::fill(button_press_time_, button_press_time_ + CONTROL_BUTTON_LAST, 0);
   button_state_ = 0;
-  button_ignore_mask_ = 0;
+  button_down_ = 0;
+  chord_hold_ = 0;
+  chord_release_ = 0;
   screensaver_ = false;
   preempt_screensaver_ = false;
   jump_to_menu_ = false;
@@ -108,10 +113,30 @@ void FASTRUN Ui::Poll() {
 
   for (size_t i = 0; i < count; ++i) {
     auto &button = buttons_[i];
+    const uint16_t control = control_mask(i);
     if (button.just_pressed()) {
+      button_down_ |= control;
       button_press_time_[i] = now;
       PushEvent(UI::EVENT_BUTTON_DOWN, control_mask(i), 0, button_state);
     } else if (button.released()) {
+      button_down_ &= ~control;
+      // Release-first rule: the held half of the guard ends HERE, on the
+      // debounced release -- seven consecutive high reads -- and never on
+      // button_state, which is the raw pin. A switch that bounces reads high
+      // for a poll or two while the user is still holding, and clearing the
+      // guard on that would hand the screen the very press the guard exists to
+      // absorb. The release event being pushed on this same tick is still the
+      // chord's own, so it goes to the other half rather than out.
+      //
+      // This is also why the guard cannot stick and leave a button dead: it is
+      // only ever armed on a pin that is (or has just been) low, and every low
+      // excursion ends here. UI::Button::state_ reaches 0x7f seven high reads
+      // after ANY low read, whether or not the press was long enough to have
+      // reached 0x80 and reported a press in the first place.
+      if (chord_hold_ & control) {
+        chord_hold_ &= ~control;
+        chord_release_ |= control;
+      }
       if (now - button_press_time_[i] < kLongPressTicks)
         PushEvent(UI::EVENT_BUTTON_PRESS, control_mask(i), 0, button_state);
       else
@@ -174,8 +199,11 @@ UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
         (CONTROL_BUTTON_L == event.control || CONTROL_BUTTON_R == event.control) &&
         (event.mask & (CONTROL_BUTTON_L | CONTROL_BUTTON_R))
             == (CONTROL_BUTTON_L | CONTROL_BUTTON_R)) {
+      // Claim the chord BEFORE the screen exists, so nothing it opens can be
+      // reached by the gesture that opened it -- including a screen that runs
+      // its own blocking loop and never returns here.
+      IgnoreUntilRelease(CONTROL_BUTTON_L | CONTROL_BUTTON_R);
       OC::PresetBusUI::Enter();
-      SetButtonIgnoreMask();  // swallow the releases
       continue;
     }
 
@@ -183,22 +211,30 @@ UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
     const bool a_hold = (event.mask & CONTROL_BUTTON_A);
 
     // --- Handle global hotkeys
+    //
+    // Each of these opens a screen while its chord is still held, so each
+    // claims its whole chord on the way in. The mask names A and Z together
+    // rather than whichever of them the test above matched: the modifier may
+    // already have been let go a few ms early, in which case event.mask (the
+    // raw pin) no longer mentions it while its release event is still queued,
+    // and naming a button that turns out not to have been held costs nothing.
     if (UI::EVENT_BUTTON_DOWN == event.type) {
       // Hold Z or A and push right encoder for main menu
       if (CONTROL_BUTTON_R == event.control && (z_hold || a_hold)) {
+        IgnoreUntilRelease(CONTROL_BUTTON_R | CONTROL_BUTTON_A | CONTROL_BUTTON_Z);
         jump_to_menu_ = true;
         break;
       }
       // Hold Z or A and push left encoder for IO settings menu
       if (CONTROL_BUTTON_L == event.control && (z_hold || a_hold)) {
+        IgnoreUntilRelease(CONTROL_BUTTON_L | CONTROL_BUTTON_A | CONTROL_BUTTON_Z);
         app->EditIOSettings();
-        SetButtonIgnoreMask();
         continue;
       }
       // Hold Z and push A for screensaver (not available on O_C without VOR button)
       if (CONTROL_BUTTON_A == event.control && z_hold) {
+        IgnoreUntilRelease(CONTROL_BUTTON_A | CONTROL_BUTTON_Z);
         screensaver_ = true;
-        SetButtonIgnoreMask();
         break;
       }
     }
@@ -217,7 +253,10 @@ UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
   if (screensaver_) {
     return UI_MODE_SCREENSAVER;
   } else if (jump_to_menu_) {
-    SetButtonIgnoreMask(); // ignore release
+    // The A/Z + encR chord already claimed itself above; this covers the OTHER
+    // way in, JumpToMenu() from an app (Hemisphere's encR), whose button is
+    // likewise still down. Re-arming for a chord already armed is a no-op.
+    SetButtonIgnoreMask();
     jump_to_menu_ = false;
     return UI_MODE_APP_SETTINGS;
   } else {

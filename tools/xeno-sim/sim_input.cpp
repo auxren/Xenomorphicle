@@ -46,6 +46,10 @@ EncoderQueue g_enc[2];    // [0] = left, [1] = right
 struct ScheduledTap { uint16_t control; uint32_t down_ms, up_ms; bool started; };
 std::vector<ScheduledTap> g_taps;
 
+// Scheduled encoder turns (see SimInputScheduleEncoder).
+struct ScheduledEnc { bool right; int delta; uint32_t at_ms; };
+std::vector<ScheduledEnc> g_sched_enc;
+
 void SetPin(uint8_t pin, uint8_t level) {
   if (pin < kSimPinCount) SimPinLevels()[pin] = level;
 }
@@ -94,6 +98,15 @@ void SimInputInit() {
 
 void SimInputTick() {
   const uint32_t now = SimNowMs();
+  for (size_t i = 0; i < g_sched_enc.size();) {
+    if (now >= g_sched_enc[i].at_ms) {
+      const ScheduledEnc e = g_sched_enc[i];
+      g_sched_enc.erase(g_sched_enc.begin() + i);
+      SimInputEncoder(e.right, e.delta);
+      continue;
+    }
+    ++i;
+  }
   for (size_t i = 0; i < g_taps.size();) {
     ScheduledTap &t = g_taps[i];
     if (!t.started && now >= t.down_ms) { SimInputSetButton(t.control, true); t.started = true; }
@@ -172,6 +185,10 @@ std::string SimInputHeldTokens() {
     out += g_buttons[i].token;
   }
   return out;
+}
+
+void SimInputScheduleEncoder(bool right, int delta, uint32_t at_ms) {
+  g_sched_enc.push_back({right, delta, SimNowMs() + at_ms});
 }
 
 void SimInputScheduleTap(uint16_t control, uint32_t at_ms, uint32_t dur_ms) {

@@ -62,6 +62,14 @@ std::string SimInputHeldTokens();
 // the firmware to skip it. See SimRuntimeBoot.
 void SimInputScheduleTap(uint16_t control, uint32_t at_ms, uint32_t dur_ms);
 
+// The same idea for an encoder: queue |delta| detents at_ms from now, rather
+// than immediately. Needed because detents queued BEFORE a blocking loop are
+// consumed by whatever screen is still running while the entry gesture is
+// being held -- the app menu eats them as list scrolling -- so they never
+// reach the loop. Ui::DebugStats pages on an encL TURN while an encL PRESS is
+// its exit, which makes this the only way to see any page but the first.
+void SimInputScheduleEncoder(bool right, int delta, uint32_t at_ms);
+
 // The 225e last/next pulse jacks. Level, not edge: PresetBusUI::Task does its
 // own edge detection, which is the code under test.
 void SimInputSetTrigger(int index /*0-3*/, bool high);

@@ -64,6 +64,15 @@ SimEEPROMClass EEPROM;
 SimSDClass SD;
 
 namespace {
+// Set once from the command line before boot. NOT cleared by SimHostReset():
+// whether a card is seated is a property of the bench, not of the run, and a
+// replay that re-boots must find the same machine it recorded on.
+bool g_card_present = false;
+}
+void SimSetCardPresent(bool present) { g_card_present = present; }
+bool SimCardPresent() { return g_card_present; }
+
+namespace {
 uint8_t g_eeprom[E2END + 1];
 }
 uint8_t *SimEepromBytes() { return g_eeprom; }
@@ -129,6 +138,34 @@ void SimPanelVisible(uint8_t out[1024]) {
   else
     memcpy(out, src, 1024);
 }
+
+// --- deferred frame capture ------------------------------------------------
+// See sim_host.h. Armed from the command line before boot, fired from the
+// SH1106 shim's page-7 write so the captured frame is whole.
+//
+// NOT cleared by SimHostReset(): the arm is a property of the run, set before
+// boot, and a reset that dropped it would silently disarm --snap-at.
+namespace {
+uint32_t g_snap_at = 0;
+bool g_snap_armed = false;
+bool g_snap_taken = false;
+uint8_t g_snap[1024];
+}
+
+void SimSnapArm(uint32_t at_ms) {
+  g_snap_at = at_ms;
+  g_snap_armed = true;
+  g_snap_taken = false;
+}
+
+void SimPanelFrameComplete() {
+  if (!g_snap_armed || g_snap_taken || SimNowMs() < g_snap_at) return;
+  SimPanelVisible(g_snap);
+  g_snap_taken = true;
+}
+
+bool SimSnapTaken() { return g_snap_taken; }
+const uint8_t *SimSnapBytes() { return g_snap; }
 
 // --- log -------------------------------------------------------------------
 namespace {

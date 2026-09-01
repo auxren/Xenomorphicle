@@ -36,10 +36,24 @@ stray typing is harmless but will spew capture bytes.
 | `{` / `}` | **local** save / recall, slot 1 |
 | `>` / `<` | **broadcast** save / recall, slot 0 — hits every module on the 200e bus |
 | `.` / `,` | **broadcast** save / recall, slot 1 |
+| `S` / `R` | **broadcast** save / recall to an arbitrary slot — then type 2 decimal digits (`00`–`29`) |
 | `p` | toggle the preset-bus overlay UI (remote inspection of the front-panel preset manager) |
 | `b` | preset-bus debug dump |
 | `B` | toggle preset-bus verbose logging |
 | `k` | toggle 0x50 card serving (slave-TX card emulator; hard-gated off when a live WPM is present) |
+
+### 200e master operations
+| key | action |
+|---|---|
+| `q` | QUERY a module's identity — then type 2 hex digits for its address |
+| `m` | master **BACKUP** (read a whole bank) — then 2 hex digits for the address |
+| `c` | hex-dump the last capture held in the resident card image |
+| `w` | patch one byte of the resident card image — 4 hex digits offset, then 2 hex digits value. No bus traffic |
+| `x` | master **RESTORE** the resident card image to a module — 2 hex digits for the address, then press `x` and the **same two digits again within 3 s** to actually push it |
+| `y` | USB bridge status; toggles the fallback `usbMIDI` poll (leave OFF under any app that reads USB MIDI itself) |
+
+`w` and `x` together are a whole-bank write with none of the 200e app's guards
+in front of them. `x` rewrites all 30 slots of the target module.
 
 ### Files
 | key | action |
@@ -47,8 +61,15 @@ stray typing is harmless but will spew capture bytes.
 | `g` | save globals + app data now |
 | `l` | list LittleFS files |
 | `s` | list SD card files |
+| `r` | print LittleFS `CRASH.LOG` |
+| `K` | ButtonWatch — name the physical buttons as you press them |
 
-### DANGER — destructive, no confirmation
+### DANGER — destructive
+Each of these needs the **same key pressed twice within 3 s**; the first press
+only arms it and prints what the second one will do. That is a guard against
+typos and host probes, not a substitute for care — there is no undo behind any
+of them.
+
 | key | action |
 |---|---|
 | `C` | **clear/reset the config file** (GLOBALS.CFG rewritten empty) |
@@ -90,6 +111,14 @@ captain: poll_gap_max=1180us echoes=0
 - **audio pools / cpu** — i16 and F32 block pools, current/high-water,
   plus audio CPU now/peak. A pool `max` at the pool ceiling means
   allocation failures have likely occurred.
+- **littlefs** — bytes used against the 4 MB internal partition. Read it as a
+  hint, not a budget: `LittleFS_Program` uses **64 KB erase sectors** on T4.1,
+  so the partition is only **64 allocation blocks** and *every file costs a
+  whole block* however little it holds. A 588-byte file measured on the bench
+  occupied 64 KB. Running out of blocks with kilobytes of "free space" showing
+  is the expected failure, and it is why a preset slot is now one container
+  file (`PB_NN.PBS`) instead of the three-to-five it used to be — 30 slots
+  × 3 files is 90 blocks against a 64-block filesystem. Use `l` to count files.
 - **fs write-verify** — writes a 64-byte pattern to `SELFTST.TMP`, reads
   it back, compares, deletes. **FAIL** catches the failure mode where
   writes "succeed" as 0-byte files — treat the flash filesystem as
@@ -140,9 +169,18 @@ p95 0.24 ms, max 0.51 ms, 0 drops — ~90 µs one-way.
 
 ## Flashing
 
-**Use `software/flash.sh`.** It builds, refuses any image that is not linked
-for slot 0, stages a rollback it will not overwrite, stops the running app so
-no CV transient reaches the Buchla, flashes, and verifies by enumeration.
+**Use `software/flash.sh`.** It builds locally, then does everything else on
+the bench rig over ssh (`RIG=orin` by default, overridable). In order: build;
+refuse any image that is not linked for slot 0; `scp` it across and stage a
+rollback it will not overwrite; SIGTERM the host-side player (`ember.py`, whose
+shutdown path drives all six continuous outputs to zero, so a reboot with CVs
+patched into a live Buchla is not a transient into someone's speakers); flash;
+and verify by enumeration — USB ID plus a `Phazerville` ALSA card, retried for
+30 s. Note it quiets the *host*, not the firmware: nothing stops the running
+app on the module itself.
+
+`./flash.sh` alone builds `T41_audio`; pass an environment name for anything
+else, and it is still address-checked.
 
 ### The trap it exists to prevent
 
@@ -169,7 +207,10 @@ so the advice inherited from upstream — "press the program button" — does no
 apply, and neither does `teensy_loader_cli -s`: a soft reboot still needs the
 running firmware to enter the bootloader for it. Two ways in:
 
-- **Front panel:** SETTINGS → **Reflash** ("Flash Upgrade Mode").
+- **Front panel:** Setup/About → **hold encL** past the long-press (the footer
+  reads `keep holding: Reflash` while you hold), then **B** on the
+  `REFLASH: BOOTLOADER` confirm screen. It ignores a yes for 350 ms after the
+  screen appears.
 - **From a host:** console **`Z`**, double-press like `C` and `F`. It calls
   `_reboot_Teensyduino_()` and drops straight into HalfKay.
 

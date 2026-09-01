@@ -25,6 +25,7 @@
 #include <vector>
 
 #include <Arduino.h>
+#include <SD.h>          // SimSetCardPresent: --sd-card seats one before boot
 
 #include "OC_apps.h"
 #include "OC_app_switcher.h"
@@ -38,6 +39,7 @@
 #include "sim_input.h"
 #include "sim_runtime.h"
 #include "sim_session.h"
+#include "sim_storage.h"
 #include "sim_term.h"
 
 namespace {
@@ -268,6 +270,17 @@ void PrintScreen(bool with_chrome) {
 // this when an unmapped console key asks for a capture, so a device capture
 // and a simulator capture are directly comparable -- see fbdiff.py.
 void PrintFrameBufferHex() {
+  // --snap-at wins when it fired: the whole point of a deferred capture is
+  // that the frame you want is NOT the one on screen at exit. If the capture
+  // never fired, fall through to the live frame rather than printing a blank
+  // one -- an empty 1024 bytes would decode as an empty screen and read as a
+  // layout assertion passing on nothing at all.
+  if (SimSnapTaken()) {
+    const uint8_t *s = SimSnapBytes();
+    for (int i = 0; i < 1024; ++i) printf("%02X", s[i]);
+    printf("\n");
+    return;
+  }
   const uint8_t *f = VisibleFrame();
   for (int i = 0; i < 1024; ++i) printf("%02X", f[i]);
   printf("\n");
@@ -441,7 +454,30 @@ void Usage() {
       "  --bus-off            simulate PresetBus::Enabled() == false\n"
       "  --id-voltage V       the hardware-ID divider the firmware reads at\n"
       "                       boot to pick its pin map (default 0.10)\n"
-      "  --reset-settings     boot the first-run/EEPROM-reset path\n"
+      "  --reset-settings     boot the first-run/EEPROM-reset path, and\n"
+      "                       answer its ConfirmReset prompt OK (erase)\n"
+      "  --reset-cancel       the same gesture, answered CANCEL. What a user\n"
+      "                       who changed their mind does -- and the only way\n"
+      "                       to ask whether a refused reset left storage alone\n"
+      "  --snap-at MS         capture the first complete frame drawn at or\n"
+      "                       after MS (ABSOLUTE simulated time, so it can\n"
+      "                       reach screens drawn during boot itself; inside a\n"
+      "                       script prefer the relative \"snapN\" token) and\n"
+      "                       let --dump-fb print THAT. The only\n"
+      "                       way to see a screen the firmware draws from its\n"
+      "                       own blocking loop (DebugStats, ConfirmReset, the\n"
+      "                       calibration wizard), which has been redrawn over\n"
+      "                       by the time the script gets another turn.\n"
+      "  --sd-card            seat an SD card, so SDcard_Ready is true. The\n"
+      "                       card is empty unless --state seeds it.\n"
+      "  --state FILE         non-volatile memory: read FILE before boot and\n"
+      "                       write it back at exit. Two runs sharing one FILE\n"
+      "                       are a power cycle -- the only way to ask what a\n"
+      "                       SECOND boot sees.\n"
+      "  --state-in FILE      read only (leave the image untouched)\n"
+      "  --state-out FILE     write only\n"
+      "  --dump-fs            list stored files with sizes and CRCs, and\n"
+      "                       nothing else\n"
       "  --capture-251e PATH  251e bank hex dump (default: bench capture)\n"
       "  --capture-259e PATH  259e bank hex dump (default: bench capture)\n"
       "  --no-log             omit the status/log lines under the frame\n"
@@ -452,6 +488,10 @@ void Usage() {
       "                       (default: none, i.e. it works). short-readback\n"
       "                       stores perfectly and truncates the READ-BACK,\n"
       "                       which is the one shape that can fake a VERIFY.\n"
+      "  --write-fault-once   apply that fault to the FIRST restore only, so\n"
+      "                       the recovery write after it goes out to a module\n"
+      "                       that behaves -- which is what makes the pre-write\n"
+      "                       snapshot's UNDO checkable end to end.\n"
       "  --help\n"
       "\nKeys:\n%s\n"
       "\nA --keys token may be \"<button>-down\" / \"<button>-up\" (buttons are\n"
@@ -477,6 +517,54 @@ bool ApplyToken(const std::string &tok, bool allow_settle) {
     Advance((uint32_t)strtoul(tok.c_str() + 4, nullptr, 10));
     return true;
   }
+  // "qencl+N@T" / "qencr-N@T": queue N detents on an encoder to be delivered
+  // T ms from now, and return WITHOUT advancing the clock. "@T" is optional
+  // and defaults to immediately.
+  //
+  // The ordinary turn tokens drain themselves (EncoderDelta advances four ms
+  // per detent so the caller sees the turn it asked for), which means that
+  // inside a blocking firmware loop they are unusable -- the loop never gives
+  // the script another turn, so a turn issued afterwards arrives after the
+  // loop has ended. This is the encoder's "<button>-inN": queue it before,
+  // consume it during. It is what makes the debug-stats pages past the first
+  // reachable at all, since paging there is an encL TURN while an encL PRESS
+  // is the exit.
+  //
+  // The "@T" delay is not optional in practice for that case: detents queued
+  // for delivery NOW are consumed by whatever is still on screen while the
+  // entry gesture is being held -- the app menu takes them as list scrolling
+  // -- and never reach the loop at all. T must put them past the long-press
+  // threshold.
+  if (tok.rfind("qenc", 0) == 0 && tok.size() > 5) {
+    const bool right = tok[4] == 'r';
+    const size_t at = tok.find('@');
+    const int n = (int)strtol(tok.c_str() + 5, nullptr, 10);
+    const uint32_t when = (at == std::string::npos)
+                              ? 0
+                              : (uint32_t)strtoul(tok.c_str() + at + 1, nullptr, 10);
+    if ((tok[4] == 'l' || right) && n) {
+      char buf[64];
+      snprintf(buf, sizeof(buf), "sched-enc %c %d %u", right ? 'r' : 'l', n,
+               (unsigned)when);
+      SimSessionRecord(buf);
+      SimInputScheduleEncoder(right, n, when);
+      return true;
+    }
+  }
+  // "snapN": arm a deferred frame capture N ms from now, and return at once.
+  //
+  // Relative, like "<button>-inN" and unlike --snap-at, and for the same
+  // reason: the interesting moment is always "N ms into the loop I am about to
+  // enter", and the absolute clock at that point depends on how long boot took
+  // -- a number that moves whenever the splash delay does. A capture armed in
+  // absolute time would then quietly sample the wrong screen, and a layout
+  // check that passes against the wrong screen is worse than no check.
+  if (tok.rfind("snap", 0) == 0 &&
+      tok.find_first_not_of("0123456789", 4) == std::string::npos &&
+      tok.size() > 4) {
+    SimSnapArm(SimNowMs() + (uint32_t)strtoul(tok.c_str() + 4, nullptr, 10));
+    return true;
+  }
   const bool settle = allow_settle && (tok.empty() || tok[0] != '+');
   const std::string k = settle ? tok : tok.substr(tok.empty() || tok[0] != '+' ? 0 : 1);
   if (!ApplyKey(k)) return false;
@@ -492,8 +580,12 @@ int main(int argc, char **argv) {
   cfg.capture_259e = kDefault259e;
 
   std::string keys, record_path, replay_path, boot_app;
+  std::string state_in, state_out;
   bool scripted = false, dump_frames = false, show_log = true;
   bool stdio_mode = false, dump_fb = false, reset_settings = false;
+  bool card_present = false, dump_fs = false, reset_cancel = false;
+  long snap_at = -1;
+  bool write_fault_once = false;
   long replay_at = -1;
   int write_fault = SIM_WRITE_FAITHFUL;
   float id_voltage = 0.10f;
@@ -515,6 +607,14 @@ int main(int argc, char **argv) {
     else if (a == "--real-timing") { cfg.real_timing = true; opts.push_back(a); }
     else if (a == "--bus-off") { cfg.bus_enabled = false; opts.push_back(a); }
     else if (a == "--reset-settings") { reset_settings = true; opts.push_back(a); }
+    else if (a == "--sd-card") { card_present = true; opts.push_back(a); }
+    else if (a == "--reset-cancel") { reset_settings = reset_cancel = true; opts.push_back(a); }
+    else if (a == "--snap-at" && has_next) { snap_at = strtol(argv[++i], nullptr, 10); }
+    else if (a == "--write-fault-once") { write_fault_once = true; opts.push_back(a); }
+    else if (a == "--state" && has_next) { state_in = state_out = argv[++i]; }
+    else if (a == "--state-in" && has_next) { state_in = argv[++i]; }
+    else if (a == "--state-out" && has_next) { state_out = argv[++i]; }
+    else if (a == "--dump-fs") { dump_fs = true; show_log = false; }
     else if (a == "--id-voltage" && has_next) {
       id_voltage = strtof(argv[++i], nullptr);
       opts.push_back(a + " " + argv[i]);
@@ -539,7 +639,10 @@ int main(int argc, char **argv) {
       return 2;
     }
     for (const std::string &o : session.opts) {
-      if (o == "--bus-off") cfg.bus_enabled = false;
+      if (o == "--sd-card") card_present = true;
+      else if (o == "--reset-cancel") reset_settings = reset_cancel = true;
+      else if (o == "--write-fault-once") write_fault_once = true;
+      else if (o == "--bus-off") cfg.bus_enabled = false;
       else if (o == "--real-timing") cfg.real_timing = true;
       else if (o == "--reset-settings") reset_settings = true;
       else if (o.rfind("--id-voltage ", 0) == 0) id_voltage = strtof(o.c_str() + 13, nullptr);
@@ -552,7 +655,22 @@ int main(int argc, char **argv) {
 
   SimHostReset();
   SimSetIdVoltage(id_voltage);
+
+  // Order matters and is not arbitrary: SimHostReset() zeroes the EEPROM and
+  // the volumes, so the stored image has to be laid down after it and before
+  // SimRuntimeBoot() reads any of it. Seating the card is the same boundary --
+  // the firmware latches SDcard_Ready once, during boot.
+  SimSetCardPresent(card_present);
+  if (snap_at >= 0) SimSnapArm((uint32_t)snap_at);
+  if (!state_in.empty()) {
+    std::string why;
+    if (SimStorageLoad(state_in, &why))
+      SimLog("--state-in %s: stored state restored", state_in.c_str());
+    else
+      SimLog("--state-in %s: %s", state_in.c_str(), why.c_str());
+  }
   SimBusSetWriteFault((SimWriteFault)(write_fault < 0 ? 0 : write_fault));
+  SimBusSetWriteFaultOnce(write_fault_once);
 
   usbMIDI.set_name("usbMIDI");
   usbHostMIDI[0].set_name("usbHostMIDI[0]");
@@ -565,7 +683,7 @@ int main(int argc, char **argv) {
            "runs the virtual clock flat out.");
   if (!cfg.bus_enabled) SimLog("--bus-off: PresetBus::Enabled() reports false.");
 
-  SimRuntimeBoot(reset_settings);
+  SimRuntimeBoot(reset_settings, reset_cancel);
 
   if (!boot_app.empty()) {
     bool found = false;
@@ -612,6 +730,10 @@ int main(int argc, char **argv) {
           SimInputScheduleTap(c, (uint32_t)strtoul(t[2].c_str(), nullptr, 10),
                               (uint32_t)strtoul(t[3].c_str(), nullptr, 10));
       }
+      else if (t[0] == "sched-enc" && t.size() >= 4) {
+        SimInputScheduleEncoder(t[1] == "r", (int)strtol(t[2].c_str(), nullptr, 10),
+                                (uint32_t)strtoul(t[3].c_str(), nullptr, 10));
+      }
       else if (t[0] == "release-all") { SimInputReleaseAll(); }
       else if (t[0] == "enc" && t.size() >= 3) {
         SimInputEncoder(t[1] == "r", (int)strtol(t[2].c_str(), nullptr, 10));
@@ -632,7 +754,8 @@ int main(int argc, char **argv) {
       }
       if (replay_at >= 0 && idx >= replay_at) break;
     }
-    if (dump_fb) PrintFrameBufferHex();
+    if (dump_fs) SimStorageList(stdout);
+    else if (dump_fb) PrintFrameBufferHex();
     else if (!dump_frames) PrintScreen(show_log);
   } else if (stdio_mode) {
     rc = RunStdio();
@@ -645,8 +768,11 @@ int main(int argc, char **argv) {
         PrintScreen(show_log);
       }
     }
-    if (dump_fb) PrintFrameBufferHex();
+    if (dump_fs) SimStorageList(stdout);
+    else if (dump_fb) PrintFrameBufferHex();
     else if (!dump_frames) PrintScreen(show_log);
+  } else if (dump_fs) {
+    SimStorageList(stdout);
   } else if (dump_fb) {
     PrintFrameBufferHex();
   } else {
@@ -682,6 +808,13 @@ int main(int argc, char **argv) {
     SimTermRawMode(false);
     printf("\n");
   }
+
+  // The power cycle's other half. Written on every exit path that gets here,
+  // so a run that changed nothing still leaves an image -- "the stored set did
+  // not change" has to be expressible as two identical files, which means the
+  // second run must produce a file at all.
+  if (!state_out.empty() && !SimStorageSave(state_out))
+    fprintf(stderr, "xeno-sim: cannot write %s\n", state_out.c_str());
 
   if (!record_path.empty()) {
     FILE *fp = fopen(record_path.c_str(), "w");

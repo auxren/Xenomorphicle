@@ -25,6 +25,20 @@ glyph can reach -- an honest row is uniform: all dark (plain text) or all lit
 is neither. Any column that is part-lit in a band where text was found is a
 character that ran off the screen.
 
+...with one exception, which is NOT a loophole. Text right-aligned with
+print_right(127) legitimately ends at x=126: "R:exit" on the debug-stats page
+starts at 91 and its last glyph occupies 121..126, so column 126 is part-lit
+and the row is perfectly honest. The rule that separates the two cases is not
+"is the column uniform" but "is every lit pixel here accounted for by a glyph
+that DECODED". A whole glyph decodes; two thirds of one matches nothing, which
+is the very property that makes it invisible to fbtext -- so the pixels it
+leaves behind are exactly the unexplained ones.
+
+That keeps the original defect caught. "LIVE 105s ago  wire 29" put its 22nd
+character at x=126, where no cell can even be read (a cell needs six columns
+and the last readable one starts at 122), so those pixels belong to no decoded
+run and are still flagged. Only fully-formed glyphs are forgiven.
+
 usage: edgecheck.py FRAME.hex [FRAME.hex ...]
        xeno-sim --dump-fb ... | edgecheck.py -
 
@@ -44,16 +58,34 @@ WIDTH, FONT_H = fbtext.WIDTH, fbtext.FONT_H
 EDGE_COLUMNS = (126, 127)
 
 
+def decoded_columns(runs):
+    """Per row y, the x columns that a fully-decoded glyph accounts for.
+
+    A run reported at (y, x) with n characters occupies x .. x+6n-1. Those
+    pixels have an explanation, so they are not evidence of a truncation.
+    """
+    cov = {}
+    for y, x, _inv, text in runs:
+        cov.setdefault(y, set()).update(range(x, x + fbtext.FONT_W * len(text)))
+    return cov
+
+
 def clipped_rows(buf, glyphs):
     """Rows carrying text whose right edge holds a part-drawn glyph."""
+    runs = fbtext.read_lines(buf, glyphs)
+    cov = decoded_columns(runs)
     bad = []
-    for y in sorted({run[0] for run in fbtext.read_lines(buf, glyphs)}):
+    for y in sorted({run[0] for run in runs}):
         if y + FONT_H > fbtext.HEIGHT:
             continue
         for cx in EDGE_COLUMNS:
             bits = [fbtext.pixel(buf, cx, y + dy) for dy in range(FONT_H)]
             # Uniform is honest: blank panel, or a full-row inversion.
             if len(set(bits)) == 1:
+                continue
+            # ...and so is a column inside a glyph that decoded -- see the
+            # print_right note in the module docstring.
+            if cx in cov.get(y, ()):
                 continue
             bad.append((y, cx, "".join(str(b) for b in bits)))
             break

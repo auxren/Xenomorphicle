@@ -16,7 +16,7 @@
   </style>
 </helmet>
 
-<div style="width: 900px; height: 860px; background: #14161a; color: #e6e9ee; padding: 40px 44px; box-sizing: border-box; display: flex; flex-direction: column; gap: 22px">
+<div style="width: 900px; height: 1180px; background: #14161a; color: #e6e9ee; padding: 40px 44px; box-sizing: border-box; display: flex; flex-direction: column; gap: 22px">
 
   <div style="display: flex; flex-direction: column; gap: 7px">
     <div style="font: 700 11px/1 'JetBrains Mono', monospace; letter-spacing: .28em; color: #b06a3b">ANSWERED · WHY ALL THIRTY</div>
@@ -82,6 +82,38 @@
       One real read returned <b style="color: #fff">957 bytes instead of 990</b> and reported success.
       Harmless on a read. Written back, it would have shifted every record after the
       truncation and quietly rewritten twenty-nine presets with mis-aligned data.
+    </div>
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px">
+    <div class="tag" style="color: #6fae78">Detection, and then recovery — what the screen now promises</div>
+    <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab; max-width: 810px">
+      The confirm row used to end
+      <span class="cmd" style="color:#cfe6ff; font-size:12.5px">29 re-sent, then chkd</span>.
+      That was true and still wrong to say: <b style="color: #e6e9ee">"checked" promises
+      detection, and a reader hears protection</b>. They are not the same thing. At the
+      time the instrument kept no copy of the bank it was overwriting, so a detected
+      failure was still a failure you could not undo — and "chkd" was the only
+      abbreviation of its kind in the firmware, on the one screen that can least
+      afford to be skimmed. It became
+      <span class="cmd" style="color:#cfe6ff; font-size:12.5px">29 re-sent - no undo</span>.
+    </div>
+    <div style="background: #171d19; border: 1px solid #2f3d33; border-radius: 6px; padding: 13px 16px; font-size: 13px; line-height: 1.6; color: #9fb0a4">
+      <b style="color: #cfe6d3">Both halves have since been strengthened.</b>
+      Detection: the verify no longer accepts a partial read-back — it requires the
+      full 63,120 bytes before the hash is even computed, and reports
+      <span class="cmd" style="font-size:12px">BAD: read-back short</span> when it
+      does not get them, rather than blaming the other twenty-nine for damage nobody
+      observed. Recovery: the bank is snapshotted to internal flash immediately
+      before the first byte is modified, and a
+      <span class="cmd" style="font-size:12px">BAD</span> verdict offers
+      <span class="cmd" style="font-size:12px">encR:UNDO</span> — which replays the
+      snapshot through the same write path, so the undo is verified like any other
+      write. <b style="color:#e8c98a">The confirm row still reads "no undo" and has
+      not caught up with this;</b> it is firmware copy, recorded here rather than
+      changed here.
     </div>
   </div>
 

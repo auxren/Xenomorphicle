@@ -59,6 +59,12 @@
 #include "../Buchla259eSlotCodec.h"
 #include "../HSMIDI.h"
 #include "../PresetBus.h"
+// SnapshotBank/LoadSnapshot for the pre-write undo. Included explicitly rather
+// than relied on transitively: this compiled in full builds only because
+// Quadrants.h happens to be included first and pulls it in, which is not a
+// dependency this header should have.
+#include "../PresetEngine.h"
+#include "../PhzConfig.h"    // the scan set lives in GLOBALS.CFG, not EEPROM
 
 namespace Bus200eAppNS {
 
@@ -69,6 +75,7 @@ enum Screen : uint8_t {
   SCR_EDIT,            // per-stage editor over the selected sequence
   SCR_GEN,             // Euclidean generator parameters
   SCR_REC,             // record stages from incoming MIDI
+  SCR_SNAP_CONFIRM,    // armed: put the pre-write bank back
 };
 
 // Generator parameter cursor. Pitches are carried as MIDI note numbers, not
@@ -154,6 +161,12 @@ static constexpr int kSlotCount = 30;
 // well over a third of a second, and the preset overlay already asks 500 ms
 // for a STORE, which is a far less consequential act than this.
 static constexpr uint32_t kConfirmDeadMs = 350;
+
+// The scan set's home: GLOBALS.CFG, in the namespace the preset bus already
+// owns (PRESETBUS_KEY = 8 << 8, shared with the module address and the slot
+// manifests). Two keys -- the 64-bit found bitmap, and addr/target/table-size.
+static constexpr uint16_t kScanSetKey  = (8 << 8) | 0x20;
+static constexpr uint16_t kScanMetaKey = (8 << 8) | 0x21;
 
 // Stage strip geometry. 50 stages at 2px each = 100px, left-aligned.
 static constexpr int kStripX = 4;
@@ -242,12 +255,16 @@ static constexpr int kRow259eValueX = 74;   // char column 12 of 21
 OC_APP_CLASS(AppBus200e, TWOCCS("2E"), "200e Modules", "200e"),
   public HSApplication {
 public:
-  // 11 bytes: addr_, target_, the 8-byte found bitmap, and the module-table
-  // size the bitmap was built against. The found set is persisted because a
-  // scan takes ~49 s on hardware and the case does not change unless someone
-  // physically changes it -- rescanning on every power-up or app switch was
-  // pure repeated cost for an answer that was already known.
-  OC_APP_INTERFACE_DECLARE(AppBus200e, 11);
+  // Back to 2 bytes: addr_ and target_ only.
+  //
+  // The scan set briefly lived here, which grew this chunk 6 -> 16 bytes and
+  // put it against an EEPROM budget nobody has measured on real hardware --
+  // and BuildAppData's overflow behaviour is to silently drop a RANDOMLY
+  // ROTATED app per save, so exceeding it corrupts a different app each time
+  // and would be near-impossible to diagnose. It now lives in GLOBALS.CFG
+  // under the PRESETBUS namespace instead, where a 64-bit value holds the
+  // whole bitmap exactly and costs no EEPROM at all.
+  OC_APP_INTERFACE_DECLARE(AppBus200e, 2);
 
   void Start() final {}
   void Resume() final {}
@@ -306,6 +323,7 @@ private:
   uint32_t read_started_ms_ = 0;   // millis() the transfer was accepted
   uint32_t armed_ms_ = 0;          // millis() the confirm screen appeared
   bool found_dirty_ = false;       // scan result awaiting a safe write
+  bool snap_here_ = false;         // a snapshot exists for target_
   uint32_t write_started_ms_ = 0;  // ditto for a restore
   // Set when a job vanished instead of finishing, so the status line can say
   // "lost" rather than blaming the module for an error it never reported.
@@ -443,6 +461,10 @@ private:
 
   void StartScan();
   void ConsumeScanDirty();
+  void LoadScanSet();
+  void RefreshSnapshotFlag();
+  void CommitSnapshotRestore();
+  void DrawSnapConfirm() const;
   void StopScan();
   void PumpScan();
   void PumpProbe();
@@ -996,6 +1018,27 @@ void AppBus200e::CommitWrite() {
     return;
   }
 
+  // 2a. SNAPSHOT, before a single byte is modified or sent.
+  //
+  // This is the step that turns "we can tell you it went wrong" into "we can
+  // put it back". Everything downstream -- the hash of the other 29, the
+  // byte-for-byte proof, the read-back -- only ever DETECTED damage. The
+  // module keeps no undo and this app kept only hashes, so the honest reading
+  // of the old confirm screen was: we will check, and if it is wrong we will
+  // say so, and that is all. One 64 KB block changes that.
+  //
+  // Taken here rather than earlier because this is the last moment the image
+  // is provably the module's own contents: the guard above has just re-checked
+  // it against read_hash_, and the memcpy below is the first thing to touch it.
+  //
+  // A snapshot that fails to write does NOT block the write. It is a safety
+  // net, not a precondition, and refusing an edit the user has already
+  // confirmed because a filesystem hiccuped would be its own kind of wrong --
+  // but say so on the wire log, because the net is not there.
+  if (!OC::PresetEngine::SnapshotBank(target_, img, bank_len,
+                                      Buchla200eCrc32(img, bank_len)))
+    serial_printf("200e: WARNING no snapshot taken for %02X\n", target_);
+
   const Buchla200eBankHash before =
       Buchla200eHashBank(img, bank_len, off, kBuchla251eSlotBytes);
 
@@ -1166,6 +1209,9 @@ void AppBus200e::PumpWrite() {
     }
   }
   OC::PresetBus::MasterReset();
+  // The verdict decides whether a recovery is on offer, so ask now rather
+  // than opening the snapshot file on every draw.
+  RefreshSnapshotFlag();
 #endif
 }
 
@@ -1598,13 +1644,21 @@ void AppBus200e::DrawWriteConfirm() const {
   // the transfer proves all 30 landed. Both halves of that promise are stated
   // here because this is the screen where consent is actually given.
   //
-  // "no undo" earns its space. The old line spent four columns on "chkd" --
-  // the only abbreviation of its kind in the firmware, on the one screen that
-  // can least afford to be skimmed -- to promise DETECTION, which a reader
-  // hears as PROTECTION. They are not the same thing: this instrument keeps
-  // no copy of the bank it is about to overwrite, so a verified failure is
-  // still a failure you cannot undo. Say that instead.
-  graphics.print("29 re-sent - no undo");
+  // States the blast radius and nothing more.
+  //
+  // This line has been wrong in both directions. It used to spend four columns
+  // on "chkd" -- the only abbreviation of its kind in the firmware, on the one
+  // screen that can least afford to be skimmed -- promising DETECTION, which a
+  // reader hears as PROTECTION. It was then changed to "no undo", which was
+  // true at the time and became false the moment the pre-write snapshot
+  // landed: there IS an undo now, offered as encR:UNDO when a write ends BAD.
+  //
+  // It does not promise one either, because at the instant this screen is
+  // drawn the snapshot does not exist yet -- CommitWrite takes it, after this
+  // prompt is answered. Promising recovery before securing it is exactly the
+  // kind of claim this codebase treats as a bug. The recovery offer belongs on
+  // the BAD screen, where snap_here_ makes it a checked fact.
+  graphics.print("29 others re-sent");
 
   graphics.setPrintPos(0, 56);
   graphics.print("encR:CONFIRM  encL:no");
@@ -1674,6 +1728,20 @@ void AppBus200e::DrawModule251e() const {
 
   DrawReadState();
 
+  // In the BAD state the ordinary action row is the wrong offer. The module
+  // is known to hold something other than what was sent, and if a pre-write
+  // snapshot survives, the only two sensible next moves are "put it back" and
+  // "leave it". Edit/Gen/Rec are noise at that moment, and there is no room
+  // for a sixth entry anyway -- the five already reach x=124 of 128.
+  //
+  // So the row becomes the recovery prompt, and it appears exactly when it is
+  // actionable: never when there is nothing to restore, never on a good write.
+  if (write_state_ == WRITE_BAD && snap_here_) {
+    graphics.setPrintPos(0, 56);
+    graphics.print("encR:UNDO  encL:keep");
+    return;
+  }
+
   // Action row. Read and Save are wired; Edit/Gen/Rec are stubs.
   // 4px gaps, not 6: five entries at 6px spill to 132px on a 128px screen.
   int x = 0;
@@ -1684,6 +1752,85 @@ void AppBus200e::DrawModule251e() const {
     if (i == action_) graphics.invertRect(x - 1, 55, w + 2, 10);
     x += w + 4;
   }
+}
+
+// Is there a snapshot for the module we are pointed at? Cheap enough to call
+// on state changes, not cheap enough for every draw -- it opens a file.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::RefreshSnapshotFlag() {
+#ifdef PRESET_BUS
+  uint8_t a = 0;
+  uint32_t len = 0;
+  snap_here_ = OC::PresetEngine::SnapshotInfo(&a, &len) && a == target_ &&
+               len == ExpectedBankBytes();
+#else
+  snap_here_ = false;
+#endif
+}
+
+// The recovery prompt. Same shape as the write confirm because it IS a write:
+// 63,120 bytes go back on the wire, all 30 slots are rewritten again, and the
+// module cannot refuse them. The only difference is which bytes.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::DrawSnapConfirm() const {
+  graphics.setPrintPos(0, 13);
+  graphics.printf("UNDO write to %02X", target_);
+  graphics.invertRect(0, 12, 128, 10);
+  graphics.setPrintPos(0, 26);
+  graphics.print("Puts back the bank");
+  graphics.setPrintPos(0, 36);
+  graphics.print("read before the write");
+  graphics.setPrintPos(0, 46);
+  graphics.print("Rewrites ALL 30 slots");
+  graphics.setPrintPos(0, 56);
+  graphics.print("encR:CONFIRM  encL:no");
+}
+
+// Load the snapshot back into the card image and send it. Deliberately reuses
+// the ordinary write machinery from the send onward, so the read-back and the
+// verdict work exactly as they do for any other write -- an undo that cannot
+// be verified would be no better than the damage it is undoing.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::CommitSnapshotRestore() {
+#ifdef PRESET_BUS
+  uint8_t *img = OC::PresetBus::MasterCardImage();
+  const uint32_t bank_len = ExpectedBankBytes();
+  if (!img || !bank_len) { write_block_ = BUCHLA200E_WRITE_NO_IMAGE; return; }
+
+  uint32_t got = 0;
+  if (!OC::PresetEngine::LoadSnapshot(target_, img, bank_len, &got) ||
+      got != bank_len) {
+    // The snapshot is gone, truncated, or belongs to another address. Say so
+    // and change nothing: a partial bank is worse than the damage.
+    snap_here_ = false;
+    write_state_ = Bus200eAppNS::WRITE_FAIL;
+    write_lost_ = false;
+    write_err_ = BUS200E_MASTER_ERR_NONE;
+    screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+    return;
+  }
+
+  // From here it is an ordinary write: the image IS the intent.
+  committed_off_ = 0;
+  memcpy(intended_slot_, img, kBuchla251eSlotBytes);
+  const Buchla200eBankHash h =
+      Buchla200eHashBank(img, bank_len, 0, kBuchla251eSlotBytes);
+  intended_hash_ = h.whole;
+  intended_outside_ = h.outside;
+
+  OC::PresetBus::MasterReset();
+  if (OC::PresetBus::MasterRestore(target_) != 0) {
+    write_state_ = Bus200eAppNS::WRITE_FAIL;
+    write_lost_ = true;
+    screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+    return;
+  }
+  write_state_ = Bus200eAppNS::WRITE_ACTIVE;
+  write_started_ms_ = millis();
+  screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+  serial_printf("200e: undo -- restoring %lu snapshot bytes to %02X\n",
+                (unsigned long)bank_len, target_);
+#endif
 }
 
 // --- edit / gen / rec screens ---------------------------------------------
@@ -2081,13 +2228,6 @@ FLASHMEM void AppBus200e::Init() {
 FLASHMEM size_t AppBus200e::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
   stream_buffer.Write<uint8_t>(addr_);
   stream_buffer.Write<uint8_t>(target_);
-  // The scan result. found_ is a bitmap over the MODULE TABLE, not over raw
-  // addresses, so it is only meaningful against the table it was built from
-  // -- stash the table size and refuse the set if a firmware update changed
-  // it, rather than silently reinterpreting old bits as different modules.
-  for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i)
-    stream_buffer.Write<uint8_t>(found_[i]);
-  stream_buffer.Write<uint8_t>((uint8_t)Buchla200eModuleCount());
   return stream_buffer.overflow() ? 0 : stream_buffer.written();
 }
 
@@ -2096,30 +2236,16 @@ FLASHMEM size_t AppBus200e::RestoreAppData(util::StreamBufferReader &stream_buff
   const uint8_t t = stream_buffer.Read<uint8_t>();
   addr_ = (a <= 0x7F) ? a : 0x5C;
   target_ = (t <= 0x7F) ? t : 0x5C;
-
-  uint8_t bits[Bus200eAppNS::kFoundBytes];
-  for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i)
-    bits[i] = stream_buffer.Read<uint8_t>();
-  const uint8_t table_n = stream_buffer.Read<uint8_t>();
-
-  // An underflow means this chunk predates the found set (a unit coming from
-  // older firmware): keep the empty list and let the user scan once.
-  if (!stream_buffer.underflow() && table_n == (uint8_t)Buchla200eModuleCount()) {
-    const int n = Buchla200eModuleCount();
-    int count = 0;
-    for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i) found_[i] = bits[i];
-    // Recompute the count rather than storing it: one source of truth means
-    // the list and the "N found" tally can never disagree.
-    for (int i = 0; i < n; ++i) if (IsFound(found_, i)) ++count;
-    found_count_ = count;
-    list_top_ = 0;
-  }
   return stream_buffer.underflow() ? 0 : stream_buffer.read();
 }
 
 FLASHMEM void AppBus200e::HandleAppEvent(OC::AppEvent event) {
   // A scan owns the bus master FSM; never leave one running in the
   // background when the app goes away.
+  // Resume is where the scan set comes back: the config map is loaded by
+  // then, which it is not when apps are constructed.
+  if (event == OC::APP_EVENT_RESUME) LoadScanSet();
+
   if (event == OC::APP_EVENT_SUSPEND || event == OC::APP_EVENT_SCREENSAVER_ON) {
     if (scan_state_ != Bus200eAppNS::SCAN_IDLE) StopScan();
     // Never leave a write armed across a suspend or a screensaver: the
@@ -2156,14 +2282,62 @@ FLASHMEM void AppBus200e::ConsumeScanDirty() {
   if (OC::PresetBus::CardServing()) return;
 
   found_dirty_ = false;
+
+  // Two keys in GLOBALS.CFG, under the namespace the preset bus already owns.
+  // A PhzConfig value is 8 bytes and kFoundBytes is 8, so the whole bitmap is
+  // one value exactly -- no packing, no truncation, nothing to get wrong.
+  uint64_t bits = 0;
+  for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i)
+    bits |= (uint64_t)found_[i] << (8 * i);
+
+  // found_ indexes the MODULE TABLE, not raw addresses, so it only means
+  // anything against the table it was built from. Store the table size beside
+  // it and refuse the set if a firmware update changed it, rather than
+  // silently reinterpreting old bits as different modules.
+  const uint64_t meta = (uint64_t)addr_ |
+                        ((uint64_t)target_ << 8) |
+                        ((uint64_t)(uint8_t)Buchla200eModuleCount() << 16);
+
   OC::CORE::app_isr_enabled = false;
-  OC::SaveAppData();
+  PhzConfig::load_config();            // own GLOBALS.CFG before mutating it
+  PhzConfig::setValue(Bus200eAppNS::kScanSetKey, bits);
+  PhzConfig::setValue(Bus200eAppNS::kScanMetaKey, meta);
+  PhzConfig::save_config();
   OC::CORE::app_isr_enabled = true;
-  // Hand the config map back: SaveGlobalSettings loaded GLOBALS.CFG into the
-  // shared map and left it there. We own no PhzConfig state ourselves, but
-  // the next app to write a file would inherit the wrong map.
+
+  // Hand the shared map back. PhzConfig has ONE in-RAM map and every writer
+  // is expected to leave it belonging to the active app; the next app to save
+  // a file would otherwise inherit GLOBALS.
   OC::app_switcher.current_app()->DispatchAppEvent(OC::APP_EVENT_RESUME);
   serial_printf("200e: scan set persisted (%d modules)\n", found_count_);
+#endif
+}
+
+// Read the scan set back. Called from Resume rather than Init because the
+// config map is not loaded yet when apps are constructed.
+FLASHMEM void AppBus200e::LoadScanSet() {
+#ifdef PRESET_BUS
+  uint64_t bits = 0, meta = 0;
+  if (!PhzConfig::getValue(Bus200eAppNS::kScanSetKey, bits)) return;
+  if (!PhzConfig::getValue(Bus200eAppNS::kScanMetaKey, meta)) return;
+  if ((uint8_t)(meta >> 16) != (uint8_t)Buchla200eModuleCount()) return;
+
+  const uint8_t a = (uint8_t)(meta & 0xFF);
+  const uint8_t t = (uint8_t)((meta >> 8) & 0xFF);
+  if (a && a <= 0x7F) addr_ = a;
+  if (t && t <= 0x7F) target_ = t;
+
+  int count = 0;
+  const int n = Buchla200eModuleCount();
+  for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i)
+    found_[i] = (uint8_t)(bits >> (8 * i));
+  // Recompute rather than storing the count: one source of truth means the
+  // list and the "N found" tally can never disagree.
+  for (int i = 0; i < n; ++i) if (IsFound(found_, i)) ++count;
+  found_count_ = count;
+  list_top_ = 0;
+  if (count)
+    serial_printf("200e: %d modules remembered; no scan needed\n", count);
 #endif
 }
 
@@ -2186,6 +2360,7 @@ FLASHMEM void AppBus200e::DrawMenu() const {
 #endif
   switch (screen_) {
     case Bus200eAppNS::SCR_WRITE_CONFIRM: DrawWriteConfirm(); return;
+    case Bus200eAppNS::SCR_SNAP_CONFIRM: DrawSnapConfirm(); return;
     case Bus200eAppNS::SCR_MODULE_HOME:   DrawModuleHome();   return;
     case Bus200eAppNS::SCR_EDIT:          DrawEdit();         return;
     case Bus200eAppNS::SCR_GEN:           DrawGen();          return;
@@ -2203,6 +2378,21 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
   // press starts clean -- the Start* calls below set it again if they refuse,
   // and a stale reason on screen would be its own kind of lie.
   last_refusal_ = BUCHLA200E_READ_OK;
+
+  // --- armed undo: same two answers, same dead window ---------------------
+  if (screen_ == Bus200eAppNS::SCR_SNAP_CONFIRM) {
+    switch (event.control) {
+      case OC::CONTROL_BUTTON_R:
+        if (millis() - armed_ms_ < Bus200eAppNS::kConfirmDeadMs) break;
+        CommitSnapshotRestore();
+        break;
+      case OC::CONTROL_BUTTON_L:
+        screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+        break;
+      default: break;   // face buttons inert, as on the write confirm
+    }
+    return;
+  }
 
   // --- armed write: only two answers, and one of them is "no" -------------
   if (screen_ == Bus200eAppNS::SCR_WRITE_CONFIRM) {
@@ -2320,8 +2510,16 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
     const bool known = (CurrentModuleType() != Bus200eAppNS::MODTYPE_UNKNOWN);
     switch (event.control) {
       case OC::CONTROL_BUTTON_L:      // encL = back
-        // Leaving is refused while a write is on the wire -- see the note in
-        // the module-select handler; this is the other half of that door.
+        // "keep": accept the module as it stands and put the ordinary action
+        // row back. The snapshot is deliberately NOT discarded -- the user may
+        // change their mind, and it costs one block that is already spent.
+        if (write_state_ == Bus200eAppNS::WRITE_BAD && snap_here_) {
+          write_state_ = Bus200eAppNS::WRITE_NONE;
+          break;
+        }
+        // Leaving is refused while a write is on the wire: PumpWrite bails on
+        // !WriteBusy(), so navigating away would let the transfer finish with
+        // no read-back, no verdict, and no record that it happened.
         if (WriteBusy()) {
           last_refusal_ = BUCHLA200E_READ_WRITE_IN_FLIGHT;
           break;
@@ -2340,6 +2538,15 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
         if (!is259 && known) ArmWrite();
         break;
       case OC::CONTROL_BUTTON_R:      // encR = confirm/enter = run the action
+        // While the recovery prompt is up it owns both encoder buttons --
+        // the action row it replaced is not on screen, so running one of its
+        // entries from a press the user aimed at "UNDO" would be acting on
+        // something they cannot see.
+        if (write_state_ == Bus200eAppNS::WRITE_BAD && snap_here_) {
+          screen_ = Bus200eAppNS::SCR_SNAP_CONFIRM;
+          armed_ms_ = millis();
+          break;
+        }
         // Gated on `known` like A and B above. Without this the unknown-module
         // screen -- which draws only "no handler for this module type yet /
         // encL:back" -- still ran the full 251e action set underneath: encR
@@ -2390,6 +2597,7 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
         read_addr_ = 0;
         read_type_ = Bus200eAppNS::MODTYPE_UNKNOWN;
         write_state_ = Bus200eAppNS::WRITE_NONE;
+        RefreshSnapshotFlag();  // a different module, a different snapshot
       }
       target_ = addr_;
       screen_ = Bus200eAppNS::SCR_MODULE_HOME;

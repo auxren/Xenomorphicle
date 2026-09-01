@@ -50,6 +50,27 @@ bool SimPanelInverted();
 // applied. This is what the front end draws and what --dump-fb emits.
 void SimPanelVisible(uint8_t out[1024]);
 
+// --- deferred frame capture ------------------------------------------------
+// Capture the first COMPLETE frame drawn at or after `at_ms`, and keep it.
+//
+// This is the only way to see a screen the firmware draws from inside its own
+// blocking loop -- Ui::DebugStats(), ConfirmReset(), the calibration wizard.
+// Those never return to the simulator's driver, so by the time --dump-fb runs,
+// whatever was on screen has been redrawn over: the app menu repaints as soon
+// as DebugStats exits, and the frame the page actually showed is gone. The
+// scheduled-tap trick (`<button>-inN`) can get a press INTO such a loop; this
+// is the same idea pointed the other way, and it is what makes those pages'
+// layout checkable at all.
+//
+// "Complete" is load-bearing. The panel is filled one page of eight at a time,
+// so g_panel between page 0 and page 7 is a blend of two frames. The capture
+// therefore fires from the page-7 write, not from a timer, so it can never
+// return a torn picture -- see SendPage() in the SH1106 shim.
+void SimSnapArm(uint32_t at_ms);
+void SimPanelFrameComplete();
+bool SimSnapTaken();
+const uint8_t *SimSnapBytes();   // 1024 bytes, as SimPanelVisible emits them
+
 // --- log -------------------------------------------------------------------
 void SimLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 const std::vector<std::string> &SimLogLines();

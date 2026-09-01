@@ -14,74 +14,93 @@
     .tag { font: 700 10px/1 "JetBrains Mono", monospace; letter-spacing: .16em; text-transform: uppercase; }
     .g { font: 700 12.5px/1.4 "JetBrains Mono", monospace; color: #cfe6ff; }
     .row { display: flex; gap: 14px; align-items: flex-start; padding: 11px 0; border-bottom: 1px solid #23282f; }
+    .badge { font: 700 11px/1 "JetBrains Mono", monospace; letter-spacing: .1em; }
   </style>
 </helmet>
 
-<div style="width: 900px; height: 1080px; background: #14161a; color: #e6e9ee; padding: 40px 44px; box-sizing: border-box; display: flex; flex-direction: column; gap: 22px">
+<div style="width: 900px; height: 1780px; background: #14161a; color: #e6e9ee; padding: 40px 44px; box-sizing: border-box; display: flex; flex-direction: column; gap: 20px">
 
   <div style="display: flex; flex-direction: column; gap: 7px">
     <div style="font: 700 11px/1 'JetBrains Mono', monospace; letter-spacing: .28em; color: #b06a3b">WHOLE-INSTRUMENT · NAVIGATION</div>
     <div style="font: 700 30px/1.1 'Space Grotesk', sans-serif; letter-spacing: -.015em">Every way in is a chord</div>
     <div style="font-size: 14.5px; line-height: 1.6; color: #9aa3ad; max-width: 720px">
       Six controls, no labels, no menu key. Everything global is a held-button
-      combination — and none of them is discoverable from any screen.
+      combination — and when this artboard was first drawn, none of them was
+      discoverable from any screen. <b style="color:#e6e9ee">That is the part that
+      has since been fixed.</b> Hold A on its own, or Z on its own, and the running
+      app dims behind a card listing what that button modifies.
     </div>
   </div>
 
   <div style="display: flex; flex-direction: column">
     <div class="row" style="border-top: 1px solid #23282f">
-      <div class="g" style="min-width: 190px">hold A · press encR</div>
+      <div class="g" style="min-width: 210px">hold A <i>or</i> Z · press encR</div>
       <div style="font-size: 13.5px; line-height: 1.5; color: #98a1ab">App switcher — the way to every other app</div>
     </div>
     <div class="row">
-      <div class="g" style="min-width: 190px">both encoders</div>
+      <div class="g" style="min-width: 210px">both encoder buttons</div>
       <div style="font-size: 13.5px; line-height: 1.5; color: #98a1ab">Preset-bus overlay — store and recall across the whole case</div>
     </div>
     <div class="row">
-      <div class="g" style="min-width: 190px">hold A · press encL</div>
-      <div style="font-size: 13.5px; line-height: 1.5; color: #98a1ab">IO settings — and it is silently refused in some apps</div>
+      <div class="g" style="min-width: 210px">hold A <i>or</i> Z · press encL</div>
+      <div style="font-size: 13.5px; line-height: 1.5; color: #98a1ab">IO settings — and it is silently refused in apps whose <span class="g" style="font-size:12px">io_settings_allowed()</span> is false</div>
     </div>
     <div class="row">
-      <div class="g" style="min-width: 190px">hold Z · press A</div>
+      <div class="g" style="min-width: 210px">hold Z · press A</div>
       <div style="font-size: 13.5px; line-height: 1.5; color: #98a1ab">Screensaver</div>
     </div>
     <div class="row">
-      <div class="g" style="min-width: 190px">A + B together</div>
+      <div class="g" style="min-width: 210px">A + B together</div>
       <div style="font-size: 13.5px; line-height: 1.5; color: #98a1ab">Clock router (Captain MIDI) · screen flip (Setup) · clock setup (Quadrants)</div>
     </div>
     <div class="row">
-      <div class="g" style="min-width: 190px">A + B through splash</div>
-      <div style="font-size: 13.5px; line-height: 1.5; color: #98a1ab">Erase all settings</div>
+      <div class="g" style="min-width: 210px">A + B <i>or</i> A + encR, at splash</div>
+      <div style="font-size: 13.5px; line-height: 1.5; color: #98a1ab">Erase all settings. <b style="color:#e8a795">Which one depends on the build:</b> A+encR under <span class="g" style="font-size:12px">NORTHERNLIGHT</span> (the <span class="g" style="font-size:12px">nlm*</span> environments), A+B otherwise — including the <span class="g" style="font-size:12px">T41_audio</span> image <span class="g" style="font-size:12px">flash.sh</span> builds by default.</div>
     </div>
   </div>
 
   <div style="display: flex; flex-direction: column; gap: 12px">
-    <div class="tag" style="color: #8b939d">Three problems this creates</div>
+    <div class="tag" style="color: #8b939d">Three problems this creates — one of them now closed</div>
+    <div style="font-size: 12.5px; line-height: 1.6; color: #7e8892; margin-top: -4px">
+      The fourth, that none of it was discoverable, is closed too — see the chord
+      card below.
+    </div>
 
     <div style="display: flex; flex-direction: column; gap: 11px">
 
       <div style="background: #1b1f25; border: 1px solid #2b313a; border-left: 3px solid #a9713a; border-radius: 6px; padding: 14px 17px">
-        <div style="font-weight: 600; font-size: 15.5px; margin-bottom: 5px">A is overloaded four ways</div>
+        <div class="badge" style="color: #cf9153">OPEN</div>
+        <div style="font-weight: 600; font-size: 15.5px; margin: 7px 0 5px">A is overloaded five ways</div>
         <div style="font-size: 13.5px; line-height: 1.6; color: #98a1ab">
           A alone toggles invert-display in Setup. A+encR opens the switcher. A+encL
-          opens IO settings. A+B does a third thing that differs per app. The same
-          finger position means four things depending on what else is down and where
-          you are.
+          opens IO settings. A+B does a third thing that differs per app. And A held
+          through the splash, with either B or encR, erases every setting in the
+          module. The same finger position means five things depending on what else
+          is down, where you are, and how long ago the module powered on.
+          <b style="color:#e8a795">On a NORTHERNLIGHT build the splash erase is A+encR</b> —
+          the same two controls, in the same order, as the switcher chord. That is
+          the one destructive gesture reachable by doing the most practised thing in
+          the instrument slightly too early.
         </div>
       </div>
 
-      <div style="background: #1b1f25; border: 1px solid #2b313a; border-left: 3px solid #a9713a; border-radius: 6px; padding: 14px 17px">
-        <div style="font-weight: 600; font-size: 15.5px; margin-bottom: 5px">Entry gestures leak into the screen they open</div>
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-left: 3px solid #4f8f57; border-radius: 6px; padding: 14px 17px">
+        <div class="badge" style="color: #6fae78">SHIPPED</div>
+        <div style="font-weight: 600; font-size: 15.5px; margin: 7px 0 5px">Entry gestures leaked into the screen they opened</div>
         <div style="font-size: 13.5px; line-height: 1.6; color: #98a1ab">
           Proven, not theoretical: the both-encoder chord left encR held, and the
           overlay's 250 ms recall timer fired on it — a bus-wide recall nobody asked
-          for. Fixed there by requiring a release first. <b style="color: #e6e9ee">Every other
-          chord-opened screen has the same shape and none of them guards against it.</b>
+          for. When this artboard was first drawn the fix existed only there, and
+          every other chord-opened screen had the same shape and no guard.
+          <b style="color: #e6e9ee">It is now one rule at the point screens are entered</b> —
+          see below for exactly what shipped, and for the two places it does not
+          reach yet.
         </div>
       </div>
 
       <div style="background: #1b1f25; border: 1px solid #2b313a; border-left: 3px solid #a9713a; border-radius: 6px; padding: 14px 17px">
-        <div style="font-weight: 600; font-size: 15.5px; margin-bottom: 5px">A+B means something different in every app</div>
+        <div class="badge" style="color: #cf9153">OPEN</div>
+        <div style="font-weight: 600; font-size: 15.5px; margin: 7px 0 5px">A+B means something different in every app</div>
         <div style="font-size: 13.5px; line-height: 1.6; color: #98a1ab">
           Clock router, screen flip, clock setup. Two of those are clock-related and
           one is not — so the gesture is <i>almost</i> consistent, which is worse than
@@ -96,29 +115,105 @@
   <div style="height: 1px; background: #262b32"></div>
 
   <div style="display: flex; flex-direction: column; gap: 10px">
-    <div class="tag" style="color: #6fae78">What I would do about it</div>
-    <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab; max-width: 800px">
-      <b style="color: #e6e9ee">Make the release-first rule global, not local.</b> A screen
-      opened by a chord should ignore every button in that chord until it has been
-      released once. One rule, applied at the point screens are entered, retires a
-      whole class of bug rather than the one instance we hit.
+    <div class="tag" style="color: #6fae78">Shipped since this review</div>
+    <div style="background: #171d19; border: 1px solid #2f3d33; border-radius: 6px; padding: 14px 17px; font-size: 13.5px; line-height: 1.65; color: #9fb0a4">
+      <b style="color: #cfe6d3">The release-first rule is global.</b>
+      <span class="g" style="color:#cfe6ff; font-size:12px">Ui::IgnoreUntilRelease(mask)</span>
+      is armed <i>before</i> each chord-opened screen exists, and every button named in
+      the chord is dead — DOWN, PRESS, LONG_PRESS and LONG_RELEASE alike — until it has
+      been physically released. Armed at all four global entries: the preset overlay,
+      the app switcher, IO settings and the screensaver. The old
+      <span class="g" style="color:#cfe6ff; font-size:12px">SetButtonIgnoreMask()</span>
+      is now one way to arm that rule rather than a second mechanism, which retires
+      two of its own failures: it dropped exactly one event per button (so a held
+      button spent the drop on its LONG_PRESS and let the LONG_RELEASE through), and
+      it snapshotted the raw pin (so a chord button released a few milliseconds early
+      was never covered at all). Encoder <i>turns</i> are deliberately untouched, so a
+      screen opened with an encoder held is still navigable by turning it.
     </div>
+    <div style="background: #1b1f25; border: 1px solid #2b313a; border-left: 3px solid #a9713a; border-radius: 6px; padding: 13px 16px; font-size: 13px; line-height: 1.6; color: #98a1ab">
+      <b style="color: #e6e9ee">Two gaps, stated rather than glossed.</b>
+      (1) The rule filters the <i>event stream</i>. A screen that times a hold by
+      sampling the pin itself never passes through it — and the preset overlay's
+      STORE/RECALL bars still do exactly that, via
+      <span class="g" style="font-size:11.5px; color:#b9c4cf">read_immediate()</span>
+      and their own <span class="g" style="font-size:11.5px; color:#b9c4cf">*_needs_release</span>
+      booleans. <span class="g" style="font-size:11.5px; color:#b9c4cf">read_deliberate()</span>
+      exists for precisely this and currently has no callers, so the per-screen
+      guard is still what stops the phantom recall.
+      (2) The per-app A+B screens arm nothing global. Hemisphere and Quadrants
+      call the old <span class="g" style="font-size:11.5px; color:#b9c4cf">SetButtonIgnoreMask()</span>
+      (which now routes into the rule); Captain MIDI, Calibr8or and Setup call
+      nothing at all.
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px">
+    <div class="tag" style="color: #6fae78">Also shipped — the chord card</div>
+    <div style="background: #171d19; border: 1px solid #2f3d33; border-radius: 6px; padding: 14px 17px; font-size: 13.5px; line-height: 1.65; color: #9fb0a4">
+      <b style="color: #cfe6d3">Hold a modifier on its own and it lists what it modifies.</b>
+      700 ms of A alone — nothing else down — tints the running app to 50% and draws
+      an opaque card titled <span class="g" style="color:#cfe6ff; font-size:12px">HOLD A</span>:
+      <span class="g" style="font-size:12px; color:#b9c4cf">A+encR: Switch App</span> ·
+      <span class="g" style="font-size:12px; color:#b9c4cf">A+encL: I/O Cfg</span> ·
+      <span class="g" style="font-size:12px; color:#b9c4cf">A+B:</span> the gloss for
+      <i>this</i> app (Clock Setup, Clock Router or Flip Screen — no generic label,
+      because there is no true generic answer) ·
+      <span class="g" style="font-size:12px; color:#b9c4cf">encL+encR: Presets</span> ·
+      <span class="g" style="font-size:12px; color:#b9c4cf">Z+A: Screensaver</span>.
+      Holding Z gives the Z-side equivalent, including what a bare Z does here.
+      Press-and-hold-the-first-button is the universal discovery move on unlabelled
+      hardware, and it was the one gesture with no feedback at all — which is what
+      left A, X and Y reading as dead buttons.
+      <br><br>
+      <b style="color: #cfe6d3">700 ms is load-bearing.</b> The floor is the 500-tick
+      long-press boundary: below it, letting go after reading the card emits an
+      ordinary A press, and a plain A is a live control in most apps — it changes
+      setup in Captain MIDI, moves the applet selection in Hemisphere, inverts the
+      whole display in Setup. Past 500 the release is a LONG_RELEASE, which nothing
+      in the tree binds. That is what makes "reveal, then let go, and nothing
+      happened" true rather than hoped for. The card's visibility is tested against
+      the live pin, not a latch, because the chords deliberately swallow their own
+      releases — a latch would strand it on screen after every gesture it exists
+      to teach.
+    </div>
+    <div style="background: #1b1f25; border: 1px solid #2b313a; border-left: 3px solid #a9713a; border-radius: 6px; padding: 13px 16px; font-size: 13px; line-height: 1.6; color: #98a1ab">
+      <b style="color: #e6e9ee">What it still does not reach.</b> The card is drawn by
+      the running app, so it is absent from the two screens that are not one: the app
+      switcher and the preset-bus overlay. And it lists no way to erase every setting
+      in the module — the splash gesture is the one chord still written nowhere,
+      which is arguably correct and worth deciding on purpose rather than by omission.
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px">
+    <div class="tag" style="color: #cf9153">Still proposed — not built</div>
     <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab; max-width: 800px">
       <b style="color: #e6e9ee">Give A+B one meaning.</b> Two of its three uses are clock
       setup; the odd one out (screen flip in Setup) is a settings toggle that has a
       natural home in Setup's own list.
     </div>
     <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab; max-width: 800px">
-      <b style="color: #e6e9ee">Put the chords somewhere.</b> Setup/About is the honest
-      place for a gesture list — it is where a player already goes to find out about
-      the instrument, and it costs no rows anywhere else.
+      <b style="color: #e6e9ee">Reach the two screens the card cannot.</b> The app
+      switcher and the preset-bus overlay are drawn by the framework, not by an app,
+      so the chord card never appears over them. Both are places a player arrives at
+      by accident and has to guess their way out of.
+    </div>
+    <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab; max-width: 800px">
+      <b style="color: #e6e9ee">Move the factory-erase gesture off the switcher chord</b>
+      on NORTHERNLIGHT builds, or make the two branches agree. Two builds of the same
+      firmware having different destructive gestures is its own hazard — a player who
+      learns one and is handed the other has learned the wrong thing.
     </div>
   </div>
 
   <div style="margin-top: auto; font-size: 12.5px; line-height: 1.6; color: #6d7681; border-top: 1px solid #262b32; padding-top: 14px">
-    Z is on this list because the firmware maps it, but two attempts to observe the
-    grey <i>clock</i> button firing it on real hardware were inconclusive. If Z is not
-    reachable on this panel, the screensaver chord is unreachable too.
+    Z is on this list because the firmware maps it — <span class="g" style="font-size:11.5px; color:#8b939d">but_mid</span> on pin 20,
+    polled as <span class="g" style="font-size:11.5px; color:#8b939d">CONTROL_BUTTON_M</span> with the other six. Two attempts to
+    observe the grey <i>clock</i> button firing it on real hardware were inconclusive; the
+    simulator drives its pin as a working control and captions the binding as
+    unconfirmed. If Z is not reachable on this panel, the screensaver chord is
+    unreachable too.
   </div>
 
 </div>

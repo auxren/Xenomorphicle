@@ -787,8 +787,13 @@ FLASHMEM void AppSettings::DrawConfirm() const {
   if (reset) {
     // What AppSwitcher::Init(true) actually does: InitDefaults() on every
     // app, global_settings back to defaults, the user Turing machines
-    // zeroed, and -- if its own prompt is answered OK -- EEPROM erased from
-    // EEPROM_GLOBALSETTINGS_START up, plus PhzConfig::eraseFiles() on T4.1.
+    // zeroed, EEPROM erased from EEPROM_GLOBALSETTINGS_START up, plus
+    // PhzConfig::eraseFiles() on T4.1.
+    //
+    // No second prompt: Init() now resolves the decision BEFORE it mutates
+    // anything, and treats a runtime reset as already-confirmed because THIS
+    // screen is the confirmation. It used to ask again afterwards, over state
+    // it had already discarded -- a prompt performed on a corpse.
     // Calibration lives below that mark and survives, which is worth saying:
     // it is the one thing a user cannot recreate without a voltmeter.
     graphics.print("Erases all settings");

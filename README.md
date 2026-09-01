@@ -13,6 +13,45 @@ Phazerville Suite - an active o_C firmware fork
   [![DualTM & O_C T4.1 Hardware](http://img.youtube.com/vi/51cchuLNIDU/0.jpg)](http://www.youtube.com/watch?v=51cchuLNIDU "Next-gen O_C T4.1 Hardware + DualTM applet")
 </details>
 
+## About this fork
+
+This repository is a fork of Phazerville Suite aimed at **Northern Light Modular
+Buchla 4U** builds — the _Xenomorpher_ — and its distinguishing feature is the
+**200e preset bus**: the module talks I²C to the other modules in a Buchla 200e
+case, follows and drives bus clock and bus MIDI, coexists with a Buchla preset
+manager on the same wire, and can read and rewrite another module's preset bank.
+Everything upstream still builds and works; this is additive.
+
+Where to start:
+
+* **Build environments** — `software/platformio.ini`. `T41_audio` is the slot-0
+  image the module actually runs, and it carries `-DPRESET_BUS` and the 200e app;
+  `T41` links to slot 1 and **will not boot on its own**. `software/flash.sh`
+  builds locally and then flashes over ssh to a bench rig, refusing any image not
+  linked for slot 0 and verifying by USB enumeration afterwards. The `nlm*`
+  environments add `-DNORTHERNLIGHT`, which among other things changes the
+  factory-erase gesture at the splash screen.
+* **The bus** — `-DPRESET_BUS` turns it on; `-DENABLE_APP_BUS200E` adds the
+  _200e Modules_ app on top of it. See
+  [200e conformance](docs/200e-conformance.md) for how coexistence with a
+  Buchla preset manager is guaranteed, and
+  [252e clock sync](docs/252e-clock-sync.md).
+* **State and presets** — [Saving State](docs/Saving-State.md), including the
+  30 preset-bus slots and why they live on internal flash.
+* **Bench work** — [console cheat sheet](docs/bench-console.md) and
+  [flashing notes](docs/bench-flashing.md). Both are written for a headless rig
+  where the Teensy's PROGRAM button is unreachable.
+* **Interface review** — `design/ui-review/`, a design canvas of findings and
+  proposals for the whole-instrument navigation and the 200e app. Every item is
+  marked shipped or open.
+* **A host simulator** — `tools/xeno-sim/` runs the real firmware's screens on a
+  desktop, no module required. See its own README.
+* **Known open work** — [TODO.md](TODO.md), Xenomorpher section.
+
+Everything below this point is the upstream Phazerville README.
+
+***
+
 Watch some **video overviews** (above) or check the [**project website**](https://firmware.phazerville.com) for more info, including commercial product links.
 
 [Download a firmware **Release**](https://github.com/djphazer/O_C-Phazerville/releases) or [Request a **Custom Build**](https://github.com/djphazer/O_C-Phazerville/discussions/38) (for Teensy 3.2).

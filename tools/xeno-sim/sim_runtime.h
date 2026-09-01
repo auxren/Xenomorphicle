@@ -22,8 +22,15 @@
 #include <string>
 
 // Boot: everything from setup() that has a meaning off-chip, in the order
-// Main.cpp does it. `reset_settings` forces the first-run path.
-void SimRuntimeBoot(bool reset_settings);
+// Main.cpp does it. `reset_settings` forces the first-run path -- it holds A+B
+// through the splash, which is the module's own gesture.
+//
+// `answer_cancel` decides how the ConfirmReset prompt that gesture opens is
+// answered: false is OK (erase), true is CANCEL. Both are real button presses
+// scheduled into the firmware's own blocking prompt; nothing reaches inside it.
+// CANCEL is not a curiosity -- "a reset the user backed out of leaves storage
+// exactly as it was" is a property nothing else in the simulator can ask.
+void SimRuntimeBoot(bool reset_settings, bool answer_cancel = false);
 
 // One simulated millisecond: 17 core ISR passes (16.6 kHz), one UI poll
 // (1 kHz), then one pass of loop(). Returns after advancing the clock by 1 ms.
