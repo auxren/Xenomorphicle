@@ -36,6 +36,14 @@ public:
 
   bool reflash = false;
   bool bus_addr_dirty = false;
+  // Pending bus address, 0 = untouched. The module's address is its identity on
+  // the bus: change it by accident and it stops answering where a preset
+  // manager expects it, or collides with another module. It used to move on a
+  // bare right-encoder turn -- the only thing that encoder did on this screen --
+  // and each detent was applied to the live bus immediately, so dialling 3C->40
+  // made this module briefly answer at 3D, 3E and 3F while a WPM was polling.
+  // Now it takes X held down, and nothing reaches the bus until app exit.
+  uint8_t bus_addr_edit = 0;
   bool invert_display_dirty = false;
   bool calibration_mode = false;
   bool calibration_complete = true;
@@ -67,14 +75,18 @@ public:
       OC::calibration_save();
       cal_save_q = false;
     }
-    if (bus_addr_dirty) {
-      // persist the live-edited 200e bus address under the globals map
-      // (load first: the shared PhzConfig map may hold another app's file)
+    if (bus_addr_dirty && bus_addr_edit) {
+      // Apply the pending address ONCE, here, rather than per detent while the
+      // user was still dialling -- the bus sees one change, not every value
+      // swept through on the way. SetModuleAddress sets it live and writes it
+      // to the globals map (load first: the shared PhzConfig map may hold
+      // another app's file).
       PhzConfig::load_config();
-      OC::PresetBus::SetModuleAddress(OC::PresetBus::ModuleAddress());
+      OC::PresetBus::SetModuleAddress(bus_addr_edit);
       PhzConfig::save_config();
-      bus_addr_dirty = false;
     }
+    bus_addr_dirty = false;
+    bus_addr_edit = 0;
     if (invert_display_dirty) {
 #ifdef __IMXRT1062__
       // invert_display lives in the same METADATA_KEY-packed globals struct
@@ -459,13 +471,18 @@ public:
         }
         if (event.control == OC::CONTROL_BUTTON_R && event.type == UI::EVENT_BUTTON_PRESS) FactoryReset();
 
-        // right encoder edits the 200e preset-bus module address (live on
-        // the bus at once; persisted to GLOBALS.CFG on app exit)
+        // The 200e module address moves only while X is held -- see the note on
+        // bus_addr_edit. A bare turn is ignored on purpose: this encoder does
+        // nothing else here, so every stray nudge used to land on the module's
+        // bus identity. Nothing is applied to the bus until Suspend().
         if (event.control == OC::CONTROL_ENCODER_R && OC::PresetBus::Enabled()) {
-          int a = (int)OC::PresetBus::ModuleAddress() + event.value;
+          if (!(event.mask & OC::CONTROL_BUTTON_X)) return;
+          int a = (int)(bus_addr_edit ? bus_addr_edit
+                                      : OC::PresetBus::ModuleAddress())
+                  + event.value;
           CONSTRAIN(a, 0x01, 0x77);
-          OC::PresetBus::SetModuleAddressRuntime((uint8_t)a);
-          bus_addr_dirty = true;
+          bus_addr_edit = (uint8_t)a;
+          bus_addr_dirty = (bus_addr_edit != OC::PresetBus::ModuleAddress());
         }
 
         // dual-press UP+DOWN / A+B to flip screen
@@ -668,8 +685,13 @@ FLASHMEM void AppSettings::View() const {
         // idiom; caps = active, lowercase = inactive.
         gfxPrint(10, 45, "Bus");
         graphics.setPrintPos(34, 45);
-        graphics.printf("%02X", OC::PresetBus::ModuleAddress());
-        graphics.invertRect(32, 44, 16, 10);
+        // Show the pending value while it is being dialled, and invert it only
+        // then -- inversion is this UI's "the right encoder changes this", and
+        // it was previously on permanently, advertising an edit that a stray
+        // turn would make. Unedited, the address just reads as a fact.
+        graphics.printf("%02X", bus_addr_edit ? bus_addr_edit
+                                              : OC::PresetBus::ModuleAddress());
+        if (bus_addr_edit) graphics.invertRect(32, 44, 16, 10);
         graphics.setPrintPos(58, 45);
         gfxPrint(OC::PresetBus::RemoteEnabled() ? "REM" : "rem");
         graphics.drawCircle(94, 49, 2);
