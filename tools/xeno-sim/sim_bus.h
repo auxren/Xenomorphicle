@@ -59,9 +59,9 @@ void SimBusInjectMidiNote(uint8_t note, uint8_t vel);
 // A one-line description of what the bus is doing, for the terminal chrome.
 std::string SimBusStatusLine();
 
-// Rolling log of everything the simulator did on the fake wire. Writes are
-// logged loudly because a simulated RESTORE changes nothing anywhere.
-void SimLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-const std::vector<std::string> &SimLogLines();
+// The rolling log lives in sim_host.h -- one log for the whole simulator.
+// Writes are logged loudly here because a simulated RESTORE changes nothing
+// anywhere.
+#include "sim_host.h"
 
 #endif  // XENOSIM_SIM_BUS_H_

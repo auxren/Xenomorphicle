@@ -7,9 +7,9 @@
 #include "Buchla251eSlotCodec.h"
 #include "Buchla259eSlotCodec.h"
 #include "PresetBus.h"     // real declarations; the definitions below are ours
-#include "shim/oc_shim.h"  // SimNowMs
+#include "PresetEngine.h"  // where a bus-wide SAVE/RECALL lands here
+#include "sim_host.h"      // SimNowMs, SimLog
 #include "sim_capture.h"
-#include "sim_preset.h"    // where a bus-wide SAVE/RECALL lands here
 
 namespace {
 
@@ -25,6 +25,7 @@ bool g_synthetic = false;
 // Our own address on the bus: the Xenomorpher's default. The app skips it
 // during a scan, so it has to be a real value, not 0.
 constexpr uint8_t kSelfAddr = 0x3C;
+uint8_t g_self_addr = kSelfAddr;
 
 // --- the modules on the other end of the wire ------------------------------
 
@@ -71,7 +72,6 @@ int g_midi_head = 0, g_midi_tail = 0;
 
 // --- log -------------------------------------------------------------------
 
-std::vector<std::string> g_log;
 
 // --- Bus200eMasterOps ------------------------------------------------------
 
@@ -184,19 +184,9 @@ std::vector<uint8_t> SyntheticBank259e() {
 // public surface
 // ---------------------------------------------------------------------------
 
-void SimLog(const char *fmt, ...) {
-  char buf[192];
-  va_list ap;
-  va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
-  va_end(ap);
-  char line[224];
-  snprintf(line, sizeof(line), "[%6u ms] %s", (unsigned)SimNowMs(), buf);
-  g_log.push_back(line);
-  if (g_log.size() > 200) g_log.erase(g_log.begin());
-}
+// SimLog/SimLogLines now live in sim_host.cpp: one log for the whole
+// simulator, so a bus line and a firmware Serial line interleave in order.
 
-const std::vector<std::string> &SimLogLines() { return g_log; }
 
 bool SimBusUsingSyntheticBanks() { return g_synthetic; }
 
@@ -307,8 +297,31 @@ std::string SimBusStatusLine() {
 namespace OC {
 namespace PresetBus {
 
+// Boot and per-loop hooks. The simulator's own bus lives in SimBusTask(),
+// which the runtime calls next to this one; these exist so the real call sites
+// in the boot sequence and the loop stay where they are.
+void Init() { SimLog("PresetBus::Init (simulated bus, self addr 0x%02X)", g_self_addr); }
+void Task() {}
+
 bool Enabled() { return g_bus_enabled; }
-uint8_t ModuleAddress() { return kSelfAddr; }
+
+// The bus parser's remote-enable latch. Nothing here can send the frame that
+// sets it, so the Setup app's bus page always shows it off.
+bool RemoteEnabled() { return false; }
+
+uint8_t ModuleAddress() { return g_self_addr; }
+void SetModuleAddress(uint8_t a) { g_self_addr = a; SimLog("PresetBus: module address -> 0x%02X (not persisted)", a); }
+void SetModuleAddressRuntime(uint8_t a) { g_self_addr = a; }
+
+// MIDI out over the bus. Counted and logged like every other transmit path in
+// the simulator, then dropped -- there is no wire.
+void QueueMidiTx(uint8_t type, uint8_t channel, uint8_t d1, uint8_t d2) {
+  static unsigned n = 0;
+  if (++n <= 8)
+    SimLog("bus MIDI TX: type %02X ch%u %u %u (goes nowhere)", type, channel, d1, d2);
+  else if (n == 9)
+    SimLog("bus MIDI TX: ...further messages not logged");
+}
 bool CardServing() { return g_serving; }
 
 int MasterQuery(uint8_t mod_addr) { return Bus200eMasterQuery(mod_addr); }
@@ -342,16 +355,26 @@ void MasterReset() { Bus200eMasterReset(); }
 
 // The preset overlay's two bus-wide actions. On the module these master a
 // general-call SAVE/RECALL frame that every 200e in the case obeys, and
-// dispatch the local PresetEngine as well. Here only the local half exists,
-// faked in sim_preset.cpp -- nothing is put on any wire, because there is no
-// wire.
-void BroadcastSave(uint8_t slot) { SimPresetRequestSave(slot); }
-void BroadcastRecall(uint8_t slot) { SimPresetRequestRecall(slot); }
+// dispatch the local PresetEngine as well. Only the local half exists here --
+// nothing is put on any wire, because there is no wire -- but that half is the
+// REAL PresetEngine, running against the RAM-backed file system, exactly as
+// PresetBus.cpp:177-178 and :300-301 dispatch it.
+void BroadcastSave(uint8_t slot) { PresetEngine::RequestSave(slot); }
+void BroadcastRecall(uint8_t slot) { PresetEngine::RequestRecall(slot); }
 
 // No preset manager on the simulated bus, so the overlay's WPM dot stays
 // hollow. Inventing one would change what STORE means -- with a WPM present
 // the module is not the one holding the presets.
 bool WpmPresent() { return false; }
+
+// The I2C slave's counters. Every one of them is a count of something that
+// happens on a real wire -- ISR entries, arbitration losses, ring overflows --
+// so all of them are zero here, and the Setup app's bus statistics page is
+// blank rather than plausible.
+const Stats &GetStats() {
+  static const Stats zero{};
+  return zero;
+}
 
 bool ReadMidiRx(uint8_t &status, uint8_t &d1, uint8_t &d2) {
   if (g_midi_tail == g_midi_head) return false;
