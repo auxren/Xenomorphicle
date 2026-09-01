@@ -896,6 +896,17 @@ FLASHMEM __attribute__((noinline)) void loop() {
       static uint8_t save_slot_value = 0;
       // 'R' bench trigger: bus-wide broadcast RECALL from a specific slot
       // (0-29), same 2-DECIMAL-digit convention as 'S'.
+      // LOCAL slot save/recall by number. The bench had only '(' and ')' for
+      // slot 0 and '{' '}' for slot 1, which is useless on a module whose
+      // low slots hold real presets: there was no way to exercise the slot
+      // writer without overwriting somebody's work. These touch this module's
+      // own storage only -- no bus traffic, nothing broadcast.
+      static bool lsave_pending = false;
+      static uint8_t lsave_digits = 0;
+      static uint8_t lsave_value = 0;
+      static bool lrecall_pending = false;
+      static uint8_t lrecall_digits = 0;
+      static uint8_t lrecall_value = 0;
       static bool recall_slot_pending = false;
       static uint8_t recall_slot_digits = 0;
       static uint8_t recall_slot_value = 0;
@@ -973,6 +984,29 @@ FLASHMEM __attribute__((noinline)) void loop() {
           Serial.printf("  MasterQuery() returned %d (0=accepted; the reply "
                         "prints itself when it arrives)\n", qrc);
 #endif
+          continue;
+        }
+        if (lsave_pending || lrecall_pending) {
+          const bool saving = lsave_pending;
+          uint8_t &digits = saving ? lsave_digits : lrecall_digits;
+          uint8_t &value  = saving ? lsave_value  : lrecall_value;
+          if (cmd < '0' || cmd > '9') {
+            Serial.printf("local %s: cancelled (not a decimal digit)\n",
+                          saving ? "save" : "recall");
+            lsave_pending = lrecall_pending = false;
+            continue;
+          }
+          value = (uint8_t)(value * 10 + (cmd - '0'));
+          if (++digits < 2) continue;
+          lsave_pending = lrecall_pending = false;
+          if (value > 29) {
+            Serial.printf("local %s: slot %d out of range (0-29)\n",
+                          saving ? "save" : "recall", value);
+            continue;
+          }
+          Serial.printf("local %s slot %d\n", saving ? "save" : "recall", value);
+          if (saving) OC::PresetEngine::RequestSave(value);
+          else        OC::PresetEngine::RequestRecall(value);
           continue;
         }
         if (save_slot_pending) {
@@ -1267,6 +1301,14 @@ FLASHMEM __attribute__((noinline)) void loop() {
             f.close();
             break;
           }
+          case 'V':  // LOCAL save to slot NN -- this module only, no bus
+            Serial.println("local save: type 2 decimal digits (00-29)");
+            lsave_pending = true; lsave_digits = 0; lsave_value = 0;
+            break;
+          case 'N':  // LOCAL recall of slot NN -- this module only, no bus
+            Serial.println("local recall: type 2 decimal digits (00-29)");
+            lrecall_pending = true; lrecall_digits = 0; lrecall_value = 0;
+            break;
           case 'S':  // broadcast SAVE to slot NN (2 decimal digits, 00-29)
             Serial.println("broadcast save: type 2 decimal digits for the "
                            "target slot (00-29)");
