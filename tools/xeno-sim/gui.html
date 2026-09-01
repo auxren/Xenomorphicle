@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xeno-sim — 200e Modules</title>
+<style>
+:root {
+  --ink: #23225c;              /* the panel's silkscreen navy */
+  --metal-hi: #e2ded5;
+  --metal-lo: #b9b5ab;
+  --warn: #c8471f;
+  --bg: #16181b;
+  --card: #1e2126;
+  --card-line: #32373e;
+  --text: #d6dae0;
+  --dim: #8a929c;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  padding: 20px 20px 40px;
+}
+h1 { font-size: 15px; letter-spacing: .14em; text-transform: uppercase; margin: 0 0 4px; }
+h2 { font-size: 11px; letter-spacing: .16em; text-transform: uppercase;
+     color: var(--dim); margin: 0 0 10px; font-weight: 600; }
+.sub { color: var(--dim); font-size: 12px; margin: 0 0 18px; }
+.wrap { display: grid; grid-template-columns: minmax(560px, 640px) minmax(320px, 1fr);
+        gap: 22px; align-items: start; max-width: 1180px; margin: 0 auto; }
+@media (max-width: 1000px) { .wrap { grid-template-columns: 1fr; } }
+
+/* ---- the honesty frame: the terminal build's captioned border, kept ------ */
+.simframe { border: 2px solid var(--warn); border-radius: 10px; overflow: hidden;
+            background: #201a17; }
+.simframe-cap {
+  background: var(--warn); color: #fff; font: 600 11px/1.6 ui-monospace, Menlo, monospace;
+  letter-spacing: .06em; padding: 5px 10px; text-transform: uppercase;
+}
+
+/* ---- the panel ---------------------------------------------------------- */
+.panel {
+  padding: 20px 26px 22px;
+  background:
+    repeating-linear-gradient(93deg,
+      rgba(255,255,255,.05) 0 1px, rgba(0,0,0,.045) 1px 2px, rgba(0,0,0,0) 2px 5px),
+    linear-gradient(168deg, #e6e2d9 0%, #cfcbc1 34%, #dcd8cf 58%, #c1bdb3 100%);
+  color: var(--ink);
+}
+.brand { font: 700 11px/1 ui-sans-serif, sans-serif; letter-spacing: .28em;
+         color: var(--ink); opacity: .8; margin-bottom: 16px; }
+.row { display: flex; align-items: flex-start; justify-content: space-between; }
+.row + .row { margin-top: 14px; }
+
+.ctl { display: flex; flex-direction: column; align-items: center; gap: 6px;
+       width: 106px; }
+.ctl > .slot { height: 56px; display: flex; align-items: center; justify-content: center; }
+.cap { font: 700 11px/1 ui-sans-serif, sans-serif; letter-spacing: .18em;
+       color: var(--ink); white-space: nowrap; }
+.cap.small { font-size: 9px; letter-spacing: .08em; font-weight: 600; opacity: .72;
+             text-transform: none; }
+
+button.btn {
+  width: 56px; height: 56px; border-radius: 50%; border: 0; padding: 0;
+  cursor: pointer; position: relative;
+  box-shadow: 0 3px 5px rgba(0,0,0,.34), inset 0 -3px 6px rgba(0,0,0,.30),
+              inset 0 3px 7px rgba(255,255,255,.34);
+  transition: transform .05s, filter .12s;
+}
+button.btn:active, button.btn.active { transform: translateY(2px); filter: brightness(1.22); }
+button.btn:focus-visible { outline: 3px solid #1c53d6; outline-offset: 3px; }
+.btn.green { background: radial-gradient(circle at 34% 28%, #63c48a, #2f9558 62%, #1f6f40); }
+.btn.blue  { background: radial-gradient(circle at 34% 28%, #6fbde8, #2f8fc9 62%, #1d6b9c); }
+.btn.grey  { background: radial-gradient(circle at 34% 28%, #b6b8b3, #8b8e89 62%, #6b6e6a);
+             cursor: not-allowed; }
+.btn.grey:active, .btn.grey.active { transform: none; filter: none; }
+
+/* connectors: passive geometry, drawn because they are on the panel */
+.jack { width: 56px; display: flex; justify-content: center; align-items: center; }
+.usb-c { width: 34px; height: 13px; border-radius: 7px; background: #14161a;
+         border: 2px solid #7f8288; box-shadow: inset 0 0 0 3px #2a2d33; }
+.usb-a { width: 40px; height: 19px; border-radius: 2px; background: #1a1c20;
+         border: 2px solid #85888e; display: flex; align-items: flex-end; padding: 2px; }
+.usb-a::after { content: ""; display: block; height: 7px; width: 100%;
+                background: #d9d6cd; border-radius: 1px; }
+
+/* ---- OLED --------------------------------------------------------------- */
+.bay { margin: 18px 0 6px; display: flex; justify-content: center; }
+.bezel {
+  padding: 9px; border-radius: 6px; background: linear-gradient(#3c3f45, #1c1e22);
+  box-shadow: inset 0 0 0 1px #55585e, 0 4px 10px rgba(0,0,0,.4);
+}
+canvas#oled {
+  display: block; width: 512px; height: 256px; background: #05070a;
+  image-rendering: pixelated; image-rendering: crisp-edges;
+  border-radius: 2px;
+}
+@media (max-width: 640px) { canvas#oled { width: 384px; height: 192px; } }
+
+/* ---- knobs -------------------------------------------------------------- */
+.knobrow { margin-top: 18px; }
+.cluster { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.knob {
+  width: 92px; height: 92px; border-radius: 50%; position: relative;
+  cursor: grab; touch-action: none; user-select: none;
+  background: #191b1e;
+  box-shadow: 0 5px 10px rgba(0,0,0,.45), inset 0 0 0 1px #000;
+}
+.knob:active { cursor: grabbing; }
+.knob.active .cap-top { filter: brightness(1.15); }
+.knurl {
+  position: absolute; inset: 0; border-radius: 50%;
+  background: repeating-conic-gradient(from 0deg,
+      #2c2f34 0deg 3deg, #131518 3deg 6deg);
+  box-shadow: inset 0 0 12px rgba(0,0,0,.8);
+}
+.cap-top {
+  position: absolute; inset: 17px; border-radius: 50%;
+  background: radial-gradient(circle at 36% 30%, #f2efe6, #ddd9cd 66%, #c3bfb3);
+  box-shadow: 0 2px 4px rgba(0,0,0,.45), inset 0 -2px 4px rgba(0,0,0,.18);
+  pointer-events: none;
+}
+.nudge { display: flex; gap: 6px; }
+.nudge button {
+  width: 30px; height: 24px; border-radius: 5px; cursor: pointer;
+  border: 1px solid rgba(35,34,92,.4); background: rgba(255,255,255,.42);
+  color: var(--ink); font: 700 14px/1 ui-monospace, Menlo, monospace;
+}
+.nudge button:hover { background: rgba(255,255,255,.75); }
+.nudge button:active { transform: translateY(1px); }
+
+.absent {
+  margin-top: 20px; padding-top: 12px; border-top: 1px dashed rgba(35,34,92,.32);
+  font-size: 11px; line-height: 1.6; color: rgba(35,34,92,.55);
+}
+
+/* ---- simulator side ----------------------------------------------------- */
+.card { background: var(--card); border: 1px solid var(--card-line);
+        border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+.card.sim { border-color: #4a5a3c; background: #1c2119; }
+.card.sim h2 { color: #9dbb7e; }
+.mono { font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+#status { color: #9fd4ff; word-break: break-all; }
+#log { margin: 0; max-height: 260px; overflow: auto; white-space: pre-wrap;
+       word-break: break-word; color: var(--dim); }
+#log b { color: #e8c07a; font-weight: 600; }
+.simbtn {
+  display: block; width: 100%; text-align: left; margin-bottom: 7px;
+  background: #262c22; border: 1px solid #45523a; color: #d8e3cc;
+  border-radius: 6px; padding: 7px 10px; cursor: pointer;
+  font: 12px/1.3 ui-monospace, Menlo, monospace;
+}
+.simbtn:hover { background: #2f3729; }
+.simbtn kbd { float: right; color: #93a583; }
+kbd { font: 11px/1 ui-monospace, Menlo, monospace; border: 1px solid #4b535d;
+      border-radius: 3px; padding: 2px 4px; background: #262b31; color: #cfd6de; }
+table.keys { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.keys td { padding: 3px 0; vertical-align: top; }
+table.keys td:first-child { width: 96px; white-space: nowrap; }
+.warnline { color: #e79070; font-size: 12px; margin: 0 0 8px; }
+#offline { display: none; background: var(--warn); color: #fff; padding: 8px 12px;
+           border-radius: 6px; margin-bottom: 14px; font-size: 12px; }
+.note { font-size: 11px; color: var(--dim); margin: 8px 0 0; }
+</style>
+</head>
+<body>
+
+<h1>xeno-sim — 200e Modules</h1>
+<p class="sub">The panel below is a display and an input surface. Every pixel on the
+OLED was drawn by the real <code>Bus200eApp.h</code> through the real
+<code>weegfx</code> renderer, running in <code>build/xeno-sim</code> on this
+machine. No UI logic lives in this page.</p>
+
+<div id="offline"></div>
+
+<div class="wrap">
+  <div>
+    <div class="simframe">
+      <div class="simframe-cap" id="caption">XENO-SIM — SIMULATED BUS — NO HARDWARE — WRITES GO NOWHERE</div>
+      <div class="panel">
+        <div class="brand">XENOMORPHER · MODEL 2X0</div>
+
+        <div class="row">
+          <div class="ctl">
+            <div class="slot"><button class="btn green" data-key="a" aria-label="button A"></button></div>
+            <span class="cap">A</span>
+          </div>
+          <div class="ctl">
+            <div class="slot"><div class="jack"><div class="usb-c"></div></div></div>
+            <span class="cap small">device</span>
+          </div>
+          <div class="ctl">
+            <div class="slot"><button class="btn grey" id="clockbtn" aria-label="clock button (not wired to the UI)"></button></div>
+            <span class="cap">clock</span>
+            <span class="cap small">not wired to the UI</span>
+          </div>
+          <div class="ctl">
+            <div class="slot"><div class="jack"><div class="usb-a"></div></div></div>
+            <span class="cap small">host</span>
+          </div>
+          <div class="ctl">
+            <div class="slot"><button class="btn green" data-key="b" aria-label="button B"></button></div>
+            <span class="cap">B</span>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="ctl">
+            <div class="slot"><button class="btn blue" data-key="x" aria-label="button X"></button></div>
+            <span class="cap">X</span>
+          </div>
+          <div class="ctl"></div><div class="ctl"></div><div class="ctl"></div>
+          <div class="ctl">
+            <div class="slot"><button class="btn blue" data-key="y" aria-label="button Y"></button></div>
+            <span class="cap">Y</span>
+          </div>
+        </div>
+
+        <div class="bay">
+          <div class="bezel"><canvas id="oled" width="512" height="256"></canvas></div>
+        </div>
+
+        <div class="row knobrow" style="justify-content: space-around;">
+          <div class="cluster">
+            <div class="knob" id="knobL" tabindex="0" role="button"
+                 aria-label="left encoder: click to push, wheel or drag to turn"
+                 title="click = push (encL) · wheel or drag = turn"><div class="knurl"></div><div class="cap-top"></div></div>
+            <div class="nudge">
+              <button data-turn="l" data-dir="-1" title="turn left encoder −1 (shift: −10)">−</button>
+              <button data-turn="l" data-dir="1" title="turn left encoder +1 (shift: +10)">+</button>
+            </div>
+            <span class="cap small">encoder L — push = back</span>
+          </div>
+          <div class="cluster">
+            <div class="knob" id="knobR" tabindex="0" role="button"
+                 aria-label="right encoder: click to push, wheel or drag to turn"
+                 title="click = push (encR) · wheel or drag = turn"><div class="knurl"></div><div class="cap-top"></div></div>
+            <div class="nudge">
+              <button data-turn="r" data-dir="-1" title="turn right encoder −1 (shift: −10)">−</button>
+              <button data-turn="r" data-dir="1" title="turn right encoder +1 (shift: +10)">+</button>
+            </div>
+            <span class="cap small">encoder R — push = enter</span>
+          </div>
+        </div>
+
+        <p class="absent" id="absent">
+          Also on this panel, deliberately not drawn because nothing here models
+          them: MIDI OUT, the audio IN L / IN R / OUT jacks, and the CV, trigger
+          and attenuator sections to the right. There is no power LED here
+          because the firmware drives none.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>Bus status</h2>
+      <div class="mono" id="status">—</div>
+      <p class="note">Simulated clock: <span id="clockms" class="mono">0</span> ms.
+         Master state, bytes moved and pacing come straight from the real
+         <code>Bus200eMaster</code> FSM.</p>
+    </div>
+
+    <div class="card sim">
+      <h2>Simulator — not on the panel</h2>
+      <button class="simbtn" data-key="n">MIDI note-on → usbHostMIDI[0] (host port) <kbd>n</kbd></button>
+      <button class="simbtn" data-key="N">MIDI note-on → 200e bus MIDI RX <kbd>N</kbd></button>
+      <button class="simbtn" data-key="w">Advance 1 simulated second <kbd>w</kbd></button>
+      <button class="simbtn" data-key="t" id="pacebtn">Scan pacing: <span id="pace">fast</span> — toggle <kbd>t</kbd></button>
+      <p class="note">These four exist only in the simulator. Nothing on the panel
+         above does any of them.</p>
+    </div>
+
+    <div class="card">
+      <h2>Event log</h2>
+      <p class="warnline">Writes are discarded. A confirmed Save runs the real
+         guard, the real diff and the real <code>MasterRestore</code> call, then
+         the bytes go nowhere — the log says so, every time.</p>
+      <pre id="log" class="mono">—</pre>
+    </div>
+
+    <div class="card">
+      <h2>Keyboard</h2>
+      <table class="keys">
+        <tr><td><kbd>a</kbd> <kbd>b</kbd> <kbd>x</kbd> <kbd>y</kbd></td><td>face buttons A / B / X / Y</td></tr>
+        <tr><td><kbd>l</kbd> <kbd>r</kbd></td><td>left / right encoder push</td></tr>
+        <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>left encoder turn −1 / +1</td></tr>
+        <tr><td><kbd>,</kbd> <kbd>.</kbd></td><td>right encoder turn −1 / +1</td></tr>
+        <tr><td><kbd>{</kbd> <kbd>}</kbd> <kbd>&lt;</kbd> <kbd>&gt;</kbd></td><td>the same, ×10</td></tr>
+        <tr><td><kbd>n</kbd> <kbd>N</kbd> <kbd>w</kbd> <kbd>t</kbd></td><td>the simulator controls above</td></tr>
+      </table>
+      <p class="note">Same letters as the terminal build. Mouse wheel over a knob
+         turns it (down = +1); dragging around it turns it; a click pushes it.
+         <kbd>q</kbd> quits the terminal build and is inert here.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// --- OLED ------------------------------------------------------------------
+// The framebuffer arrives exactly as the SH1106 driver is handed it on target:
+// 1024 bytes, vertically packed, bit (y & 7) of buf[(y >> 3) * 128 + x]. This
+// unpacks those bits and nothing else -- no glyphs, no layout, no decisions.
+var oled = document.getElementById("oled");
+var ctx = oled.getContext("2d");
+var off = document.createElement("canvas");
+off.width = 128; off.height = 64;
+var octx = off.getContext("2d");
+var img = octx.createImageData(128, 64);
+var bytes = new Uint8Array(1024);
+var ON = [214, 240, 255], OFF = [8, 11, 14];
+
+(function initOled() {
+  var d = img.data;
+  for (var i = 0; i < 128 * 64; i++) {
+    d[i * 4] = OFF[0]; d[i * 4 + 1] = OFF[1]; d[i * 4 + 2] = OFF[2]; d[i * 4 + 3] = 255;
+  }
+  octx.putImageData(img, 0, 0);
+  paint();
+})();
+
+function drawFrame(hex) {
+  if (!hex || hex.length < 2048) return;
+  for (var i = 0; i < 1024; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+  var d = img.data;
+  for (var y = 0; y < 64; y++) {
+    var page = (y >> 3) * 128, bit = 1 << (y & 7), row = y * 128;
+    for (var x = 0; x < 128; x++) {
+      var c = (bytes[page + x] & bit) ? ON : OFF, o = (row + x) * 4;
+      d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2];
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  paint();
+}
+
+function paint() {
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, oled.width, oled.height);
+  ctx.drawImage(off, 0, 0, 128, 64, 0, 0, oled.width, oled.height);
+}
+
+// --- transport -------------------------------------------------------------
+var chain = Promise.resolve(), queued = 0, lastLogTotal = -1;
+
+function send(url) {
+  queued++;
+  chain = chain
+    .then(function () { return fetch(url); })
+    .then(function (r) { return r.json(); })
+    .then(apply, failed)
+    .then(function () { queued--; }, function () { queued--; });
+  return chain;
+}
+
+function failed(e) {
+  var el = document.getElementById("offline");
+  el.style.display = "block";
+  el.textContent = "Lost the simulator: " + (e && e.message ? e.message : e) +
+                   ". Restart xeno_gui.py and reload.";
+}
+
+function apply(st) {
+  if (!st || st.error) { failed(new Error(st ? st.error : "empty reply")); return; }
+  document.getElementById("offline").style.display = "none";
+  drawFrame(st.frame);
+  if (st.caption) document.getElementById("caption").textContent = st.caption;
+  document.getElementById("status").textContent = st.status || "";
+  document.getElementById("clockms").textContent = st.millis;
+  document.getElementById("pace").textContent = st.timing;
+  if (st.logtotal !== lastLogTotal) {
+    lastLogTotal = st.logtotal;
+    var pre = document.getElementById("log");
+    pre.textContent = (st.log || []).join("\n");
+    pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+function key(k) { send("/api/key?k=" + encodeURIComponent(k)); }
+function turn(side, d) {
+  if (!d) return;
+  rotate(side, d);
+  send("/api/enc?side=" + side + "&d=" + d);
+}
+
+// --- panel wiring ----------------------------------------------------------
+function flash(el) {
+  if (!el) return;
+  el.classList.add("active");
+  setTimeout(function () { el.classList.remove("active"); }, 130);
+}
+
+Array.prototype.forEach.call(document.querySelectorAll("[data-key]"), function (el) {
+  el.addEventListener("click", function () { flash(el); key(el.getAttribute("data-key")); });
+});
+
+Array.prototype.forEach.call(document.querySelectorAll("[data-turn]"), function (el) {
+  el.addEventListener("click", function (e) {
+    var n = parseInt(el.getAttribute("data-dir"), 10) * (e.shiftKey ? 10 : 1);
+    turn(el.getAttribute("data-turn"), n);
+  });
+});
+
+// The clock button is real hardware and really is inert: it fires no UI control
+// on this module. Say so out loud rather than swallow the click.
+document.getElementById("clockbtn").addEventListener("click", function () {
+  var el = document.getElementById("absent");
+  var was = el.textContent;
+  el.textContent = "The clock button fires no UI control on this hardware — " +
+                   "it is drawn because it is on the panel, and it does nothing here " +
+                   "because it does nothing there.";
+  el.style.color = "#a03418";
+  setTimeout(function () { el.textContent = was; el.style.color = ""; }, 3200);
+});
+
+// --- encoders --------------------------------------------------------------
+// Turning is relative, like the hardware: every gesture resolves to a count of
+// detents and is posted as one CONTROL_ENCODER event of that size. The knurling
+// rotates so a turn is visible, but carries no index mark -- there is no
+// absolute encoder position to show, and inventing one would be a lie.
+var angle = { l: 0, r: 0 };
+function rotate(side, detents) {
+  angle[side] += detents * 15;
+  var el = document.getElementById(side === "l" ? "knobL" : "knobR");
+  el.querySelector(".knurl").style.transform = "rotate(" + angle[side] + "deg)";
+}
+
+function wireKnob(id, side) {
+  var el = document.getElementById(id);
+  var wheelAcc = 0;
+
+  el.addEventListener("wheel", function (e) {
+    e.preventDefault();
+    wheelAcc += e.deltaY;
+    var steps = wheelAcc / 30 | 0;
+    if (steps) { wheelAcc -= steps * 30; turn(side, Math.max(-10, Math.min(10, steps))); }
+  }, { passive: false });
+
+  // Drag: the angle swept around the knob's centre, one detent per 15 degrees.
+  // A press that never sweeps far enough is a push, which is how the real knob
+  // behaves too.
+  var dragging = false, prev = 0, swept = 0, carry = 0, t0 = 0;
+
+  el.addEventListener("pointerdown", function (e) {
+    var r = el.getBoundingClientRect();
+    dragging = true; swept = 0; carry = 0; t0 = Date.now();
+    prev = Math.atan2(e.clientY - (r.top + r.height / 2),
+                      e.clientX - (r.left + r.width / 2)) * 180 / Math.PI;
+    try { el.setPointerCapture(e.pointerId); } catch (ignored) {}
+  });
+
+  el.addEventListener("pointermove", function (e) {
+    if (!dragging) return;
+    var r = el.getBoundingClientRect();
+    var a = Math.atan2(e.clientY - (r.top + r.height / 2),
+                       e.clientX - (r.left + r.width / 2)) * 180 / Math.PI;
+    var d = a - prev;
+    while (d > 180) d -= 360;
+    while (d < -180) d += 360;
+    prev = a; swept += Math.abs(d); carry += d;
+    var steps = carry / 15 | 0;
+    if (steps) { carry -= steps * 15; turn(side, Math.max(-10, Math.min(10, steps))); }
+  });
+
+  function release(e) {
+    if (!dragging) return;
+    dragging = false;
+    try { el.releasePointerCapture(e.pointerId); } catch (ignored) {}
+    if (swept < 9 && Date.now() - t0 < 500) { flash(el); key(side); }
+  }
+  el.addEventListener("pointerup", release);
+  el.addEventListener("pointercancel", release);
+
+  el.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flash(el); key(side); }
+    else if (e.key === "ArrowLeft" || e.key === "ArrowDown") { e.preventDefault(); turn(side, -1); }
+    else if (e.key === "ArrowRight" || e.key === "ArrowUp") { e.preventDefault(); turn(side, 1); }
+  });
+}
+wireKnob("knobL", "l");
+wireKnob("knobR", "r");
+
+// --- keyboard --------------------------------------------------------------
+var PANEL_KEYS = "abxylr[],.{}<>nNwt";
+document.addEventListener("keydown", function (e) {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  var t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+  if (t && t.classList && t.classList.contains("knob")) return;   // arrows are the knob's
+  if (PANEL_KEYS.indexOf(e.key) < 0 || e.key.length !== 1) return;
+  e.preventDefault();
+  var el = document.querySelector('[data-key="' + e.key + '"]');
+  // The turn keys move the knurling too, so a keyboard turn looks like a turn.
+  var TURN = { "[": ["l", -1], "]": ["l", 1], ",": ["r", -1], ".": ["r", 1],
+               "{": ["l", -10], "}": ["l", 10], "<": ["r", -10], ">": ["r", 10] };
+  if (TURN[e.key]) {
+    el = document.getElementById(TURN[e.key][0] === "l" ? "knobL" : "knobR");
+    rotate(TURN[e.key][0], TURN[e.key][1]);
+  }
+  if (e.key === "l") el = document.getElementById("knobL");
+  if (e.key === "r") el = document.getElementById("knobR");
+  flash(el);
+  key(e.key);
+});
+
+// --- clock -----------------------------------------------------------------
+// One refresh's worth of simulated time per poll, charged in real elapsed ms.
+// The pacing rule itself lives in C++, shared with the terminal build.
+var last = Date.now();
+setInterval(function () {
+  if (queued > 0) return;
+  var now = Date.now(), ms = Math.max(0, Math.min(500, now - last));
+  last = now;
+  send("/api/pump?ms=" + ms);
+}, 90);
+
+send("/api/state");
+</script>
+</body>
+</html>

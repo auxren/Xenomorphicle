@@ -1,7 +1,8 @@
 # xeno-sim -- host simulator for the Xenomorpher's "200e Modules" app.
 #
 #   make            build build/xeno-sim
-#   make run        build and run it interactively
+#   make run        build and run it interactively, in this terminal
+#   make gui        build and serve the browser front end on 127.0.0.1:8731
 #   make clean
 #
 # Nothing here is part of the firmware build: no platformio.ini env references
@@ -43,7 +44,7 @@ SIM_OBJS = $(patsubst %,$(BUILD)/%.o,$(basename $(notdir $(SIM_SRCS))))
 
 EXE = $(BUILD)/xeno-sim
 
-.PHONY: all run clean
+.PHONY: all run gui clean
 all: $(EXE)
 
 $(EXE): $(SIM_OBJS) $(FW_OBJS)
@@ -76,6 +77,11 @@ $(BUILD)/fw_%.o: $(SRC)/src/extern/%.cpp | $(BUILD)
 
 run: $(EXE)
 	@$(EXE)
+
+# The browser front end. python3 stdlib only, and it drives this same binary
+# over --stdio, so `make` on its own still produces a headless simulator.
+gui: $(EXE)
+	@python3 xeno_gui.py
 
 clean:
 	@rm -rf $(BUILD)

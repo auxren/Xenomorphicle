@@ -16,6 +16,7 @@ files, linked. Only the hardware itself is faked.
 cd tools/xeno-sim
 make                       # -> build/xeno-sim
 ./build/xeno-sim           # interactive, in your own terminal
+make gui                   # ...or the panel in a browser, see below
 ```
 
 Scripted (no terminal needed — this is how screens get captured for review):
@@ -36,6 +37,61 @@ Options:
 | `--bus-off` | make `PresetBus::Enabled()` false (the "preset bus disabled" screen) |
 | `--capture-251e PATH` / `--capture-259e PATH` | point at different bank hex dumps |
 | `--no-log` | omit the status/log lines under the frame |
+| `--stdio` | line protocol on stdin/stdout, for the browser front end |
+
+## The browser front end
+
+```sh
+cd tools/xeno-sim
+make gui                   # or: python3 xeno_gui.py
+```
+
+Then open **<http://127.0.0.1:8731/>** — `make gui` opens it for you.
+`--port N` moves it, `--no-open` leaves the browser alone, and
+`--real-timing` / `--bus-off` / `--capture-251e` / `--capture-259e` are passed
+straight through to the simulator.
+
+`xeno_gui.py` is **python3 stdlib only** — no pip, no npm, no CDN, works
+offline — and it binds **127.0.0.1 only**, refusing any request that does not
+arrive with a loopback `Host`.
+
+It contains **no simulation and no UI logic**. It spawns `build/xeno-sim
+--stdio`, the same binary the terminal mode runs, and shuttles input tokens in
+and the 128x64 framebuffer out. The page unpacks those bits onto a canvas and
+draws nothing of its own: every glyph, every cursor, every menu decision is
+made by the real `Bus200eApp.h` through the real `weegfx` renderer, in C++, on
+the other end of a pipe. There is deliberately no JavaScript reimplementation
+of any screen — one would drift from the firmware and test nothing.
+
+The panel is drawn as it is: green **A** / **B** and blue **X** / **Y** in two
+rows, the `device` (USB-C) and `host` (USB-A) jacks, the grey `clock` button
+between them, the OLED in a bezel at 4x, and the two encoders below it. Click a
+button to press it; click an encoder to push it, wheel over it or drag around
+it to turn it, or use the `−` / `+` beside it (Shift for ×10). The terminal
+build's keys all work in the page too, and are listed in it.
+
+Two things the page is careful about:
+
+* The **clock button is inert**, and says so on the panel. It fires no UI
+  control on this hardware. It is drawn because it is there; it does nothing
+  here because it does nothing there.
+* The four simulator-only affordances — inject a MIDI note on the USB-host
+  port, inject one on bus MIDI, advance a simulated second, toggle scan pacing
+  — live in a **separate, visually distinct panel** marked *not on the panel*.
+  Nothing on the instrument above is fictional.
+
+The terminal frame's caption carries into the page as the orange border and
+banner around the panel, live from the simulator, so `[SYNTHETIC BANK DATA]`
+shows up there too. The bus status line and the event log sit beside the
+screen, which is where most of the debugging value is: `BACKUP 5C: served 63120
+bytes from capture` next to the pixels it produced.
+
+Everything under **Where the simulation is NOT faithful** below applies to the
+GUI exactly as it applies to the terminal. In particular **writes still go
+nowhere**. The MIDI OUT jack, the audio jacks and the CV / trigger sections are
+on the real panel and are deliberately *not* drawn, because nothing here models
+them; the page says so. There is no power LED in the page because the firmware
+drives none.
 
 ## Keys
 
@@ -152,10 +208,41 @@ Read this before trusting a green screen here for anything.
   fired; outputs go nowhere.
 * **The terminal font is not the module's font.** Glyph shapes come from the
   real 6x8 table, but a half-block terminal cell is not an OLED pixel:
-  contrast, persistence and the physical aspect ratio all differ.
+  contrast, persistence and the physical aspect ratio all differ. The browser
+  canvas is closer — it is one square pixel per pixel, at 4x — but it is still
+  a backlit LCD pretending to be an OLED, and the module's screen is small and
+  physically about 2:1. Do not judge legibility from either.
+* **The GUI's timing is polled, not driven.** The page asks the simulator to
+  advance the clock about eleven times a second and repaints on the reply, so
+  the animation is the simulator's pacing seen through a 90 ms shutter. The
+  pacing rule itself is shared C++ with the terminal build, but no screen
+  refresh here is evidence about the module's refresh rate.
+
+## The `--stdio` protocol
+
+Only `xeno_gui.py` speaks it, but it is small enough to drive by hand:
+
+```
+$ ./build/xeno-sim --stdio
+frame <2048 hex chars>          # 1024 bytes, vertically packed, as the SH1106 gets them
+caption ...                     # the terminal frame's caption
+status ...                      # the terminal's bus status line
+millis / busy / timing / synthetic
+logtotal N
+log ...                         # the last 120 lines
+END
+```
+
+Requests are one line each: `key <token>` (any interactive key or word alias),
+`enc <l|r> <signed delta>` (arbitrary turns, which the key tokens cannot
+express — this is what a drag or a wheel sends), `pump <ms>` (one refresh of
+simulated time, using the interactive loop's pacing rule), `state`, `bye`.
+Every request answers with one block in the shape above.
 
 ## Not part of the firmware build
 
 No `platformio.ini` env references this directory and no file under
 `software/src/` was modified for it. `pio run -e T41_console -e T41_audio -e T40`
-is unaffected.
+is unaffected, and the GUI adds nothing to it: `make` on its own still produces
+a headless `build/xeno-sim`, and the server is a separate python3 script that
+is never built, imported or shipped.
