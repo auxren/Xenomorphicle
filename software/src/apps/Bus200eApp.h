@@ -116,8 +116,10 @@ enum ReadState : uint8_t {
 enum WriteState : uint8_t {
   WRITE_NONE = 0,
   WRITE_ACTIVE,
-  WRITE_OK,
+  WRITE_VERIFYING,  // restore done; reading the bank back to check it landed
+  WRITE_OK,         // read back and matched, byte for byte
   WRITE_FAIL,
+  WRITE_BAD,        // read back and did NOT match: module contents unknown
 };
 
 // Module types this app has a handler for. Identification is by address (see
@@ -303,11 +305,33 @@ private:
   uint8_t read_addr_ = 0;
   uint8_t read_type_ = Bus200eAppNS::MODTYPE_UNKNOWN;
 
+  // CRC-32 of the whole bank as it was when the read completed. The card
+  // image is shared with the console 'w' patcher and the USB bridge, so this
+  // is the only thing that can tell, at Save time, whether the bytes about to
+  // go on the wire are still the ones that were read.
+  uint32_t read_hash_ = 0;
+
   // write path
   uint8_t write_state_ = Bus200eAppNS::WRITE_NONE;
   Bus200eMasterError write_err_ = BUS200E_MASTER_ERR_NONE;
   int pending_changes_ = 0;    // diff size shown on the confirm screen
   Buchla200eWriteBlock write_block_ = BUCHLA200E_WRITE_OK;
+  // What the bank hashed to once the patch was applied and checked. The
+  // read-back after the restore is compared against this: equal means the
+  // module holds exactly what was intended, and nothing else does.
+  uint32_t intended_hash_ = 0;
+  uint32_t intended_outside_ = 0;
+  uint32_t verify_started_ms_ = 0;
+  int verify_diff_ = 0;         // differing bytes in the read-back of our slot
+  bool verify_outside_ok_ = true;  // the other 29 presets came back unchanged
+
+  // Freshly encoded copy of the slot being written, built at commit time.
+  // Its whole job is to be compared against: once against the image after
+  // patching (proving the patch list was neither too wide nor too narrow),
+  // and once against the read-back (proving the module took it). A member,
+  // not a stack local -- 2104 bytes of stack in Loop() is not something this
+  // build can spend, and app instances live in RAM2 where it is free.
+  uint8_t intended_slot_[kBuchla251eSlotBytes];
 
   // The decoded slot under the cursor. 2104 bytes, and deliberately a MEMBER:
   // app instances live in RAM2 (see the DMAMEM app_container in _config.h),
@@ -403,10 +427,18 @@ private:
   bool DecodeSlotFromCardImage();
   uint32_t ExpectedBankBytes() const;
   int ComputeSlotDiff();       // changed bytes for slot_, or <0 on overflow
-  Buchla200eWriteBlock CheckWrite(int changed) const;
+  Buchla200eWriteBlock CheckWrite(int changed, uint32_t image_hash) const;
   void ArmWrite();
   void CommitWrite();
   void PumpWrite();
+  uint32_t HashResidentBank() const;   // CRC-32 over the full expected bank
+  bool SlotWindowInBank(uint32_t *off_out) const;  // slot_ lies inside the bank
+  // A restore is in flight OR its read-back is: both own the master FSM, and
+  // both must keep every other bus user out.
+  bool WriteBusy() const {
+    return write_state_ == Bus200eAppNS::WRITE_ACTIVE ||
+           write_state_ == Bus200eAppNS::WRITE_VERIFYING;
+  }
   void DrawWriteConfirm() const;
   Bus200eAppNS::ModuleType CurrentModuleType() const;
   void DrawModuleSelect() const;
@@ -451,7 +483,7 @@ void AppBus200e::StartScan() {
   Buchla200eReadContext rc;
   rc.bus_enabled = OC::PresetBus::Enabled();
   rc.read_active = (read_state_ == Bus200eAppNS::READ_ACTIVE);
-  rc.write_active = (write_state_ == Bus200eAppNS::WRITE_ACTIVE);
+  rc.write_active = WriteBusy();
   rc.scan_idle = true;   // starting one is what we are here to do
   rc.probe_active = probe_active_;
   last_refusal_ = Buchla200eCheckRead(rc);
@@ -492,7 +524,7 @@ void AppBus200e::StartProbe() {
   Buchla200eReadContext rc;
   rc.bus_enabled = OC::PresetBus::Enabled();
   rc.read_active = (read_state_ == Bus200eAppNS::READ_ACTIVE);
-  rc.write_active = (write_state_ == Bus200eAppNS::WRITE_ACTIVE);
+  rc.write_active = WriteBusy();
   rc.scan_idle = (scan_state_ == Bus200eAppNS::SCAN_IDLE);
   rc.probe_active = probe_active_;
   last_refusal_ = Buchla200eCheckRead(rc);
@@ -608,7 +640,7 @@ void AppBus200e::StartRead() {
   Buchla200eReadContext rc;
   rc.bus_enabled = OC::PresetBus::Enabled();
   rc.read_active = (read_state_ == Bus200eAppNS::READ_ACTIVE);
-  rc.write_active = (write_state_ == Bus200eAppNS::WRITE_ACTIVE);
+  rc.write_active = WriteBusy();
   rc.scan_idle = (scan_state_ == Bus200eAppNS::SCAN_IDLE);
   rc.probe_active = probe_active_;
   last_refusal_ = Buchla200eCheckRead(rc);
@@ -708,6 +740,9 @@ void AppBus200e::PumpRead() {
       // still matches the target at Save time.
       read_addr_ = target_;
       read_type_ = (uint8_t)CurrentModuleType();
+      // ...and WHAT it contained, so a later Save can tell whether anything
+      // else has written into the shared image since.
+      read_hash_ = HashResidentBank();
     } else {
       // Transfer reported success but the bytes aren't usable. Say so --
       // a failed read must never be shown as a good one.
@@ -739,29 +774,73 @@ uint32_t AppBus200e::ExpectedBankBytes() const {
   }
 }
 
-// Changed bytes between the resident image's copy of this slot and the
-// working copy. <0 means the diff overflowed its buffer, which the guard
-// treats as unverifiable rather than as zero.
+// Where slot_ lives in the bank, and whether that window is entirely inside
+// the bank we actually hold. This is the range check the guard asks about:
+// the transfer is whole-bank, so an out-of-range slot index does not fail --
+// it silently lands on a neighbouring preset, or past the end of the buffer.
+FLASHMEM __attribute__((noinline))
+bool AppBus200e::SlotWindowInBank(uint32_t *off_out) const {
+#ifdef PRESET_BUS
+  if (off_out) *off_out = 0;
+  if (CurrentModuleType() != Bus200eAppNS::MODTYPE_251E) return false;
+  if (slot_ < 0 || slot_ >= Bus200eAppNS::kSlotCount) return false;
+  const uint32_t off = (uint32_t)slot_ * kBuchla251eSlotBytes;
+  const uint32_t end = off + kBuchla251eSlotBytes;
+  if (end > ExpectedBankBytes()) return false;
+  if (end > Bus200eMasterBytesTransferred()) return false;
+  if (off_out) *off_out = off;
+  return true;
+#else
+  (void)off_out;
+  return false;
+#endif
+}
+
+// Encodes the working slot into intended_slot_ and returns how many bytes it
+// differs from the resident image's copy.
+//
+// This is the number the user consents to on the confirm screen, so it is
+// computed from the same bytes that will actually be sent -- encode once into
+// a member, compare, and later memcpy that same member. The previous form
+// called Buchla251eDiffSlot(), which encodes into a 2104-byte STACK buffer;
+// on a build whose stack overflow was already once a crash-loop, doing that
+// from Loop() was a risk taken for nothing.
 FLASHMEM __attribute__((noinline))
 int AppBus200e::ComputeSlotDiff() {
 #ifdef PRESET_BUS
-  if (CurrentModuleType() != Bus200eAppNS::MODTYPE_251E) return 0;
+  uint32_t off = 0;
+  if (!SlotWindowInBank(&off)) return 0;
   const uint8_t *img = OC::PresetBus::MasterCardImage();
   if (!img) return 0;
-  const uint32_t off = (uint32_t)slot_ * kBuchla251eSlotBytes;
-  if (Bus200eMasterBytesTransferred() < off + kBuchla251eSlotBytes) return 0;
-  // Only the count is wanted here; the patch buffer is a scratch the caller
-  // never reads, so a small one is fine -- overflow reports -1, which the
-  // guard blocks on.
-  Buchla251eBytePatch patches[32];
-  return Buchla251eDiffSlot(img + off, working_slot_, patches, 32);
+
+  Buchla251eEncodeSlot(working_slot_, intended_slot_);
+  int count = 0;
+  for (uint32_t i = 0; i < kBuchla251eSlotBytes; ++i)
+    if (intended_slot_[i] != img[off + i]) ++count;
+  return count;
+#else
+  return 0;
+#endif
+}
+
+// CRC-32 over the full expected bank in the resident image. Zero when there
+// is nothing to hash, which never collides with a real answer being trusted:
+// every caller pairs it with the guard's image/short-read checks.
+FLASHMEM __attribute__((noinline))
+uint32_t AppBus200e::HashResidentBank() const {
+#ifdef PRESET_BUS
+  const uint8_t *img = OC::PresetBus::MasterCardImage();
+  const uint32_t len = ExpectedBankBytes();
+  if (!img || len == 0) return 0;
+  if (Bus200eMasterBytesTransferred() < len) return 0;
+  return Buchla200eCrc32(img, len);
 #else
   return 0;
 #endif
 }
 
 FLASHMEM __attribute__((noinline))
-Buchla200eWriteBlock AppBus200e::CheckWrite(int changed) const {
+Buchla200eWriteBlock AppBus200e::CheckWrite(int changed, uint32_t image_hash) const {
   Buchla200eWriteContext c;
   c.have_read = (read_state_ == Bus200eAppNS::READ_OK);
   c.read_addr = read_addr_;
@@ -770,18 +849,27 @@ Buchla200eWriteBlock AppBus200e::CheckWrite(int changed) const {
   c.target_type = (uint8_t)CurrentModuleType();
   c.expected_bank_bytes = ExpectedBankBytes();
   c.changed_bytes = changed;
+  c.patches_in_range = SlotWindowInBank(nullptr);
 #ifdef PRESET_BUS
   c.bytes_transferred = Bus200eMasterBytesTransferred();
   c.card_serving = OC::PresetBus::CardServing();
   c.image_valid = (OC::PresetBus::MasterCardImage() != nullptr);
   c.master_idle = (scan_state_ == Bus200eAppNS::SCAN_IDLE) && !probe_active_ &&
-                  (read_state_ != Bus200eAppNS::READ_ACTIVE) &&
-                  (write_state_ != Bus200eAppNS::WRITE_ACTIVE);
+                  (read_state_ != Bus200eAppNS::READ_ACTIVE) && !WriteBusy();
+  // image_hash is the caller's freshly taken CRC of the resident bank. This
+  // is the only check that looks at the bytes rather than at a counter: the
+  // console 'w' command patches this same buffer, Bus200eBridge writes browser
+  // SysEx into it, and any other MasterBackup replaces it wholesale. "We read
+  // it, therefore it is still ours" was never true.
+  c.image_matches_read = (read_state_ == Bus200eAppNS::READ_OK) &&
+                         (read_hash_ != 0) && (image_hash == read_hash_);
 #else
+  (void)image_hash;
   c.bytes_transferred = 0;
   c.card_serving = false;
   c.image_valid = false;
   c.master_idle = false;
+  c.image_matches_read = false;
 #endif
   return Buchla200eCheckWrite(c);
 }
@@ -792,29 +880,76 @@ Buchla200eWriteBlock AppBus200e::CheckWrite(int changed) const {
 FLASHMEM __attribute__((noinline))
 void AppBus200e::ArmWrite() {
   pending_changes_ = ComputeSlotDiff();
-  write_block_ = CheckWrite(pending_changes_);
+  const uint32_t h = HashResidentBank();
+  write_block_ = CheckWrite(pending_changes_, h);
   screen_ = Bus200eAppNS::SCR_WRITE_CONFIRM;
 }
 
-// Step 2 of 2. Re-runs the guard rather than trusting the arm-time verdict:
-// the card image can be dropped, or a transfer started, in between.
+// Step 2 of 2, and the only place in this app that puts bytes on the wire in
+// the destructive direction.
+//
+// The sequence below is deliberately paranoid, because the failure it guards
+// against is silent and total: MasterRestore sends 63,120 bytes and the module
+// takes them. Nothing rejects a bad bank. So, in order:
+//
+//   1. Re-diff and re-run the full guard -- never trust the arm-time verdict,
+//      since the image can be dropped or replaced while the confirm screen is
+//      up. The guard's image_matches_read check is fed a CRC taken right here.
+//   2. Hash the bank with the target slot punched out, so we know what the
+//      OTHER 29 presets look like before we touch anything.
+//   3. Copy in the exact bytes the diff counted -- the same intended_slot_
+//      buffer, not a re-encode that might differ.
+//   4. Prove the copy: the slot must equal intended_slot_ byte for byte, and
+//      everything outside it must still hash to what it did in step 2. A
+//      memcpy that ran long, or a slot offset off by one record, fails here
+//      instead of on the module.
+//   5. Remember the intended whole-bank hash, then send. PumpWrite reads the
+//      bank back and compares against it.
+//
+// If step 4 fails the image is already modified and cannot be trusted, so the
+// read is invalidated and nothing is sent.
 FLASHMEM __attribute__((noinline))
 void AppBus200e::CommitWrite() {
 #ifdef PRESET_BUS
-  const int changed = ComputeSlotDiff();
-  write_block_ = CheckWrite(changed);
+  const int changed = ComputeSlotDiff();      // also fills intended_slot_
+  const uint32_t bank_len = ExpectedBankBytes();
+  uint8_t *img = OC::PresetBus::MasterCardImage();
+
+  write_block_ = CheckWrite(changed, img ? Buchla200eCrc32(img, bank_len) : 0);
   if (write_block_ != BUCHLA200E_WRITE_OK) {
     pending_changes_ = changed;
     return;   // stay on the confirm screen showing why
   }
-
-  uint8_t *img = OC::PresetBus::MasterCardImage();
   if (!img) { write_block_ = BUCHLA200E_WRITE_NO_IMAGE; return; }
 
-  // Encode the edited slot into the resident image. Only this slot's bytes
-  // move; the other 29 stay exactly as they were read, which is what makes a
-  // whole-bank transfer non-destructive to them.
-  Buchla251eEncodeSlot(working_slot_, img + (uint32_t)slot_ * kBuchla251eSlotBytes);
+  // The guard passing means the window is in range, so this cannot fail --
+  // but it is what produces `off`, and a bad `off` is the whole danger here.
+  uint32_t off = 0;
+  if (!SlotWindowInBank(&off)) {
+    write_block_ = BUCHLA200E_WRITE_PATCH_RANGE;
+    return;
+  }
+
+  const Buchla200eBankHash before =
+      Buchla200eHashBank(img, bank_len, off, kBuchla251eSlotBytes);
+
+  memcpy(img + off, intended_slot_, kBuchla251eSlotBytes);
+
+  const Buchla200eBankHash after =
+      Buchla200eHashBank(img, bank_len, off, kBuchla251eSlotBytes);
+  if (after.outside != before.outside ||
+      memcmp(img + off, intended_slot_, kBuchla251eSlotBytes) != 0) {
+    // The image no longer holds what we meant to build. Send nothing, and
+    // make the user re-Read: the buffer is now neither the module's bank nor
+    // the intended one.
+    write_block_ = BUCHLA200E_WRITE_BUILD_FAILED;
+    read_state_ = Bus200eAppNS::READ_FAIL;
+    read_hash_ = 0;
+    return;
+  }
+
+  intended_hash_ = after.whole;
+  intended_outside_ = after.outside;
 
   OC::PresetBus::MasterReset();
   const int rc = OC::PresetBus::MasterRestore(target_);
@@ -833,37 +968,115 @@ void AppBus200e::CommitWrite() {
 FLASHMEM __attribute__((noinline))
 void AppBus200e::PumpWrite() {
 #ifdef PRESET_BUS
-  if (write_state_ != Bus200eAppNS::WRITE_ACTIVE) return;
+  if (!WriteBusy()) return;
+
+  const bool verifying = (write_state_ == Bus200eAppNS::WRITE_VERIFYING);
 
   // Same bound as the read path. A write that vanishes is worse than one that
   // fails: the module's state is then unknown, so say so and make the user
   // re-Read rather than leaving a hopeful "writing..." on screen forever.
   const Bus200eMasterState st = OC::PresetBus::MasterState();
   const Buchla200eJobFate fate = Buchla200eJobProgress(
-      st, millis() - write_started_ms_, BUCHLA200E_JOB_TIMEOUT_MS);
+      st, millis() - (verifying ? verify_started_ms_ : write_started_ms_),
+      BUCHLA200E_JOB_TIMEOUT_MS);
   if (fate == BUCHLA200E_JOB_PENDING) return;
 
-  if (fate == BUCHLA200E_JOB_LOST || fate == BUCHLA200E_JOB_TIMEOUT) {
-    write_state_ = Bus200eAppNS::WRITE_FAIL;
-    write_err_ = BUS200E_MASTER_ERR_NONE;
-    write_lost_ = true;
+  const bool bad = (fate == BUCHLA200E_JOB_LOST ||
+                    fate == BUCHLA200E_JOB_TIMEOUT ||
+                    st == BUS200E_MASTER_FAILED);
+
+  if (bad) {
+    // A restore that failed leaves the module in an unknown state, and so
+    // does a read-back that never arrived -- we cannot say the write landed,
+    // and we must not say it did not. Both keep edited_ set so the user's
+    // work survives and the retry path stays open.
+    if (verifying) {
+      write_state_ = Bus200eAppNS::WRITE_BAD;
+      read_state_ = Bus200eAppNS::READ_FAIL;
+      read_hash_ = 0;
+    } else {
+      write_state_ = Bus200eAppNS::WRITE_FAIL;
+    }
+    const bool reported = (st == BUS200E_MASTER_FAILED);
+    write_lost_ = !reported;   // nobody said why; don't invent an error code
+    write_err_ = reported ? OC::PresetBus::MasterError() : BUS200E_MASTER_ERR_NONE;
     OC::PresetBus::MasterReset();
     return;
   }
   write_lost_ = false;
+  if (st != BUS200E_MASTER_DONE) return;
 
-  if (st == BUS200E_MASTER_DONE) {
-    write_state_ = Bus200eAppNS::WRITE_OK;
-    // The module now holds what working_slot_ holds, so this is no longer a
-    // divergence. Verification is a deliberate follow-up Read, not an
-    // automatic one -- see the comment on the confirm screen.
-    edited_ = false;
+  if (!verifying) {
+    // The restore reported DONE. That only means the bytes went out -- it says
+    // nothing about what the module stored. Read the whole bank straight back
+    // and compare it against the hash of what we built. Until that lands,
+    // edited_ STAYS SET: claiming success before checking is exactly how a
+    // failed write gets mistaken for a good one.
     OC::PresetBus::MasterReset();
-  } else if (st == BUS200E_MASTER_FAILED) {
-    write_state_ = Bus200eAppNS::WRITE_FAIL;
-    write_err_ = OC::PresetBus::MasterError();
-    OC::PresetBus::MasterReset();
+    const int rc = OC::PresetBus::MasterBackup(target_);
+    if (rc != 0) {
+      write_state_ = Bus200eAppNS::WRITE_BAD;
+      write_err_ = (Bus200eMasterError)(-rc);
+      read_state_ = Bus200eAppNS::READ_FAIL;
+      read_hash_ = 0;
+      return;
+    }
+    write_state_ = Bus200eAppNS::WRITE_VERIFYING;
+    write_err_ = BUS200E_MASTER_ERR_NONE;
+    verify_started_ms_ = millis();
+    return;
   }
+
+  // Read-back complete. The image now holds whatever the module actually has.
+  //
+  // MasterReset() comes LAST, after every question about this job has been
+  // asked -- how many bytes it moved, and what they were. PumpRead has the
+  // same ordering. Retiring the job first would mean checking the result of
+  // something already declared over.
+  const uint32_t bank_len = ExpectedBankBytes();
+  const uint8_t *img = OC::PresetBus::MasterCardImage();
+  uint32_t off = 0;
+  const bool windowed = SlotWindowInBank(&off);
+
+  const Buchla200eBankHash back =
+      (img && windowed) ? Buchla200eHashBank(img, bank_len, off, kBuchla251eSlotBytes)
+                        : Buchla200eBankHash{0, 0};
+
+  verify_diff_ = 0;
+  verify_outside_ok_ = (img && windowed && back.outside == intended_outside_);
+  if (img && windowed) {
+    for (uint32_t i = 0; i < kBuchla251eSlotBytes; ++i)
+      if (img[off + i] != intended_slot_[i]) ++verify_diff_;
+  }
+
+  if (img && windowed && back.whole == intended_hash_) {
+    // Every byte of all 30 slots is what we intended. This is the only path
+    // that clears the edit flag.
+    write_state_ = Bus200eAppNS::WRITE_OK;
+    edited_ = false;
+    read_state_ = Bus200eAppNS::READ_OK;
+    read_ms_ = millis();
+    read_addr_ = target_;
+    read_type_ = (uint8_t)CurrentModuleType();
+    read_hash_ = back.whole;
+    DecodeSlotFromCardImage();
+  } else {
+    // The module does not hold what we sent. Say so loudly and keep edited_
+    // set -- the working copy is still the user's intent, and it is now the
+    // only place that intent exists.
+    write_state_ = Bus200eAppNS::WRITE_BAD;
+    if (img && windowed) {
+      read_state_ = Bus200eAppNS::READ_OK;
+      read_ms_ = millis();
+      read_addr_ = target_;
+      read_type_ = (uint8_t)CurrentModuleType();
+      read_hash_ = back.whole;   // truth, so a retry is diffed against reality
+    } else {
+      read_state_ = Bus200eAppNS::READ_FAIL;
+      read_hash_ = 0;
+    }
+  }
+  OC::PresetBus::MasterReset();
 #endif
 }
 
@@ -1152,14 +1365,30 @@ void AppBus200e::DrawReadState() const {
       graphics.printf("WRITING %02X ...", target_);
       graphics.invertRect(0, 45, 128, 10);
       return;
+    case Bus200eAppNS::WRITE_VERIFYING:
+      // The bytes went out; this is the read-back. Named as its own phase so
+      // "done sending" is never mistaken on screen for "confirmed stored".
+      graphics.printf("VERIFYING %02X ...", target_);
+      graphics.invertRect(0, 45, 128, 10);
+      return;
     case Bus200eAppNS::WRITE_OK:
-      // Not "verified" -- only that the transfer completed. Re-Read to check.
-      graphics.print("WROTE ok - Read to chk");
+      // Earned, not assumed: the whole bank was read back and hashed equal to
+      // what was sent. This is the only state that says the write is done.
+      graphics.print("WROTE + VERIFIED");
+      return;
+    case Bus200eAppNS::WRITE_BAD:
+      // The worst outcome the app can report, and the only one where the
+      // module's contents are known to be wrong rather than merely unknown.
+      if (!verify_outside_ok_)      graphics.print("BAD: OTHER PRESETS!");
+      else if (verify_diff_ == 1)   graphics.print("BAD: 1 byte wrong");
+      else if (verify_diff_ > 0)    graphics.printf("BAD: %d bytes wrong", verify_diff_);
+      else                          graphics.print("BAD: verify failed");
+      graphics.invertRect(0, 45, 128, 10);
       return;
     case Bus200eAppNS::WRITE_FAIL:
       // "lost" is not the same as "the module rejected it": the transfer
       // vanished, so what the module now holds is unknown. Say that.
-      if (write_lost_) graphics.print("WRITE LOST - Read to chk");
+      if (write_lost_) graphics.print("WRITE LOST - reread");
       else             graphics.printf("WRITE FAILED (err %d)", (int)write_err_);
       graphics.invertRect(0, 45, 128, 10);
       return;
@@ -1235,7 +1464,10 @@ void AppBus200e::DrawWriteConfirm() const {
   graphics.setPrintPos(0, 36);
   graphics.print("Rewrites ALL 30 slots");
   graphics.setPrintPos(0, 46);
-  graphics.print("from what was read.");
+  // The other 29 are re-sent verbatim from the read, and the read-back after
+  // the transfer proves all 30 landed. Both halves of that promise are stated
+  // here because this is the screen where consent is actually given.
+  graphics.print("29 re-sent, then chkd");
 
   graphics.setPrintPos(0, 56);
   graphics.print("encR:CONFIRM  encL:no");

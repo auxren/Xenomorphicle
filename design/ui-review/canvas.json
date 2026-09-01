@@ -1,0 +1,34 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html",         "x": 0,    "y": 0,    "w": 880, "h": 1180 },
+    { "file": "Navigation.dc.html",   "x": 1000, "y": 0,    "w": 900, "h": 1080 },
+    { "file": "ModuleSelect.dc.html", "x": 2020, "y": 0,    "w": 900, "h": 760 },
+    { "file": "ActionRow.dc.html",    "x": 3040, "y": 0,    "w": 900, "h": 760 },
+    { "file": "WriteConfirm.dc.html", "x": 2020, "y": 1200, "w": 900, "h": 800 },
+    { "file": "WriteScope.dc.html",   "x": 3040, "y": 1200, "w": 900, "h": 860 }
+  ],
+  "annotations": [
+    {
+      "id": "start-here",
+      "x": 0,
+      "y": 1300,
+      "w": 420,
+      "text": "Start at Main, then Navigation — those two are whole-instrument. The four to the right are the 200e app specifically."
+    },
+    {
+      "id": "coverage",
+      "x": 0,
+      "y": 1520,
+      "w": 460,
+      "text": "COVERAGE, honestly:\n\nWalked and reviewed — the app switcher, the preset-bus overlay, the 200e app, Setup/About, Scenery, Pong.\n\nNot reviewed — Quadrants and Hemisphere (the applet registry is not simulated), and Captain MIDI, Calibr8or and Scale Editor, which will not compile for the simulator because of a firmware portability bug. Captain MIDI is the default app on hardware, so that gap is the one worth closing first."
+    },
+    {
+      "id": "write-answer",
+      "x": 2020,
+      "y": 2100,
+      "w": 480,
+      "text": "\"Why rewrite all 30?\" — answered on the artboard above. Short version: the bus has no command that sends data into a single preset. RESTORE moves the whole bank or nothing.\n\nThe other 29 get their own values back, read seconds earlier — so the danger is a stale or short read, not the rewrite itself.\n\nSince this review, the write path was hardened: the bank is fingerprinted at Read, re-checked at Save, the patch is proved byte-for-byte before anything is sent, and the whole bank is read straight back and compared. WROTE + VERIFIED is now earned, and a mismatch says BAD and keeps the edit."
+    }
+  ],
+  "launch": { "view": "canvas" }
+}

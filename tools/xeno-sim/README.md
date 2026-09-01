@@ -116,11 +116,49 @@ delta: `#` lit in both, `.` dark in both, `a`/`b` lit in only one. It skips the
 console chatter around a capture and does not care about case or whitespace.
 `--quiet` gives the counts only and exits non-zero on any difference.
 
+`fbtext.py` reads the same capture the other way: it tells you what the screen
+SAYS.
+
+```sh
+./build/xeno-sim --keys "..." --dump-fb | python3 fbtext.py -
+y=46  x=0    WROTE + VERIFIED
+y=56  x=100  [inv] Save
+```
+
+It is not guesswork — it renders every glyph of the firmware's own 6x8 font
+(parsed from `gfx_font_6x8.h`, never copied, so it cannot drift) and demands an
+exact pixel match, reporting inverted text as `[inv]`. That makes a regression
+check assert what a person would actually read, instead of a frame hash that
+says only "something moved". `selfcheck.sh` uses it for the whole 200e write
+path.
+
 **No device captures have been compared yet.** The mechanism is here and tested
 against itself; the numbers that would turn "looks right" into "is right" need
 someone with console access to capture the reference frames. Worth capturing
 first, in this order: the 200e app's home screen, the app switcher, the preset
 overlay at slot 1, Setup/About's first page.
+
+## The write path
+
+A 200e write rewrites all 30 presets and has no undo, so the interesting
+question is not whether it works — it is whether it tells the truth when it
+does not. `--write-fault` makes the simulated 251e mishandle the RESTORE:
+
+| value | the module... |
+|---|---|
+| `none` | stores the bank faithfully (the default) |
+| `ignore` | reports done and stores nothing |
+| `drop-tail` | stores all but the last record |
+| `flip-first` | stores one byte wrong in the FIRST slot |
+| `flip-last` | stores one byte wrong in the LAST slot — collateral damage |
+
+The firmware reads the whole bank straight back after every write and compares
+it against what it built, so each of these should end on a `BAD:` line rather
+than `WROTE + VERIFIED`. `make check` asserts all five.
+
+`drop-tail` is the interesting one: it verifies clean, because the record it
+drops is one this edit never changed, so the module really does match the
+intent. That is a correct answer, not a miss.
 
 ---
 
@@ -273,6 +311,7 @@ toggle pacing) and the session controls live in visually distinct cards marked
 | `--real-timing` | interactive only: pin the virtual clock to wall-clock, so a scan takes the ~60 s it takes on the module |
 | `--bus-off` | make `PresetBus::Enabled()` false |
 | `--capture-251e PATH` / `--capture-259e PATH` | different bank hex dumps |
+| `--write-fault WHAT` | make the simulated modules mishandle a RESTORE: `none` (default), `ignore`, `drop-tail`, `flip-first`, `flip-last` — see *the write path* |
 | `--no-log` | omit the status/log lines under the frame |
 | `--stdio` | line protocol on stdin/stdout, for the browser front end |
 
@@ -364,10 +403,11 @@ the local half happens.
 Read this before trusting a green screen here for anything.
 
 * **Nothing is written to any module.** A confirmed Save runs the real guard,
-  the real diff and the real `MasterRestore` call, and then the bytes are
-  discarded. The frame border says so on every frame. The simulator can tell
-  you the write path's *decisions* are right. It cannot tell you a 251e will
-  accept the bytes.
+  the real diff and the real `MasterRestore` call, and the simulated module
+  then stores the bank so the firmware's own read-back has something honest to
+  compare against — but no hardware is touched. The frame border says so on
+  every frame. The simulator can tell you the write path's *decisions* are
+  right. It cannot tell you a 251e will accept the bytes.
 * **Nothing persists.** The file system is a `std::map` that dies with the
   process, and the EEPROM is an array. A Save screen that works here is not
   evidence that settings come back after a power cycle, and none of LittleFS's

@@ -37,6 +37,10 @@ struct SimModule {
 
 std::vector<SimModule> g_modules;
 
+// How the simulated modules treat a RESTORE. Faithful unless a test or the
+// operator asks otherwise -- see SimBusSetWriteFault.
+SimWriteFault g_write_fault = SIM_WRITE_FAITHFUL;
+
 SimModule *FindModule(uint8_t addr) {
   for (auto &m : g_modules)
     if (m.addr == addr) return &m;
@@ -54,7 +58,19 @@ bool g_xfer_restore = false;
 uint32_t g_xfer_start = 0;      // when the target starts touching the card
 uint32_t g_xfer_end = 0;        // when it stops
 uint32_t g_xfer_bytes = 0;
-uint32_t g_activity = 0;        // monotonic; what ops.card_activity() reports
+// The card's byte counters, shaped exactly like the BusCardStats pair the
+// firmware reads on hardware (see master_card_activity in PresetBus.cpp):
+// FREE-RUNNING and cumulative, one for each direction, because the master
+// takes a baseline when a job starts and works in deltas.
+//
+// This used to be a single counter that restarted at 0 for every transfer.
+// Nothing did two transfers in a row until the write path started reading its
+// own result back, so the second job's delta -- baseline 63120, counter back
+// at 0 -- came out as 0 bytes, and a good write verified as BAD. The fake was
+// wrong, not the firmware.
+uint32_t g_card_bytes_read = 0;     // the target READ our card (a RESTORE)
+uint32_t g_card_bytes_written = 0;  // the target WROTE our card (a BACKUP)
+uint32_t g_xfer_base = 0;           // that counter when this transfer began
 
 // Bench-shaped pacing for the fake modules. These are the SIMULATOR's guesses
 // about how a real module behaves, not measured values -- the firmware's own
@@ -86,7 +102,11 @@ int ops_probe_card(uint8_t) { return 0; }
 
 void ops_suppress_echo(const uint8_t *, uint8_t) {}
 
-uint32_t ops_card_activity() { return g_activity; }
+// Same choice of counter the firmware makes on hardware, and for the same
+// reason: which one moves depends on the job's direction.
+uint32_t ops_card_activity() {
+  return Bus200eMasterIsRestore() ? g_card_bytes_read : g_card_bytes_written;
+}
 
 int ops_send_frame(const uint8_t *b, uint8_t n) {
   // QUERY: [len=4][destAddr][0x22][0x1A][0xFF]
@@ -117,9 +137,36 @@ int ops_send_frame(const uint8_t *b, uint8_t n) {
     }
     const uint32_t bytes = (uint32_t)m->bank.size();
     if (restore) {
-      SimLog("RESTORE %02X: SIMULATED ONLY -- %u bytes went nowhere", mod,
-             (unsigned)bytes);
-      SimLog("  no module was written. Nothing on this bus is real.");
+      // The simulated module STORES what the master sent, because that is what
+      // a real one does -- and because the firmware now reads the bank straight
+      // back to verify it. A restore that changed nothing here would make every
+      // write in the simulator report BAD, which would be a lie about the
+      // firmware rather than a fact about the module.
+      const uint32_t rec = (bytes % kBuchla251eSlotBytes == 0)
+                               ? (uint32_t)kBuchla251eSlotBytes
+                               : (uint32_t)kBuchla259eRecordBytes;
+      switch (g_write_fault) {
+        case SIM_WRITE_IGNORE:
+          break;
+        case SIM_WRITE_DROP_TAIL:
+          memcpy(m->bank.data(), g_card, bytes - rec);
+          break;
+        case SIM_WRITE_FLIP_FIRST:
+          memcpy(m->bank.data(), g_card, bytes);
+          m->bank[0] ^= 0x01;
+          break;
+        case SIM_WRITE_FLIP_LAST:
+          memcpy(m->bank.data(), g_card, bytes);
+          m->bank[bytes - 1] ^= 0x01;
+          break;
+        case SIM_WRITE_FAITHFUL:
+        default:
+          memcpy(m->bank.data(), g_card, bytes);
+          break;
+      }
+      SimLog("RESTORE %02X: %u bytes stored (%s)", mod, (unsigned)bytes,
+             SimWriteFaultName(g_write_fault));
+      SimLog("  SIMULATED ONLY. No hardware was written.");
     } else {
       // The target writes its bank into our card image.
       memcpy(g_card, m->bank.data(), bytes);
@@ -127,6 +174,7 @@ int ops_send_frame(const uint8_t *b, uint8_t n) {
     }
     g_xfer_pending = true;
     g_xfer_restore = restore;
+    g_xfer_base = restore ? g_card_bytes_read : g_card_bytes_written;
     g_xfer_start = SimNowMs() + kXferStartMs;
     g_xfer_end = g_xfer_start + bytes / kXferBytesPerMs + 1;
     g_xfer_bytes = bytes;
@@ -193,6 +241,20 @@ bool SimBusUsingSyntheticBanks() { return g_synthetic; }
 void SimBusSetRealTiming(bool on) { g_real_timing = on; }
 bool SimBusRealTiming() { return g_real_timing; }
 
+void SimBusSetWriteFault(SimWriteFault f) { g_write_fault = f; }
+SimWriteFault SimBusWriteFault() { return g_write_fault; }
+
+const char *SimWriteFaultName(SimWriteFault f) {
+  switch (f) {
+    case SIM_WRITE_IGNORE:      return "fault: stores nothing";
+    case SIM_WRITE_DROP_TAIL:   return "fault: last record dropped";
+    case SIM_WRITE_FLIP_FIRST:  return "fault: 1 byte wrong, first slot";
+    case SIM_WRITE_FLIP_LAST:   return "fault: 1 byte wrong, last slot";
+    case SIM_WRITE_FAITHFUL:
+    default:                    return "faithful";
+  }
+}
+
 void SimBusInit(const SimBusConfig &cfg) {
   g_bus_enabled = cfg.bus_enabled;
   g_real_timing = cfg.real_timing;
@@ -246,7 +308,8 @@ void SimBusTask() {
     const uint32_t done = (now >= g_xfer_end) ? span : (now - g_xfer_start);
     const uint32_t moved = span ? (uint32_t)((uint64_t)g_xfer_bytes * done / span)
                                 : g_xfer_bytes;
-    g_activity = moved;
+    (g_xfer_restore ? g_card_bytes_read : g_card_bytes_written) =
+        g_xfer_base + moved;
     if (now >= g_xfer_end) g_xfer_pending = false;
   }
 

@@ -73,7 +73,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [T41, T41_audio, T41_audio_dbg, T40]
+        # antihem and nlm_hoc_midi are here because a change that built clean
+        # on all four T4x targets still broke both of them (96d33a89): they are
+        # the reduced builds, so they are the ones that notice a new call into
+        # code fenced behind __IMXRT1062__ or a full app set.
+        env: [T41, T41_audio, T41_audio_dbg, T40, T41_console, antihem, nlm_hoc_midi]
     steps:
       - uses: actions/checkout@v4
         with:

@@ -56,6 +56,28 @@ bool SimBusRealTiming();
 // sources AppBus200e::Controller() drains while a recording is armed.
 void SimBusInjectMidiNote(uint8_t note, uint8_t vel);
 
+// What a simulated module does with a RESTORE.
+//
+// FAITHFUL is the truth for a working module and the default: the bank the
+// master sent is what the module now holds, so a subsequent BACKUP serves it
+// back. The rest exist so the firmware's post-write read-back verification can
+// be exercised without a real module and without a real mis-write -- each one
+// is a shape a bad transfer actually takes.
+enum SimWriteFault {
+  SIM_WRITE_FAITHFUL = 0,
+  SIM_WRITE_IGNORE,        // reports done, stores nothing (the silent no-op)
+  // Stores all but the last record: the short write. Note this is only
+  // DETECTABLE when the edit was in that last record -- truncating away
+  // records the user did not change leaves the module matching the intent
+  // exactly, and the firmware is right to call that verified.
+  SIM_WRITE_DROP_TAIL,
+  SIM_WRITE_FLIP_FIRST,    // one byte wrong in the FIRST slot
+  SIM_WRITE_FLIP_LAST,     // one byte wrong in the LAST slot -- collateral
+};
+void SimBusSetWriteFault(SimWriteFault f);
+SimWriteFault SimBusWriteFault();
+const char *SimWriteFaultName(SimWriteFault f);
+
 // A one-line description of what the bus is doing, for the terminal chrome.
 std::string SimBusStatusLine();
 

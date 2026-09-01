@@ -28,6 +28,9 @@ enum Buchla200eWriteBlock : uint8_t {
   BUCHLA200E_WRITE_NO_IMAGE,      // card image gone (CardServing dropped)
   BUCHLA200E_WRITE_BUSY,          // a scan/probe/read/write is in flight
   BUCHLA200E_WRITE_NO_CHANGES,    // diff is empty; nothing to send
+  BUCHLA200E_WRITE_IMAGE_CHANGED, // image no longer the bank we read
+  BUCHLA200E_WRITE_PATCH_RANGE,   // a patch offset falls outside the slot
+  BUCHLA200E_WRITE_BUILD_FAILED,  // constructed bank != what was intended
 };
 
 // Everything the decision depends on, gathered by the caller. Deliberately
@@ -44,6 +47,16 @@ struct Buchla200eWriteContext {
   bool     image_valid;          // MasterCardImage() != NULL
   bool     master_idle;          // no scan/probe/read/write in flight
   int      changed_bytes;        // Buchla251eDiffSlot() result; <0 = overflow
+  // The card image is SHARED MUTABLE STATE: the console 'w' command patches
+  // arbitrary bytes into it, Bus200eBridge writes browser SysEx chunks into
+  // it, and any other MasterBackup overwrites it wholesale. bytes_transferred
+  // is a counter, not a fingerprint -- it cannot notice any of that. So the
+  // caller re-hashes the image at commit time and reports whether it is still
+  // byte-for-byte the bank that was read.
+  bool     image_matches_read;
+  // Every patch offset lies inside the slot being edited. A diff bug that
+  // widened the list is exactly the failure that would rewrite a neighbour.
+  bool     patches_in_range;
 };
 
 // The order matters: report the most fundamental problem first, so the user
@@ -52,5 +65,30 @@ Buchla200eWriteBlock Buchla200eCheckWrite(const Buchla200eWriteContext &ctx);
 
 // Short enough for a 128px line.
 const char *Buchla200eWriteBlockText(Buchla200eWriteBlock b);
+
+// --- bank fingerprinting ---------------------------------------------------
+// CRC-32 (reflected, poly 0xEDB88320) over a byte range. Chosen over a sum
+// because a sum cannot see a transposition, and a swapped pair of records is
+// precisely the shape a mis-seated transfer takes.
+uint32_t Buchla200eCrc32(const uint8_t *data, uint32_t len);
+
+// Two hashes of one bank in a single pass: the whole thing, and everything
+// EXCEPT a hole (the slot about to be rewritten).
+//
+// The pair is what makes a whole-bank write provable without keeping a second
+// 63,120-byte copy, which this build has nowhere to put:
+//   * `whole` taken at read time, re-taken at commit, says the shared image is
+//     still the bank we read.
+//   * `outside` taken either side of applying the patch says the other 29
+//     slots did not move -- and the edited slot is then checked byte-for-byte
+//     against a freshly encoded copy, so both halves of the bank are proven
+//     by different means.
+// hole_len == 0 means no hole, and `outside` then equals `whole`.
+struct Buchla200eBankHash {
+  uint32_t whole;
+  uint32_t outside;
+};
+Buchla200eBankHash Buchla200eHashBank(const uint8_t *bank, uint32_t bank_len,
+                                      uint32_t hole_off, uint32_t hole_len);
 
 #endif  // BUCHLA200EWRITEGUARD_H_

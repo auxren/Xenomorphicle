@@ -1,0 +1,117 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif; }
+    a { color: #b06a3b; } a:hover { color: #8a4f28; }
+    .tag { font: 700 10px/1 "JetBrains Mono", monospace; letter-spacing: .16em; text-transform: uppercase; }
+    .cmd { font: 700 13px/1.5 "JetBrains Mono", monospace; }
+  </style>
+</helmet>
+
+<div style="width: 900px; height: 860px; background: #14161a; color: #e6e9ee; padding: 40px 44px; box-sizing: border-box; display: flex; flex-direction: column; gap: 22px">
+
+  <div style="display: flex; flex-direction: column; gap: 7px">
+    <div style="font: 700 11px/1 'JetBrains Mono', monospace; letter-spacing: .28em; color: #b06a3b">ANSWERED · WHY ALL THIRTY</div>
+    <div style="font: 700 30px/1.1 'Space Grotesk', sans-serif; letter-spacing: -.015em">The bus has no per-slot data write</div>
+    <div style="font-size: 14.5px; line-height: 1.6; color: #9aa3ad; max-width: 720px">
+      Not a design decision — the protocol offers no way to send data into one
+      preset. Here is what it does offer, and the one route that might.
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 11px">
+    <div class="tag" style="color: #8b939d">What the 251e actually accepts, from its own firmware</div>
+
+    <div style="display: flex; flex-direction: column; gap: 9px">
+
+      <div style="display: flex; gap: 14px; align-items: flex-start; background: #1b1f25; border: 1px solid #2b313a; border-radius: 6px; padding: 13px 16px">
+        <div class="cmd" style="color: #cfe6ff; min-width: 96px">0x01 RECALL</div>
+        <div style="font-size: 13.5px; line-height: 1.55; color: #98a1ab">
+          Per-slot. Loads a stored preset into the module's <b style="color:#e6e9ee">live panel state</b>. Carries no data.
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 14px; align-items: flex-start; background: #1b1f25; border: 1px solid #2b313a; border-radius: 6px; padding: 13px 16px">
+        <div class="cmd" style="color: #cfe6ff; min-width: 96px">0x02 SAVE</div>
+        <div style="font-size: 13.5px; line-height: 1.55; color: #98a1ab">
+          Per-slot — but it stores <b style="color:#e6e9ee">whatever the module currently has live</b>, not anything we supply. We cannot put our sequence into it.
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 14px; align-items: flex-start; background: #1b1f25; border: 1px solid #2b313a; border-left: 3px solid #a9713a; border-radius: 6px; padding: 13px 16px">
+        <div class="cmd" style="color: #ffd7a8; min-width: 96px">0x04 / 0x05</div>
+        <div style="font-size: 13.5px; line-height: 1.55; color: #98a1ab">
+          BACKUP / RESTORE. The <b style="color:#e6e9ee">only commands that move data</b>, and they move the whole 63,120-byte bank as one continuous transfer. Not slot-addressable.
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px">
+    <div class="tag" style="color: #8b939d">So a write is read–modify–write</div>
+    <div style="display: flex; align-items: center; gap: 12px; font: 700 13px/1.4 'JetBrains Mono', monospace; flex-wrap: wrap">
+      <div style="background: #1b2a20; border: 1px solid #38553f; border-radius: 5px; padding: 9px 13px; color: #9ed4a8">read all 30</div>
+      <div style="color: #5b6470">&rarr;</div>
+      <div style="background: #2a2519; border: 1px solid #5a4d30; border-radius: 5px; padding: 9px 13px; color: #e8c98a">change 1 byte</div>
+      <div style="color: #5b6470">&rarr;</div>
+      <div style="background: #2a1e1c; border: 1px solid #5d3b34; border-radius: 5px; padding: 9px 13px; color: #e8a795">write all 30 back</div>
+    </div>
+    <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab; max-width: 800px; margin-top: 4px">
+      The other twenty-nine are rewritten with <b style="color: #e6e9ee">their own values, read seconds
+      earlier</b> — they are not erased or defaulted. So the real risk was never
+      "we overwrite presets"; it is <b style="color: #e6e9ee">"our copy of them is wrong"</b>. That is
+      exactly why the guards check freshness, the source module, and the exact
+      byte count rather than merely asking you to confirm.
+    </div>
+  </div>
+
+  <div style="background: #241c1a; border: 1px solid #5d3b34; border-radius: 6px; padding: 14px 17px">
+    <div class="tag" style="color: #e8a795">The failure that makes this concrete</div>
+    <div style="font-size: 13.5px; line-height: 1.6; color: #c9b3ac; margin-top: 7px">
+      One real read returned <b style="color: #fff">957 bytes instead of 990</b> and reported success.
+      Harmless on a read. Written back, it would have shifted every record after the
+      truncation and quietly rewritten twenty-nine presets with mis-aligned data.
+    </div>
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 9px">
+    <div class="tag" style="color: #6fae78">There may be a per-slot route — unexplored</div>
+    <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab; max-width: 800px">
+      Two handled commands, <span class="cmd" style="color:#cfe6ff">0x07</span> and
+      <span class="cmd" style="color:#cfe6ff">0x08</span>, each take a
+      <b style="color: #e6e9ee">32-bit big-endian argument</b> and have never been investigated.
+      If either sets a live parameter, the sequence becomes: set the live state,
+      then <span class="cmd" style="color:#cfe6ff">0x02 SAVE(slot)</span> — a genuine
+      single-slot write that never touches the other twenty-nine.
+    </div>
+    <div style="font-size: 13px; line-height: 1.6; color: #c8b280; margin-top: 3px">
+      Worth knowing before betting on it: on the <i>259e</i>, the equivalent parameter
+      setters turned out to be <b>miscompiled and dead code</b> — they always wrote zero
+      and were never called. The same could be true here. It needs the same
+      firmware disassembly the rest of this was built on.
+    </div>
+  </div>
+
+  <div style="margin-top: auto; font-size: 12.5px; line-height: 1.6; color: #6d7681; border-top: 1px solid #262b32; padding-top: 14px">
+    Command set decoded from the 251e's own AVR32 firmware: fourteen commands
+    handled, everything else silently dropped. Full table in
+    <span class="cmd" style="font-size: 12px">Buchla_FW/docs/251e-BUS-COMMAND-DISPATCH.md</span>.
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

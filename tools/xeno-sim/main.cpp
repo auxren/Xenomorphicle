@@ -381,6 +381,18 @@ int RunStdio() {
   return 0;
 }
 
+// Names for --write-fault. Returns <0 for an unknown one so a typo cannot
+// silently degrade into "faithful" and make a broken write look verified.
+int ParseWriteFault(const char *s) {
+  const std::string a = s ? s : "";
+  if (a == "none" || a == "faithful") return SIM_WRITE_FAITHFUL;
+  if (a == "ignore")     return SIM_WRITE_IGNORE;
+  if (a == "drop-tail")  return SIM_WRITE_DROP_TAIL;
+  if (a == "flip-first") return SIM_WRITE_FLIP_FIRST;
+  if (a == "flip-last")  return SIM_WRITE_FLIP_LAST;
+  return -1;
+}
+
 void Usage() {
   printf(
       "xeno-sim -- host simulator for the Xenomorpher's UI\n"
@@ -406,6 +418,10 @@ void Usage() {
       "  --capture-251e PATH  251e bank hex dump (default: bench capture)\n"
       "  --capture-259e PATH  259e bank hex dump (default: bench capture)\n"
       "  --no-log             omit the status/log lines under the frame\n"
+      "  --write-fault WHAT   make the simulated modules mishandle a RESTORE,\n"
+      "                       to exercise the firmware's post-write read-back:\n"
+      "                       none | ignore | drop-tail | flip-first |\n"
+      "                       flip-last  (default: none, i.e. it works)\n"
       "  --help\n"
       "\nKeys:\n%s\n"
       "\nA --keys token may be \"<button>-down\" / \"<button>-up\" (buttons are\n"
@@ -445,6 +461,7 @@ int main(int argc, char **argv) {
   bool scripted = false, dump_frames = false, show_log = true;
   bool stdio_mode = false, dump_fb = false, reset_settings = false;
   long replay_at = -1;
+  int write_fault = SIM_WRITE_FAITHFUL;
   float id_voltage = 0.10f;
   std::vector<std::string> opts;   // what a replay needs to reproduce this run
 
@@ -471,6 +488,11 @@ int main(int argc, char **argv) {
     else if (a == "--no-log") show_log = false;
     else if (a == "--capture-251e" && has_next) { cfg.capture_251e = argv[++i]; opts.push_back(a + " " + cfg.capture_251e); }
     else if (a == "--capture-259e" && has_next) { cfg.capture_259e = argv[++i]; opts.push_back(a + " " + cfg.capture_259e); }
+    else if (a == "--write-fault" && has_next) {
+      write_fault = ParseWriteFault(argv[++i]);
+      if (write_fault < 0) { fprintf(stderr, "unknown --write-fault: %s\n", argv[i]); return 2; }
+      opts.push_back(a + " " + argv[i]);
+    }
     else { fprintf(stderr, "unknown option: %s\n", a.c_str()); Usage(); return 2; }
   }
 
@@ -490,11 +512,13 @@ int main(int argc, char **argv) {
       else if (o.rfind("--app ", 0) == 0) boot_app = o.substr(6);
       else if (o.rfind("--capture-251e ", 0) == 0) cfg.capture_251e = o.substr(15);
       else if (o.rfind("--capture-259e ", 0) == 0) cfg.capture_259e = o.substr(15);
+      else if (o.rfind("--write-fault ", 0) == 0) write_fault = ParseWriteFault(o.substr(14).c_str());
     }
   }
 
   SimHostReset();
   SimSetIdVoltage(id_voltage);
+  SimBusSetWriteFault((SimWriteFault)(write_fault < 0 ? 0 : write_fault));
 
   usbMIDI.set_name("usbMIDI");
   usbHostMIDI[0].set_name("usbHostMIDI[0]");

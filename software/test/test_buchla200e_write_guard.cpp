@@ -43,6 +43,8 @@ static Buchla200eWriteContext Good() {
   c.image_valid = true;
   c.master_idle = true;
   c.changed_bytes = 5;
+  c.image_matches_read = true;
+  c.patches_in_range = true;
   return c;
 }
 
@@ -172,13 +174,157 @@ static void test_ordering_reports_the_root_cause_first() {
   CHECK(Buchla200eCheckWrite(c) == BUCHLA200E_WRITE_WRONG_MODULE);
 }
 
+// --- the shared-image checks ----------------------------------------------
+
+static void test_stale_image_blocks_the_write() {
+  printf("test_stale_image_blocks_the_write\n");
+  // The card image is shared with the console 'w' patcher and the USB bridge.
+  // Every other field here says "this is your bank, you read it, it is whole"
+  // -- and all of them are counters and flags that cannot notice a third party
+  // rewriting the bytes. Only this one looks at the bytes themselves.
+  Buchla200eWriteContext c = Good();
+  c.image_matches_read = false;
+  CHECK(Buchla200eCheckWrite(c) == BUCHLA200E_WRITE_IMAGE_CHANGED);
+}
+
+static void test_out_of_range_slot_blocks_the_write() {
+  printf("test_out_of_range_slot_blocks_the_write\n");
+  // A slot window that reaches past the bank does not fail on the wire: the
+  // transfer is whole-bank either way, so the bad bytes land on a neighbouring
+  // preset (or on whatever follows the buffer) and the module accepts them.
+  Buchla200eWriteContext c = Good();
+  c.patches_in_range = false;
+  CHECK(Buchla200eCheckWrite(c) == BUCHLA200E_WRITE_PATCH_RANGE);
+}
+
+static void test_stale_image_outranks_no_changes() {
+  printf("test_stale_image_outranks_no_changes\n");
+  // If someone else replaced the image, "no changes" is a statement about the
+  // WRONG bytes. The user must be told to re-read, not that there is nothing
+  // to do -- the latter reads as reassurance.
+  Buchla200eWriteContext c = Good();
+  c.image_matches_read = false;
+  c.changed_bytes = 0;
+  CHECK(Buchla200eCheckWrite(c) == BUCHLA200E_WRITE_IMAGE_CHANGED);
+
+  // ...and the same for an out-of-range window.
+  c = Good();
+  c.patches_in_range = false;
+  c.changed_bytes = 0;
+  CHECK(Buchla200eCheckWrite(c) == BUCHLA200E_WRITE_PATCH_RANGE);
+}
+
+static void test_short_read_outranks_the_byte_checks() {
+  printf("test_short_read_outranks_the_byte_checks\n");
+  // A truncated transfer makes the hash comparison meaningless (it is taken
+  // over bytes that were never received), so the size problem must be the one
+  // reported.
+  Buchla200eWriteContext c = Good();
+  c.bytes_transferred = 60000;
+  c.image_matches_read = false;
+  c.patches_in_range = false;
+  CHECK(Buchla200eCheckWrite(c) == BUCHLA200E_WRITE_SHORT_READ);
+}
+
+// --- fingerprinting --------------------------------------------------------
+
+static void test_crc_detects_what_a_checksum_would_miss() {
+  printf("test_crc_detects_what_a_checksum_would_miss\n");
+  // Known answer first. The two sides of every comparison in the app use the
+  // same function, so a wrong-but-consistent table would pass every other test
+  // here while quietly being a weaker code than intended. This pins it to
+  // standard CRC-32 (poly 0xEDB88320, init/final 0xFFFFFFFF).
+  CHECK(Buchla200eCrc32((const uint8_t *)"123456789", 9) == 0xCBF43926UL);
+
+  uint8_t a[64];
+  for (int i = 0; i < 64; ++i) a[i] = (uint8_t)(i * 7 + 3);
+  const uint32_t base = Buchla200eCrc32(a, 64);
+
+  // Every single-byte change is seen.
+  for (int i = 0; i < 64; ++i) {
+    uint8_t b[64];
+    memcpy(b, a, 64);
+    b[i] ^= 0x01;
+    CHECK(Buchla200eCrc32(b, 64) != base);
+  }
+
+  // A transposition -- the shape a mis-seated record transfer takes, and the
+  // exact case a byte sum cannot see.
+  uint8_t t[64];
+  memcpy(t, a, 64);
+  const uint8_t tmp = t[10];
+  t[10] = t[40];
+  t[40] = tmp;
+  CHECK(Buchla200eCrc32(t, 64) != base);
+
+  // Deterministic, and a null buffer is not silently "fine".
+  CHECK(Buchla200eCrc32(a, 64) == base);
+  CHECK(Buchla200eCrc32(nullptr, 64) == 0);
+}
+
+static void test_hole_hash_isolates_the_edited_slot() {
+  printf("test_hole_hash_isolates_the_edited_slot\n");
+  uint8_t bank[300];
+  for (int i = 0; i < 300; ++i) bank[i] = (uint8_t)(i % 251);
+
+  const uint32_t hole_off = 100, hole_len = 50;
+  const Buchla200eBankHash before =
+      Buchla200eHashBank(bank, 300, hole_off, hole_len);
+
+  // Changing every byte INSIDE the hole must leave `outside` alone and move
+  // `whole`. That pair is what lets the app prove a patch without keeping a
+  // second copy of a 63,120-byte bank.
+  for (uint32_t i = hole_off; i < hole_off + hole_len; ++i) bank[i] ^= 0xFF;
+  const Buchla200eBankHash after =
+      Buchla200eHashBank(bank, 300, hole_off, hole_len);
+  CHECK(after.outside == before.outside);
+  CHECK(after.whole != before.whole);
+
+  // One byte OUTSIDE the hole -- the "we clobbered a neighbouring preset"
+  // case -- must move `outside`. This is the check that catches a memcpy
+  // that ran long.
+  bank[hole_off + hole_len] ^= 0x01;
+  const Buchla200eBankHash spill =
+      Buchla200eHashBank(bank, 300, hole_off, hole_len);
+  CHECK(spill.outside != after.outside);
+
+  // A byte just before the hole, too: off-by-one at the low edge.
+  uint8_t b2[300];
+  for (int i = 0; i < 300; ++i) b2[i] = (uint8_t)(i % 251);
+  const Buchla200eBankHash h0 = Buchla200eHashBank(b2, 300, hole_off, hole_len);
+  b2[hole_off - 1] ^= 0x01;
+  CHECK(Buchla200eHashBank(b2, 300, hole_off, hole_len).outside != h0.outside);
+}
+
+static void test_hole_is_skipped_not_zero_filled() {
+  printf("test_hole_is_skipped_not_zero_filled\n");
+  // If the hole were fed to the CRC as zeroes, a hole whose contents happen to
+  // BE zero would hash the same as one that was skipped -- and then two
+  // different banks would agree. Skipping keeps `outside` a function of length
+  // as well as content.
+  uint8_t a[64], b[64];
+  memset(a, 0, 64);
+  memset(b, 0, 64);
+  for (int i = 0; i < 64; ++i) a[i] = b[i] = (uint8_t)i;
+  memset(a + 16, 0, 8);   // zeroes inside what will be b's hole
+
+  const Buchla200eBankHash ha = Buchla200eHashBank(a, 64, 0, 0);   // no hole
+  const Buchla200eBankHash hb = Buchla200eHashBank(b, 64, 16, 8);  // holed
+  CHECK(ha.outside != hb.outside);
+
+  // No hole means outside == whole, so the two-hash API degrades sanely.
+  CHECK(ha.outside == ha.whole);
+  CHECK(Buchla200eHashBank(nullptr, 64, 0, 0).whole == 0);
+}
+
 static void test_every_block_has_distinct_text() {
   printf("test_every_block_has_distinct_text\n");
   const Buchla200eWriteBlock all[] = {
       BUCHLA200E_WRITE_OK,        BUCHLA200E_WRITE_NO_READ,
       BUCHLA200E_WRITE_WRONG_MODULE, BUCHLA200E_WRITE_SHORT_READ,
       BUCHLA200E_WRITE_NO_IMAGE,  BUCHLA200E_WRITE_BUSY,
-      BUCHLA200E_WRITE_NO_CHANGES};
+      BUCHLA200E_WRITE_NO_CHANGES, BUCHLA200E_WRITE_IMAGE_CHANGED,
+      BUCHLA200E_WRITE_PATCH_RANGE, BUCHLA200E_WRITE_BUILD_FAILED};
   const int n = (int)(sizeof(all) / sizeof(all[0]));
   for (int i = 0; i < n; ++i) {
     const char *a = Buchla200eWriteBlockText(all[i]);
@@ -203,6 +349,13 @@ int main() {
   test_no_changes_is_refused_not_permitted();
   test_diff_overflow_never_reads_as_no_changes();
   test_ordering_reports_the_root_cause_first();
+  test_stale_image_blocks_the_write();
+  test_out_of_range_slot_blocks_the_write();
+  test_stale_image_outranks_no_changes();
+  test_short_read_outranks_the_byte_checks();
+  test_crc_detects_what_a_checksum_would_miss();
+  test_hole_hash_isolates_the_edited_slot();
+  test_hole_is_skipped_not_zero_filled();
   test_every_block_has_distinct_text();
 
   printf("\ntest_buchla200e_write_guard: %d checks, %d failures\n", checks,

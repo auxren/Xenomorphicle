@@ -1,0 +1,103 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif; }
+    a { color: #b06a3b; } a:hover { color: #8a4f28; }
+    .oled { background: #05070a; border-radius: 4px; padding: 14px 16px; box-shadow: inset 0 0 0 1px #333a43; }
+    .oled pre { margin: 0; font: 700 16px/1.55 "JetBrains Mono", monospace; color: #cfe6ff; letter-spacing: .055em; white-space: pre; }
+    .tag { font: 700 10px/1 "JetBrains Mono", monospace; letter-spacing: .16em; text-transform: uppercase; }
+  </style>
+</helmet>
+
+<div style="width: 900px; height: 760px; background: #14161a; color: #e6e9ee; padding: 40px 44px; box-sizing: border-box; display: flex; flex-direction: column; gap: 24px">
+
+  <div style="display: flex; flex-direction: column; gap: 7px">
+    <div style="font: 700 11px/1 'JetBrains Mono', monospace; letter-spacing: .28em; color: #b06a3b">PROPOSAL 02</div>
+    <div style="font: 700 30px/1.1 'Space Grotesk', sans-serif; letter-spacing: -.015em">Say why, before the press</div>
+    <div style="font-size: 14.5px; line-height: 1.6; color: #9aa3ad; max-width: 700px">
+      The action row already knows which actions can't run. It just waits until you
+      press one to admit it.
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 26px">
+
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div class="tag" style="color: #8b939d">Now</div>
+      <div class="oled">
+        <pre>~251 A @5C   Slot 10
+Seq A  end@16  ^2.4V
+&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;
+NO DATA
+&gt;Read Edit Gen Rec</pre>
+      </div>
+      <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab">
+        All four actions look equally available. Edit, Gen and Rec need a bank in
+        memory; Save needs a completed read of <i>this</i> module. Press one and it
+        tells you — which is how “I tried to read but it didn't read” started.
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div class="tag" style="color: #6fae78">Proposed</div>
+      <div class="oled">
+        <pre>~251 A @5C   Slot 10
+Seq A  end@16  ^2.4V
+&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;
+NO DATA - Read first
+&gt;Read ·Edit ·Gen ·Rec</pre>
+      </div>
+      <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab">
+        A leading dot marks an action that can't run yet, and the state line carries
+        the reason and the remedy in the same breath. Nothing moves, nothing is
+        added — the row is the same 21 characters.
+      </div>
+    </div>
+
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 12px">
+    <div class="tag" style="color: #8b939d">The state line does the work</div>
+    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px">
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-radius: 6px; padding: 13px 15px">
+        <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; color: #cfe6ff">NO DATA - Read first</div>
+        <div style="font-size: 12.5px; line-height: 1.55; color: #8b939d; margin-top: 7px">Nothing loaded. Says the fix, not just the fact.</div>
+      </div>
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-radius: 6px; padding: 13px 15px">
+        <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; color: #cfe6ff">LIVE 8s ago  wire 9</div>
+        <div style="font-size: 12.5px; line-height: 1.55; color: #8b939d; margin-top: 7px">Matches the module. Age matters — banks go stale.</div>
+      </div>
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-radius: 6px; padding: 13px 15px">
+        <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; color: #ffd7a8">EDITED* - not saved</div>
+        <div style="font-size: 12.5px; line-height: 1.55; color: #8b939d; margin-top: 7px">Local changes. The module still holds the old values.</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 9px">
+    <div class="tag" style="color: #c8b280">Why this one matters beyond the bug</div>
+    <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab; max-width: 780px">
+      The 251e's own front panel does not repaint when we write to it — confirmed
+      three ways. So this screen is the only honest account of what the module
+      holds. A state line that distinguishes <b style="color:#e6e9ee">live</b>,
+      <b style="color:#e6e9ee">edited</b> and <b style="color:#e6e9ee">nothing loaded</b>
+      is not decoration; it is the only place that truth exists.
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

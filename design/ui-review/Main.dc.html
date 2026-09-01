@@ -1,0 +1,143 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif; }
+    a { color: #b06a3b; } a:hover { color: #8a4f28; }
+  </style>
+</helmet>
+
+<div style="width: 880px; height: 1180px; background: #14161a; color: #e6e9ee; padding: 44px 48px; box-sizing: border-box; display: flex; flex-direction: column; gap: 30px">
+
+  <div style="display: flex; flex-direction: column; gap: 10px">
+    <div style="font: 700 11px/1 'JetBrains Mono', monospace; letter-spacing: .3em; color: #7d8794; text-transform: uppercase">Xenomorpher · 200e app</div>
+    <div style="font: 700 40px/1.05 'Space Grotesk', sans-serif; letter-spacing: -.02em">Interface review</div>
+    <div style="font-size: 15px; line-height: 1.6; color: #9aa3ad; max-width: 640px">
+      Findings from building and bench-testing the 200e app, plus what I would
+      change. Every defect below was observed — on hardware or in the simulator —
+      not inferred.
+    </div>
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 8px">
+    <div style="font: 700 12px/1 'JetBrains Mono', monospace; letter-spacing: .18em; color: #7d8794; text-transform: uppercase">The constraint everything answers to</div>
+    <div style="display: flex; align-items: center; gap: 26px; margin-top: 6px">
+      <div style="background: #05070a; border: 1px solid #2f363f; border-radius: 4px; padding: 12px 14px; box-shadow: inset 0 0 0 1px #333a43">
+        <pre style="margin: 0; font: 700 15px/1.5 'JetBrains Mono', monospace; color: #cfe6ff; letter-spacing: .06em">█████████████████████
+█████████████████████
+█████████████████████
+█████████████████████
+█████████████████████
+█████████████████████
+█████████████████████
+█████████████████████</pre>
+      </div>
+      <div style="font-size: 15px; line-height: 1.65; color: #c3cad3; max-width: 420px">
+        <b style="color: #fff">21 characters across, 8 rows down.</b> A 128×64 OLED
+        at a 6×8 font. Every screen in this review lives inside that box — which is
+        why most of the fixes below are about <i>what earns a row</i>, not about
+        adding anything.
+      </div>
+    </div>
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 14px">
+    <div style="font: 700 12px/1 'JetBrains Mono', monospace; letter-spacing: .18em; color: #7d8794; text-transform: uppercase">Four defects found, and the pattern behind each</div>
+
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px">
+
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-left: 3px solid #4f8f57; border-radius: 6px; padding: 16px 18px">
+        <div style="font: 700 11px/1 'JetBrains Mono', monospace; color: #6fae78; letter-spacing: .1em">FIXED</div>
+        <div style="font-weight: 600; font-size: 16px; margin: 8px 0 6px">Read did nothing, forever</div>
+        <div style="font-size: 13.5px; line-height: 1.6; color: #98a1ab">
+          Three refusal paths returned silently, and a stuck state had no timeout.
+          One stray gesture killed the button for the session.
+        </div>
+        <div style="font-size: 13px; line-height: 1.5; color: #c8b280; margin-top: 10px">
+          <b>Pattern:</b> a control that can refuse must say why.
+        </div>
+      </div>
+
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-left: 3px solid #4f8f57; border-radius: 6px; padding: 16px 18px">
+        <div style="font: 700 11px/1 'JetBrains Mono', monospace; color: #6fae78; letter-spacing: .1em">FIXED</div>
+        <div style="font-weight: 600; font-size: 16px; margin: 8px 0 6px">The way in fired a recall</div>
+        <div style="font-size: 13.5px; line-height: 1.6; color: #98a1ab">
+          The overlay opens on a both-encoder hold, so RECALL's timer began already
+          held and fired 250 ms later — bus-wide.
+        </div>
+        <div style="font-size: 13px; line-height: 1.5; color: #c8b280; margin-top: 10px">
+          <b>Pattern:</b> an entry gesture must not survive into the screen it opens.
+        </div>
+      </div>
+
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-left: 3px solid #4f8f57; border-radius: 6px; padding: 16px 18px">
+        <div style="font: 700 11px/1 'JetBrains Mono', monospace; color: #6fae78; letter-spacing: .1em">FIXED</div>
+        <div style="font-weight: 600; font-size: 16px; margin: 8px 0 6px">The scan froze the instrument</div>
+        <div style="font-size: 13.5px; line-height: 1.6; color: #98a1ab">
+          Not the scan — its logging. Serial output blocks up to 120 ms per line
+          when the host isn't reading. 61 lines, 57 ms stalls, dead UI.
+        </div>
+        <div style="font-size: 13px; line-height: 1.5; color: #c8b280; margin-top: 10px">
+          <b>Pattern:</b> diagnostics must not cost more than the work.
+        </div>
+      </div>
+
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-left: 3px solid #a9713a; border-radius: 6px; padding: 16px 18px">
+        <div style="font: 700 11px/1 'JetBrains Mono', monospace; color: #cf9153; letter-spacing: .1em">OPEN</div>
+        <div style="font-weight: 600; font-size: 16px; margin: 8px 0 6px">Modules are addresses, not names</div>
+        <div style="font-size: 13.5px; line-height: 1.6; color: #98a1ab">
+          You dial hex to choose a module, and a scan is part of the everyday path
+          rather than setup.
+        </div>
+        <div style="font-size: 13px; line-height: 1.5; color: #c8b280; margin-top: 10px">
+          <b>Pattern:</b> the instrument should remember what's in the case.
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 12px">
+    <div style="font: 700 12px/1 'JetBrains Mono', monospace; letter-spacing: .18em; color: #7d8794; text-transform: uppercase">Six artboards: two whole-instrument, four on the 200e app</div>
+    <div style="display: flex; flex-direction: column; gap: 11px; font-size: 14.5px; line-height: 1.6">
+      <div style="display: flex; gap: 14px">
+        <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; color: #b06a3b; min-width: 26px">01</div>
+        <div style="color: #c3cad3"><b style="color: #fff">Open on your case, not on an address.</b> A remembered list of modules by name. Scan becomes setup you run when hardware changes.</div>
+      </div>
+      <div style="display: flex; gap: 14px">
+        <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; color: #b06a3b; min-width: 26px">02</div>
+        <div style="color: #c3cad3"><b style="color: #fff">Say why an action is unavailable, in place.</b> The action row already knows; it just doesn't tell you until you press.</div>
+      </div>
+      <div style="display: flex; gap: 14px">
+        <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; color: #b06a3b; min-width: 26px">03</div>
+        <div style="color: #c3cad3"><b style="color: #fff">Make the write's blast radius the headline.</b> A save rewrites all 30 presets. That fact currently shares a line with everything else.</div>
+      </div>
+      <div style="display: flex; gap: 14px">
+        <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; color: #b06a3b; min-width: 26px">04</div>
+        <div style="color: #c3cad3"><b style="color: #fff">Make release-first a global rule.</b> Every screen opened by a chord can be entered with its own buttons still held. One of those already fired a bus-wide recall.</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-top: auto; padding-top: 18px; border-top: 1px solid #262b32; font-size: 12.5px; line-height: 1.6; color: #6d7681">
+    Screens are drawn at the real 21×8 character grid. Values shown are from the
+    actual captured banks on Oren's bus — 251e at 0x5C, 259e at 0x28.
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>
