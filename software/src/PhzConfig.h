@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __IMXRT1062__
 #include <LittleFS.h>
@@ -35,6 +36,20 @@ namespace PhzConfig {
   bool save_filtered(const char* filename, FS &fs,
                      bool (*pred)(KEY), KEY (*remap)(KEY));
 
+  // The same bytes save_config would write, into RAM (optionally filtered
+  // and remapped like save_filtered), and back. The preset engine packs
+  // config sections into its slot container straight from RAM so no scratch
+  // file -- and no interrupts-off block erase -- stands between the map and
+  // the container. serialize returns bytes used, 0 if cap is too small.
+  size_t serialize(uint8_t *buf, size_t cap,
+                   bool (*pred)(KEY) = nullptr, KEY (*remap)(KEY) = nullptr);
+  bool deserialize(const uint8_t *buf, size_t len);
+
+  // True when the map differs from the file it was last loaded from or saved
+  // to. save_config skips the write when it is false and the target is that
+  // same file.
+  bool unsaved_changes();
+
   void setData(KEY key, VALUE value);
   bool getData(KEY key, VALUE &value);
   void deleteData(KEY key);
@@ -64,6 +79,10 @@ namespace PhzConfig {
   inline bool save_config(const char* = nullptr) { return false; }
   inline void clear_config() {}
   inline bool backup_config() { return false; }
+
+  inline size_t serialize(uint8_t *, size_t, bool (*)(KEY) = nullptr, KEY (*)(KEY) = nullptr) { return 0; }
+  inline bool deserialize(const uint8_t *, size_t) { return false; }
+  inline bool unsaved_changes() { return false; }
 
   inline void setValue(KEY, VALUE) {}
   inline bool getValue(KEY, VALUE &) { return false; }

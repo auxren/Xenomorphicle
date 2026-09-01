@@ -28,10 +28,14 @@
 //
 // Calibration is per-module and never in a preset.
 //
-// RequestSave/RequestRecall are ISR-safe (volatile, last-wins); the work runs
-// from Process() in loop() context. Recall applies LIVE: validate, stop the
-// app ISR, restore chunks + globals, switch app, RESUME under
-// AudioNoInterrupts. See docs in the plan / bring-up notes.
+// RequestSave/RequestRecall queue work in WIRE ORDER; Process() drains the
+// queue from loop() context. They are loop-context only (the bus parser runs
+// in PresetBus::Task, not the slave ISR), so no lock is involved. Order
+// matters because a save stalls loop() for seconds and the bus keeps
+// delivering: SAVE 29, RECALL 9, SAVE 5 arriving during one stall must leave
+// slot 5 holding what was live AFTER recall 9, not before it. Recall applies
+// LIVE: validate, stop the app ISR, restore chunks + globals, switch app,
+// RESUME under AudioNoInterrupts. See docs in the plan / bring-up notes.
 // ---------------------------------------------------------------------------
 #include <stdint.h>
 
@@ -45,9 +49,13 @@ static constexpr int kNumSlots = 30;
 void Init();                  // call after app_switcher.Init (boot)
 void Process();               // call from loop(); runs pending save/recall
 
-// ISR-safe triggers (from the preset bus or anywhere)
-void RequestSave(uint8_t slot);
-void RequestRecall(uint8_t slot);
+// Queue a save/recall in arrival order; loop() context only (bus parser,
+// console, boot). A recall queued directly behind another recall replaces it
+// (only the last one would be audible anyway); saves are never coalesced
+// away. Returns false only when the queue is full, which is counted.
+bool RequestSave(uint8_t slot);
+bool RequestRecall(uint8_t slot);
+uint32_t RequestsDropped();   // queue-full refusals since boot
 
 // Direct operations; loop() context only.
 bool SaveSlot(uint8_t slot);
@@ -115,8 +123,9 @@ int CardSlotCount();                     // containers on the card; -1 = no card
 static constexpr int kNumSlots = 30;
 inline void Init() {}
 inline void Process() {}
-inline void RequestSave(uint8_t) {}
-inline void RequestRecall(uint8_t) {}
+inline bool RequestSave(uint8_t) { return false; }
+inline bool RequestRecall(uint8_t) { return false; }
+inline uint32_t RequestsDropped() { return 0; }
 inline bool SaveSlot(uint8_t) { return false; }
 inline bool RecallSlot(uint8_t) { return false; }
 inline int ConsumeQuadrantsRecallHint() { return -1; }

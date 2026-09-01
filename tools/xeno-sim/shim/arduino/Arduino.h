@@ -282,6 +282,11 @@ static inline void extmem_free(void *p) { free(p); }
 #ifndef F_CPU
 #define F_CPU 600000000
 #endif
+// The core's live clock rate (set_arm_clock can change it); the preset
+// engine divides DWT cycles by it. A constant here, like F_CPU.
+#ifndef F_CPU_ACTUAL
+#define F_CPU_ACTUAL F_CPU
+#endif
 extern uint32_t SIM_ARM_DWT_CYCCNT;
 extern uint32_t SIM_ARM_DWT_CTRL;
 extern uint32_t SIM_ARM_DEMCR;

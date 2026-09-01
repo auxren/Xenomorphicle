@@ -5,6 +5,7 @@
  * Supercedes previous EEPROM mechanism
  */
 #ifdef __IMXRT1062__
+#include <string.h>
 #include "PhzConfig.h"
 #include "HSUtils.h"
 #include "util/util_misc.h"
@@ -20,6 +21,38 @@ LittleFS_Program myfs;
 File dataFile;
 ConfigMap cfg_store;
 ConfigMap data_store;
+
+// Change tracking, so a save that would rewrite a file with its own contents
+// can be skipped. Every flash write is expensive here in a way that is easy
+// to miss: LittleFS_Program's program and erase run with interrupts OFF
+// (cores/teensy4/eeprom.c), and a new file costs a 64 KB block erase --
+// ~250 ms on the bench, during which audio, USB and the preset bus all
+// stall. Captain's FLUSH handler and Quadrants' preset autosave both write
+// files whose contents have usually not changed; before this they paid the
+// full price every time.
+//
+// The map is clean when it holds exactly what `map_source` on `map_source_fs`
+// holds: right after a successful load_config from it or save_config to it,
+// until a setValue/setData actually changes a value, a delete removes a key,
+// or clear_config runs. Filenames are copied because callers build them in
+// stack buffers (Quadrants' BANK_NNN.DAT).
+static bool map_dirty = true;
+static char map_source[16] = "";
+static FS *map_source_fs = nullptr;
+
+static void mark_clean(const char *filename, FS &fs) {
+  strncpy(map_source, filename, sizeof(map_source) - 1);
+  map_source[sizeof(map_source) - 1] = 0;
+  map_source_fs = &fs;
+  map_dirty = false;
+}
+static void mark_dirty() {
+  map_dirty = true;
+}
+static bool is_clean_copy_of(const char *filename, FS &fs) {
+  return !map_dirty && map_source_fs == &fs && map_source[0] &&
+         strcmp(map_source, filename) == 0;
+}
 
 // Specify size to use of onboard Teensy Program Flash chip.
 // the maximum flash available for LittleFS is 960 blocks of 1024 bytes
@@ -69,11 +102,19 @@ void Init()
 void clear_config() {
   cfg_store.clear();
   data_store.clear();
+  mark_dirty();
 }
 
 void setValue(KEY key, VALUE value)
 {
-  cfg_store[key] = value;
+  auto it = cfg_store.find(key);
+  if (it != cfg_store.end()) {
+    if (it->second == value) return;   // no change, map stays clean
+    it->second = value;
+  } else {
+    cfg_store.emplace(key, value);
+  }
+  mark_dirty();
 }
 
 bool getValue(KEY key, VALUE &value)
@@ -87,11 +128,18 @@ bool getValue(KEY key, VALUE &value)
 }
 
 void deleteKey(KEY key) {
-  cfg_store.erase(key);
+  if (cfg_store.erase(key)) mark_dirty();
 }
 
 void setData(KEY key, VALUE value) {
-  data_store[key] = value;
+  auto it = data_store.find(key);
+  if (it != data_store.end()) {
+    if (it->second == value) return;
+    it->second = value;
+  } else {
+    data_store.emplace(key, value);
+  }
+  mark_dirty();
 }
 bool getData(KEY key, VALUE &value) {
   auto thing = data_store.find(key);
@@ -102,27 +150,44 @@ bool getData(KEY key, VALUE &value) {
   return false;
 }
 void deleteData(KEY key) {
-  data_store.erase(key);
+  if (data_store.erase(key)) mark_dirty();
+}
+
+bool unsaved_changes() { return map_dirty; }
+
+// Header + records for one chunk, written STRICTLY SEQUENTIALLY.
+//
+// This used to write a placeholder header, the records, then seek back to
+// backfill the count and checksum. On littlefs a write behind the end of an
+// open file is copy-on-write: the block is relocated -- a fresh 64 KB erase
+// -- and everything after the write position is copied over byte by byte
+// through the 128-byte cache (lfs_file_flush). Two chunks meant two extra
+// erases per save on top of the one the file itself costs, which is how a
+// 2 KB config took a second to write. The count and checksum are cheap to
+// know up front: one pass over the map first.
+static void chunk_header(uint8_t *h, const char *sig, ConfigMap &store) {
+  uint16_t record_count = 0;
+  uint64_t checksum = 0;
+  for (auto &i : store) {
+    checksum ^= i.second;
+    record_count++;
+  }
+  h[0] = sig[0]; h[1] = sig[1];
+  h[2] = record_count & 0xFF; h[3] = record_count >> 8;
+  for (int i = 0; i < 8; ++i) h[4 + i] = (uint8_t)(checksum >> (8 * i));
 }
 
 size_t save_chunk(const size_t offset, const char* sig, ConfigMap &store) {
-  size_t record_count = 0;
+  uint8_t header_buf[HEADER_SIZE];
+  chunk_header(header_buf, sig, store);
+  if (dataFile.write(header_buf, HEADER_SIZE) != HEADER_SIZE) {
+    SERIAL_PRINTLN("!! ERROR while writing file header !!\n");
+    return 0;
+  }
+
   size_t bytes_written = 0;
-
-  // 12-byte header:
-  char header_buf[HEADER_SIZE] = {
-    sig[0], sig[1], // signature
-    0, 0, // record count
-    0, 0, 0, 0, 0, 0, 0, 0, // checksum
-  };
-
-  dataFile.seek(offset);
-  dataFile.write(header_buf, HEADER_SIZE);
-
-  uint64_t checksum = 0;
   for (auto &i : store)
   {
-    checksum ^= i.second;
     int result = dataFile.write((const uint8_t*)&i.first, sizeof(i.first)) +
                 dataFile.write((const uint8_t*)&i.second, sizeof(i.second));
     if (result != (sizeof(i.first) + sizeof(i.second))) {
@@ -131,25 +196,106 @@ size_t save_chunk(const size_t offset, const char* sig, ConfigMap &store) {
       return 0;
     }
     bytes_written += result;
-
-    record_count += 1;
   }
 
-  if (dataFile.seek(offset + 2)) {
-    dataFile.write((const uint8_t*)&record_count, 2);
-    dataFile.write((const uint8_t*)&checksum, 8);
-  }
-
-  SERIAL_PRINTLN("Records written = %u\n", record_count);
   SERIAL_PRINTLN("Bytes written = %u\n", bytes_written);
-  SERIAL_PRINTLN("Checksum: %lx%lx\n",
-      (uint32_t)checksum, (uint32_t)(checksum >> 32));
-
   return offset + HEADER_SIZE + bytes_written;
 }
+
+// Same bytes save_chunk writes, into RAM. Returns the bytes used, or 0 when
+// `cap` is too small (nothing partial is left behind for the caller to trust).
+static size_t chunk_to_mem(uint8_t *buf, size_t cap, const char *sig,
+                           ConfigMap &store) {
+  const size_t need = HEADER_SIZE + store.size() * (sizeof(KEY) + sizeof(VALUE));
+  if (need > cap) return 0;
+  chunk_header(buf, sig, store);
+  uint8_t *p = buf + HEADER_SIZE;
+  for (auto &i : store) {
+    memcpy(p, &i.first, sizeof(i.first));   p += sizeof(i.first);
+    memcpy(p, &i.second, sizeof(i.second)); p += sizeof(i.second);
+  }
+  return need;
+}
+
+FLASHMEM size_t serialize(uint8_t *buf, size_t cap,
+                          bool (*pred)(KEY), KEY (*remap)(KEY)) {
+  ConfigMap *cfg = &cfg_store, *data = &data_store;
+  ConfigMap cfg_out, data_out;
+  if (pred || remap) {
+    for (auto &kv : cfg_store) {
+      if (pred && !pred(kv.first)) continue;
+      cfg_out[remap ? remap(kv.first) : kv.first] = kv.second;
+    }
+    for (auto &kv : data_store) {
+      if (pred && !pred(kv.first)) continue;
+      data_out[remap ? remap(kv.first) : kv.first] = kv.second;
+    }
+    cfg = &cfg_out; data = &data_out;
+  }
+  const size_t a = chunk_to_mem(buf, cap, "PZ", *cfg);
+  if (!a) return 0;
+  const size_t b = chunk_to_mem(buf + a, cap - a, "PX", *data);
+  if (!b) return 0;
+  return a + b;
+}
+
+// One chunk out of a RAM image; advances *pos. Validation matches
+// load_chunk: signature, record count, xor-of-values checksum.
+static bool chunk_from_mem(const uint8_t *buf, size_t len, size_t *pos,
+                           const char *sig, ConfigMap &store) {
+  if (*pos + HEADER_SIZE > len) return false;
+  const uint8_t *h = buf + *pos;
+  if (h[0] != sig[0] || h[1] != sig[1]) return false;
+  const size_t count = (size_t)h[2] | (size_t)h[3] << 8;
+  uint64_t expected = 0;
+  for (int i = 0; i < 8; ++i) expected |= (uint64_t)h[4 + i] << (8 * i);
+  const size_t body = count * (sizeof(KEY) + sizeof(VALUE));
+  if (*pos + HEADER_SIZE + body > len) return false;
+  const uint8_t *p = h + HEADER_SIZE;
+  uint64_t computed = 0;
+  for (size_t i = 0; i < count; ++i) {
+    KEY k; VALUE v;
+    memcpy(&k, p, sizeof(k)); p += sizeof(k);
+    memcpy(&v, p, sizeof(v)); p += sizeof(v);
+    store.insert_or_assign(k, v);
+    computed ^= v;
+  }
+  *pos += HEADER_SIZE + body;
+  return computed == expected;
+}
+
+FLASHMEM bool deserialize(const uint8_t *buf, size_t len) {
+  cfg_store.clear();
+  data_store.clear();
+  mark_dirty();   // the map is nobody's file until it is saved somewhere
+  size_t pos = 0;
+  bool any = false;
+  while (pos < len) {
+    const size_t before = pos;
+    const bool has_config = chunk_from_mem(buf, len, &pos, "PZ", cfg_store);
+    const bool has_data = chunk_from_mem(buf, len, &pos, "PX", data_store);
+    if (!has_config && !has_data) {
+      SERIAL_PRINTLN("PhzConfig: bad image at %u\n", (unsigned)before);
+      return false;
+    }
+    any = true;
+  }
+  return any;
+}
+
 bool save_config(const char* filename, FS &fs)
 {
     SERIAL_PRINTLN("\nSaving Config: %s\n", filename);
+
+    // Nothing changed since this exact file was loaded or written: the bytes
+    // on flash already ARE the map. Skipping is what makes a preset-bus
+    // save's Captain FLUSH, or a Quadrants autosave with no edits, free
+    // instead of a second-long, interrupts-off block erase. The exists()
+    // check keeps a deleted file honest.
+    if (is_clean_copy_of(filename, fs) && fs.exists(filename)) {
+      SERIAL_PRINTLN("PhzConfig: %s unchanged, not rewritten\n", filename);
+      return true;
+    }
 
     const char* const TEMPFILE = "PEWPEW.TMP";
     bool success = true;
@@ -203,6 +349,7 @@ bool save_config(const char* filename, FS &fs)
         HS::PokePopup(HS::MESSAGE_POPUP, "TempFile ERR !!");
     }
 
+    if (success) mark_clean(filename, fs);
     return success;
 }
 
@@ -321,6 +468,7 @@ bool load_config(const char* filename, FS &fs)
 {
   cfg_store.clear();
   data_store.clear();
+  mark_dirty();
 
   SERIAL_PRINTLN("\nLoading Config: %s\n", filename);
   dataFile = fs.open(filename);
@@ -353,6 +501,7 @@ bool load_config(const char* filename, FS &fs)
   } while (dataFile.available());
 
   dataFile.close();
+  mark_clean(filename, fs);
   return true; // everything was fine!
 }
 

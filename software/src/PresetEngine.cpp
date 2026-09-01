@@ -152,8 +152,28 @@ static constexpr uint32_t kLfsBlockBytes = 32768;
 static constexpr uint32_t kSaveBlocksNeeded = 3;
 
 // ---- state -----------------------------------------------------------------
-static volatile int8_t pending_save = -1;    // last-wins
-static volatile int8_t pending_recall = -1;
+
+// Request queue, drained in arrival order by Process().
+//
+// This replaced a pair of last-wins slots (pending_save / pending_recall),
+// which the bench caught reordering the bus: a save stalls loop() for
+// seconds while the bus keeps delivering, so SAVE 29 / RECALL 9 / SAVE 5
+// arriving in one stall ran as save 29, save 5, recall 9 -- slot 5 got the
+// state from BEFORE the recall, and a second SAVE in the same window would
+// have replaced the first outright. A preset manager's "save what you hear
+// after this recall" is exactly that sequence.
+//
+// Sized for a bus, not a firehose: one entry per command a manager could
+// plausibly send in the ~3 s a save takes. When it is full the newest request
+// is refused and counted rather than an older one being dropped, because the
+// older one is the one the sender has already moved on from.
+enum ReqOp : uint8_t { REQ_SAVE, REQ_RECALL, REQ_BOOT_RECALL };
+struct Request { uint8_t op; uint8_t slot; };
+static constexpr int kReqQueue = 8;
+static Request req_q[kReqQueue];
+static uint8_t req_head = 0, req_count = 0;
+static uint32_t req_dropped = 0;
+
 static int8_t last_slot = -1;
 static bool last_was_save = false;
 static uint32_t cur_slot_dirty_ms = 0;   // 0 = clean
@@ -173,10 +193,47 @@ static bool skip_captain_restore = false;  // boot recall only
 
 static DMAMEM AppData capture;               // RAM capture buffer (~4KB)
 
+// RAM staging for the PhzConfig-format sections ('G' globals+manifest and
+// 'B' bank extract at save; 'G' at recall). Sized well above what either
+// holds -- GLOBALS.CFG is ~2.1 KB on the bench and a bank extract is one
+// preset plus the bank globals, a few KB -- because overflow fails the save
+// loudly rather than quietly, and OCRAM has the room.
+static constexpr uint32_t kSecBufBytes = 16384;
+static DMAMEM uint8_t sec_buf[kSecBufBytes];
+
 // active Quadrants preset during bank extraction (predicate/remap context)
 static uint8_t extract_preset;
 
 // ---- helpers ---------------------------------------------------------------
+
+// A wall clock that keeps running while LittleFS writes flash.
+//
+// millis() does not. Every program and erase on the program flash goes
+// through eepromemu_flash_write/erase_64K_block (cores/teensy4/eeprom.c),
+// which hold __disable_irq() for the whole FlexSPI operation because code is
+// executing from that same chip; systick is masked with everything else. The
+// bench caught the gap: a save the module reported as 188 ms took 2748 ms by
+// the host's clock, and a recall reported at 40 ms took 630 ms. The report
+// was not merely imprecise, it was measuring exactly the part of the work
+// that was NOT the problem.
+//
+// The Cortex-M7 DWT cycle counter (enabled at startup) is unaffected by
+// PRIMASK. It wraps every ~7 s at 600 MHz, so it is read as laps -- each one
+// shorter than any single flash op can be (a 64 KB block erase is 2 s worst
+// case) -- and summed in 64 bits.
+struct WallClock {
+  uint32_t last;
+  uint64_t cycles;
+  void start() { last = ARM_DWT_CYCCNT; cycles = 0; }
+  uint32_t lap_ms() {
+    const uint32_t now = ARM_DWT_CYCCNT;
+    const uint32_t d = now - last;
+    last = now;
+    cycles += d;
+    return d / (F_CPU_ACTUAL / 1000);
+  }
+  uint32_t total_ms() const { return (uint32_t)(cycles / (F_CPU_ACTUAL / 1000)); }
+};
 
 // Where preset containers live: ALWAYS internal flash, card or no card.
 //
@@ -294,14 +351,21 @@ FLASHMEM static bool read_appdata_file(uint8_t slot) {
 //   0x10  SectionEntry[kMaxSections]          6 x 12 = 72 bytes
 //   0x58  section payloads, in write order
 //
-// The directory is fixed-size and written LAST (seek back to 0), because
-// section lengths are not known until their bytes are on disk -- the same
-// backfill trick PhzConfig::save_chunk already uses for its record count.
+// The file is written in ONE forward pass: every section is planned first
+// (source, length, checksum -- files are read once for that, RAM images are
+// summed), then header, directory and payloads go down in order. It used to
+// reserve the directory and seek back to backfill it once the lengths were
+// known. On littlefs a write behind the end of an open file relocates the
+// block -- a fresh 64 KB erase with interrupts off, then a byte-by-byte copy
+// of everything after the write -- so that one backfill cost as much as the
+// whole container. Reads are cheap here (memory-mapped flash); erases are
+// what a save is made of, and the plan/write split gets it down to the one
+// the container's own block needs.
 //
-// Sections are opaque byte ranges, so this deliberately needs no changes to
-// PhzConfig: a PhzConfig-format section is simply the bytes that
-// save_config() would have written, appended here and extracted to a scratch
-// file on the way back out.
+// Sections are opaque byte ranges: a PhzConfig-format section is exactly
+// what save_config() would have written, taken from PhzConfig::serialize()
+// in RAM and handed back to deserialize() at recall. No scratch file in
+// either direction.
 // ---------------------------------------------------------------------------
 
 static constexpr uint32_t kContainerFourcc = 0x53425058UL;  // 'X','P','B','S'
@@ -335,42 +399,38 @@ FLASHMEM static void container_name(char *buf, uint8_t slot) {
   buf[5] = '.'; buf[6] = 'P'; buf[7] = 'B'; buf[8] = 'S'; buf[9] = 0;
 }
 
+// A planned section: where its bytes come from when the container is
+// written. Files are re-read at write time (they were read once already to
+// measure and checksum them); RAM sections may be two pieces so the app-data
+// section can carry its AppDataHeader without a copy.
+struct SectionSrc {
+  FS *fs;
+  const char *path;
+  const uint8_t *mem, *mem2;
+  uint32_t len, len2;
+};
+
 struct ContainerWriter {
-  File f;
   SectionEntry sec[kMaxSections];
+  SectionSrc src[kMaxSections];
   int n;
-  uint32_t pos;
+  uint32_t pos;     // next payload offset
   bool ok;
 };
 
-FLASHMEM static bool cw_begin(ContainerWriter &w, const char *tmp) {
+FLASHMEM static void cw_begin(ContainerWriter &w) {
   w.n = 0;
   w.pos = kPayloadStart;
-  w.ok = false;
-  preset_fs().remove(tmp);
-  w.f = preset_fs().open(tmp, FILE_WRITE_BEGIN);
-  if (!w.f) return false;
-  // Reserve the directory by WRITING placeholder bytes, not by seeking past
-  // them: seeking beyond EOF on a freshly created file is not portable (the
-  // host FS refuses it outright), and a hole would leave the directory
-  // undefined if the commit never ran. cw_commit seeks back over these.
-  const uint8_t zero[kPayloadStart] = { 0 };
-  if (w.f.write(zero, sizeof(zero)) != sizeof(zero)) {
-    w.f.close();
-    preset_fs().remove(tmp);
-    return false;
-  }
   w.ok = true;
-  return true;
 }
 
-// Append a whole file as one section. An absent or empty source is NOT a
+// Plan a whole file as one section. An absent or empty source is NOT a
 // failure -- it just means the slot has no such content (no Scenery file
 // yet, Quadrants not active) and no entry is recorded for it.
-FLASHMEM static bool cw_add_file(ContainerWriter &w, char kind,
-                                 FS &fs, const char *src) {
+FLASHMEM static bool cw_plan_file(ContainerWriter &w, char kind,
+                                  FS &fs, const char *path) {
   if (!w.ok || w.n >= kMaxSections) return false;
-  File s = fs.open(src, FILE_READ);
+  File s = fs.open(path, FILE_READ);
   if (!s) return false;
   const uint32_t want = (uint32_t)s.size();
   uint8_t buf[256];
@@ -378,63 +438,98 @@ FLASHMEM static bool cw_add_file(ContainerWriter &w, char kind,
   uint32_t len = 0;
   int r;
   while ((r = s.read(buf, sizeof(buf))) > 0) {
-    if (w.f.write(buf, r) != (size_t)r) { s.close(); w.ok = false; return false; }
     for (int i = 0; i < r; ++i) sum += buf[i];
     len += (uint32_t)r;
-    watchdog_feed();
   }
   s.close();
   if (!len) return false;
-  // A mid-stream read error used to end the loop quietly and record a
-  // TRUNCATED section whose checksum matched the bytes that did arrive -- so
-  // the container validated clean and the loss only surfaced as missing state
-  // at recall. sum16 cannot see this; only the length can. Fail the save.
+  // A short read here is a source we cannot trust; refusing is cheaper than
+  // a container that validates clean and recalls with state missing.
   if (len != want) {
     serial_printf("PresetEngine: section '%c' short: %lu of %lu bytes\n",
                   kind, (unsigned long)len, (unsigned long)want);
     w.ok = false;
     return false;
   }
-  w.sec[w.n++] = { (uint8_t)kind, 0, sum, w.pos, len };
+  w.sec[w.n] = { (uint8_t)kind, 0, sum, w.pos, len };
+  w.src[w.n] = { &fs, path, nullptr, nullptr, 0, 0 };
+  w.n++;
   w.pos += len;
+  return true;
+}
+
+FLASHMEM static bool cw_plan_mem(ContainerWriter &w, char kind,
+                                 const uint8_t *a, uint32_t la,
+                                 const uint8_t *b = nullptr, uint32_t lb = 0) {
+  if (!w.ok || w.n >= kMaxSections || !la) return false;
+  const uint16_t sum = (uint16_t)(sum16(a, la) + (b ? sum16(b, lb) : 0));
+  w.sec[w.n] = { (uint8_t)kind, 0, sum, w.pos, la + lb };
+  w.src[w.n] = { nullptr, nullptr, a, b, la, lb };
+  w.n++;
+  w.pos += la + lb;
   return true;
 }
 
 // The app-data section carries the same AppDataHeader framing the standalone
-// PB_NN_A.BIN used, so read_appdata_stream() validates either source.
-FLASHMEM static bool cw_add_appdata(ContainerWriter &w) {
-  if (!w.ok || w.n >= kMaxSections) return false;
-  const AppDataHeader h = { kAppDataFourcc, 1, (uint16_t)capture.used,
-                            sum16(capture.data, capture.used), 0 };
-  if (w.f.write((const uint8_t *)&h, sizeof(h)) != sizeof(h)) { w.ok = false; return false; }
-  if (w.f.write(capture.data, capture.used) != capture.used) { w.ok = false; return false; }
-  const uint32_t len = sizeof(h) + capture.used;
-  const uint16_t sum = (uint16_t)(sum16((const uint8_t *)&h, sizeof(h)) +
-                                  sum16(capture.data, capture.used));
-  w.sec[w.n++] = { (uint8_t)'A', 0, sum, w.pos, len };
-  w.pos += len;
-  return true;
+// PB_NN_A.BIN used, so read_appdata_stream() validates either source. The
+// header has to outlive the plan, hence static.
+static AppDataHeader appdata_hdr;
+FLASHMEM static bool cw_plan_appdata(ContainerWriter &w) {
+  appdata_hdr = { kAppDataFourcc, 1, (uint16_t)capture.used,
+                  sum16(capture.data, capture.used), 0 };
+  return cw_plan_mem(w, 'A', (const uint8_t *)&appdata_hdr, sizeof(appdata_hdr),
+                     capture.data, capture.used);
 }
 
-// Backfill the directory, then publish via rename so a torn write can never
-// replace a good slot (same discipline as PhzConfig::save_config).
-FLASHMEM static bool cw_commit(ContainerWriter &w, const char *tmp, const char *final_name) {
-  bool ok = w.ok && w.f.seek(0);
-  if (ok) {
-    const ContainerHeader h = { kContainerFourcc, kContainerVersion,
-                                (uint16_t)w.n, 0, 0 };
-    ok = w.f.write((const uint8_t *)&h, sizeof(h)) == sizeof(h);
+FLASHMEM static bool cw_put(File &f, const uint8_t *p, uint32_t n) {
+  return n == 0 || f.write(p, n) == n;
+}
+
+FLASHMEM static bool cw_copy_file(File &f, FS &fs, const char *path, uint32_t want) {
+  File s = fs.open(path, FILE_READ);
+  if (!s) return false;
+  uint8_t buf[256];
+  uint32_t len = 0;
+  int r;
+  bool ok = true;
+  while (ok && (r = s.read(buf, sizeof(buf))) > 0) {
+    ok = f.write(buf, r) == (size_t)r;
+    len += (uint32_t)r;
+    watchdog_feed();
   }
+  s.close();
+  // The source changed size between plan and write: the directory would lie.
+  return ok && len == want;
+}
+
+// Write header, directory and payloads in one pass, then publish via rename
+// so a torn write can never replace a good slot (same discipline as
+// PhzConfig::save_config).
+FLASHMEM static bool cw_commit(ContainerWriter &w, const char *tmp, const char *final_name) {
+  if (!w.ok) return false;
+  preset_fs().remove(tmp);
+  File f = preset_fs().open(tmp, FILE_WRITE_BEGIN);
+  if (!f) return false;
+
+  const ContainerHeader h = { kContainerFourcc, kContainerVersion,
+                              (uint16_t)w.n, 0, 0 };
+  bool ok = cw_put(f, (const uint8_t *)&h, sizeof(h));
   for (int i = 0; i < kMaxSections && ok; ++i) {
     const SectionEntry e = (i < w.n) ? w.sec[i] : SectionEntry{ 0, 0, 0, 0, 0 };
-    ok = w.f.write((const uint8_t *)&e, sizeof(e)) == sizeof(e);
+    ok = cw_put(f, (const uint8_t *)&e, sizeof(e));
   }
-  if (w.f) w.f.close();
+  for (int i = 0; i < w.n && ok; ++i) {
+    const SectionSrc &src = w.src[i];
+    if (src.fs) ok = cw_copy_file(f, *src.fs, src.path, w.sec[i].length);
+    else ok = cw_put(f, src.mem, src.len) && cw_put(f, src.mem2, src.len2);
+    watchdog_feed();
+  }
+  f.close();
   if (!ok) { preset_fs().remove(tmp); return false; }
   // verify the bytes actually landed: LittleFS has produced 0-byte files
   // while reporting success on a degraded FS
   File v = preset_fs().open(tmp, FILE_READ);
-  ok = v && v.size() >= kPayloadStart;
+  ok = v && (uint32_t)v.size() == w.pos;
   if (v) v.close();
   if (!ok) { preset_fs().remove(tmp); return false; }
   // Rename FIRST. littlefs's rename atomically replaces an existing
@@ -443,7 +538,7 @@ FLASHMEM static bool cw_commit(ContainerWriter &w, const char *tmp, const char *
   // remove-then-rename opened a window where a power cut left the slot with
   // no container at all -- and for a migrated slot, no legacy files either,
   // since those were retired on the earlier commit. The only survivor was
-  // the temp file, which the next save of ANY slot deletes in cw_begin.
+  // the temp file, which the next save of ANY slot deletes in cw_commit.
   // The fallback remove is for SD, where replace-on-rename is not promised.
   ok = preset_fs().rename(tmp, final_name);
   if (!ok) {
@@ -451,12 +546,12 @@ FLASHMEM static bool cw_commit(ContainerWriter &w, const char *tmp, const char *
     ok = preset_fs().rename(tmp, final_name);
     // If THAT failed we have already removed the old container, so the tmp
     // file is now the only copy of this slot in existence. Leave it alone:
-    // cw_begin reclaims the name on the next save, which is a block we can
-    // spare, and until then a human has something to recover. Removing it
-    // here -- as the first version of this did -- deleted the old container
-    // and the freshly verified new one in the same breath, which is exactly
-    // the slot loss the rename-first ordering exists to prevent, just moved
-    // to a rarer path. Only the first-rename failure is safe to clean up
+    // the next save reclaims the name, which is a block we can spare, and
+    // until then a human has something to recover. Removing it here -- as
+    // the first version of this did -- deleted the old container and the
+    // freshly verified new one in the same breath, which is exactly the
+    // slot loss the rename-first ordering exists to prevent, just moved to
+    // a rarer path. Only the first-rename failure is safe to clean up
     // after, because there the old container is still in place.
     if (!ok)
       serial_printf("PresetEngine: %s left in place -- it is the only copy "
@@ -516,11 +611,42 @@ FLASHMEM static const SectionEntry *find_section(const SectionEntry *sec, int n,
   return nullptr;
 }
 
-// Extract one section back out to a standalone file, verifying its checksum
+// Read one section into RAM, checksum-verified. Returns false when it does
+// not fit or does not add up; `buf` holds nothing trustworthy then.
+FLASHMEM static bool section_to_mem(File &f, const SectionEntry &e,
+                                    uint8_t *buf, uint32_t cap) {
+  if (e.length > cap || !f.seek(e.offset)) return false;
+  if (f.read(buf, e.length) != (int)e.length) return false;
+  return sum16(buf, e.length) == e.checksum;
+}
+
+// True when `dest` already holds exactly the section's bytes. Reads only,
+// which on memory-mapped flash costs nothing next to the block erase the
+// rewrite would take -- a recall that changes nothing about Captain's setup
+// should not stall the module for a quarter second re-writing CAPTAIN.DAT.
+FLASHMEM static bool section_matches_file(File &f, const SectionEntry &e,
+                                          const char *dest, FS &fs) {
+  File d = fs.open(dest, FILE_READ);
+  if (!d) return false;
+  bool same = (uint32_t)d.size() == e.length && f.seek(e.offset);
+  uint8_t a[128], b[128];
+  uint32_t left = e.length;
+  while (same && left) {
+    const uint32_t want = left < sizeof(a) ? left : sizeof(a);
+    same = f.read(a, want) == (int)want && d.read(b, want) == (int)want &&
+           memcmp(a, b, want) == 0;
+    left -= want;
+  }
+  d.close();
+  return same;
+}
+
+// Extract one section back out to a standalone file. Verifying the checksum
 // before the destination is touched is not possible in one pass without a
 // buffer, so the copy is written to a scratch name and only then renamed.
 FLASHMEM static bool section_to_file(File &f, const SectionEntry &e,
                                      const char *dest, FS &fs) {
+  if (section_matches_file(f, e, dest, fs)) return true;
   if (!f.seek(e.offset)) return false;
   static const char *const kScratch = "PB_XTR.TMP";
   fs.remove(kScratch);
@@ -608,10 +734,8 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
 
   const uint16_t app_id = app_switcher.current_app()->id();
   uint8_t flags = 0;
-  // Section staging and container staging. Both are transient: they are
-  // removed or renamed away before this function returns, so neither costs a
+  // Container staging: renamed into place by cw_commit, so it never costs a
   // block in the steady state.
-  static const char *const kSecTmp = "PB_SEC.TMP";
   static const char *const kCtrTmp = "PB_CTR.TMP";
   char final_name[12];
   container_name(final_name, slot);
@@ -624,6 +748,11 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   // and that a fault taken during exception stacking is the mechanism.
   const uint32_t t_start = millis();
   const uint32_t isr_start = PresetBus::GetStats().isr_count;
+  WallClock wall;
+  wall.start();
+  // per-phase wall time, ms: capture, flush, bank, files, globals, appdata,
+  // commit, verify, resume
+  uint32_t ph[9] = { 0 };
 
   // 1. capture the app-data chunk stream to RAM (fast; ISR-bracketed).
   // app_isr stays OFF clear through step 7's APP_EVENT_RESUME below, so the
@@ -635,33 +764,44 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   CORE::app_isr_enabled = false;
   delay(1);
   BuildAppData(capture);
+  ph[0] = wall.lap_ms();
 
   // 2. ask the active app to flush its file-backed state (Captain, e.g.,
-  // does its own load_config+save_config("CAPTAIN.DAT") right here)
+  // does its own load_config+save_config("CAPTAIN.DAT") right here -- which
+  // PhzConfig now skips when nothing in it changed)
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_FLUSH);
   watchdog_feed();
+  ph[1] = wall.lap_ms();
 
-  // Steps 3-6 append the slot's sections to one container. Section ORDER is
-  // constrained: the content flags must be settled before the 'G' section is
-  // written, because the manifest that records them lives inside that map.
+  // Steps 3-6 PLAN the slot's sections; cw_commit writes them all at once.
+  // Section ORDER is constrained: the content flags must be settled before
+  // the 'G' section is built, because the manifest that records them lives
+  // inside that map.
   ContainerWriter w;
-  cw_begin(w, kCtrTmp);   // failure leaves w.ok false; every add below no-ops
+  cw_begin(w);
+  uint32_t sec_used = 0;   // bump allocator over sec_buf
 
   // 3. Quadrants active: extract its live preset + bank globals from the map
   if (app_id == kQuadrantsAppId) {
     uint64_t p = 0;
     if (PhzConfig::getValue(kQuadLivePresetKey, p) && p < 32) {
       extract_preset = (uint8_t)p;
-      if (PhzConfig::save_filtered(kSecTmp, preset_fs(), bank_pred, bank_remap) &&
-          cw_add_file(w, 'B', preset_fs(), kSecTmp))
+      const size_t n = PhzConfig::serialize(sec_buf, kSecBufBytes,
+                                            bank_pred, bank_remap);
+      if (n && cw_plan_mem(w, 'B', sec_buf, n)) {
         flags |= CONTENT_BANK;
-      preset_fs().remove(kSecTmp);
+        sec_used = n;
+      } else if (!n) {
+        serial_printf("PresetEngine: bank extract exceeds %lu bytes\n",
+                      (unsigned long)kSecBufBytes);
+        w.ok = false;
+      }
     }
     watchdog_feed();
   }
+  ph[2] = wall.lap_ms();
 
-  // 4. the file-backed app stores go straight in -- they are already files,
-  // so unlike the config sections they need no staging round-trip.
+  // 4. the file-backed app stores go straight in -- they are already files.
   //
   // These come from myfs EXPLICITLY, not preset_fs(). Scenery and Captain call
   // PhzConfig::load_config/save_config without an FS argument, which defaults
@@ -675,41 +815,42 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   //
   // BANK_255.DAT is the exception, and it goes to quad_fs(): the recalled
   // bank has to land where QUADRANTS will look for it, and Quadrants genuinely
-  // prefers SD (Quadrants.h:99-103, 2104-2107). The container itself, and the
-  // scratch file this stages through, stay on internal flash like every other
-  // part of a slot.
-  if (cw_add_file(w, 'S', PhzConfig::myfs, "SCENERY.DAT")) flags |= CONTENT_SCENERY;
+  // prefers SD (Quadrants.h:99-103, 2104-2107). The container itself stays on
+  // internal flash like every other part of a slot.
+  if (cw_plan_file(w, 'S', PhzConfig::myfs, "SCENERY.DAT")) flags |= CONTENT_SCENERY;
   watchdog_feed();
-  if (cw_add_file(w, 'C', PhzConfig::myfs, "CAPTAIN.DAT")) flags |= CONTENT_CAPTAIN;
+  if (cw_plan_file(w, 'C', PhzConfig::myfs, "CAPTAIN.DAT")) flags |= CONTENT_CAPTAIN;
   watchdog_feed();
+  ph[3] = wall.lap_ms();
 
-  // 5. globals + manifest, staged through kSecTmp because PhzConfig writes
-  // whole files by name
+  // 5. globals + manifest, serialized in RAM behind the bank extract
   PhzConfig::load_config();  // base map = GLOBALS.CFG
   BuildGlobalSettingsValues();
   PhzConfig::setValue(kSchemaKey, kSchemaVersion);
   PhzConfig::setValue(kFlagsKey, flags);
-  bool ok = PhzConfig::save_config(kSecTmp, preset_fs()) &&
-            cw_add_file(w, 'G', preset_fs(), kSecTmp);
-  preset_fs().remove(kSecTmp);
+  bool ok = false;
+  {
+    const size_t n = PhzConfig::serialize(sec_buf + sec_used,
+                                          kSecBufBytes - sec_used);
+    if (n) ok = cw_plan_mem(w, 'G', sec_buf + sec_used, n);
+    else serial_printf("PresetEngine: globals exceed %lu bytes\n",
+                       (unsigned long)(kSecBufBytes - sec_used));
+  }
   watchdog_feed();
+  ph[4] = wall.lap_ms();
 
   // 6. app-data chunk stream, straight from the RAM capture
-  bool ok2 = cw_add_appdata(w);
+  bool ok2 = cw_plan_appdata(w);
   watchdog_feed();
+  ph[5] = wall.lap_ms();
 
   // Publish the container, then retire the pre-container files this replaces.
   // cw_commit verifies the bytes landed and renames into place, so a torn
   // write leaves the previous slot intact rather than half-overwritten.
   const bool committed = ok && ok2 && cw_commit(w, kCtrTmp, final_name);
-  if (!committed) {
-    // Nothing renamed the staging file away, so remove it here: it is holding
-    // a whole 64 KB block and cw_begin would not clear it until the next save.
-    if (w.f) w.f.close();
-    preset_fs().remove(kCtrTmp);
-  }
   ok = committed;
   ok2 = committed;
+  ph[6] = wall.lap_ms();
 
   // Retiring the legacy files DELETES the only other copy of this preset, so
   // the bar for doing it is not "the container is the right size" -- 88 bytes
@@ -732,6 +873,7 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
     }
   }
   watchdog_feed();
+  ph[7] = wall.lap_ms();
 
   // 7. hand the config map back to the active app (Resume reloads its file).
   // Same hazard as step 2 -- Captain's Resume() also touches PhzConfig's
@@ -739,6 +881,7 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
   CORE::app_isr_enabled = true;
   watchdog_feed();
+  ph[8] = wall.lap_ms();
 
   last_slot = slot;
   last_was_save = true;
@@ -749,19 +892,23 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   HS::PokePopup(HS::MESSAGE_POPUP, (ok && ok2) ? "Bus save OK" : "Bus save ERR");
   serial_printf("PresetEngine: save slot %d %s (flags %02x)\n",
                 slot, (ok && ok2) ? "ok" : "FAILED", flags);
-  serial_printf("PresetEngine: save took %lums, bus ISRs %lu, "
-                "stack unused %lu bytes\n",
+  // Both clocks are printed on purpose: their difference is the time the
+  // module spent with interrupts off, i.e. audio, USB and the bus stalled.
+  serial_printf("PresetEngine: save took %lums wall (millis saw %lums), "
+                "bus ISRs %lu, stack unused %lu bytes\n",
+                (unsigned long)wall.total_ms(),
                 (unsigned long)(millis() - t_start),
                 (unsigned long)(PresetBus::GetStats().isr_count - isr_start),
                 (unsigned long)stack_low_water());
+  serial_printf("PresetEngine:   capture %lu flush %lu bank %lu files %lu "
+                "globals %lu appdata %lu commit %lu verify %lu resume %lu\n",
+                (unsigned long)ph[0], (unsigned long)ph[1], (unsigned long)ph[2],
+                (unsigned long)ph[3], (unsigned long)ph[4], (unsigned long)ph[5],
+                (unsigned long)ph[6], (unsigned long)ph[7], (unsigned long)ph[8]);
   return ok && ok2;
 }
 
 // ---- recall ----------------------------------------------------------------
-
-// Scratch name the 'G' section is extracted to on the way back out, because
-// PhzConfig::load_config takes a filename rather than an open file.
-static const char *const kGlbTmp = "PB_GLB.TMP";
 
 enum RecallStage : uint8_t { STAGE_OK = 0, STAGE_EMPTY = 1, STAGE_BAD = 2 };
 
@@ -779,16 +926,13 @@ FLASHMEM static RecallStage recall_stage_head(uint8_t slot, bool &from_container
     const SectionEntry *a = find_section(sec, n, 'A');
     const SectionEntry *g = find_section(sec, n, 'G');
     bool ok = a && g && f.seek(a->offset) && read_appdata_stream(f);
-    if (ok) ok = section_to_file(f, *g, kGlbTmp, preset_fs());
+    if (ok) ok = section_to_mem(f, *g, sec_buf, kSecBufBytes);
     f.close();
     // The container exists, so a failure here is corruption, not emptiness.
-    if (!ok) { preset_fs().remove(kGlbTmp); return STAGE_BAD; }
-    const bool loaded = PhzConfig::load_config(kGlbTmp, preset_fs());
-    // The scratch file has served its purpose the moment the map is loaded.
-    // Left behind it pinned a whole 64 KB block -- 1 of the 64 the internal
-    // filesystem has -- permanently, from the first container recall onwards.
-    preset_fs().remove(kGlbTmp);
-    return loaded ? STAGE_OK : STAGE_BAD;
+    if (!ok) return STAGE_BAD;
+    // Straight from RAM: this used to go through a scratch file, which was
+    // a block erase with interrupts off on every recall for nothing.
+    return PhzConfig::deserialize(sec_buf, g->length) ? STAGE_OK : STAGE_BAD;
   }
 
   // legacy multi-file layout
@@ -873,10 +1017,15 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   if (slot >= kNumSlots) return false;
   busy = true;
   serial_printf("PresetEngine: recall slot %d\n", slot);
+  const uint32_t t_start = millis();
+  WallClock wall;
+  wall.start();
+  uint32_t ph[4] = { 0 };   // validate, files, apply, resume
 
   // 1. validate everything before touching live state
   bool from_container = false;
   const RecallStage stage = recall_stage_head(slot, from_container);
+  ph[0] = wall.lap_ms();
   if (stage == STAGE_EMPTY) {
     HS::PokePopup(HS::MESSAGE_POPUP, "Empty preset");
     // put the map back (staging doesn't touch it on this path, but stay safe)
@@ -910,6 +1059,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   // 3. stage the file-backed stores (same multi-write LittleFS chain as
   // SaveSlot's step 4 -- see the watchdog note at the top of this file)
   recall_stage_files(slot, from_container, flags);
+  ph[1] = wall.lap_ms();
 
   // 4. apply global settings (map still holds PB_NN_G.CFG) + app chunks
   RestoreGlobalSettingsFromConfig(0);
@@ -919,6 +1069,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
     HS::user_turing_machines[i].Validate();
   ApplyAppData(capture);
   watchdog_feed();
+  ph[2] = wall.lap_ms();
 
   // 5. switch to the slot's app (missing app: stay put, partial recall)
   const size_t idx = ResolveAppIndexByID(slot_app_id);
@@ -936,6 +1087,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   CORE::app_isr_enabled = true;
   CORE::app_loop_enabled = true;
   ::MENU_REDRAW = 1;
+  ph[3] = wall.lap_ms();
 
   last_slot = slot;
   last_was_save = false;
@@ -945,13 +1097,19 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   busy = false;
   HS::PokePopup(HS::MESSAGE_POPUP, "Bus recall OK");
   serial_printf("PresetEngine: recall slot %d done (app %04x)\n", slot, slot_app_id);
+  serial_printf("PresetEngine: recall took %lums wall (millis saw %lums): "
+                "validate %lu files %lu apply %lu resume %lu\n",
+                (unsigned long)wall.total_ms(),
+                (unsigned long)(millis() - t_start),
+                (unsigned long)ph[0], (unsigned long)ph[1],
+                (unsigned long)ph[2], (unsigned long)ph[3]);
   return true;
 }
 
 // ---- service ---------------------------------------------------------------
 
 FLASHMEM void Init() {
-  pending_save = pending_recall = -1;
+  req_head = req_count = 0;
   quad_recall_hint = -1;
   load_names();
 
@@ -971,12 +1129,29 @@ FLASHMEM void Init() {
                   on_card == 1 ? "it" : "them");
 }
 
-void RequestSave(uint8_t slot) {
-  if (slot < kNumSlots) pending_save = slot;
+static bool enqueue(uint8_t op, uint8_t slot) {
+  if (slot >= kNumSlots) return false;
+  // Two recalls back to back: only the second is ever heard, so the first
+  // is replaced in place. This also bounds the queue against a manager
+  // sweeping through presets. Saves are never merged -- each one is a
+  // distinct "keep this" and dropping any of them is data loss.
+  if (op == REQ_RECALL && req_count) {
+    Request &tail = req_q[(req_head + req_count - 1) % kReqQueue];
+    if (tail.op == REQ_RECALL) { tail.slot = slot; return true; }
+  }
+  if (req_count >= kReqQueue) {
+    req_dropped++;
+    serial_printf("PresetEngine: queue full, %s %d refused\n",
+                  op == REQ_SAVE ? "save" : "recall", slot);
+    return false;
+  }
+  req_q[(req_head + req_count) % kReqQueue] = { op, slot };
+  req_count++;
+  return true;
 }
-void RequestRecall(uint8_t slot) {
-  if (slot < kNumSlots) pending_recall = slot;
-}
+bool RequestSave(uint8_t slot) { return enqueue(REQ_SAVE, slot); }
+bool RequestRecall(uint8_t slot) { return enqueue(REQ_RECALL, slot); }
+uint32_t RequestsDropped() { return req_dropped; }
 
 // persist the current slot ~3s after preset activity settles, so
 // trigger-driven preset cycling never write-hammers GLOBALS.CFG
@@ -1004,15 +1179,17 @@ FLASHMEM void BootRecall() {
   if (!PhzConfig::getValue(kCurSlotKey, v) || v >= kNumSlots) return;
   if (!SlotUsed((uint8_t)v)) return;
   serial_printf("PresetEngine: boot recall slot %d\n", (int)v);
-  skip_captain_restore = true;   // cleared after the first Process() pass
-  RequestRecall((uint8_t)v);     // local only: no bus broadcast at power-up
+  // Local only -- no bus broadcast at power-up. Queued as its own op so the
+  // keep-live-Captain rule travels with THIS request rather than sitting in
+  // a static that whatever recall ran first would consume.
+  enqueue(REQ_BOOT_RECALL, (uint8_t)v);
 }
 
 FLASHMEM void Process() {
-  // Read-then-clear needs no interrupt lock, and it is worth saying why
-  // rather than adding one defensively.
+  // The queue needs no interrupt lock, and it is worth saying why rather
+  // than adding one defensively.
   //
-  // Every writer of these two is in LOOP context, not an ISR. The bus slave
+  // Every producer of the queue is in LOOP context, not an ISR. The bus slave
   // ISR (PresetBus.cpp lpi2c1_slave_isr) only pushes bytes into its own SPSC
   // ring; the parser that turns those bytes into a SAVE or RECALL runs from
   // PresetBus::Task(), and its cb_save/cb_recall callbacks call RequestSave/
@@ -1020,21 +1197,33 @@ FLASHMEM void Process() {
   // context too. So this function and every producer are the same thread and
   // cannot interleave.
   //
-  // An earlier version of this comment claimed the slave ISR wrote these and
-  // bracketed the clear in noInterrupts(). The lock was harmless but the
+  // An earlier version of this comment claimed the slave ISR was a producer
+  // and bracketed the dequeue in noInterrupts(). The lock was harmless but the
   // reason was invented, and a wrong comment about concurrency in this file
   // is worse than no comment -- the round-3 audit block above is the thing
   // people trust when they are debugging a preset-bus fault at 2am.
-  const int8_t s = pending_save;
-  if (s >= 0) {
-    pending_save = -1;
-    SaveSlot(s);
-  }
-  const int8_t r = pending_recall;
-  if (r >= 0) {
-    pending_recall = -1;
-    RecallSlot(r);
-    skip_captain_restore = false;   // only ever true for the boot recall
+  //
+  // ONE request per pass, in arrival order. Draining the whole queue here
+  // would keep loop() -- and with it the UI, USB and the bus parser that
+  // feeds this queue -- starved for as long as the bus kept sending.
+  if (req_count) {
+    const Request r = req_q[req_head];
+    req_head = (req_head + 1) % kReqQueue;
+    req_count--;
+    switch (r.op) {
+      case REQ_SAVE:
+        SaveSlot(r.slot);
+        break;
+      case REQ_RECALL:
+        RecallSlot(r.slot);
+        skip_captain_restore = false;   // only ever true for the boot recall
+        break;
+      case REQ_BOOT_RECALL:
+        skip_captain_restore = true;
+        RecallSlot(r.slot);
+        skip_captain_restore = false;
+        break;
+    }
   }
   if (cur_slot_dirty_ms && millis() - cur_slot_dirty_ms > 3000)
     persist_cur_slot();
