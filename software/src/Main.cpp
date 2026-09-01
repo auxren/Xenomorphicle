@@ -955,6 +955,9 @@ FLASHMEM __attribute__((noinline)) void loop() {
 #if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
           Serial.printf("master backup: targeting module %02X\n",
                         master_addr_value);
+          // Same discipline as StartRead(): retire whatever the last job
+          // left behind, or the master FSM refuses this one as busy.
+          OC::PresetBus::MasterReset();
           const int rc = OC::PresetBus::MasterBackup(master_addr_value);
           Serial.printf("  MasterBackup() returned %d (0=accepted; "
                         "watch 'b' for progress)\n", rc);
@@ -977,6 +980,14 @@ FLASHMEM __attribute__((noinline)) void loop() {
 #if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
           Serial.printf("query: asking module %02X who it is\n",
                         query_addr_value);
+          // Clear a terminal state left by the PREVIOUS query before starting
+          // this one -- exactly what AppBus200e::StartProbe does, and what
+          // this path was missing. A query to an address nobody answers ends
+          // FAILED/NO_RESPONSE and stays there, so the next MasterQuery is
+          // refused and so is every one after it. Found scanning the bus: the
+          // first address in the sweep was empty, and all sixty that followed
+          // reported nothing while the modules were sitting right there.
+          OC::PresetBus::MasterQueryReset();
           const int qrc = OC::PresetBus::MasterQuery(query_addr_value);
           // The answer is a separate bus frame arriving milliseconds later,
           // so it can't be printed here: PresetBus::Task() prints it (or the

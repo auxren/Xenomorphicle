@@ -554,14 +554,40 @@ bool AppSwitcher::Init(bool reset_settings) {
   }
 #endif
 
+  // Two different decisions that used to be one flag:
+  //
+  //   do_reset  -- start from factory defaults rather than stored settings
+  //   do_erase  -- WIPE storage: blank the EEPROM and format the filesystem
+  //
+  // Conflating them meant that a module which simply had no config to load --
+  // a first run, or storage lost to an interrupted save -- reformatted its
+  // filesystem and took all thirty presets with it. "I have nothing to load"
+  // and "destroy what is there" are not the same statement. Only a user who
+  // explicitly asked for a reset gets the erase.
   bool do_reset;
+  bool do_erase = false;
   if (caller_confirmed) {
+    do_reset = do_erase = true;
+  } else if (!stored_valid) {
+    // Checked BEFORE reset_settings, deliberately.
+    //
+    // The caller passes `reset_settings || firstrun` (Main.cpp), so a module
+    // with no valid config arrives here with the flag already true and cannot
+    // be told apart from a user who asked for a reset. stored_valid is the
+    // honest discriminator, and when it is false there is nothing to protect:
+    // asking "may I discard your settings?" when there are demonstrably none
+    // strands anyone whose storage failed behind a prompt only a physical
+    // button can answer. That is not hypothetical -- a reset landing inside
+    // save_config's rename window took GLOBALS.CFG and GLOBALS.BAK together,
+    // and the module came up unreachable on a bench with no hands near it.
+    //
+    // Defaults, and NO erase: there is nothing to wipe, and eraseFiles() on
+    // T4.1 is a full format that would take every preset with it.
+    SERIAL_PRINTLN("No stored settings; starting from defaults");
     do_reset = true;
-  } else if (reset_settings || !stored_valid) {
-    // One prompt covers both ways of getting here -- the boot A+B gesture and
-    // absent/invalid storage (first run, or a corrupted restore) -- exactly as
-    // before, so the first-run flow still asks once and only once.
-    do_reset = ui.ConfirmReset();
+  } else if (reset_settings) {
+    // A real request, with real settings to lose. This one still asks.
+    do_reset = do_erase = ui.ConfirmReset();
   } else {
     do_reset = false;
   }
@@ -604,19 +630,28 @@ bool AppSwitcher::Init(bool reset_settings) {
   bool gs_restored = false;
   if (do_reset) {
     SeedGlobalSettingsDefaults();
-    APPS_SERIAL_PRINTLN("Erase EEPROM ...");
-    EEPtr d = EEPROM_GLOBALSETTINGS_START;
-    size_t len = EEPROMStorage::LENGTH - EEPROM_GLOBALSETTINGS_START;
-    while (len--)
-      *d++ = 0;
-    APPS_SERIAL_PRINTLN("...done");
-    APPS_SERIAL_PRINTLN("Skip settings, using defaults...");
+    if (do_erase) {
+      // Only ever on an explicit request. This blanks ~3.9 KB of emulated
+      // EEPROM a byte at a time and then formats the filesystem, which takes
+      // long enough that the module looks dead while it runs -- and on T4.1
+      // eraseFiles() is fs.format(), so it destroys every preset too.
+      APPS_SERIAL_PRINTLN("Erase EEPROM ...");
+      EEPtr d = EEPROM_GLOBALSETTINGS_START;
+      size_t len = EEPROMStorage::LENGTH - EEPROM_GLOBALSETTINGS_START;
+      while (len--)
+        *d++ = 0;
+      APPS_SERIAL_PRINTLN("...done");
 #ifdef __IMXRT1062__
-    PhzConfig::eraseFiles();
+      PhzConfig::eraseFiles();
 #else
-    global_settings_storage.Init();
+      global_settings_storage.Init();
 #endif
+    }
+    // ALWAYS, erase or not: this initialises the page-storage structure, it
+    // does not wipe user data. Gating it on do_erase left the defaults path
+    // with an uninitialised app_data_storage for the restore that follows.
     app_data_storage.Init();
+    APPS_SERIAL_PRINTLN("Using defaults...");
     global_settings.valid = true;
     SaveGlobalSettings();
     // gs_restored stays false: a confirmed reset reports firstrun so the

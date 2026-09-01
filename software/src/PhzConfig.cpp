@@ -186,8 +186,19 @@ bool save_config(const char* filename, FS &fs)
     }
 
     if (success) {
-      fs.remove(filename);
+      // Rename FIRST. littlefs replaces an existing destination atomically,
+      // so the config is never absent: it is either the old file or the new
+      // one. The previous remove-then-rename left a window where a reset --
+      // a power cut, or the 134-baud bootloader reboot the bench uses --
+      // destroyed GLOBALS.CFG outright. That happened: a reset landed inside
+      // this window, GLOBALS.CFG and GLOBALS.BAK were both gone on the next
+      // boot, and the module came up at a factory-reset prompt that only a
+      // physical button could answer.
       success = fs.rename(TEMPFILE, filename);
+      if (!success) {
+        fs.remove(filename);                       // SD: no replace-on-rename
+        success = fs.rename(TEMPFILE, filename);
+      }
       if (!success)
         HS::PokePopup(HS::MESSAGE_POPUP, "TempFile ERR !!");
     }
@@ -227,8 +238,12 @@ FLASHMEM bool save_filtered(const char* filename, FS &fs,
     }
 
     if (success) {
-      fs.remove(filename);
+      // Rename-first, as above: never leave the destination absent.
       success = fs.rename(TEMPFILE, filename);
+      if (!success) {
+        fs.remove(filename);
+        success = fs.rename(TEMPFILE, filename);
+      }
     }
 
     return success;
