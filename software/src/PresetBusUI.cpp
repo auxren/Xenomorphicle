@@ -52,6 +52,11 @@ static uint32_t hold_start_ms = 0;        // 0 = not holding
 static const uint32_t kRecallHoldMs = OC::Ui::kLongPressTicks / 2;
 static uint32_t recall_hold_ms = 0;       // 0 = not holding
 static bool recall_fired = false;         // one shot per hold
+// Set on Enter(): the opening chord holds both encoders, so a hold that was
+// already in progress when the overlay appeared must not count. Cleared once
+// the button in question has actually been let go.
+static bool store_needs_release = false;
+static bool recall_needs_release = false;
 static int8_t pending_slot = -1;          // op we're waiting on
 static bool pending_was_save = false;
 static uint32_t pending_start_ms = 0;
@@ -91,6 +96,18 @@ FLASHMEM void Enter() {
   edit_mode = false;
   sel_stored = -1;
   active = true;
+  // This overlay is opened by holding BOTH encoders, so on the way in both
+  // buttons are already down -- and the STORE/RECALL hold timers would start
+  // counting immediately and fire the moment their thresholds pass. That is
+  // the accidental recall Oren reported, and adding a hold to RECALL only
+  // delayed it rather than preventing it. Neither hold arms until its button
+  // has been seen released at least once, so the entry chord can never roll
+  // straight into a bus-wide operation no matter how long it is held.
+  hold_start_ms = 0;
+  recall_hold_ms = 0;
+  recall_fired = false;
+  store_needs_release = true;
+  recall_needs_release = true;
 }
 
 FLASHMEM void Exit() {
@@ -403,7 +420,9 @@ void Task() {
   if (active) {
     // hold-progress source: sample the left encoder button directly
     const bool store_context = !edit_mode && !(cursor == 1 && sel_stored == 1);
-    if (store_context && ui.read_immediate(CONTROL_BUTTON_L)) {
+    if (!ui.read_immediate(CONTROL_BUTTON_L)) store_needs_release = false;
+    if (store_context && !store_needs_release &&
+        ui.read_immediate(CONTROL_BUTTON_L)) {
       if (!hold_start_ms) hold_start_ms = millis() | 1;
     } else {
       hold_start_ms = 0;
@@ -413,7 +432,9 @@ void Task() {
     // threshold is reached rather than on release -- so the gesture ends
     // when the bar fills, matching how STORE feels. Never in edit_mode:
     // a bus-wide recall must not fall out of a rename gesture.
-    if (!edit_mode && ui.read_immediate(CONTROL_BUTTON_R)) {
+    if (!ui.read_immediate(CONTROL_BUTTON_R)) recall_needs_release = false;
+    if (!edit_mode && !recall_needs_release &&
+        ui.read_immediate(CONTROL_BUTTON_R)) {
       if (!recall_hold_ms) {
         recall_hold_ms = millis() | 1;
         recall_fired = false;
