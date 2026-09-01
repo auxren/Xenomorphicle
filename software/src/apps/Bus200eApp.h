@@ -1035,9 +1035,27 @@ void AppBus200e::CommitWrite() {
   // net, not a precondition, and refusing an edit the user has already
   // confirmed because a filesystem hiccuped would be its own kind of wrong --
   // but say so on the wire log, because the net is not there.
-  if (!OC::PresetEngine::SnapshotBank(target_, img, bank_len,
-                                      Buchla200eCrc32(img, bank_len)))
+  // ...but NOT over an existing one taken before a write that went BAD.
+  //
+  // This nearly recreated, one level up, the exact failure the snapshot was
+  // built to end. Write, get BAD, then do the obvious thing and retry: the
+  // image is now the module's CORRUPT contents, and an unconditional snapshot
+  // would overwrite the pristine bank with it. The undo would then faithfully
+  // restore the damage, and the last good copy would once again have been
+  // destroyed by the recovery machinery itself. Worse in the OTHER-PRESETS
+  // case, where the retry also re-sends the 29 damaged presets as its baseline.
+  //
+  // So: while a BAD verdict for this target stands and a snapshot for it
+  // survives, keep the one we have. It is older than the image and that is
+  // precisely why it is worth more.
+  const bool keep_existing =
+      (write_state_ == Bus200eAppNS::WRITE_BAD) && snap_here_;
+  if (keep_existing) {
+    serial_printf("200e: keeping the pre-BAD snapshot for %02X\n", target_);
+  } else if (!OC::PresetEngine::SnapshotBank(target_, img, bank_len,
+                                            Buchla200eCrc32(img, bank_len))) {
     serial_printf("200e: WARNING no snapshot taken for %02X\n", target_);
+  }
 
   const Buchla200eBankHash before =
       Buchla200eHashBank(img, bank_len, off, kBuchla251eSlotBytes);
@@ -1795,7 +1813,18 @@ void AppBus200e::CommitSnapshotRestore() {
 #ifdef PRESET_BUS
   uint8_t *img = OC::PresetBus::MasterCardImage();
   const uint32_t bank_len = ExpectedBankBytes();
-  if (!img || !bank_len) { write_block_ = BUCHLA200E_WRITE_NO_IMAGE; return; }
+  if (!img || !bank_len) {
+    // Say so and leave. Returning while still on the UNDO prompt made encR do
+    // nothing visible, forever -- "a refusal the user cannot see is
+    // indistinguishable from a dead button", which is the bug this whole app
+    // was reported with.
+    write_block_ = BUCHLA200E_WRITE_NO_IMAGE;
+    write_state_ = Bus200eAppNS::WRITE_FAIL;
+    write_lost_ = false;
+    write_err_ = BUS200E_MASTER_ERR_NONE;
+    screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+    return;
+  }
 
   uint32_t got = 0;
   if (!OC::PresetEngine::LoadSnapshot(target_, img, bank_len, &got) ||
@@ -2251,7 +2280,14 @@ FLASHMEM void AppBus200e::HandleAppEvent(OC::AppEvent event) {
     // Never leave a write armed across a suspend or a screensaver: the
     // confirm prompt would be gone but the next encR press would still
     // commit a whole-bank write.
-    if (screen_ == Bus200eAppNS::SCR_WRITE_CONFIRM)
+    // Both confirm screens, not just the write one. SCR_SNAP_CONFIRM commits
+    // an equally destructive 63,120-byte transfer, and leaving it armed across
+    // a suspend meant coming back to a prompt whose 350ms dead window had
+    // expired hours ago -- so the FIRST encR press would ship it. The two
+    // screens were built by different hands and only one of them had learned
+    // the lesson stated in this comment.
+    if (screen_ == Bus200eAppNS::SCR_WRITE_CONFIRM ||
+        screen_ == Bus200eAppNS::SCR_SNAP_CONFIRM)
       screen_ = Bus200eAppNS::SCR_MODULE_HOME;
     // Likewise never leave the recorder armed: its ISR poll would keep
     // consuming note-ons that the user is playing at some other app, and
@@ -2294,9 +2330,9 @@ FLASHMEM void AppBus200e::ConsumeScanDirty() {
   // anything against the table it was built from. Store the table size beside
   // it and refuse the set if a firmware update changed it, rather than
   // silently reinterpreting old bits as different modules.
-  const uint64_t meta = (uint64_t)addr_ |
-                        ((uint64_t)target_ << 8) |
-                        ((uint64_t)(uint8_t)Buchla200eModuleCount() << 16);
+  // Only the table-size stamp. addr_/target_ are the app-data chunk's job;
+  // duplicating them here gave RESUME a way to overwrite the live values.
+  const uint64_t meta = (uint64_t)(uint8_t)Buchla200eModuleCount();
 
   OC::CORE::app_isr_enabled = false;
   PhzConfig::load_config();            // own GLOBALS.CFG before mutating it
@@ -2317,22 +2353,36 @@ FLASHMEM void AppBus200e::ConsumeScanDirty() {
 // config map is not loaded yet when apps are constructed.
 FLASHMEM void AppBus200e::LoadScanSet() {
 #ifdef PRESET_BUS
+  // Own GLOBALS.CFG before reading it. This must NOT trust whatever map
+  // happens to be resident.
+  //
+  // APP_EVENT_RESUME does not mean "your config is loaded" -- it is dispatched
+  // from at least five places that each mean something different by it. Switch
+  // in from Quadrants and the resident map is Quadrants' BANK file; arrive via
+  // a preset recall and it is that slot's G section; persist_cur_slot,
+  // PresetBusUI::persist_assignments and the clock pump all dispatch it after
+  // re-owning GLOBALS for their own writes. Reading blind was worse than
+  // useless: keys 0x820/0x821 decode as ordinary bank keys, so getValue can
+  // SUCCEED on Quadrants data and hand back a garbage address.
+  PhzConfig::load_config();
+
   uint64_t bits = 0, meta = 0;
   if (!PhzConfig::getValue(Bus200eAppNS::kScanSetKey, bits)) return;
   if (!PhzConfig::getValue(Bus200eAppNS::kScanMetaKey, meta)) return;
-  if ((uint8_t)(meta >> 16) != (uint8_t)Buchla200eModuleCount()) return;
+  // found_ indexes the module TABLE, so the set only means anything against
+  // the table it was built from.
+  if ((uint8_t)(meta & 0xFF) != (uint8_t)Buchla200eModuleCount()) return;
 
-  const uint8_t a = (uint8_t)(meta & 0xFF);
-  const uint8_t t = (uint8_t)((meta >> 8) & 0xFF);
-  if (a && a <= 0x7F) addr_ = a;
-  if (t && t <= 0x7F) target_ = t;
-
+  // addr_ and target_ are deliberately NOT restored here. They live in the
+  // app-data chunk, which is per-preset and is the one source of truth for
+  // them. Storing them here too meant every background RESUME -- a preset
+  // recall settling, a trigger assignment being saved, a clock jack moving --
+  // silently retargeted the app to whatever address was current when the scan
+  // was last persisted, under a user who was aiming at something else.
   int count = 0;
   const int n = Buchla200eModuleCount();
   for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i)
     found_[i] = (uint8_t)(bits >> (8 * i));
-  // Recompute rather than storing the count: one source of truth means the
-  // list and the "N found" tally can never disagree.
   for (int i = 0; i < n; ++i) if (IsFound(found_, i)) ++count;
   found_count_ = count;
   list_top_ = 0;
@@ -2597,9 +2647,14 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
         read_addr_ = 0;
         read_type_ = Bus200eAppNS::MODTYPE_UNKNOWN;
         write_state_ = Bus200eAppNS::WRITE_NONE;
-        RefreshSnapshotFlag();  // a different module, a different snapshot
       }
       target_ = addr_;
+      // AFTER target_ moves, not before: RefreshSnapshotFlag asks whether a
+      // snapshot exists for target_, so running it first answered about the
+      // module we are leaving. It was self-correcting only by accident --
+      // write_state_ is cleared on the same branch and PumpWrite refreshes
+      // again -- which is not a property to rely on.
+      RefreshSnapshotFlag();
       screen_ = Bus200eAppNS::SCR_MODULE_HOME;
       break;
     default: break;

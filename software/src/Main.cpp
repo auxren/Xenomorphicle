@@ -1157,7 +1157,12 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.printf("exported %d slot(s), %d failed\n", n, fail);
             break;
           }
-          case 'I': {   // import every slot the card holds
+          // 'J', not 'I': 'I' is the app-ISR toggle thirty lines up, and this
+          // clashed with it. It compiled everywhere the four-target build gate
+          // looks because none of those define PRINT_DEBUG -- which is also
+          // why nobody noticed the whole export/import feature was compiled
+          // OUT of every shipping target. The gate must include T41_console.
+          case 'J': {   // import every slot the card holds
             const int have = OC::PresetEngine::CardSlotCount();
             if (have < 0) { Serial.println("no card"); break; }
             int n = 0, fail = 0;

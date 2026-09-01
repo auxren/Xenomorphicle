@@ -796,9 +796,16 @@ FLASHMEM void AppSettings::DrawConfirm() const {
     // it had already discarded -- a prompt performed on a corpse.
     // Calibration lives below that mark and survives, which is worth saying:
     // it is the one thing a user cannot recreate without a voltmeter.
-    graphics.print("Erases all settings");
+    // "+ all 30 bus presets" is not padding. The reset calls
+    // PhzConfig::eraseFiles(), which is a full myfs format -- and since the
+    // preset store moved to internal flash it now takes every PB_NN.PBS,
+    // PBNAMES.BIN and PBSNAP.BIN with it. Before that move, with a card
+    // seated, a format left the presets alone. The blast radius grew and this
+    // screen did not, so it was understating what the press destroys by
+    // thirty presets. Export to the card first if they matter.
+    graphics.print("Erases settings, apps");
     graphics.setPrintPos(0, 36);
-    graphics.print("and every app's data");
+    graphics.print("+ all 30 bus presets");
     graphics.setPrintPos(0, 46);
     graphics.print("Calibration is kept.");
   } else {

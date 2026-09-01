@@ -28,6 +28,7 @@
 #include "OC_ui.h"
 #include "PhzConfig.h"
 #include "PresetBus.h"   // GetStats(): bus-slave ISR count, for the save report
+#include "Buchla200eWriteGuard.h"  // Buchla200eCrc32, for the snapshot
 #include "HSUtils.h"
 #include "src/drivers/FreqMeasure/OC_FreqMeasure.h"
 
@@ -211,10 +212,11 @@ FLASHMEM static void slot_name(char *buf, uint8_t slot, char kind, const char *e
 }
 
 // Source and destination filesystems are separate on purpose. Slot files live
-// on preset_fs() (SD when there is a card), but the live names they restore to
-// belong to whichever FS the owning app actually reads -- and Captain and
-// Scenery only ever read myfs. Copying within one FS silently put their state
-// on the card, where neither app looks.
+// on preset_fs() (always internal flash), but the live names they restore to
+// belong to whichever FS the owning APP actually reads: Captain and Scenery
+// only ever read myfs, Quadrants prefers SD. Copying within a single FS is
+// what silently put Captain's and Scenery's state on the card, where neither
+// of them ever looks.
 FLASHMEM static bool copy_file(FS &sfs, const char *from, FS &dfs, const char *to) {
   File src = sfs.open(from);
   if (!src) return false;
@@ -806,9 +808,9 @@ FLASHMEM static void recall_stage_files(uint8_t slot, bool from_container,
     int n = 0;
     if (!container_open(slot, f, sec, n)) return;
     // Destination FS per file, mirroring the save side: the bank goes where
-    // Quadrants looks (preset_fs()), Scenery and Captain go where THEY look
-    // (myfs, always). Restoring these to the SD card put them somewhere
-    // neither app ever reads.
+    // Quadrants looks (quad_fs() -- SD when a card is present), Scenery and
+    // Captain go where THEY look (myfs, always). Restoring those two to the
+    // card put them somewhere neither app ever reads.
     const SectionEntry *e;
     if ((flags & CONTENT_BANK) && (e = find_section(sec, n, 'B')) != nullptr) {
       if (section_to_file(f, *e, "BANK_255.DAT", quad_fs()))
@@ -1198,6 +1200,19 @@ FLASHMEM bool LoadSnapshot(uint8_t addr, uint8_t *dest, uint32_t cap,
   if (ok) ok = (uint32_t)f.read(dest, h.length) == h.length;
   f.close();
   if (!ok) return false;
+
+  // CHECK THE CRC. It was written and never read, which made this the one
+  // write path in the instrument whose payload nothing verified -- and it is
+  // the path that exists specifically to run after something has already gone
+  // wrong once. A bit-rotted or torn PBSNAP.BIN would have gone on the wire,
+  // and the verify read-back would then compare the module against the same
+  // corrupt image and stamp it WROTE + VERIFIED. The header comment naming
+  // the field "crc over the payload" read as verification, which is exactly
+  // how it survived review.
+  if (Buchla200eCrc32(dest, h.length) != h.crc) {
+    serial_printf("PresetEngine: snapshot CRC mismatch, refusing\n");
+    return false;
+  }
   if (len_out) *len_out = h.length;
   return true;
 }

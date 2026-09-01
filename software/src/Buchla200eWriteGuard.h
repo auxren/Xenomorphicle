@@ -9,8 +9,11 @@
 // WHY THIS IS ITS OWN FILE, AND PURE: MasterRestore transfers the ENTIRE bank
 // -- all 30 slots -- not the one slot being edited. The card image is the unit
 // of transfer. So a write built on a stale, short, or wrong-module image
-// destroys 29 presets the user never touched, and there is no undo. That makes
-// the permit/refuse decision the highest-consequence logic in the app, so it
+// destroys 29 presets the user never touched. The module itself offers no
+// undo; the app now takes a pre-write snapshot to internal flash so a BAD
+// verdict has a way back, but that net is taken AFTER this decision and is
+// no reason to relax it. That makes the permit/refuse decision the
+// highest-consequence logic in the app, so it
 // lives here as a pure function over a plain struct, with no bus, no UI and no
 // hardware, and is exercised by test_buchla200e_write_guard.cpp.
 //

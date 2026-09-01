@@ -216,11 +216,29 @@ void SimRuntimeBoot(bool reset_settings, bool answer_cancel) {
   // so the simulator schedules one: encL for CANCEL (keep defaults), encR for
   // OK (erase and re-save) under --reset-settings. Nothing reaches into the
   // firmware to skip the screen; --keys "" with a breakpoint will show it.
-  if (reset_settings || firstrun) {
+  // The condition here must be the FIRMWARE's, not a proxy for it.
+  //
+  // AppSwitcher::Init opens ConfirmReset() when `reset_settings ||
+  // !global_settings.valid`, and it reads that validity out of METADATA_KEY in
+  // the config map -- NOT out of "did a config file load". Those two come
+  // apart: a GLOBALS.CFG can exist and load cleanly while carrying no valid
+  // global settings at all (a virgin module whose first-run prompt was
+  // CANCELLED, on which something later writes an unrelated PhzConfig key,
+  // ends up in exactly that state). Scheduling the answer on `firstrun` --
+  // i.e. on load_config() failing -- then answered nothing, the blocking
+  // prompt sat there with no button coming, and the simulator hung with a
+  // prompt on screen until its deadline killed it. A hang is the worst
+  // failure a check can have: it reports nothing and costs the whole suite's
+  // time budget.
+  uint64_t meta = 0;
+  const bool stored_valid =
+      PhzConfig::getValue((uint16_t)(1 << 8) /* METADATA_KEY */, meta) &&
+      ((meta >> 17) & 1);
+  if (reset_settings || !stored_valid) {
     const bool say_ok = reset_settings && !answer_cancel;
     const uint16_t answer = say_ok ? OC::CONTROL_BUTTON_R : OC::CONTROL_BUTTON_L;
     SimInputScheduleTap(answer, 120, 60);
-    SimLog("boot: settings absent -> ConfirmReset answered %s automatically",
+    SimLog("boot: settings not valid -> ConfirmReset answered %s automatically",
            say_ok ? "OK (erase)" : "CANCEL (keep defaults)");
   }
   firstrun |= !OC::app_switcher.Init(reset_settings || firstrun);

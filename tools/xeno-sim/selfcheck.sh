@@ -245,8 +245,15 @@ esac
 # re-diffs against the module's real contents, so a retry that still has work
 # to do proves nothing was discarded, and a good write having nothing left to
 # do proves the first one really landed.
+#
+# Re-arming is `a`, not encR, and that is not a stylistic choice. After a write
+# that ends BAD with a pre-write snapshot on hand, the action row is replaced
+# by the recovery prompt ("encR:UNDO  encL:keep"), so encR arms the undo -- the
+# row it used to run is not on screen to run. A is the module home's primary
+# action in every state, so it is also the one gesture that states this
+# property without depending on which row happens to be drawn.
 rearm_says() {  # fault, screen row
-  $SIM --app "200e Modules" --write-fault "$1" --keys "$W251,r,step10" \
+  $SIM --app "200e Modules" --write-fault "$1" --keys "$W251,a,step200" \
        --dump-fb 2>/dev/null | python3 fbtext.py - | grep "^y=$2" \
     | sed "s/^y=$2 *x=0 *//"
 }
@@ -360,6 +367,423 @@ gen_preview=$($SIM --app "200e Modules" --keys "$W251_READ,],],r,step10,r,step10
   && ok "the Gen screen draws the stage preview it stays put for" \
   || bad "the Gen screen's preview band is empty ($gen_preview lit pixels)"
 
+
+# ---------------------------------------------------------------------------
+# NON-VOLATILE MEMORY.
+#
+# Everything below this line asks what a SECOND boot sees, which until --state
+# existed could not be asked at all: the file system is a std::map and the
+# EEPROM an array, both of which die with the process. `--state FILE` reads an
+# image before boot and writes it back at exit, so two runs sharing one file
+# are a power cycle. `--sd-card` seats a card, because half of these questions
+# are about whether the two machines agree.
+#
+# This is still not LittleFS -- no wear, no erase timing, no 0-byte-file
+# failure mode -- so a clean round-trip here says nothing about those. What it
+# does say is which BYTES the firmware chose to keep, and on which volume.
+# ---------------------------------------------------------------------------
+IMG="$TMP/img"          # scratch state images live here
+mkdir -p "$IMG"
+
+echo "presets live on internal flash, card or no card"
+
+# The bug: with a card inserted every previously-saved preset read as "Empty
+# preset", and pulling the card brought them back. Nothing was lost, but a
+# musician cannot tell that from the front panel. It was `SDcard_Ready ? SD :
+# myfs` deciding where containers live, so the instrument's preset memory
+# depended on whether an accessory happened to be seated.
+#
+# The property, stated so that no wording or file name can disarm it: a preset
+# stored in one card state must RECALL in the other. Recall either reports
+# "done" or refuses with EMPTY SLOT, and those are the two answers worth
+# telling apart.
+stored_then_recalled() {  # store-flags, recall-flags, label
+  rm -f "$IMG/xfer"
+  $SIM $1 --state-out "$IMG/xfer" \
+       --keys "$ENTER,l-down,step600,l-up,step4000" >/dev/null 2>&1
+  $SIM $2 --state-in "$IMG/xfer" \
+       --keys "$ENTER,r-down,step300,r-up,step3000" 2>&1 \
+    | grep -q 'recall slot 0 done' \
+    && ok "a preset stored $3 recalls after a power cycle" \
+    || bad "a preset stored $3 did not recall after a power cycle"
+}
+stored_then_recalled ""          "--sd-card"  "with no card, with one inserted"
+stored_then_recalled "--sd-card" ""           "with a card, with it pulled"
+
+# The control for both of the above. Without it they would pass just as well
+# against a recall that says "done" unconditionally, which is precisely the
+# failure being guarded against -- the old bug was a recall that lied about
+# what it found.
+$SIM --keys "$ENTER,r-down,step300,r-up,step3000" 2>&1 \
+  | grep -q 'refused (EMPTY SLOT)' \
+  && ok "recalling a slot nothing was ever stored in is refused, not faked" \
+  || bad "an empty slot did not refuse a recall -- the two checks above prove nothing"
+
+# ...and the containers are on internal flash in BOTH cases, which is the
+# mechanism behind the property above. Asserted on the volume, not the path:
+# the file may be renamed, but it may not move to the card.
+$SIM --sd-card --state-in "$IMG/xfer" --dump-fs 2>/dev/null > "$TMP/fs.txt"
+grep -q '^fs lfs PB_' "$TMP/fs.txt" \
+  && ok "a preset container is on internal flash with a card seated" \
+  || bad "no preset container on internal flash: $(cat "$TMP/fs.txt")"
+grep -q '^fs sd PB_' "$TMP/fs.txt" \
+  && bad "a preset container was written to the CARD" \
+  || ok "no preset container is written to the card"
+
+# Merely seating or pulling a card must not CHANGE the stored set either. Two
+# boots from one image, one with a card and one without; the containers they
+# leave behind must be byte-identical. A boot that quietly rewrote, migrated or
+# dropped a preset because the card state moved would show up here and nowhere
+# else on this screen.
+cp "$IMG/xfer" "$IMG/nocard" && cp "$IMG/xfer" "$IMG/card"
+$SIM            --state "$IMG/nocard" --keys "step300" >/dev/null 2>&1
+$SIM --sd-card  --state "$IMG/card"   --keys "step300" >/dev/null 2>&1
+# (process substitution is not POSIX sh, and this script runs under /bin/sh)
+# `|| true` is load-bearing: this script runs under `set -e`, and a grep that
+# matches nothing exits 1. Without it a build where the presets went to the
+# CARD -- exactly the regression this section exists to catch -- killed the
+# suite here instead of failing this check, taking every later section with it.
+# A check that can abort the run is worse than a check that fails it.
+grep '^file lfs PB_' "$IMG/nocard" > "$TMP/pb_nocard" 2>/dev/null || true
+grep '^file lfs PB_' "$IMG/card"   > "$TMP/pb_card"   2>/dev/null || true
+if [ ! -s "$TMP/pb_nocard" ]; then
+  bad "no preset survived the no-card boot, so the comparison below is vacuous"
+elif cmp -s "$TMP/pb_nocard" "$TMP/pb_card"; then
+  ok "the stored preset set is the same whether or not a card is present"
+else
+  bad "the stored preset set changed with the card state"
+fi
+
+echo "the pre-write bank snapshot"
+
+# Before this existed the write path could DETECT that it had damaged a preset
+# the user never touched and could never repair one: CommitWrite kept only
+# hashes of the other 29 slots, and the verify read-back overwrote the card
+# image with the module's now-corrupt contents -- so the last good copy was
+# destroyed by the act of checking. One 64 KB block holds the pre-write bank.
+
+snap_line() { $SIM --app "200e Modules" "$@" --dump-fs 2>/dev/null | grep '^fs lfs PBSNAP'; }
+
+# Two halves of one claim. A snapshot must exist after a write, and must NOT
+# exist after a read -- it is a write's doing, and a file that were always
+# there would satisfy every other check here while proving nothing.
+[ -n "$(snap_line --keys "$W251")" ] \
+  && ok "an armed and confirmed write leaves a bank snapshot behind" \
+  || bad "no snapshot after a write"
+[ -z "$(snap_line --keys "$W251_READ")" ] \
+  && ok "a read with no write behind it leaves no snapshot" \
+  || bad "a read alone left a snapshot: $(snap_line --keys "$W251_READ")"
+
+# It holds the WHOLE bank, not the edited slot. A 251e bank is 63,120 bytes and
+# the container adds a 16-byte header; a snapshot of one 2,104-byte slot would
+# be the same mistake the short read-back makes -- a safety net woven over 3%
+# of the hole.
+snap_bytes=$(snap_line --keys "$W251" | awk '{print $4}')
+[ "$snap_bytes" = "63136" ] \
+  && ok "the snapshot is the whole 63120-byte bank plus its header" \
+  || bad "the snapshot is $snap_bytes bytes, not a whole bank (63136)"
+
+# --- the load-bearing one: PRE-write, not post-write ------------------------
+#
+# The file existing proves nothing about WHEN it was taken. Taken after the
+# wire -- or worse, after the verify read-back, which is where the corrupt
+# bytes land -- it would faithfully preserve the damage it exists to undo.
+#
+# So ask the module. Write an edit through a 251e that mishandles that one
+# restore (--write-fault-once, so the recovery write afterwards goes out to a
+# module that behaves), UNDO, then re-Read and build the SAME edit again:
+#
+#   snapshot = the bank BEFORE the write  ->  the edit is once more a change
+#                                             ("6 bytes change")
+#   snapshot = the bank AFTER the write   ->  the edit is already in the module
+#                                             ("No changes to write")
+#
+# Both answers are well-formed screens, so this cannot pass by accident, and
+# the control below runs the identical script with the UNDO left out to prove
+# the two are actually distinguishable.
+UNDO_ARM='r,step400,r,step8000'      # encR opens the undo confirm, encR commits
+REDO='{,r,step3000,],],r,step10,r,step10,l,step10,],],r,step400'  # re-Read, same edit, arm
+
+undone=$($SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
+              --keys "$W251,$UNDO_ARM,$REDO" --dump-fb 2>/dev/null \
+         | python3 fbtext.py - | grep '^y=26' | sed 's/^y=26 *x=0 *//')
+[ "$undone" = "6 bytes change" ] \
+  && ok "the snapshot holds the bank from BEFORE the write, so an undo really undoes" \
+  || bad "after an undo the same edit was not a change again (said: '$undone')"
+
+kept=$($SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
+            --keys "$W251,l,step200,$REDO" --dump-fb 2>/dev/null \
+       | python3 fbtext.py - | grep '^y=36' | sed 's/^y=36 *x=0 *//')
+[ "$kept" = "No changes to write" ] \
+  && ok "...and without the undo the same edit is no change, so that told us something" \
+  || bad "the control case did not report an already-written edit (said: '$kept')"
+
+# An undo is a real write -- 63,120 bytes back on the wire, all 30 slots
+# rewritten -- so it must be read back and judged like any other. An undo that
+# could not be verified would be no better than the damage it repairs.
+undo_verdict=$($SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
+                    --keys "$W251,$UNDO_ARM" --dump-fb 2>/dev/null \
+               | python3 fbtext.py - | grep '^y=46' | sed 's/^y=46 *x=0 *//')
+[ "$undo_verdict" = "WROTE + VERIFIED" ] \
+  && ok "an undo is read back and verified like any other write" \
+  || bad "an undo produced no verdict of its own (said: '$undo_verdict')"
+
+# The recovery prompt is an OFFER, and an offer that appears when it cannot be
+# honoured is worse than none. It replaces the action row only when the module
+# is known bad AND a snapshot for THIS target exists.
+row56() { $SIM --app "200e Modules" "$@" --dump-fb 2>/dev/null \
+            | python3 fbtext.py - | grep '^y=56' | head -1 | sed 's/^y=56 *x=[0-9]* *//'; }
+case "$(row56 --write-fault flip-last --keys "$W251")" in
+  *UNDO*) ok "a BAD write offers the recovery prompt in place of the action row" ;;
+  *) bad "a BAD write did not offer recovery (y=56 said: '$(row56 --write-fault flip-last --keys "$W251")')" ;;
+esac
+case "$(row56 --keys "$W251")" in
+  *UNDO*) bad "a GOOD write offered an undo nobody needs" ;;
+  *) ok "a verified write leaves the ordinary action row alone" ;;
+esac
+
+# The snapshot is tagged with the address it came from, and LoadSnapshot
+# refuses one whose address does not match the target. Restoring a 251e's
+# 63,120 bytes into whatever answers at some other address is the single worst
+# thing this engine could do, so the offer must not even appear there. `,` and
+# `.` walk the address; 0x28 is the 259e.
+retarget=$(row56 --write-fault flip-last --keys "$W251,l,step200,l,step200,{,step200,r,step2000")
+case "$retarget" in
+  *UNDO*) bad "the undo was offered for a module the snapshot did not come from" ;;
+  *) ok "the recovery prompt is not offered for another module's bank" ;;
+esac
+
+# Both sides of the undo confirm's dead window. It is the same kConfirmDeadMs
+# (350 ms) as the write confirm, and for the same reason -- but it is a second
+# constant in a second place, so a change to one that misses the other has to
+# be caught here. Inside: the prompt is still up. Outside: it commits.
+undo_y13() { $SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
+                  --keys "$W251,r,step$1,r,step8000" --dump-fb 2>/dev/null \
+             | python3 fbtext.py - | grep '^y=13' | head -1 | sed 's/^y=13 *x=[0-9]* *//'; }
+case "$(undo_y13 10)" in
+  *UNDO*) ok "a confirm 10ms after arming an undo does nothing -- the prompt is still up" ;;
+  *) bad "a confirm inside the undo dead window left the prompt (y=13: '$(undo_y13 10)')" ;;
+esac
+# Asserted on the VERDICT, not merely on the prompt being gone. "no longer
+# showing the undo prompt" is also true of a build that has no undo at all, so
+# on its own this half would pass vacuously against the very regression the
+# half above catches. A committed undo is a write, and a write leaves a verdict.
+undo_late=$($SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
+                 --keys "$W251,r,step400,r,step8000" --dump-fb 2>/dev/null \
+            | python3 fbtext.py - | grep '^y=46' | sed 's/^y=46 *x=0 *//')
+case "$undo_late" in
+  *WROTE*|*VERIFIED*) ok "a confirm 400ms after arming an undo commits and reports a verdict" ;;
+  *) bad "a confirm 400ms after arming an undo left no verdict (y=46: '$undo_late')" ;;
+esac
+
+echo "small app state is not a whole-EEPROM rewrite"
+
+# The 200e scan result is ~11 bytes. It used to reach storage through
+# OC::SaveAppData(), which is a sledgehammer: it calls SaveGlobalSettings
+# (loading GLOBALS.CFG into PhzConfig's shared map and never handing it back),
+# rewrites 000.SCL-003.SCL on the card, and holds __disable_irq() across flash
+# windows -- which masks the I2C slave on a module whose whole job is being on
+# a bus. The scan set now has a PhzConfig key of its own.
+#
+# A scan is ~57 SIMULATED seconds of honest QUERY timeouts, so these are the
+# slowest checks in the file; they are worth it, because "does it come back
+# after a power cycle" has no cheaper form.
+SCAN='l,step70000'
+
+# Start from an image with valid stored settings, so a second boot is an
+# ordinary boot rather than a first run -- otherwise every property below is
+# confounded by the first-run path.
+rm -f "$IMG/base"
+$SIM --keys "$MENU,r-down,step900,r-up,step600" --state-out "$IMG/base" >/dev/null 2>&1
+
+cp "$IMG/base" "$IMG/scan"
+$SIM --app "200e Modules" --state "$IMG/scan" --keys "$SCAN" >/dev/null 2>&1
+
+# The property, phrased so it cannot be satisfied by re-scanning: read the
+# module list on a fresh boot WITHOUT scanning. "B:probe N" counts what the app
+# believes it found, so N>0 with no scan in the script is memory, not a scan.
+found_after_cycle=$($SIM --app "200e Modules" --state-in "$IMG/scan" \
+                         --keys "step2000" --dump-fb 2>/dev/null \
+                    | python3 fbtext.py - | grep -o 'B:probe [0-9]*' | head -1)
+[ "$found_after_cycle" = "B:probe 3" ] \
+  && ok "the scan set survives a power cycle without re-scanning" \
+  || bad "the scan set did not survive a power cycle (said: '$found_after_cycle')"
+
+# The control: the same screen on a module that never scanned. Without this the
+# check above would pass against an app that hard-codes three responders.
+found_virgin=$($SIM --app "200e Modules" --state-in "$IMG/base" \
+                    --keys "step2000" --dump-fb 2>/dev/null \
+               | python3 fbtext.py - | grep -o 'B:probe [0-9]*' | head -1)
+[ "$found_virgin" = "B:probe 0" ] \
+  && ok "...and a module that never scanned still reports nothing found" \
+  || bad "an unscanned module already claims responders (said: '$found_virgin')"
+
+# The sledgehammer itself. SaveAppData rewrote the whole EEPROM app-data page;
+# an 11-byte scan result has no business touching it. Compared as a CRC over
+# the whole array, so this holds whatever the layout becomes.
+ee() { grep '^eeprom ' "$1" | awk '{print $2}'; }   # the image's eeprom hex
+[ "$(ee "$IMG/base")" = "$(ee "$IMG/scan")" ] \
+  && ok "persisting the scan set leaves the EEPROM untouched" \
+  || bad "persisting the scan set rewrote the EEPROM"
+
+# Another app's stored state must survive it. The app the switcher saved is the
+# nearest thing to "somebody else's setting" this build can express.
+app_before=$($SIM --state-in "$IMG/base" --keys "step300" 2>&1 | grep -Eo 'app=[^ ]+' | tail -1)
+app_after=$($SIM --state-in "$IMG/scan" --keys "step300" 2>&1 | grep -Eo 'app=[^ ]+' | tail -1)
+[ -n "$app_before" ] && [ "$app_before" = "$app_after" ] \
+  && ok "persisting the scan set does not disturb another app's stored state" \
+  || bad "the stored app changed across a scan ('$app_before' -> '$app_after')"
+
+# PhzConfig's shared map must be handed back afterwards. The failure this
+# guards is not visible on the 200e screen at all: SaveGlobalSettings leaves
+# GLOBALS.CFG resident in the shared map, so the NEXT thing to write a config
+# file writes the wrong map. A preset STORE is that next thing, and it is the
+# one whose corruption would be silent and permanent.
+$SIM --app "200e Modules" --state-in "$IMG/scan" \
+     --keys "$SCAN,$ENTER,l-down,step600,l-up,step4000" 2>&1 \
+  | grep -q 'PresetEngine: save' \
+  && ok "a preset still stores after a scan persists, so the config map was handed back" \
+  || bad "a preset store failed after a scan persisted"
+
+echo "the boot path decides before it mutates"
+
+# AppSwitcher::Init() used to run InitDefaults() on every app and zero the user
+# Turing machines BEFORE ConfirmReset() asked, so every app's live state was
+# already gone by the time anything sought permission. The decision now
+# precedes the mutation.
+
+# A boot with valid stored settings must restore them rather than take the
+# first-run path. Asserted on a SPECIFIC app, chosen with the switcher's own
+# long click (switch and save) so that the value restored is one this script
+# put there -- "some app came up" is true of a first run too, and would have
+# been a check that could not fail.
+rm -f "$IMG/setup"
+$SIM --keys "$MENU,encr-,encr-,step100,r-down,step900,r-up,step600" \
+     --state-out "$IMG/setup" >/dev/null 2>&1
+restored=$($SIM --state-in "$IMG/setup" --keys "step300" 2>&1 \
+           | sed -n 's/^  [a-z][a-z]*  *app=\(.*\)  held=.*/\1/p' | tail -1)
+[ "$restored" = "Setup/About" ] \
+  && ok "a boot with valid stored settings restores the app that was saved" \
+  || bad "the saved app did not come back after a power cycle (got: '$restored')"
+$SIM --state-in "$IMG/base" --keys "step300" 2>&1 | grep -q 'ConfirmReset answered' \
+  && bad "a boot with valid stored settings still opened the reset prompt" \
+  || ok "a boot with valid stored settings does not ask about a reset at all"
+
+# First run still works: nothing stored, the prompt appears, OK erases and the
+# instrument comes up.
+$SIM --reset-settings --keys "step300" 2>&1 | grep -q 'ConfirmReset answered OK' \
+  && ok "the first-run/EEPROM-reset gesture reaches its prompt" \
+  || bad "--reset-settings did not reach the ConfirmReset prompt"
+$SIM --reset-settings --keys "step300" 2>&1 | grep -Eq '^  [a-z]+ +app=' \
+  && ok "an accepted reset leaves a running instrument" \
+  || bad "an accepted reset left no running app"
+
+# The one that matters: a reset the user BACKS OUT OF must leave storage as it
+# was. This is the whole "intent before mutation" claim, and it is a claim
+# about bytes, so it is checked as bytes -- the image before and the image
+# after must be identical. --reset-cancel performs the module's own A+B gesture
+# and then answers the prompt CANCEL.
+cp "$IMG/base" "$IMG/cancelled"
+$SIM --reset-cancel --state "$IMG/cancelled" --keys "step300" >/dev/null 2>&1
+cmp -s "$IMG/base" "$IMG/cancelled" \
+  && ok "a CANCELLED reset leaves stored settings byte-identical" \
+  || bad "a cancelled reset changed stored settings"
+
+# ...and the control, without which the above passes on any run that writes
+# nothing at all: an ACCEPTED reset must change them.
+cp "$IMG/base" "$IMG/accepted"
+$SIM --reset-settings --state "$IMG/accepted" --keys "step300" >/dev/null 2>&1
+cmp -s "$IMG/base" "$IMG/accepted" \
+  && bad "an ACCEPTED reset changed nothing -- the cancel check above proves nothing" \
+  || ok "...and an accepted reset does change them, so that was a real comparison"
+
+echo "a chord-opened screen ignores the chord that opened it"
+
+# Every global gesture in this instrument is an unlabelled chord, and the hand
+# does not release a chord's two buttons at the same instant. The proven case:
+# the both-encoder chord left encR held, and the preset overlay's 250ms RECALL
+# hold timer -- which reads the button directly rather than waiting for an
+# event -- fired on it. A bus-wide recall nobody asked for.
+#
+# The rule is now global (Ui::IgnoreUntilRelease), so the check is too, and it
+# is stated as a property with no strings in it: entering a screen with the
+# chord's second button STILL HELD must leave exactly the frame that a clean
+# entry leaves. Anything the stray hold did -- moving a cursor, activating a
+# row, arming a timer, dismissing the screen -- changes pixels.
+absorbs() {  # name, clean keys, fumbled keys, then extra sim args
+  name=$1; clean=$2; fumbled=$3; shift 3
+  $SIM "$@" --keys "$clean"   --dump-fb 2>/dev/null > "$TMP/clean.hex"
+  $SIM "$@" --keys "$fumbled" --dump-fb 2>/dev/null > "$TMP/fumbled.hex"
+  # A clean entry must actually have drawn something, or two blank frames
+  # would compare equal and the check would pass on nothing.
+  if ! grep -q '[1-9A-Fa-f]' "$TMP/clean.hex"; then
+    bad "$name: the clean entry drew an empty frame"; return
+  fi
+  cmp -s "$TMP/clean.hex" "$TMP/fumbled.hex" \
+    && ok "$name absorbs a fumbled entry gesture" \
+    || bad "$name acted on the chord button that was still held"
+}
+absorbs "the app switcher (A+encR, encR held)" \
+        "a-down,step60,r-down,step60,r-up,step60,a-up,step900" \
+        "a-down,step60,r-down,step60,a-up,step900,r-up,step60"
+absorbs "the screensaver (Z+A, A held)" \
+        "z-down,step60,a-down,step60,a-up,step60,z-up,step900" \
+        "z-down,step60,a-down,step60,z-up,step900,a-up,step60"
+absorbs "the preset overlay (both encoders, encR held)" \
+        "l-down,step20,r-down,step80,l-up,r-up,step900" \
+        "l-down,step20,r-down,step80,l-up,step900,r-up,step60"
+absorbs "the IO settings screen (A+encL, encL held)" \
+        "a-down,step60,l-down,step60,l-up,step60,a-up,step900" \
+        "a-down,step60,l-down,step60,a-up,step900,l-up,step60" --app Scenery
+
+# The rule is "until released", not "for a while", so a press AFTER the release
+# must work normally. Without this pair the guard could be a permanent mute and
+# every check above would still pass.
+$SIM --keys "$MENU,encr-,encr-,step100,r,step600" 2>&1 | grep -q 'app=Setup/About' \
+  && ok "a deliberate press after the chord is released still acts" \
+  || bad "the release-first guard swallowed a deliberate press too"
+
+# The hold-sampled gestures are the ones the guard had to be careful with:
+# STORE (500ms) and RECALL (250ms) are timed against ui.read_immediate(), i.e.
+# by reading the pin, not by waiting for an event -- which is exactly why the
+# entry chord could satisfy one. The four cases above under "preset overlay
+# holds" pin both sides of both thresholds; this asserts the guard did not
+# quietly break the mechanism they rely on by making read_immediate always
+# false. A 600ms hold after a clean entry must still store.
+$SIM --keys "$ENTER,l-down,step600,l-up,step3000" 2>&1 | grep -q 'PresetEngine: save' \
+  && ok "the release-first rule leaves the hold-sampled STORE working" \
+  || bad "the release-first rule broke the 500ms STORE hold"
+
+echo "hold A reveals the chord list"
+
+# Every global gesture here is an unlabelled chord, which is fine once and
+# unguessable the first time. Holding the modifier alone now lists them.
+# kChordHintDelayTicks is 700 UI ticks: long enough that the first half of a
+# real chord never flashes a card at you, short enough to find by accident.
+hint_rows() { $SIM "$@" --dump-fb 2>/dev/null | python3 fbtext.py -; }
+
+hint_rows --keys "a-down,step400" | grep -q 'HOLD A' \
+  && bad "the chord list appeared 400ms in, inside its own 700-tick delay" \
+  || ok "holding A for 400ms shows nothing -- the delay is real"
+hint_rows --keys "a-down,step900" | grep -q 'HOLD A' \
+  && ok "holding A past the delay reveals the chord list" \
+  || bad "holding A for 900ms revealed no chord list"
+
+# It is a hint, not a mode. Releasing without a second press must do nothing at
+# all -- not switch app, not open anything, not leave a mark.
+$SIM --keys "a-down,step900,a-up,step300" --dump-fb 2>/dev/null > "$TMP/afterhint.hex"
+$SIM --keys "step1200" --dump-fb 2>/dev/null > "$TMP/nohint.hex"
+cmp -s "$TMP/afterhint.hex" "$TMP/nohint.hex" \
+  && ok "releasing the hold without a second press does nothing at all" \
+  || bad "revealing the chord list and letting go left the instrument changed"
+
+# ...and the chords still work THROUGH it: the overlay must not eat the second
+# press it exists to advertise.
+$SIM --keys "a-down,step900,r-down,step60,r-up,step60,a-up,step200" 2>&1 \
+  | grep -q '^  menu ' \
+  && ok "a chord completed through the revealed list still works" \
+  || bad "the chord list swallowed the chord it was advertising"
+
 # ---------------------------------------------------------------------------
 # The display cannot lie by truncation.
 #
@@ -427,6 +851,78 @@ sweep 200e-bad --app "200e Modules" --write-fault ignore --keys "$W251"
 sweep setup --app "Setup/About"
 sweep scenery --app Scenery
 sweep screensaver --keys "z-down,step60,a-down,step60,a-up,step60,z-up,step300"
+echo
+
+
+# ---------------------------------------------------------------------------
+# The debug-stats page, which until now had no layout coverage at all.
+#
+# It is a `while (!exit_loop)` that owns the process, and by the time it ends
+# the app menu has redrawn over it -- so --dump-fb showed the menu and the page
+# itself was unverifiable. `snapN` fixes that: it arms a capture N ms ahead,
+# and the capture fires from the SH1106 shim's page-7 write, so what it keeps
+# is one WHOLE frame drawn from inside the loop rather than a torn blend.
+#
+# Getting past page 1 needs the other half: paging is an encL TURN while an
+# encL PRESS is the exit, and detents queued before the loop are eaten by the
+# app menu while the entry gesture is still being held. "qencl+N@T" delivers
+# them T ms later, i.e. inside the loop.
+#
+# Worth checking because an exit hint was recently added here whose geometry
+# nothing checked, on the one screen in the instrument that looks like a crash
+# if you cannot tell how to leave it.
+echo "the debug-stats page has a layout, and it is checked"
+
+# encL held long = enter; the r-inN tap is the exit press, in flight before the
+# loop starts because the loop never gives the script another turn.
+ds_page() {  # detents to page forward
+  $SIM --keys "$MENU,r-in3000,qencl+$1@700,l-down,snap1400,step3500,l-up,step200" \
+       --dump-fb 2>/dev/null > "$TMP/ds.hex"
+}
+
+ds_page 0
+python3 fbtext.py "$TMP/ds.hex" > "$TMP/dstext"
+# The page must actually have been captured -- if the timing ever drifts past
+# the loop, the capture would hold the app menu instead and every assertion
+# below would be about the wrong screen. The page number is the proof, and it
+# is a property of the page rather than a string anyone will reword.
+grep -Eq '^y=2 +x=2 +1/[0-9]+ ' "$TMP/dstext" \
+  && ok "a frame can be captured from inside the debug-stats loop" \
+  || bad "the capture did not land on the debug-stats page: $(head -2 "$TMP/dstext")"
+
+# The exit hint. This page's only way out used to be a press it never
+# mentioned, which reads as a crash. It is right-aligned to x=127, so it also
+# happens to be the one string in the instrument that legitimately occupies the
+# last pixel column -- see the print_right note in edgecheck.py.
+grep -q 'R:exit' "$TMP/dstext" \
+  && ok "the debug-stats page says how to leave it" \
+  || bad "the debug-stats page advertises no exit"
+
+# Title and hint must not collide. The title is drawn with drawStrClipX into
+# the space before the hint; if that clip window is ever widened past kHintX
+# the two overlap and BOTH become unreadable, which no text assertion can see
+# (an overlap matches no glyph, so it simply vanishes from the decode). So
+# assert they are separate runs on the same row -- the title starting at the
+# left, the hint at the right.
+title_x=$(grep -E '^y=2 ' "$TMP/dstext" | head -1 | sed -E 's/^y=2 +x=([0-9]+).*/\1/')
+hint_x=$(grep 'R:exit' "$TMP/dstext" | sed -E 's/^y=[0-9]+ +x=([0-9]+).*/\1/')
+if [ -n "$title_x" ] && [ -n "$hint_x" ] && [ "$title_x" -lt "$hint_x" ]; then
+  ok "the title and the exit hint are separate runs, title first"
+else
+  bad "title/hint geometry is wrong (title x=$title_x, hint x=$hint_x)"
+fi
+
+# ...and the generic rule, now that the page can be reached: nothing clipped,
+# on every page of it. The pages are walked with real detents through the real
+# decoder, so encoder ACCELERATION applies and N detents is not N pages -- the
+# sweep does not care which pages it lands on, only that none of them clips.
+printf '  ok    no clipped text on debug-stats pages: '
+for n in 0 1 2 3 5 8; do
+  ds_page $n
+  python3 edgecheck.py "$TMP/ds.hex" > "$TMP/edge.txt" 2>&1 \
+    || { printf '\n'; bad "a debug-stats page is clipped: $(cat "$TMP/edge.txt")"; break; }
+  printf '%s ' "$(python3 fbtext.py "$TMP/ds.hex" | sed -nE 's/^y=2 +x=2 +([0-9]+\/[0-9]+).*/\1/p' | head -1)"
+done
 echo
 
 [ $fail -eq 0 ] && echo "all checks passed" || echo "SOME CHECKS FAILED"
