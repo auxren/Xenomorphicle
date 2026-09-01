@@ -76,10 +76,40 @@ uint32_t SimNowMs();
 uint32_t SimNowUs();
 void SimAdvanceMs(uint32_t dt);
 
+// Time passing WITH the background running: the core ISR and the 1 kHz UI poll
+// on their own schedules, exactly as display::SimPump does for a blocked
+// frame. See sim_runtime.cpp.
+void SimBackgroundUs(uint32_t us);
+
 static inline uint32_t millis() { return SimNowMs(); }
 static inline uint32_t micros() { return SimNowUs(); }
-static inline void delay(uint32_t ms) { SimAdvanceMs(ms); }
-static inline void delayMicroseconds(uint32_t) {}
+
+// delay() and delayMicroseconds() must ADVANCE THE CLOCK AND RUN THE
+// BACKGROUND, not merely return.
+//
+// On hardware a delay is not a pause in the machine: the core ISR keeps
+// firing, the display drains page by page and the UI poll keeps debouncing
+// buttons. Firmware relies on that -- any `while (!done) { ...; delay(x); }`
+// is waiting for something only the ISR can deliver.
+//
+// delayMicroseconds() used to be a no-op, which made the clock stand still
+// inside exactly those loops. Ui::DebugStats() (OC_debug.cpp) is a
+// `while (!exit_loop)` whose only pacing is delayMicroseconds(10): with a
+// frozen clock the UI poll never ran, no button event was ever queued, the
+// frame buffer was never drained, and the simulator spun forever with no
+// screen and no way out. A reviewer lost a process to it. delay() had the
+// milder half of the same bug -- it moved the clock but ran nothing, so a
+// firmware loop that delays while waiting on the ISR still made no progress.
+// A second at a time, because ms * 1000 overflows a uint32_t past ~71 minutes
+// and a wrapped delay would be a silent, undebuggable time machine.
+static inline void delay(uint32_t ms) {
+  while (ms) {
+    const uint32_t chunk = ms > 1000u ? 1000u : ms;
+    SimBackgroundUs(chunk * 1000u);
+    ms -= chunk;
+  }
+}
+static inline void delayMicroseconds(uint32_t us) { SimBackgroundUs(us); }
 static inline void yield() {}
 
 class elapsedMillis {

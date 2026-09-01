@@ -3,7 +3,7 @@
 #   make            build build/xeno-sim
 #   make run        build and run it interactively, in this terminal
 #   make gui        build and serve the browser front end on 127.0.0.1:8731
-#   make check      the self-checks (determinism, the four hold cases)
+#   make check      the self-checks (determinism, gestures, the 200e write path)
 #   make clean
 #
 # Nothing here is part of the firmware build: no platformio.ini env references

@@ -31,9 +31,25 @@ template <uint8_t& PINA, uint8_t& PINB, bool acceleration_enabled = false>
 class Encoder {
 public:
 
-  static const int32_t kAccelerationDec = 16;
+  // Acceleration is an accumulator: +Inc per detent, -Dec per 1kHz UI poll, and
+  // the step is multiplied by 1 + (accumulator >> 8). So it engages only above
+  // Inc/Dec milliseconds per detent, and below that it grows to the clamp.
+  //
+  // With Dec = 16 that break-even was 13 ms/detent -- 77 detents/s, over 3 rev/s
+  // on a 24-ppr detented shaft. No hand produces that, so acceleration never
+  // engaged: every enumerated list in the instrument was walked one click at a
+  // time (29 detents to reach preset slot 30, 52 to dial 0x5C down to 0x28).
+  // When it DID fire -- a stuttering detent or contact bounce, which is faster
+  // than any turn -- the clamp of 16<<8 meant a multiplier of 17, i.e. a single
+  // click jumping to the far end of a 30-item list. Useless and unpredictable at
+  // the same time.
+  //
+  // Dec = 4 puts break-even at 52 ms/detent (~19 detents/s), which is a brisk
+  // but ordinary spin, and the clamp of 3<<8 caps the multiplier at 4x so the
+  // worst a bounce can do is overshoot by three items instead of thirty.
+  static const int32_t kAccelerationDec = 4;
   static const int32_t kAccelerationInc = 208;
-  static const int32_t kAccelerationMax = 16 << 8;
+  static const int32_t kAccelerationMax = 3 << 8;
 
   // For debouncing of pins, use 0x0f (b00001111) and 0x0c (b00001100) etc.
   static const uint8_t kPinMask = 0x03;

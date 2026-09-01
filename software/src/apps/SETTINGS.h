@@ -34,7 +34,40 @@ OC_APP_CLASS(AppSettings, TWOCCS("SE"), "Setup/About", "Settings"),
 public:
   OC_APP_INTERFACE_DECLARE(AppSettings, 0);
 
-  bool reflash = false;
+  // The two irreversible things this screen can do. Neither happens on the
+  // press that asks for it: the press arms one of these, a screen of its own
+  // states the consequence, and only then does a DIFFERENT button commit.
+  //
+  // Factory reset used to be a bare encR press -- the most-practised press in
+  // the instrument (it picks an app in the switcher, enters a module in the
+  // 200e app, confirms a write) applied on the app whose name promises it is
+  // where you go to READ about the module. AppSwitcher::Init(true) then ran
+  // InitDefaults() on every app, reset global_settings and zeroed the user
+  // Turing machines BEFORE its own ConfirmReset() prompt was drawn, so every
+  // app's live state was already gone by the time anything asked -- and that
+  // prompt's "OK" is encR as well, which made two presses of one button a
+  // full EEPROM erase. A two-step confirmation whose two steps are the same
+  // button is a one-step confirmation.
+  //
+  // Reflash used to latch on `reflash = (event.value > 0)` from any encL
+  // turn, which swapped the row to "[Reflash]" and re-bound the encL press
+  // from calibrate to reboot-into-the-bootloader. [RESET] then vanished from
+  // the screen while encR still reset, i.e. a stray nudge in a rack left the
+  // factory reset unlabelled. It is a held gesture now (encL long-press), and
+  // it latches nothing.
+  enum PendingAction : uint8_t { PENDING_NONE, PENDING_RESET, PENDING_REFLASH };
+  PendingAction pending_ = PENDING_NONE;
+  uint32_t armed_ms_ = 0;    // millis() the confirm screen appeared
+  bool b_down_solo_ = false; // B went down alone, after this screen appeared
+  bool a_down_solo_ = false; // A went down alone, i.e. not as the A+B chord
+  bool encl_held_ = false;   // encL is down: the footer offers the long-press
+
+  // How long a confirm screen ignores its "yes" after appearing. Same value
+  // and same reasoning as the 200e write confirm's kConfirmDeadMs: long
+  // enough that no fumble or double-tap crosses it, short enough that a
+  // deliberate press never feels refused.
+  static constexpr uint32_t kConfirmDeadMs = 350;
+
   bool bus_addr_dirty = false;
   // Pending bus address, 0 = untouched. The module's address is its identity on
   // the bus: change it by accident and it stops answering where a preset
@@ -62,6 +95,7 @@ public:
   }
 
   void Resume() {
+    Disarm();
     if (OC::calibration_data.get_calstart()) {
       StartCalibration();
       OC::calibration_data.set_calstart(false);
@@ -71,6 +105,7 @@ public:
     }
   }
   void Suspend() {
+    Disarm();
     if (cal_save_q) {
       OC::calibration_save();
       cal_save_q = false;
@@ -335,6 +370,7 @@ public:
   int pick_left = 0, pick_right = 0;
 
     void View() const;
+    void DrawConfirm() const;
 
   void DrawCalibration() const {
     const OC::CalibrationStep *step = calstate.current_step;
@@ -460,16 +496,39 @@ public:
 
     void HandleUiEvent(const UI::Event &event) {
       if (!calibration_mode) {
-        if (event.control == OC::CONTROL_ENCODER_L) {
-          reflash = (event.value > 0);
+        // An armed screen owns all input: see HandleConfirmEvent.
+        if (pending_ != PENDING_NONE) {
+          HandleConfirmEvent(event);
+          return;
         }
-        if (event.control == OC::CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_PRESS) {
-          if (reflash)
-            Reflash();
-          else
-            StartCalibration();
+
+        // encL: a press calibrates, holding it past kLongPressTicks offers
+        // the bootloader. Two different gestures on one button, neither of
+        // which can be reached by turning the encoder, and the footer says
+        // what continuing to hold will do while you are holding it.
+        if (event.control == OC::CONTROL_BUTTON_L) {
+          switch (event.type) {
+            case UI::EVENT_BUTTON_DOWN:
+              encl_held_ = true;
+              break;
+            case UI::EVENT_BUTTON_PRESS:
+              encl_held_ = false;
+              StartCalibration();
+              break;
+            case UI::EVENT_BUTTON_LONG_PRESS:
+              encl_held_ = false;
+              Arm(PENDING_REFLASH);
+              break;
+            default:            // LONG_RELEASE: the arm already happened
+              encl_held_ = false;
+              break;
+          }
         }
-        if (event.control == OC::CONTROL_BUTTON_R && event.type == UI::EVENT_BUTTON_PRESS) FactoryReset();
+        // encR arms the factory reset. Deliberately the harmless half of the
+        // gesture: this is the press a newcomer arrives with, and all it can
+        // do is put a screen up that says what the other half would erase.
+        if (event.control == OC::CONTROL_BUTTON_R && event.type == UI::EVENT_BUTTON_PRESS)
+          Arm(PENDING_RESET);
 
         // The 200e module address moves only while X is held -- see the note on
         // bus_addr_edit. A bare turn is ignored on purpose: this encoder does
@@ -496,7 +555,19 @@ public:
         // solo UP press (not the UP+DOWN flip-screen chord above) toggles
         // pixel invert -- the inversion itself, visible instantly, is the
         // confirmation; persisted to GLOBALS.CFG on app exit like bus_addr
-        if (event.control == OC::CONTROL_BUTTON_UP && event.type == UI::EVENT_BUTTON_PRESS) {
+        //
+        // "Solo" has to be decided on the DOWN edge, for the same reason the
+        // confirm screens do it there: event.mask is the raw pin state when
+        // the event was queued and a release is only reported seven ticks
+        // after the pin rises, so whichever of A/B is let go of first carries
+        // an empty mask by the time its press event exists. Testing the mask
+        // at the release let the flip-screen chord invert the display as
+        // well, which this comment already said it must not.
+        if (event.control == OC::CONTROL_BUTTON_UP && event.type == UI::EVENT_BUTTON_DOWN)
+          a_down_solo_ = (event.mask == OC::CONTROL_BUTTON_UP);
+        if (event.control == OC::CONTROL_BUTTON_UP && event.type == UI::EVENT_BUTTON_PRESS
+            && a_down_solo_) {
+          a_down_solo_ = false;
           bool inverted = !OC::global_settings.invert_display;
           display::SetInverted(inverted);
           OC::global_settings.invert_display = inverted;
@@ -628,6 +699,61 @@ public:
         calibration_complete = false;
         calibration_mode = true;
     }
+    void Arm(PendingAction what) {
+      pending_ = what;
+      armed_ms_ = millis();
+      // A B that was already held when the screen appeared cannot commit:
+      // only a press that BEGINS here counts, so "hold B, press encR" is one
+      // gesture short of a reset rather than one gesture past it.
+      b_down_solo_ = false;
+    }
+    void Disarm() {
+      // Never leave an action armed across a suspend, a screensaver or a
+      // return to this app: the confirm screen would be gone but B would
+      // still commit whatever it was.
+      pending_ = PENDING_NONE;
+      encl_held_ = false;
+    }
+
+    // The armed screen answers to exactly two things: B commits, encL says
+    // no. The encoder buttons (including encR, which armed the reset), the
+    // other face buttons and both encoder turns are all inert here, so no
+    // chord and no habitual press can finish what a stray press started.
+    void HandleConfirmEvent(const UI::Event &event) {
+      if (event.control == OC::CONTROL_BUTTON_L      // encL = no, everywhere
+          && event.type == UI::EVENT_BUTTON_PRESS) {
+        Disarm();
+        return;
+      }
+      if (event.control != OC::CONTROL_BUTTON_B) return;
+
+      // The chord test has to happen on the DOWN edge. event.mask is the raw
+      // pin state at the tick the event was queued, and a release is only
+      // reported seven ticks after the pin rises -- so let go of A a few
+      // milliseconds before B, as anyone releasing the A+B flip-screen chord
+      // does, and B's press event carries an empty mask and looks solo. At
+      // the DOWN edge the other button is still down and the chord is plain.
+      if (event.type == UI::EVENT_BUTTON_DOWN) {
+        b_down_solo_ = (event.mask == OC::CONTROL_BUTTON_B);
+        return;
+      }
+      if (event.type != UI::EVENT_BUTTON_PRESS) return;
+
+      const bool solo = b_down_solo_;
+      b_down_solo_ = false;
+      if (!solo || event.mask) return;   // ...and nothing else still held
+
+      // The screen must have been readable for kConfirmDeadMs before it will
+      // take a yes. Deliberately silent: a slip inside the window should feel
+      // like nothing happened, and the user reads the screen and presses again.
+      if (millis() - armed_ms_ < kConfirmDeadMs) return;
+
+      const PendingAction go = pending_;
+      Disarm();
+      if (go == PENDING_RESET) FactoryReset();
+      else if (go == PENDING_REFLASH) Reflash();
+    }
+
     void Reflash() {
       uint32_t start = millis();
       while(millis() < start + SETTINGS_SAVE_TIMEOUT_MS) {
@@ -648,9 +774,51 @@ public:
     }
 };
 
+// The confirm screens. Nothing has been erased or rebooted when these are
+// drawn -- they exist only to state, in words, what B is about to do.
+FLASHMEM void AppSettings::DrawConfirm() const {
+  const bool reset = (pending_ == PENDING_RESET);
+
+  graphics.setPrintPos(0, 13);
+  graphics.print(reset ? "FACTORY RESET" : "REFLASH: BOOTLOADER");
+  graphics.invertRect(0, 12, 128, 10);   // inversion is the only emphasis here
+
+  graphics.setPrintPos(0, 26);
+  if (reset) {
+    // What AppSwitcher::Init(true) actually does: InitDefaults() on every
+    // app, global_settings back to defaults, the user Turing machines
+    // zeroed, and -- if its own prompt is answered OK -- EEPROM erased from
+    // EEPROM_GLOBALSETTINGS_START up, plus PhzConfig::eraseFiles() on T4.1.
+    // Calibration lives below that mark and survives, which is worth saying:
+    // it is the one thing a user cannot recreate without a voltmeter.
+    graphics.print("Erases all settings");
+    graphics.setPrintPos(0, 36);
+    graphics.print("and every app's data");
+    graphics.setPrintPos(0, 46);
+    graphics.print("Calibration is kept.");
+  } else {
+    graphics.print("Reboots to bootloader");
+    graphics.setPrintPos(0, 36);
+    graphics.print("for Teensy Loader.");
+    graphics.setPrintPos(0, 46);
+    graphics.print("Module stops running.");
+  }
+
+  // encL is the harmless answer at x=0 on every screen this app draws; the
+  // committing button sits where nothing else does.
+  graphics.setPrintPos(0, 56);
+  graphics.print("encL:no");
+  graphics.setPrintPos(78, 56);
+  graphics.print(reset ? "B:ERASE" : "B:BOOT");
+}
+
 FLASHMEM void AppSettings::View() const {
       if (calibration_mode) {
         DrawCalibration();
+        return;
+      }
+      if (pending_ != PENDING_NONE) {
+        DrawConfirm();
         return;
       }
 
@@ -701,7 +869,14 @@ FLASHMEM void AppSettings::View() const {
       } else {
         gfxPrint(10, 45, "github.com/djphazer");
       }
-      gfxPrint(0, 55, reflash ? "[Reflash]" : "[CALIBRATE]   [RESET]");
+      // 21 columns exactly, and it states its bindings rather than relying on
+      // the unwritten "left label = left encoder" convention the bracketed
+      // labels used to. Same legend grammar as the 200e app's "encR:CONFIRM
+      // encL:no". While encL is held the row offers the other half of that
+      // button, so the long-press is discoverable without being reachable by
+      // accident -- you are told what continuing to hold does while you hold.
+      gfxPrint(0, 55, encl_held_ ? "keep holding: Reflash"
+                                 : "encL:Cal   encR:Reset");
 }
 
 FLASHMEM void AppSettings::Init() {
@@ -722,6 +897,11 @@ FLASHMEM void AppSettings::HandleAppEvent(OC::AppEvent event) {
   }
   if (event == OC::APP_EVENT_SUSPEND) {
     Suspend();
+  }
+  // The screensaver is not a suspend, but it hides the confirm screen just as
+  // completely -- an armed action must not outlive the words that explain it.
+  if (event == OC::APP_EVENT_SCREENSAVER_ON) {
+    Disarm();
   }
 }
 

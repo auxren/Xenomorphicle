@@ -43,6 +43,7 @@ enum Buchla200eReadBlock : uint8_t {
   BUCHLA200E_READ_BUSY_SCAN,        // the scan owns the master FSM
   BUCHLA200E_READ_BUSY_PROBE,       // a single-address probe is in flight
   BUCHLA200E_READ_BAD_ADDR,         // address 0, or our own module address
+  BUCHLA200E_READ_UNSAVED_EDIT,     // leaving this slot would discard an edit
 };
 
 struct Buchla200eReadContext {

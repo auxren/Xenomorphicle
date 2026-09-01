@@ -41,6 +41,13 @@ std::vector<SimModule> g_modules;
 // operator asks otherwise -- see SimBusSetWriteFault.
 SimWriteFault g_write_fault = SIM_WRITE_FAITHFUL;
 
+// Armed by a RESTORE under SIM_WRITE_SHORT_READBACK and consumed by the very
+// next BACKUP, which is the firmware's post-write read-back. Only that one
+// transfer is truncated: the user's FIRST read has to succeed or there is
+// nothing to edit, and a re-Read after the failure has to succeed or the test
+// could not tell "invalidated, ask again" from "wedged".
+bool g_short_next_backup = false;
+
 SimModule *FindModule(uint8_t addr) {
   for (auto &m : g_modules)
     if (m.addr == addr) return &m;
@@ -136,6 +143,9 @@ int ops_send_frame(const uint8_t *b, uint8_t n) {
       return 0;
     }
     const uint32_t bytes = (uint32_t)m->bank.size();
+    // How much of the bank this transfer actually moves. Equal to the bank
+    // except under SIM_WRITE_SHORT_READBACK, below.
+    uint32_t moved = bytes;
     if (restore) {
       // The simulated module STORES what the master sent, because that is what
       // a real one does -- and because the firmware now reads the bank straight
@@ -159,6 +169,11 @@ int ops_send_frame(const uint8_t *b, uint8_t n) {
           memcpy(m->bank.data(), g_card, bytes);
           m->bank[bytes - 1] ^= 0x01;
           break;
+        case SIM_WRITE_SHORT_READBACK:
+          // The STORE is perfect. What breaks is the read-back that follows.
+          memcpy(m->bank.data(), g_card, bytes);
+          g_short_next_backup = true;
+          break;
         case SIM_WRITE_FAITHFUL:
         default:
           memcpy(m->bank.data(), g_card, bytes);
@@ -168,16 +183,40 @@ int ops_send_frame(const uint8_t *b, uint8_t n) {
              SimWriteFaultName(g_write_fault));
       SimLog("  SIMULATED ONLY. No hardware was written.");
     } else {
-      // The target writes its bank into our card image.
-      memcpy(g_card, m->bank.data(), bytes);
-      SimLog("BACKUP %02X: served %u bytes from capture", mod, (unsigned)bytes);
+      if (g_short_next_backup) {
+        // One record, then silence -- and NO error. The module simply stops
+        // touching the card, so the master's activity watcher sees the wire
+        // go quiet and calls the job DONE, exactly as it would after a
+        // complete transfer. A short DONE is a real observed failure: see the
+        // note in AppBus200e::DecodeSlotFromCardImage about a bench capture
+        // that came back one record shy while reporting success.
+        //
+        // Only the first record lands, so the rest of the card image is still
+        // the bytes the RESTORE was built from. That is the trap: the
+        // untouched 97% agrees with the intent by construction, so a
+        // whole-bank hash of the image says "the module holds what we sent"
+        // on the strength of bytes the module never sent.
+        g_short_next_backup = false;
+        moved = (bytes % kBuchla251eSlotBytes == 0)
+                    ? (uint32_t)kBuchla251eSlotBytes
+                    : (uint32_t)kBuchla259eRecordBytes;
+        if (moved > bytes) moved = bytes;
+        memcpy(g_card, m->bank.data(), moved);
+        SimLog("BACKUP %02X: served only %u of %u bytes, then went quiet "
+               "(fault: read-back truncated)",
+               mod, (unsigned)moved, (unsigned)bytes);
+      } else {
+        // The target writes its bank into our card image.
+        memcpy(g_card, m->bank.data(), bytes);
+        SimLog("BACKUP %02X: served %u bytes from capture", mod, (unsigned)bytes);
+      }
     }
     g_xfer_pending = true;
     g_xfer_restore = restore;
     g_xfer_base = restore ? g_card_bytes_read : g_card_bytes_written;
     g_xfer_start = SimNowMs() + kXferStartMs;
-    g_xfer_end = g_xfer_start + bytes / kXferBytesPerMs + 1;
-    g_xfer_bytes = bytes;
+    g_xfer_end = g_xfer_start + moved / kXferBytesPerMs + 1;
+    g_xfer_bytes = moved;
     return 0;
   }
 
@@ -250,6 +289,7 @@ const char *SimWriteFaultName(SimWriteFault f) {
     case SIM_WRITE_DROP_TAIL:   return "fault: last record dropped";
     case SIM_WRITE_FLIP_FIRST:  return "fault: 1 byte wrong, first slot";
     case SIM_WRITE_FLIP_LAST:   return "fault: 1 byte wrong, last slot";
+    case SIM_WRITE_SHORT_READBACK: return "fault: read-back truncated";
     case SIM_WRITE_FAITHFUL:
     default:                    return "faithful";
   }
@@ -260,6 +300,7 @@ void SimBusInit(const SimBusConfig &cfg) {
   g_real_timing = cfg.real_timing;
   memset(g_card, 0, sizeof(g_card));
   g_serving = false;
+  g_short_next_backup = false;
   g_modules.clear();
 
   std::vector<uint8_t> b251, b259;

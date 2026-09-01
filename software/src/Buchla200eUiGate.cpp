@@ -29,9 +29,14 @@ const char *Buchla200eReadBlockText(Buchla200eReadBlock b) {
     case BUCHLA200E_READ_BUS_OFF:          return "bus off";
     case BUCHLA200E_READ_IN_FLIGHT:        return "read already running";
     case BUCHLA200E_READ_WRITE_IN_FLIGHT:  return "write running";
-    case BUCHLA200E_READ_BUSY_SCAN:        return "busy: scan (L stops)";
+    // NOT "(L stops)". This text is drawn on the module home screen too, and
+    // there encL means back-to-module-select, so the advice cost a silent
+    // navigation and still did not stop the scan. The remedy belongs where it
+    // is true: the module-select screen draws "Scan N/M encL:stop" in place.
+    case BUCHLA200E_READ_BUSY_SCAN:        return "busy: scanning bus";
     case BUCHLA200E_READ_BUSY_PROBE:       return "busy: probe";
     case BUCHLA200E_READ_BAD_ADDR:         return "addr is us / zero";
+    case BUCHLA200E_READ_UNSAVED_EDIT:     return "edited: Save or Read";
     default:                               return "refused";
   }
 }

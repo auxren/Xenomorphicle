@@ -139,6 +139,32 @@ bool ApplyKey(const std::string &k) {
     const size_t dash = k.rfind('-');
     if (dash != std::string::npos && dash > 0) {
       const std::string tail = k.substr(dash + 1);
+      // "<button>-inN": schedule a tap N simulated ms from now and return at
+      // once, without advancing the clock.
+      //
+      // This is the ONLY way a script can answer a screen the firmware draws
+      // from inside its own blocking loop -- Ui::DebugStats(), ConfirmReset(),
+      // the calibration wizard. Those never return to the simulator's driver,
+      // so the token that would press the exit button is never reached; the
+      // press has to already be in flight before the loop is entered. The
+      // taps are consumed by SimInputTick(), which runs on the UI-poll
+      // schedule inside the pump, so it fires just the same while the
+      // firmware is spinning.
+      if (tail.rfind("in", 0) == 0 &&
+          tail.find_first_not_of("0123456789", 2) == std::string::npos &&
+          tail.size() > 2) {
+        const std::string btn = k.substr(0, dash);
+        const uint16_t c = SimInputControlForToken(btn);
+        if (c) {
+          const uint32_t at = (uint32_t)strtoul(tail.c_str() + 2, nullptr, 10);
+          char buf[64];
+          snprintf(buf, sizeof(buf), "sched %s %u %u", btn.c_str(),
+                   (unsigned)at, (unsigned)kTapMs);
+          SimSessionRecord(buf);
+          SimInputScheduleTap(c, at, kTapMs);
+          return true;
+        }
+      }
       if (tail == "down" || tail == "up") {
         if (SimInputControlForToken(k.substr(0, dash))) {
           ButtonEdge(k.substr(0, dash), tail == "down");
@@ -390,6 +416,7 @@ int ParseWriteFault(const char *s) {
   if (a == "drop-tail")  return SIM_WRITE_DROP_TAIL;
   if (a == "flip-first") return SIM_WRITE_FLIP_FIRST;
   if (a == "flip-last")  return SIM_WRITE_FLIP_LAST;
+  if (a == "short-readback") return SIM_WRITE_SHORT_READBACK;
   return -1;
 }
 
@@ -421,7 +448,10 @@ void Usage() {
       "  --write-fault WHAT   make the simulated modules mishandle a RESTORE,\n"
       "                       to exercise the firmware's post-write read-back:\n"
       "                       none | ignore | drop-tail | flip-first |\n"
-      "                       flip-last  (default: none, i.e. it works)\n"
+      "                       flip-last | short-readback\n"
+      "                       (default: none, i.e. it works). short-readback\n"
+      "                       stores perfectly and truncates the READ-BACK,\n"
+      "                       which is the one shape that can fake a VERIFY.\n"
       "  --help\n"
       "\nKeys:\n%s\n"
       "\nA --keys token may be \"<button>-down\" / \"<button>-up\" (buttons are\n"
@@ -430,6 +460,10 @@ void Usage() {
       "  --keys \"a-down,r,a-up\"                   A + encR      -> app menu\n"
       "  --keys \"l-down,step600,l-up\"             a 500ms hold  -> STORE\n"
       "and \"stepN\" advances exactly N simulated ms.\n"
+      "\n\"<button>-inN\" schedules a tap N ms ahead and returns immediately --\n"
+      "the only way to answer a screen the firmware draws from its own\n"
+      "blocking loop (DebugStats), which never gives the script another turn:\n"
+      "  --keys \"a-down,r,a-up,r-in400,l,step900\"  in and out of debug stats\n"
       "\nThe simulated bus is 0x20 \"210\", 0x28 \"259 A\", 0x5C \"251 A\".\n"
       "NOTHING here touches real hardware. Writes are discarded.\n",
       kLegend);
@@ -572,6 +606,12 @@ int main(int argc, char **argv) {
       if (t.empty()) continue;
 
       if (t[0] == "btn" && t.size() >= 3) { ButtonEdge(t[1], t[2] == "down"); }
+      else if (t[0] == "sched" && t.size() >= 4) {
+        const uint16_t c = SimInputControlForToken(t[1]);
+        if (c)
+          SimInputScheduleTap(c, (uint32_t)strtoul(t[2].c_str(), nullptr, 10),
+                              (uint32_t)strtoul(t[3].c_str(), nullptr, 10));
+      }
       else if (t[0] == "release-all") { SimInputReleaseAll(); }
       else if (t[0] == "enc" && t.size() >= 3) {
         SimInputEncoder(t[1] == "r", (int)strtol(t[2].c_str(), nullptr, 10));

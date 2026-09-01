@@ -133,10 +133,22 @@ static constexpr uint16_t kCurSlotKey = kManifestKey | 0x13;
 static constexpr uint16_t kQuadLivePresetKey = 253;
 
 enum ContentFlags : uint8_t {
-  CONTENT_BANK    = 1 << 0,   // PB_NN_B.DAT present (Quadrants was active)
+  CONTENT_BANK    = 1 << 0,   // bank section present (Quadrants was active)
   CONTENT_SCENERY = 1 << 1,
   CONTENT_CAPTAIN = 1 << 2,
 };
+
+// LittleFS_Program's erase-sector size, which is also its allocation unit:
+// SECTOR_SIZE in the core's LittleFS.cpp, keyed off the board exactly as it
+// is there. A 4 MB partition on T4.1 is therefore only 64 blocks in total,
+// and every file consumes one whether it holds 588 bytes or 64 KB.
+#if defined(ARDUINO_TEENSY41)
+static constexpr uint32_t kLfsBlockBytes = 65536;
+#else
+static constexpr uint32_t kLfsBlockBytes = 32768;
+#endif
+// container + the scratch file it renames through + metadata slack
+static constexpr uint32_t kSaveBlocksNeeded = 3;
 
 // ---- state -----------------------------------------------------------------
 static volatile int8_t pending_save = -1;    // last-wins
@@ -176,11 +188,16 @@ FLASHMEM static void slot_name(char *buf, uint8_t slot, char kind, const char *e
   buf[8] = ext[0]; buf[9] = ext[1]; buf[10] = ext[2]; buf[11] = 0;
 }
 
-FLASHMEM static bool copy_file(FS &fs, const char *from, const char *to) {
-  File src = fs.open(from);
+// Source and destination filesystems are separate on purpose. Slot files live
+// on slot_fs() (SD when there is a card), but the live names they restore to
+// belong to whichever FS the owning app actually reads -- and Captain and
+// Scenery only ever read myfs. Copying within one FS silently put their state
+// on the card, where neither app looks.
+FLASHMEM static bool copy_file(FS &sfs, const char *from, FS &dfs, const char *to) {
+  File src = sfs.open(from);
   if (!src) return false;
-  fs.remove(to);
-  File dst = fs.open(to, FILE_WRITE_BEGIN);
+  dfs.remove(to);
+  File dst = dfs.open(to, FILE_WRITE_BEGIN);
   if (!dst) { src.close(); return false; }
   uint8_t buf[512];
   bool ok = true;
@@ -190,7 +207,7 @@ FLASHMEM static bool copy_file(FS &fs, const char *from, const char *to) {
   }
   src.close();
   dst.close();
-  if (!ok) fs.remove(to);
+  if (!ok) dfs.remove(to);
   return ok;
 }
 
@@ -209,27 +226,10 @@ static uint16_t sum16(const uint8_t *p, size_t n) {
   return s;
 }
 
-FLASHMEM static bool write_appdata_file(uint8_t slot) {
-  char name[12];
-  slot_name(name, slot, 'A', "BIN");
-  FS &fs = slot_fs();
-  fs.remove(name);
-  File f = fs.open(name, FILE_WRITE_BEGIN);
-  if (!f) return false;
-  AppDataHeader h = { kAppDataFourcc, 1, (uint16_t)capture.used,
-                      sum16(capture.data, capture.used), 0 };
-  bool ok = f.write((const uint8_t *)&h, sizeof(h)) == sizeof(h) &&
-            f.write(capture.data, capture.used) == capture.used;
-  f.close();
-  if (!ok) fs.remove(name);
-  return ok;
-}
-
-FLASHMEM static bool read_appdata_file(uint8_t slot) {
-  char name[12];
-  slot_name(name, slot, 'A', "BIN");
-  File f = slot_fs().open(name);
-  if (!f) return false;
+// Parse an app-data section from wherever the file cursor currently sits, so
+// the legacy PB_NN_A.BIN reader and the container's 'A' section share one
+// validator instead of drifting apart.
+FLASHMEM static bool read_appdata_stream(File &f) {
   AppDataHeader h;
   bool ok = f.read((uint8_t *)&h, sizeof(h)) == sizeof(h) &&
             h.fourcc == kAppDataFourcc && h.version == 1 &&
@@ -239,7 +239,288 @@ FLASHMEM static bool read_appdata_file(uint8_t slot) {
          sum16(capture.data, h.used) == h.checksum;
     capture.used = h.used;
   }
+  return ok;
+}
+
+FLASHMEM static bool read_appdata_file(uint8_t slot) {
+  char name[12];
+  slot_name(name, slot, 'A', "BIN");
+  File f = slot_fs().open(name);
+  if (!f) return false;
+  const bool ok = read_appdata_stream(f);
   f.close();
+  return ok;
+}
+
+// ---- slot container --------------------------------------------------------
+//
+// WHY ONE FILE PER SLOT. LittleFS_Program allocates whole erase sectors, and
+// on Teensy 4.1 that sector is 65536 bytes (SECTOR_SIZE in the core's
+// LittleFS.cpp; 32768 on a T4.0). Every file costs at least one whole block
+// no matter how little it holds -- the 588-byte PB_04_A.BIN measured on the
+// bench occupied 64 KB. With a 4 MB partition that is only 64 blocks TOTAL,
+// so the old layout's 3-5 files per slot could not survive its own 30 slots:
+// 30 x 3 = 90 blocks against a 64-block filesystem, i.e. the filesystem ran
+// out somewhere around slot 20 while reporting well over a megabyte free.
+//
+// Packing every section into one file makes a slot cost one block instead of
+// three-to-five, which is what actually makes 30 slots fit. Layout:
+//
+//   0x00  ContainerHeader                     16 bytes
+//   0x10  SectionEntry[kMaxSections]          6 x 12 = 72 bytes
+//   0x58  section payloads, in write order
+//
+// The directory is fixed-size and written LAST (seek back to 0), because
+// section lengths are not known until their bytes are on disk -- the same
+// backfill trick PhzConfig::save_chunk already uses for its record count.
+//
+// Sections are opaque byte ranges, so this deliberately needs no changes to
+// PhzConfig: a PhzConfig-format section is simply the bytes that
+// save_config() would have written, appended here and extracted to a scratch
+// file on the way back out.
+// ---------------------------------------------------------------------------
+
+static constexpr uint32_t kContainerFourcc = 0x53425058UL;  // 'X','P','B','S'
+static constexpr uint16_t kContainerVersion = 1;
+static constexpr int kMaxSections = 6;
+
+struct ContainerHeader {
+  uint32_t fourcc;
+  uint16_t version;
+  uint16_t count;
+  uint32_t reserved0;
+  uint32_t reserved1;
+};
+struct SectionEntry {
+  uint8_t  kind;      // 'G','A','B','S','C'; 0 = unused
+  uint8_t  pad;
+  uint16_t checksum;  // sum16 over the payload
+  uint32_t offset;    // absolute, from file start
+  uint32_t length;
+};
+static_assert(sizeof(ContainerHeader) == 16, "container header must be 16 bytes");
+static_assert(sizeof(SectionEntry) == 12, "section entry must be 12 bytes");
+
+static constexpr uint32_t kPayloadStart =
+    sizeof(ContainerHeader) + kMaxSections * sizeof(SectionEntry);  // 88
+
+// "PB_NN.PBS"
+FLASHMEM static void container_name(char *buf, uint8_t slot) {
+  buf[0] = 'P'; buf[1] = 'B'; buf[2] = '_';
+  buf[3] = '0' + slot / 10; buf[4] = '0' + slot % 10;
+  buf[5] = '.'; buf[6] = 'P'; buf[7] = 'B'; buf[8] = 'S'; buf[9] = 0;
+}
+
+struct ContainerWriter {
+  File f;
+  SectionEntry sec[kMaxSections];
+  int n;
+  uint32_t pos;
+  bool ok;
+};
+
+FLASHMEM static bool cw_begin(ContainerWriter &w, const char *tmp) {
+  w.n = 0;
+  w.pos = kPayloadStart;
+  w.ok = false;
+  slot_fs().remove(tmp);
+  w.f = slot_fs().open(tmp, FILE_WRITE_BEGIN);
+  if (!w.f) return false;
+  // Reserve the directory by WRITING placeholder bytes, not by seeking past
+  // them: seeking beyond EOF on a freshly created file is not portable (the
+  // host FS refuses it outright), and a hole would leave the directory
+  // undefined if the commit never ran. cw_commit seeks back over these.
+  const uint8_t zero[kPayloadStart] = { 0 };
+  if (w.f.write(zero, sizeof(zero)) != sizeof(zero)) {
+    w.f.close();
+    slot_fs().remove(tmp);
+    return false;
+  }
+  w.ok = true;
+  return true;
+}
+
+// Append a whole file as one section. An absent or empty source is NOT a
+// failure -- it just means the slot has no such content (no Scenery file
+// yet, Quadrants not active) and no entry is recorded for it.
+FLASHMEM static bool cw_add_file(ContainerWriter &w, char kind,
+                                 FS &fs, const char *src) {
+  if (!w.ok || w.n >= kMaxSections) return false;
+  File s = fs.open(src, FILE_READ);
+  if (!s) return false;
+  const uint32_t want = (uint32_t)s.size();
+  uint8_t buf[256];
+  uint16_t sum = 0;
+  uint32_t len = 0;
+  int r;
+  while ((r = s.read(buf, sizeof(buf))) > 0) {
+    if (w.f.write(buf, r) != (size_t)r) { s.close(); w.ok = false; return false; }
+    for (int i = 0; i < r; ++i) sum += buf[i];
+    len += (uint32_t)r;
+    watchdog_feed();
+  }
+  s.close();
+  if (!len) return false;
+  // A mid-stream read error used to end the loop quietly and record a
+  // TRUNCATED section whose checksum matched the bytes that did arrive -- so
+  // the container validated clean and the loss only surfaced as missing state
+  // at recall. sum16 cannot see this; only the length can. Fail the save.
+  if (len != want) {
+    serial_printf("PresetEngine: section '%c' short: %lu of %lu bytes\n",
+                  kind, (unsigned long)len, (unsigned long)want);
+    w.ok = false;
+    return false;
+  }
+  w.sec[w.n++] = { (uint8_t)kind, 0, sum, w.pos, len };
+  w.pos += len;
+  return true;
+}
+
+// The app-data section carries the same AppDataHeader framing the standalone
+// PB_NN_A.BIN used, so read_appdata_stream() validates either source.
+FLASHMEM static bool cw_add_appdata(ContainerWriter &w) {
+  if (!w.ok || w.n >= kMaxSections) return false;
+  const AppDataHeader h = { kAppDataFourcc, 1, (uint16_t)capture.used,
+                            sum16(capture.data, capture.used), 0 };
+  if (w.f.write((const uint8_t *)&h, sizeof(h)) != sizeof(h)) { w.ok = false; return false; }
+  if (w.f.write(capture.data, capture.used) != capture.used) { w.ok = false; return false; }
+  const uint32_t len = sizeof(h) + capture.used;
+  const uint16_t sum = (uint16_t)(sum16((const uint8_t *)&h, sizeof(h)) +
+                                  sum16(capture.data, capture.used));
+  w.sec[w.n++] = { (uint8_t)'A', 0, sum, w.pos, len };
+  w.pos += len;
+  return true;
+}
+
+// Backfill the directory, then publish via rename so a torn write can never
+// replace a good slot (same discipline as PhzConfig::save_config).
+FLASHMEM static bool cw_commit(ContainerWriter &w, const char *tmp, const char *final_name) {
+  bool ok = w.ok && w.f.seek(0);
+  if (ok) {
+    const ContainerHeader h = { kContainerFourcc, kContainerVersion,
+                                (uint16_t)w.n, 0, 0 };
+    ok = w.f.write((const uint8_t *)&h, sizeof(h)) == sizeof(h);
+  }
+  for (int i = 0; i < kMaxSections && ok; ++i) {
+    const SectionEntry e = (i < w.n) ? w.sec[i] : SectionEntry{ 0, 0, 0, 0, 0 };
+    ok = w.f.write((const uint8_t *)&e, sizeof(e)) == sizeof(e);
+  }
+  if (w.f) w.f.close();
+  if (!ok) { slot_fs().remove(tmp); return false; }
+  // verify the bytes actually landed: LittleFS has produced 0-byte files
+  // while reporting success on a degraded FS
+  File v = slot_fs().open(tmp, FILE_READ);
+  ok = v && v.size() >= kPayloadStart;
+  if (v) v.close();
+  if (!ok) { slot_fs().remove(tmp); return false; }
+  // Rename FIRST. littlefs's rename atomically replaces an existing
+  // destination, so on internal flash the old slot is never absent: it is
+  // either the previous container or the new one. The previous
+  // remove-then-rename opened a window where a power cut left the slot with
+  // no container at all -- and for a migrated slot, no legacy files either,
+  // since those were retired on the earlier commit. The only survivor was
+  // the temp file, which the next save of ANY slot deletes in cw_begin.
+  // The fallback remove is for SD, where replace-on-rename is not promised.
+  ok = slot_fs().rename(tmp, final_name);
+  if (!ok) {
+    slot_fs().remove(final_name);
+    ok = slot_fs().rename(tmp, final_name);
+    // If THAT failed we have already removed the old container, so the tmp
+    // file is now the only copy of this slot in existence. Leave it alone:
+    // cw_begin reclaims the name on the next save, which is a block we can
+    // spare, and until then a human has something to recover. Removing it
+    // here -- as the first version of this did -- deleted the old container
+    // and the freshly verified new one in the same breath, which is exactly
+    // the slot loss the rename-first ordering exists to prevent, just moved
+    // to a rarer path. Only the first-rename failure is safe to clean up
+    // after, because there the old container is still in place.
+    if (!ok)
+      serial_printf("PresetEngine: %s left in place -- it is the only copy "
+                    "of this slot\n", tmp);
+    return ok;
+  }
+  return ok;
+}
+
+// Open a slot container and read its directory. Returns false when the file
+// is absent or not a container -- the caller then falls back to the legacy
+// multi-file layout.
+FLASHMEM static bool container_open(uint8_t slot, File &f, SectionEntry *sec, int &n) {
+  char name[12];
+  container_name(name, slot);
+  f = slot_fs().open(name, FILE_READ);
+  if (!f) return false;
+  ContainerHeader h;
+  if (f.read((uint8_t *)&h, sizeof(h)) != sizeof(h) ||
+      h.fourcc != kContainerFourcc || h.version != kContainerVersion ||
+      h.count > kMaxSections) {
+    f.close();
+    return false;
+  }
+  n = h.count;
+  for (int i = 0; i < n; ++i) {
+    if (f.read((uint8_t *)&sec[i], sizeof(sec[i])) != sizeof(sec[i])) {
+      f.close();
+      return false;
+    }
+    // a section must lie inside the file
+    if (sec[i].offset < kPayloadStart ||
+        (uint64_t)sec[i].offset + sec[i].length > (uint64_t)f.size()) {
+      f.close();
+      return false;
+    }
+  }
+  return true;
+}
+
+// Retire the pre-container files for a slot once its container is safely on
+// disk. This is what actually reclaims the blocks: each of these cost a whole
+// 64 KB sector, so a converted slot hands back two to four of them.
+FLASHMEM static void remove_legacy_slot(uint8_t slot) {
+  static const char kinds[] = { 'G', 'A', 'B', 'S', 'C' };
+  static const char *const exts[] = { "CFG", "BIN", "DAT", "DAT", "DAT" };
+  char name[12];
+  for (unsigned i = 0; i < sizeof(kinds); ++i) {
+    slot_name(name, slot, kinds[i], exts[i]);
+    slot_fs().remove(name);
+  }
+}
+
+FLASHMEM static const SectionEntry *find_section(const SectionEntry *sec, int n, char kind) {
+  for (int i = 0; i < n; ++i)
+    if (sec[i].kind == (uint8_t)kind) return &sec[i];
+  return nullptr;
+}
+
+// Extract one section back out to a standalone file, verifying its checksum
+// before the destination is touched is not possible in one pass without a
+// buffer, so the copy is written to a scratch name and only then renamed.
+FLASHMEM static bool section_to_file(File &f, const SectionEntry &e,
+                                     const char *dest, FS &fs) {
+  if (!f.seek(e.offset)) return false;
+  static const char *const kScratch = "PB_XTR.TMP";
+  fs.remove(kScratch);
+  File d = fs.open(kScratch, FILE_WRITE_BEGIN);
+  if (!d) return false;
+  uint8_t buf[256];
+  uint32_t left = e.length;
+  uint16_t sum = 0;
+  bool ok = true;
+  while (left) {
+    const uint32_t want = left < sizeof(buf) ? left : sizeof(buf);
+    const int r = f.read(buf, want);
+    if (r != (int)want) { ok = false; break; }
+    if (d.write(buf, r) != (size_t)r) { ok = false; break; }
+    for (int i = 0; i < r; ++i) sum += buf[i];
+    left -= want;
+    watchdog_feed();
+  }
+  d.close();
+  if (ok) ok = (sum == e.checksum);
+  if (!ok) { fs.remove(kScratch); return false; }
+  fs.remove(dest);
+  ok = fs.rename(kScratch, dest);
+  if (!ok) fs.remove(kScratch);
   return ok;
 }
 
@@ -268,22 +549,44 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   busy = true;
   serial_printf("PresetEngine: save slot %d\n", slot);
 
-  // free-space guard (LittleFS only; SD is effectively unbounded).
+  // Free-space guard (LittleFS only; SD is effectively unbounded).
+  //
+  // This MUST be denominated in blocks, not bytes. LittleFS_Program hands out
+  // whole erase sectors -- kLfsBlockBytes below -- so a slot that needs one
+  // block cannot be placed when one block is not free, however many spare
+  // BYTES the filesystem reports. The previous 24 KB threshold was smaller
+  // than a single T4.1 sector, so it cheerfully green-lit saves the allocator
+  // had no room for; the failure then surfaced as a torn write far downstream
+  // instead of an honest refusal here.
+  //
+  // A save needs the container plus the scratch files it renames through, so
+  // require kSaveBlocksNeeded free rather than exactly one.
+  //
   // usedSize() has been observed reporting == totalSize() on a healthy FS,
   // so treat that state as "unknown" and rely on post-write verification.
   if (!SDcard_Ready) {
     const uint64_t total = PhzConfig::myfs.totalSize();
     const uint64_t used = PhzConfig::myfs.usedSize();
-    if (used < total && total - used < 24 * 1024) {
+    if (used < total &&
+        (total - used) / kLfsBlockBytes < kSaveBlocksNeeded) {
       HS::PokePopup(HS::MESSAGE_POPUP, "Disk full !!");
       busy = false;
+      serial_printf("PresetEngine: save refused, %lu KB free < %lu blocks\n",
+                    (unsigned long)((total - used) >> 10),
+                    (unsigned long)kSaveBlocksNeeded);
       return false;
     }
   }
 
   const uint16_t app_id = app_switcher.current_app()->id();
   uint8_t flags = 0;
-  char name[12], name2[12];
+  // Section staging and container staging. Both are transient: they are
+  // removed or renamed away before this function returns, so neither costs a
+  // block in the steady state.
+  static const char *const kSecTmp = "PB_SEC.TMP";
+  static const char *const kCtrTmp = "PB_CTR.TMP";
+  char final_name[12];
+  container_name(final_name, slot);
 
   // Instrumentation for the Store-crash hunt (see the note at the top of
   // this file): how long the save blocked loop(), how much interrupt traffic
@@ -310,46 +613,93 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_FLUSH);
   watchdog_feed();
 
+  // Steps 3-6 append the slot's sections to one container. Section ORDER is
+  // constrained: the content flags must be settled before the 'G' section is
+  // written, because the manifest that records them lives inside that map.
+  ContainerWriter w;
+  cw_begin(w, kCtrTmp);   // failure leaves w.ok false; every add below no-ops
+
   // 3. Quadrants active: extract its live preset + bank globals from the map
   if (app_id == kQuadrantsAppId) {
     uint64_t p = 0;
     if (PhzConfig::getValue(kQuadLivePresetKey, p) && p < 32) {
       extract_preset = (uint8_t)p;
-      slot_name(name, slot, 'B', "DAT");
-      if (PhzConfig::save_filtered(name, slot_fs(), bank_pred, bank_remap))
+      if (PhzConfig::save_filtered(kSecTmp, slot_fs(), bank_pred, bank_remap) &&
+          cw_add_file(w, 'B', slot_fs(), kSecTmp))
         flags |= CONTENT_BANK;
+      slot_fs().remove(kSecTmp);
     }
     watchdog_feed();
   }
 
-  // 4. copy the file-backed app stores
-  slot_name(name, slot, 'S', "DAT");
-  if (copy_file(slot_fs(), "SCENERY.DAT", name)) flags |= CONTENT_SCENERY;
-  else if (!SDcard_Ready && copy_file(PhzConfig::myfs, "SCENERY.DAT", name)) flags |= CONTENT_SCENERY;
+  // 4. the file-backed app stores go straight in -- they are already files,
+  // so unlike the config sections they need no staging round-trip.
+  //
+  // These come from myfs EXPLICITLY, not slot_fs(). Scenery and Captain call
+  // PhzConfig::load_config/save_config without an FS argument, which defaults
+  // to myfs -- so those two files only ever exist on internal flash, whatever
+  // slot_fs() happens to be. Sourcing them from slot_fs() meant that with an
+  // SD card inserted the open simply failed and both apps' state was silently
+  // absent from every preset. (The old !SDcard_Ready fallback below could not
+  // catch it: when !SDcard_Ready, slot_fs() ALREADY is myfs, so it re-tried
+  // the call that had just failed, and when SD was present -- the only case
+  // that needed a fallback -- the condition blocked it.)
+  //
+  // BANK_255.DAT is different and stays on slot_fs(): Quadrants genuinely
+  // prefers SD (Quadrants.h:99-103, 2104-2107).
+  if (cw_add_file(w, 'S', PhzConfig::myfs, "SCENERY.DAT")) flags |= CONTENT_SCENERY;
   watchdog_feed();
-  slot_name(name, slot, 'C', "DAT");
-  if (copy_file(slot_fs(), "CAPTAIN.DAT", name)) flags |= CONTENT_CAPTAIN;
+  if (cw_add_file(w, 'C', PhzConfig::myfs, "CAPTAIN.DAT")) flags |= CONTENT_CAPTAIN;
   watchdog_feed();
 
-  // 5. globals + manifest into PB_NN_G.CFG
+  // 5. globals + manifest, staged through kSecTmp because PhzConfig writes
+  // whole files by name
   PhzConfig::load_config();  // base map = GLOBALS.CFG
   BuildGlobalSettingsValues();
   PhzConfig::setValue(kSchemaKey, kSchemaVersion);
   PhzConfig::setValue(kFlagsKey, flags);
-  slot_name(name, slot, 'G', "CFG");
-  bool ok = PhzConfig::save_config(name, slot_fs());
+  bool ok = PhzConfig::save_config(kSecTmp, slot_fs()) &&
+            cw_add_file(w, 'G', slot_fs(), kSecTmp);
+  slot_fs().remove(kSecTmp);
   watchdog_feed();
-  // verify on disk: LittleFS has produced 0-byte files while save_config
-  // reported success (full/degraded FS) — a slot that can't recall is worse
-  // than a failed save
-  if (ok) {
-    File f = slot_fs().open(name, FILE_READ);
-    ok = f && f.size() > 16;
-    if (f) f.close();
-  }
 
-  // 6. app-data chunk stream
-  bool ok2 = write_appdata_file(slot);
+  // 6. app-data chunk stream, straight from the RAM capture
+  bool ok2 = cw_add_appdata(w);
+  watchdog_feed();
+
+  // Publish the container, then retire the pre-container files this replaces.
+  // cw_commit verifies the bytes landed and renames into place, so a torn
+  // write leaves the previous slot intact rather than half-overwritten.
+  const bool committed = ok && ok2 && cw_commit(w, kCtrTmp, final_name);
+  if (!committed) {
+    // Nothing renamed the staging file away, so remove it here: it is holding
+    // a whole 64 KB block and cw_begin would not clear it until the next save.
+    if (w.f) w.f.close();
+    slot_fs().remove(kCtrTmp);
+  }
+  ok = committed;
+  ok2 = committed;
+
+  // Retiring the legacy files DELETES the only other copy of this preset, so
+  // the bar for doing it is not "the container is the right size" -- 88 bytes
+  // of anything passes that. Re-open and parse it: container_open validates
+  // the fourcc, the version, the section count and every section's bounds, at
+  // the cost of one directory read. The degraded filesystem that motivated
+  // cw_commit's size check can just as easily return a right-sized file whose
+  // directory bytes never landed, and that slot would then read as empty with
+  // no legacy files left to fall back to.
+  if (committed) {
+    File v;
+    SectionEntry vsec[kMaxSections];
+    int vn = 0;
+    if (container_open(slot, v, vsec, vn)) {
+      v.close();
+      remove_legacy_slot(slot);
+    } else {
+      serial_printf("PresetEngine: slot %d container did not re-open; "
+                    "legacy files kept\n", slot);
+    }
+  }
   watchdog_feed();
 
   // 7. hand the config map back to the active app (Resume reloads its file).
@@ -365,7 +715,6 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   cur_slot_dirty_ms = millis() | 1;
   op_count++;
   busy = false;
-  (void)name2;
   HS::PokePopup(HS::MESSAGE_POPUP, (ok && ok2) ? "Bus save OK" : "Bus save ERR");
   serial_printf("PresetEngine: save slot %d %s (flags %02x)\n",
                 slot, (ok && ok2) ? "ok" : "FAILED", flags);
@@ -378,6 +727,102 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
 }
 
 // ---- recall ----------------------------------------------------------------
+
+// Scratch name the 'G' section is extracted to on the way back out, because
+// PhzConfig::load_config takes a filename rather than an open file.
+static const char *const kGlbTmp = "PB_GLB.TMP";
+
+enum RecallStage : uint8_t { STAGE_OK = 0, STAGE_EMPTY = 1, STAGE_BAD = 2 };
+
+// The validate-first half of a recall: app-data into `capture`, the slot's
+// globals + manifest into the config map, WITHOUT touching live state.
+// Reads a container when there is one and the pre-container files otherwise,
+// so slots written before the layout change still recall.
+FLASHMEM static RecallStage recall_stage_head(uint8_t slot, bool &from_container) {
+  File f;
+  SectionEntry sec[kMaxSections];
+  int n = 0;
+  from_container = container_open(slot, f, sec, n);
+
+  if (from_container) {
+    const SectionEntry *a = find_section(sec, n, 'A');
+    const SectionEntry *g = find_section(sec, n, 'G');
+    bool ok = a && g && f.seek(a->offset) && read_appdata_stream(f);
+    if (ok) ok = section_to_file(f, *g, kGlbTmp, slot_fs());
+    f.close();
+    // The container exists, so a failure here is corruption, not emptiness.
+    if (!ok) { slot_fs().remove(kGlbTmp); return STAGE_BAD; }
+    const bool loaded = PhzConfig::load_config(kGlbTmp, slot_fs());
+    // The scratch file has served its purpose the moment the map is loaded.
+    // Left behind it pinned a whole 64 KB block -- 1 of the 64 the internal
+    // filesystem has -- permanently, from the first container recall onwards.
+    slot_fs().remove(kGlbTmp);
+    return loaded ? STAGE_OK : STAGE_BAD;
+  }
+
+  // legacy multi-file layout
+  if (!read_appdata_file(slot)) return STAGE_EMPTY;
+  char name[12];
+  slot_name(name, slot, 'G', "CFG");
+  return PhzConfig::load_config(name, slot_fs()) ? STAGE_OK : STAGE_BAD;
+}
+
+// Stage the file-backed stores into their live names. Runs with the app world
+// already frozen, so it only moves bytes around.
+FLASHMEM static void recall_stage_files(uint8_t slot, bool from_container,
+                                        uint64_t flags) {
+  if (from_container) {
+    File f;
+    SectionEntry sec[kMaxSections];
+    int n = 0;
+    if (!container_open(slot, f, sec, n)) return;
+    // Destination FS per file, mirroring the save side: the bank goes where
+    // Quadrants looks (slot_fs()), Scenery and Captain go where THEY look
+    // (myfs, always). Restoring these to the SD card put them somewhere
+    // neither app ever reads.
+    const SectionEntry *e;
+    if ((flags & CONTENT_BANK) && (e = find_section(sec, n, 'B')) != nullptr) {
+      if (section_to_file(f, *e, "BANK_255.DAT", slot_fs()))
+        quad_recall_hint = kScratchBank;
+      watchdog_feed();
+    }
+    if ((flags & CONTENT_SCENERY) && (e = find_section(sec, n, 'S')) != nullptr) {
+      section_to_file(f, *e, "SCENERY.DAT", PhzConfig::myfs);
+      watchdog_feed();
+    }
+    // Boot recall deliberately keeps the LIVE Captain config -- see the note
+    // on the legacy branch below.
+    if ((flags & CONTENT_CAPTAIN) && !skip_captain_restore &&
+        (e = find_section(sec, n, 'C')) != nullptr) {
+      section_to_file(f, *e, "CAPTAIN.DAT", PhzConfig::myfs);
+      watchdog_feed();
+    }
+    f.close();
+    return;
+  }
+
+  char name[12];
+  if (flags & CONTENT_BANK) {
+    slot_name(name, slot, 'B', "DAT");
+    copy_file(slot_fs(), name, slot_fs(), "BANK_255.DAT");
+    quad_recall_hint = kScratchBank;
+    watchdog_feed();
+  }
+  if (flags & CONTENT_SCENERY) {
+    slot_name(name, slot, 'S', "DAT");
+    copy_file(slot_fs(), name, PhzConfig::myfs, "SCENERY.DAT");
+    watchdog_feed();
+  }
+  // Boot recall deliberately keeps the LIVE Captain config: it's the
+  // module's MIDI-interface setup (autosaved continuously), not scene
+  // state - restoring the slot's snapshot at power-up silently rewound
+  // the owner's mapping edits. Explicit recalls still restore it.
+  if ((flags & CONTENT_CAPTAIN) && !skip_captain_restore) {
+    slot_name(name, slot, 'C', "DAT");
+    copy_file(slot_fs(), name, PhzConfig::myfs, "CAPTAIN.DAT");
+    watchdog_feed();
+  }
+}
 
 // A refused recall is still a FINISHED op: op_count bumps so the overlay's
 // completion watch reports the reason at once instead of timing out into a
@@ -398,18 +843,17 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   busy = true;
   serial_printf("PresetEngine: recall slot %d\n", slot);
 
-  char name[12];
-
   // 1. validate everything before touching live state
-  if (!read_appdata_file(slot)) {
+  bool from_container = false;
+  const RecallStage stage = recall_stage_head(slot, from_container);
+  if (stage == STAGE_EMPTY) {
     HS::PokePopup(HS::MESSAGE_POPUP, "Empty preset");
-    // put the map back (read_appdata doesn't touch it, but stay safe)
+    // put the map back (staging doesn't touch it on this path, but stay safe)
     return recall_refused(slot, "EMPTY SLOT");
   }
-  slot_name(name, slot, 'G', "CFG");
-  if (!PhzConfig::load_config(name, slot_fs())) {
-    // map now cleared/partial: restore base-map ownership, then let the
-    // app reload its own file so no later writer inherits slot content
+  if (stage == STAGE_BAD) {
+    // map may now be cleared/partial: restore base-map ownership, then let
+    // the app reload its own file so no later writer inherits slot content
     PhzConfig::load_config();
     app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
     HS::PokePopup(HS::MESSAGE_POPUP, "Bad preset");
@@ -434,27 +878,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
 
   // 3. stage the file-backed stores (same multi-write LittleFS chain as
   // SaveSlot's step 4 -- see the watchdog note at the top of this file)
-  if (flags & CONTENT_BANK) {
-    slot_name(name, slot, 'B', "DAT");
-    copy_file(slot_fs(), name, "BANK_255.DAT");
-    if (SDcard_Ready) copy_file(SD, name, "BANK_255.DAT");
-    quad_recall_hint = kScratchBank;
-    watchdog_feed();
-  }
-  if (flags & CONTENT_SCENERY) {
-    slot_name(name, slot, 'S', "DAT");
-    copy_file(slot_fs(), name, "SCENERY.DAT");
-    watchdog_feed();
-  }
-  // Boot recall deliberately keeps the LIVE Captain config: it's the
-  // module's MIDI-interface setup (autosaved continuously), not scene
-  // state - restoring the slot's snapshot at power-up silently rewound
-  // the owner's mapping edits. Explicit recalls still restore it.
-  if ((flags & CONTENT_CAPTAIN) && !skip_captain_restore) {
-    slot_name(name, slot, 'C', "DAT");
-    copy_file(slot_fs(), name, "CAPTAIN.DAT");
-    watchdog_feed();
-  }
+  recall_stage_files(slot, from_container, flags);
 
   // 4. apply global settings (map still holds PB_NN_G.CFG) + app chunks
   RestoreGlobalSettingsFromConfig(0);
@@ -539,6 +963,22 @@ FLASHMEM void BootRecall() {
 }
 
 FLASHMEM void Process() {
+  // Read-then-clear needs no interrupt lock, and it is worth saying why
+  // rather than adding one defensively.
+  //
+  // Every writer of these two is in LOOP context, not an ISR. The bus slave
+  // ISR (PresetBus.cpp lpi2c1_slave_isr) only pushes bytes into its own SPSC
+  // ring; the parser that turns those bytes into a SAVE or RECALL runs from
+  // PresetBus::Task(), and its cb_save/cb_recall callbacks call RequestSave/
+  // RequestRecall from there. The console commands and BootRecall() are loop
+  // context too. So this function and every producer are the same thread and
+  // cannot interleave.
+  //
+  // An earlier version of this comment claimed the slave ISR wrote these and
+  // bracketed the clear in noInterrupts(). The lock was harmless but the
+  // reason was invented, and a wrong comment about concurrency in this file
+  // is worse than no comment -- the round-3 audit block above is the thing
+  // people trust when they are debugging a preset-bus fault at 2am.
   const int8_t s = pending_save;
   if (s >= 0) {
     pending_save = -1;
@@ -603,6 +1043,14 @@ FLASHMEM void SetSlotName(uint8_t slot, const char *name) {
 FLASHMEM bool SlotUsed(uint8_t slot) {
   if (slot >= kNumSlots) return false;
   char name[12];
+  container_name(name, slot);
+  {
+    File c = slot_fs().open(name, FILE_READ);
+    const bool have = c && c.size() >= (int)kPayloadStart;
+    if (c) c.close();
+    if (have) return true;
+  }
+  // pre-container layout
   slot_name(name, slot, 'G', "CFG");
   File f = slot_fs().open(name, FILE_READ);
   const bool used = f && f.size() > 16;

@@ -43,6 +43,17 @@ OC::IOFrame g_io_frame;
 uint32_t g_last_redraw_ticks = 0;
 uint32_t g_isr_carry_us = 0;
 
+// True once display::Init() has run, which is the point from which CoreIsr()
+// is safe to call. Before it a delay() can only move the clock: driving the
+// display and DAC through their own init sequence would be a fiction, and a
+// worse one than a still clock.
+bool g_background_ready = false;
+
+// Re-entry guard. A delay() reached from inside CoreIsr() or ui.Poll() must
+// not recurse into them -- on hardware an ISR cannot preempt itself either --
+// so it degrades to moving the clock, which is what the caller asked for.
+bool g_in_background = false;
+
 // Main.cpp:139-156, CORE_timer_ISR(). On hardware this runs from an
 // IntervalTimer at OC_CORE_TIMER_RATE (60 us, 16.6 kHz). Here it is called
 // from SimRuntimeTickMs on the same schedule against the virtual clock: the
@@ -127,6 +138,7 @@ void SimRuntimePoke() { MENU_REDRAW = 1; }
 
 // Main.cpp:411-620, setup(), in order, minus everything with no host meaning.
 void SimRuntimeBoot(bool reset_settings) {
+  g_background_ready = false;
   OC::Pinout_Detect();          // sets the real pin map from the ID voltage
   SimInputInit();               // ...which is what the panel's pins are bound to
 
@@ -151,6 +163,9 @@ void SimRuntimeBoot(bool reset_settings) {
   display::AdjustOffset(OC::calibration_data.display_offset);
   display::SetFlipMode(OC::calibration_data.flipscreen());
   display::Init();
+  // From here on a firmware delay() runs the background rather than only
+  // moving the clock -- CoreIsr() has something to drive. See SimBackgroundUs.
+  g_background_ready = true;
 
   GRAPHICS_BEGIN_FRAME(true);
   GRAPHICS_END_FRAME();
@@ -247,6 +262,22 @@ void BackgroundUs(uint32_t us) {
 
 // See shim/src/src/drivers/display.h.
 void display::SimPump() { BackgroundUs(OC_CORE_TIMER_RATE); }
+
+// The firmware's delay()/delayMicroseconds(), which are not pauses: see the
+// note in shim/arduino/Arduino.h. Advanced one core-ISR period at a time so
+// that everything the background runs sees a clock that is moving, rather than
+// N periods' worth of work at one frozen instant.
+void SimBackgroundUs(uint32_t us) {
+  if (!us) return;
+  if (!g_background_ready || g_in_background) { SimAdvanceUs(us); return; }
+  g_in_background = true;
+  while (us) {
+    const uint32_t chunk = us > OC_CORE_TIMER_RATE ? OC_CORE_TIMER_RATE : us;
+    BackgroundUs(chunk);
+    us -= chunk;
+  }
+  g_in_background = false;
+}
 
 void SimRuntimeTickMs() {
   const uint32_t until = SimNowUs() + 1000;

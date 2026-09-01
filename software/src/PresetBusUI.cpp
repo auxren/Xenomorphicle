@@ -49,6 +49,7 @@ static uint32_t hold_start_ms = 0;        // 0 = not holding
 // stray recall is bus-wide and immediate. It now wants a hold too, half the
 // length STORE asks for: deliberate, but still clearly the lighter gesture.
 // Derived from kLongPressTicks so the two can never drift apart.
+static const uint32_t kStoreHoldMs = OC::Ui::kLongPressTicks;
 static const uint32_t kRecallHoldMs = OC::Ui::kLongPressTicks / 2;
 static uint32_t recall_hold_ms = 0;       // 0 = not holding
 static bool recall_fired = false;         // one shot per hold
@@ -273,8 +274,17 @@ FLASHMEM void Draw() {
   draw_7seg(66, 16, shown % 10);
 
   // edge legends: contextual (turns are unlabeled, presses are labeled)
-  const char *l_top = "STORE", *l_hint = "hold";
-  const char *r_top = "RECALL", *r_hint = "hold";
+  //
+  // The holds state their DURATION. They are not the same length -- STORE is
+  // 500 ms and RECALL is 250 ms -- and both used to read simply "hold", which
+  // hid an asymmetry that runs the wrong way: RECALL changes the live state of
+  // every 200e module in the case, STORE only writes a local slot, and the
+  // bus-wide one was the easier of the two to trigger. A firm ordinary button
+  // press is 150-250 ms, so that threshold sat right at the edge of an
+  // accident. Saying the number is the cheapest honest fix; whether the two
+  // should also be swapped is a separate question for the owner.
+  const char *l_top = "STORE", *l_hint = "hold .5s";
+  const char *r_top = "RECALL", *r_hint = "hold .25s";
   if (edit_mode) {
     l_top = "DONE"; l_hint = "click";
     r_top = "CHAR"; r_hint = "turn";
@@ -283,12 +293,20 @@ FLASHMEM void Draw() {
   }
   graphics.setPrintPos(4, 16);
   graphics.print(l_top);
-  graphics.setPrintPos(7, 26);
-  graphics.print(l_hint);
   graphics.setPrintPos(88, 16);
   graphics.print(r_top);
-  graphics.setPrintPos(91, 26);
-  graphics.print(r_hint);
+  // The hint row doubles as the progress row: while a hold is running the
+  // bar is drawn HERE, in place of the word, so it never has to be squeezed
+  // in beside the label. The RECALL bar used to sit at y=29 and was drawn
+  // straight through the bottom five rows of its own "hold" text.
+  if (!(hold_start_ms && !edit_mode)) {
+    graphics.setPrintPos(7, 26);
+    graphics.print(l_hint);
+  }
+  if (!(recall_hold_ms && !edit_mode)) {
+    graphics.setPrintPos(91, 26);
+    graphics.print(r_hint);
+  }
 
   // WPM presence: banana-jack dot, filled = present
   graphics.drawCircle(92, 38, 2);
@@ -331,25 +349,26 @@ FLASHMEM void Draw() {
   if (last_trig) graphics.printf("TR%d", last_trig);
   else graphics.print("off");
 
-  // hold-progress bar under the STORE column while the left encoder is held
+  // Hold-progress bars. Both live on the hint row (y=26) in place of the
+  // word they replace, both are 34x5, and both start filling IMMEDIATELY.
+  //
+  // The 120 ms flicker guard the STORE bar used to carry is gone: it meant
+  // the first 24% of a 500 ms hold gave no feedback at all, so the gesture
+  // that most needs to feel like it registered was the one that stayed dark
+  // longest. RECALL never had the guard, so the two also disagreed about
+  // when feedback begins. They now behave identically and differ only in how
+  // fast they fill -- which is the one thing that IS different about them.
   if (hold_start_ms && !edit_mode) {
     const uint32_t held = millis() - hold_start_ms;
-    if (held > 120) {   // don't flicker on ordinary clicks
-      graphics.drawFrame(4, 35, 34, 5);
-      uint32_t w = (held >= 500) ? 32 : ((held - 120) * 32) / 380;
-      if (w) graphics.drawRect(5, 36, w, 3);
-    }
+    graphics.drawFrame(4, 26, 34, 5);
+    const uint32_t w = (held >= kStoreHoldMs) ? 32 : (held * 32) / kStoreHoldMs;
+    if (w) graphics.drawRect(5, 27, w, 3);
   }
-
-  // the same bar under RECALL, scaled to its shorter hold. Sits above the
-  // WPM dot (y=35 is taken on this side) and starts filling immediately --
-  // at 250ms there is no room for a flicker guard, and the bar appearing at
-  // all is the feedback that the hold registered.
   if (recall_hold_ms && !edit_mode) {
     const uint32_t held = millis() - recall_hold_ms;
-    graphics.drawFrame(90, 29, 34, 5);
-    uint32_t w = (held >= kRecallHoldMs) ? 32 : (held * 32) / kRecallHoldMs;
-    if (w) graphics.drawRect(91, 30, w, 3);
+    graphics.drawFrame(90, 26, 34, 5);
+    const uint32_t w = (held >= kRecallHoldMs) ? 32 : (held * 32) / kRecallHoldMs;
+    if (w) graphics.drawRect(91, 27, w, 3);
   }
 
   // one focus grammar: invert exactly what the right encoder will change

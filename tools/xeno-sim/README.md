@@ -12,7 +12,7 @@ are all compiled from `software/src/`, unmodified. Only hardware is replaced.
 cd tools/xeno-sim
 make                       # -> build/xeno-sim
 make gui                   # ...the panel in a browser (recommended)
-make check                 # the self-checks: determinism, the hold gestures
+make check                 # the self-checks: determinism, gestures, the write path
 ./build/xeno-sim           # interactive, in your own terminal
 ```
 
@@ -36,9 +36,12 @@ splash screen, app restore. Every screen below is drawn by firmware.
 The IO settings screen is offered per app: the 200e app declines it
 (`io_settings_allowed()`), so reach it from Scenery or Pong.
 
-Inside the app switcher the **right** encoder scrolls (the left one opens the
-debug stats page, as on the module), a click switches app, and a long click
-switches and saves. `--app NAME` boots straight into one; `--app x` lists them.
+Inside the app switcher the **right** encoder scrolls, a click switches app, and
+a long click switches and saves. The **left** encoder cancels on a press and
+opens the debug-stats page on a **hold** — that page is a blocking firmware
+loop whose only exit is the right encoder, so scripting it needs a press
+already in flight before it is entered: see `<button>-inN` under *Keys*.
+`--app NAME` boots straight into one; `--app x` lists them.
 
 Inside the preset overlay: the left encoder moves the cursor, the right one
 changes what is highlighted, **hold the left encoder 500 ms to STORE**, **hold
@@ -88,8 +91,19 @@ verifies that, because a replay that silently diverges would be worse than no
 replay at all. What guarantees it:
 
 * the simulated clock is the **only** time source any firmware code can
-  observe — `millis()`, `micros()`, `delay()`, `elapsedMillis` and
-  `elapsedMicros` all read it, and it moves only when the simulator moves it;
+  observe — `millis()`, `micros()`, `delay()`, `delayMicroseconds()`,
+  `elapsedMillis` and `elapsedMicros` all read it, and it moves only when the
+  simulator moves it;
+* `delay()` and `delayMicroseconds()` **advance the clock and run the
+  background** — the core ISR and the 1 kHz UI poll on their own schedules,
+  exactly as `display::SimPump()` does for a blocked frame. On hardware a delay
+  is not a pause in the machine, and firmware relies on that: every
+  `while (!done) { …; delay(x); }` is waiting for something only the ISR can
+  deliver. `delayMicroseconds()` was a no-op, which froze the clock inside
+  precisely those loops — `Ui::DebugStats()` is a `while (!exit_loop)` paced
+  only by `delayMicroseconds(10)`, so the UI poll never ran, no button event
+  was ever queued, the frame buffer was never drained, and the simulator spun
+  forever with a blank screen and had to be killed;
 * `random()` is seeded to a fixed value at start, so even the splash screen's
   icon roulette repeats;
 * every simulator-owned static is reset before boot.
@@ -132,6 +146,29 @@ check assert what a person would actually read, instead of a frame hash that
 says only "something moved". `selfcheck.sh` uses it for the whole 200e write
 path.
 
+`edgecheck.py` reads the same capture for the one thing `fbtext.py` structurally
+cannot see: **text clipped at the right edge**.
+
+```sh
+./build/xeno-sim --keys "..." --dump-fb | python3 edgecheck.py -
+y=46  CLIPPED: a glyph is cut off at x=127 (column bits 01100000)
+```
+
+The 6x8 font gives a row 21 columns, x=0..125. A 22nd character starts at x=126
+and only its first two pixel columns fit, so it is drawn and then cut off — and
+it does not *look* cut off, it looks like a shorter string. `fbtext.py` demands
+an exact glyph match, and two thirds of a glyph matches nothing, so the clipped
+character is simply absent from the decode: the truncation is invisible to any
+text assertion. This was a real defect. `LIVE %lus ago  wire %d` had 17 columns
+of fixed overhead, so a 3-digit age plus a 2-digit slot came to 22 and rendered
+`wire 29` as `wire 2` — a perfectly well-formed slot number, on the screen that
+precedes a 30-slot rewrite.
+
+So `edgecheck.py` looks at the pixels. In columns 126-127 an honest row is
+uniform: all dark, or all lit under an `invertRect` (which is how this UI
+shouts). Two thirds of a glyph is neither. It exits non-zero on any offending
+row, and `selfcheck.sh` sweeps it over a dozen screens.
+
 **No device captures have been compared yet.** The mechanism is here and tested
 against itself; the numbers that would turn "looks right" into "is right" need
 someone with console access to capture the reference frames. Worth capturing
@@ -151,14 +188,34 @@ does not. `--write-fault` makes the simulated 251e mishandle the RESTORE:
 | `drop-tail` | stores all but the last record |
 | `flip-first` | stores one byte wrong in the FIRST slot |
 | `flip-last` | stores one byte wrong in the LAST slot — collateral damage |
+| `short-readback` | stores the bank perfectly, then serves one slot instead of thirty on the read-back — and reports DONE |
 
 The firmware reads the whole bank straight back after every write and compares
 it against what it built, so each of these should end on a `BAD:` line rather
-than `WROTE + VERIFIED`. `make check` asserts all five.
+than `WROTE + VERIFIED`. `make check` asserts all six.
 
-`drop-tail` is the interesting one: it verifies clean, because the record it
-drops is one this edit never changed, so the module really does match the
-intent. That is a correct answer, not a miss.
+**The two truncations are opposites, and neither is a spelling of the other.**
+
+`drop-tail` is a bad STORE seen through a **good** read-back. The record it
+drops is one this edit never changed, so all 63,120 bytes come back and they
+genuinely match the intent: it verifies clean, and that is the correct answer.
+There is nothing wrong with the module's contents to report, and inventing an
+alarm there would teach the user to ignore the real ones.
+
+`short-readback` is a good STORE seen through a **bad** read-back, and it is
+the one shape that can fake a verify. The read-back lands in the *same* 64 KB
+card image the RESTORE was sourced from, so every byte the module does not
+send back still holds the value we intended — and a whole-bank hash of that
+image agrees with itself, happily, on 3% of the evidence. The firmware
+therefore requires `Bus200eMasterBytesTransferred() >= bank_len` before it will
+compute the verify hash at all; requiring only that the read-back covered the
+*edited slot's* 2,104-byte window (which a 2,104-byte read-back does exactly)
+earned `WROTE + VERIFIED` on a bank nobody had seen, and then stamped
+`read_hash_` with it, poisoning every later diff. A short DONE is real: one
+bench capture during bring-up came back exactly one record shy while reporting
+success.
+
+`make check` asserts both, side by side, for exactly this reason.
 
 ---
 
@@ -311,7 +368,7 @@ toggle pacing) and the session controls live in visually distinct cards marked
 | `--real-timing` | interactive only: pin the virtual clock to wall-clock, so a scan takes the ~60 s it takes on the module |
 | `--bus-off` | make `PresetBus::Enabled()` false |
 | `--capture-251e PATH` / `--capture-259e PATH` | different bank hex dumps |
-| `--write-fault WHAT` | make the simulated modules mishandle a RESTORE: `none` (default), `ignore`, `drop-tail`, `flip-first`, `flip-last` — see *the write path* |
+| `--write-fault WHAT` | make the simulated modules mishandle a RESTORE: `none` (default), `ignore`, `drop-tail`, `flip-first`, `flip-last`, `short-readback` — see *the write path* |
 | `--no-log` | omit the status/log lines under the frame |
 | `--stdio` | line protocol on stdin/stdout, for the browser front end |
 
@@ -339,6 +396,28 @@ Word aliases: `encl` `encr` (pushes), `encl-` `encl+` `encr-` `encr+` (turns),
 * `stepN` — advance exactly N simulated milliseconds (e.g. `step200`)
 * `<button>-down` / `<button>-up` — hold and release, which is how a chord or a
   timed hold is scripted. A bare token is still a tap.
+* `<button>-inN` — schedule a tap N simulated ms from now and return
+  **immediately**, without advancing the clock.
+
+`-inN` is the only way a script can answer a screen the firmware draws from
+inside its *own* blocking loop — `Ui::DebugStats()`, `ConfirmReset()`, the
+calibration wizard. Those never return to the simulator's driver, so the token
+that would press the exit button is never reached; the press has to be in
+flight before the loop is entered. Scheduled taps are consumed by
+`SimInputTick()`, which runs on the UI-poll schedule inside the pump, so they
+fire while the firmware is spinning:
+
+```sh
+# in and out of the app switcher's debug-stats page (encL held = enter)
+./build/xeno-sim --keys "a-down,step60,r-down,step60,r-up,step60,a-up,step200,\
+r-in900,l-down,step1400,l-up,step200"
+```
+
+What this still cannot do is **capture a frame from inside** such a loop: the
+loop owns the process until it ends, and by the time control returns the app
+menu has already redrawn over it. `selfcheck.sh` therefore asserts that the
+debug-stats page is entered, sees a scheduled press and exits — not what it
+draws. Its layout is unchecked here.
 
 A terminal cannot report a key being *held*, so chords in interactive terminal
 mode are not possible — use `--keys` or the browser.

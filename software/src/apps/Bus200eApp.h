@@ -148,6 +148,13 @@ static constexpr int kListRows = 3;     // responders visible at once
 // rather than a read of the wrong preset.
 static constexpr int kSlotCount = 30;
 
+// How long the write-confirm screen ignores a "yes" after it appears. Long
+// enough that no fumbled chord or double-tap can cross it, short enough that a
+// deliberate press never feels refused: a considered look at a new screen is
+// well over a third of a second, and the preset overlay already asks 500 ms
+// for a STORE, which is a far less consequential act than this.
+static constexpr uint32_t kConfirmDeadMs = 350;
+
 // Stage strip geometry. 50 stages at 2px each = 100px, left-aligned.
 static constexpr int kStripX = 4;
 static constexpr int kStripTop = 31;
@@ -235,7 +242,12 @@ static constexpr int kRow259eValueX = 74;   // char column 12 of 21
 OC_APP_CLASS(AppBus200e, TWOCCS("2E"), "200e Modules", "200e"),
   public HSApplication {
 public:
-  OC_APP_INTERFACE_DECLARE(AppBus200e, 2);
+  // 11 bytes: addr_, target_, the 8-byte found bitmap, and the module-table
+  // size the bitmap was built against. The found set is persisted because a
+  // scan takes ~49 s on hardware and the case does not change unless someone
+  // physically changes it -- rescanning on every power-up or app switch was
+  // pure repeated cost for an answer that was already known.
+  OC_APP_INTERFACE_DECLARE(AppBus200e, 11);
 
   void Start() final {}
   void Resume() final {}
@@ -292,6 +304,8 @@ private:
   Bus200eMasterError read_err_ = BUS200E_MASTER_ERR_NONE;
   uint32_t read_ms_ = 0;       // millis() when the bank read completed
   uint32_t read_started_ms_ = 0;   // millis() the transfer was accepted
+  uint32_t armed_ms_ = 0;          // millis() the confirm screen appeared
+  bool found_dirty_ = false;       // scan result awaiting a safe write
   uint32_t write_started_ms_ = 0;  // ditto for a restore
   // Set when a job vanished instead of finishing, so the status line can say
   // "lost" rather than blaming the module for an error it never reported.
@@ -321,9 +335,19 @@ private:
   // module holds exactly what was intended, and nothing else does.
   uint32_t intended_hash_ = 0;
   uint32_t intended_outside_ = 0;
+  // The slot window that was actually committed, latched at CommitWrite.
+  // PumpWrite used to re-derive the hole from the live slot_, which the user
+  // can change with the encoder while the write is in flight -- so a genuine
+  // mismatch could be attributed to the wrong slot and reported as
+  // "BAD: OTHER PRESETS!" when only the edited slot was wrong.
+  uint32_t committed_off_ = 0;
   uint32_t verify_started_ms_ = 0;
   int verify_diff_ = 0;         // differing bytes in the read-back of our slot
   bool verify_outside_ok_ = true;  // the other 29 presets came back unchanged
+  // Whether the read-back covered the whole bank. Separate from
+  // verify_outside_ok_ on purpose: "the other 29 came back wrong" and "we
+  // never saw the other 29" are different facts and need different words.
+  bool verify_covered_ = true;
 
   // Freshly encoded copy of the slot being written, built at commit time.
   // Its whole job is to be compared against: once against the image after
@@ -418,6 +442,7 @@ private:
   }
 
   void StartScan();
+  void ConsumeScanDirty();
   void StopScan();
   void PumpScan();
   void PumpProbe();
@@ -447,6 +472,7 @@ private:
   void DrawModule259e() const;
   void DrawRow259e(int row, int y) const;
   void DrawTenths(int tenths, const char *suffix) const;
+  void DrawAge(uint32_t ms) const;
   void ScrollRows(int delta);
   void DrawStageStrip() const;
   void DrawStageStripCursor() const;
@@ -606,6 +632,22 @@ void AppBus200e::PumpScan() {
   if (scan_index_ >= count) {
     scan_state_ = Bus200eAppNS::SCAN_IDLE;
     OC::PresetBus::MasterQuerySetQuiet(false);
+    // Mark the result for persistence -- but do NOT write it from here.
+    //
+    // The set is worth keeping: the case only changes when someone physically
+    // changes it, and the answer costs ~49 s to obtain. But OC::SaveAppData()
+    // is a heavier hammer than it looks from this call site. It calls
+    // SaveGlobalSettings() (which loads GLOBALS.CFG into PhzConfig's SHARED
+    // map and never hands it back -- persist_cur_slot documents that handback
+    // as mandatory), it rewrites 000.SCL-003.SCL on the SD card when one is
+    // present, and it holds __disable_irq() across each flash erase/program
+    // window. That last one masks our own I2C slave: if a foreign master is
+    // mid-transfer through the card we serve, its transfer can tear. Doing
+    // all that as a side effect of a scan finishing is the wrong trade.
+    //
+    // ConsumeScanDirty() below writes it at a quiescent moment instead.
+    found_dirty_ = true;
+    serial_printf("200e: scan complete, %d modules found\n", found_count_);
     return;
   }
 
@@ -646,6 +688,18 @@ void AppBus200e::StartRead() {
   last_refusal_ = Buchla200eCheckRead(rc);
   if (last_refusal_ != BUCHLA200E_READ_OK) return;
 
+  // The address check StartProbe has always had, and this never did.
+  // Address 0 is the bus's GENERAL CALL destination: a BACKUP addressed
+  // there is not a read of "module zero", it is an invitation to every
+  // module on the bus at once. And backing up our own address means asking
+  // our own slave to answer our own master. Neither is a write, so the
+  // mandate is not at stake -- but the first is real bus disruption in
+  // someone else's case, and the address encoder can reach both.
+  if (target_ == 0 || target_ == OC::PresetBus::ModuleAddress()) {
+    last_refusal_ = BUCHLA200E_READ_BAD_ADDR;
+    return;
+  }
+
   // Clear any DONE/FAILED left over from a previous job, otherwise the
   // master FSM refuses the new one as busy.
   OC::PresetBus::MasterReset();
@@ -654,6 +708,17 @@ void AppBus200e::StartRead() {
     read_state_ = Bus200eAppNS::READ_ACTIVE;
     read_err_ = BUS200E_MASTER_ERR_NONE;
     read_started_ms_ = millis();   // bounds the wait; see PumpRead
+    // A read in flight is now the most recent thing that happened to this
+    // module, so it -- not the previous write -- owns the provenance line.
+    // DrawReadState() gives write_state_ priority, and nothing used to clear
+    // it, so after any write the line was pinned to WROTE + VERIFIED for the
+    // rest of the session: pressing Read re-read all 63120 bytes and the
+    // screen did not change by a pixel, which is indistinguishable from a
+    // dead button. It also meant the freshness clock never restarted and the
+    // banner was drawn over slots it did not describe.
+    // Only cleared once the job is actually accepted, so a REFUSED read
+    // leaves the previous write's verdict standing.
+    write_state_ = Bus200eAppNS::WRITE_NONE;
   } else {
     read_state_ = Bus200eAppNS::READ_FAIL;
     read_err_ = (Bus200eMasterError)(-rc2);
@@ -883,6 +948,7 @@ void AppBus200e::ArmWrite() {
   const uint32_t h = HashResidentBank();
   write_block_ = CheckWrite(pending_changes_, h);
   screen_ = Bus200eAppNS::SCR_WRITE_CONFIRM;
+  armed_ms_ = millis();
 }
 
 // Step 2 of 2, and the only place in this app that puts bytes on the wire in
@@ -950,6 +1016,7 @@ void AppBus200e::CommitWrite() {
 
   intended_hash_ = after.whole;
   intended_outside_ = after.outside;
+  committed_off_ = off;   // the hole this write owns, for the verify pass
 
   OC::PresetBus::MasterReset();
   const int rc = OC::PresetBus::MasterRestore(target_);
@@ -1035,21 +1102,40 @@ void AppBus200e::PumpWrite() {
   // something already declared over.
   const uint32_t bank_len = ExpectedBankBytes();
   const uint8_t *img = OC::PresetBus::MasterCardImage();
-  uint32_t off = 0;
-  const bool windowed = SlotWindowInBank(&off);
+  const uint32_t off = committed_off_;   // the hole THIS write patched
+
+  // The read-back must have covered the WHOLE bank, not merely the edited
+  // slot's window.
+  //
+  // This is the difference between VERIFIED meaning something and meaning
+  // nothing. The read-back lands in the same image the restore was sourced
+  // from, so any byte the module did not send back still holds the value we
+  // intended -- and the whole-bank hash matches it happily. Requiring only
+  // the slot window (as SlotWindowInBank does) let a read-back that stopped
+  // after 2104 of 63120 bytes earn "WROTE + VERIFIED" on the strength of 3%
+  // of the evidence, and then stamp read_hash_ with it, poisoning every
+  // later diff. A short DONE is real: see the note in PumpRead about a
+  // capture that came back exactly one record short while reporting success.
+  //
+  // HashResidentBank() has guarded the read path this way all along; the
+  // verify path simply never got the same line.
+  const bool covered =
+      img && bank_len && Bus200eMasterBytesTransferred() >= bank_len &&
+      (uint64_t)off + kBuchla251eSlotBytes <= (uint64_t)bank_len;
 
   const Buchla200eBankHash back =
-      (img && windowed) ? Buchla200eHashBank(img, bank_len, off, kBuchla251eSlotBytes)
-                        : Buchla200eBankHash{0, 0};
+      covered ? Buchla200eHashBank(img, bank_len, off, kBuchla251eSlotBytes)
+              : Buchla200eBankHash{0, 0};
 
   verify_diff_ = 0;
-  verify_outside_ok_ = (img && windowed && back.outside == intended_outside_);
-  if (img && windowed) {
+  verify_covered_ = covered;
+  verify_outside_ok_ = (covered && back.outside == intended_outside_);
+  if (covered) {
     for (uint32_t i = 0; i < kBuchla251eSlotBytes; ++i)
       if (img[off + i] != intended_slot_[i]) ++verify_diff_;
   }
 
-  if (img && windowed && back.whole == intended_hash_) {
+  if (covered && back.whole == intended_hash_) {
     // Every byte of all 30 slots is what we intended. This is the only path
     // that clears the edit flag.
     write_state_ = Bus200eAppNS::WRITE_OK;
@@ -1065,13 +1151,16 @@ void AppBus200e::PumpWrite() {
     // set -- the working copy is still the user's intent, and it is now the
     // only place that intent exists.
     write_state_ = Bus200eAppNS::WRITE_BAD;
-    if (img && windowed) {
+    if (covered) {
       read_state_ = Bus200eAppNS::READ_OK;
       read_ms_ = millis();
       read_addr_ = target_;
       read_type_ = (uint8_t)CurrentModuleType();
       read_hash_ = back.whole;   // truth, so a retry is diffed against reality
     } else {
+      // Not enough of the bank came back to say anything about it. The image
+      // is a blend of what the module sent and what we intended, so it is not
+      // a usable baseline: invalidate the read and make the user re-Read.
       read_state_ = Bus200eAppNS::READ_FAIL;
       read_hash_ = 0;
     }
@@ -1200,7 +1289,12 @@ void AppBus200e::GenApply() {
   Buchla251eGenerateEuclid(p, working_slot_.sequences[seq_]);
   edited_ = true;
   edit_stage_ = 0;
-  screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+  // Stay on the Gen screen. The loop here is "generate, look, adjust,
+  // regenerate" -- twenty laps is normal -- and bouncing to the home screen
+  // cost two presses of pure transport per lap, 40 for that session. The
+  // round trip existed only because the home screen drew the stage strip and
+  // this one did not; DrawGen now draws it in the two blank rows it already
+  // had, so there is nothing left to go back for.
 }
 
 // --- recorder --------------------------------------------------------------
@@ -1269,8 +1363,8 @@ void AppBus200e::DrawModuleSelect() const {
   graphics.invertRect(28, 14, 14, 10);   // the encoder target has focus
   graphics.setPrintPos(48, 15);
   // "probably": address is a convention, not a proof -- clones squat it.
-  if (model) graphics.printf("~%s", model);
-  else       graphics.print("~unknown");
+  if (model) graphics.printf("?%s", model);
+  else       graphics.print("?unknown");
 
   graphics.setPrintPos(0, 26);
   if (scan_state_ != Bus200eAppNS::SCAN_IDLE) {
@@ -1301,7 +1395,7 @@ void AppBus200e::DrawModuleSelect() const {
     if (!e) break;
     const int y = 36 + row * 9;
     graphics.setPrintPos(4, y);
-    graphics.printf("%02X ~%s", e->addr, e->name);
+    graphics.printf("%02X ?%s", e->addr, e->name);
     if (e->addr == addr_) graphics.drawRect(0, y + 2, 3, 3);
   }
 }
@@ -1329,8 +1423,14 @@ void AppBus200e::DrawStageStrip() const {
     if (bh > 0) graphics.drawVLine(x, kStripBase - bh, bh);
     // The loop marker crosses BELOW the baseline, which a data bar never
     // does, so it cannot be misread as a very tall stage.
+    //
+    // It starts at kStripTop-1, not -2: the text line above occupies rows
+    // 22-29 and the old span began at row 29, so stage 1's marker (x=4, which
+    // is column 0 of that text) ate the first character -- "Seq A" rendered
+    // as "eq A" on the home screen and "Note 4" as "ote 4" in the editor.
+    // Bars top out at kStripTop, so this still clears the tallest of them.
     if (Buchla251eHasEndMarker(s.stages[i]))
-      graphics.drawVLine(x, kStripTop - 2, kStripH + 5);
+      graphics.drawVLine(x, kStripTop - 1, kStripH + 4);
   }
 }
 
@@ -1360,7 +1460,21 @@ void AppBus200e::DrawReadState() const {
 
   // A write in flight or just finished outranks the read line: it is the more
   // recent, and more consequential, thing that happened to the module.
-  switch (write_state_) {
+  //
+  // With ONE exception, below: a finished write does not outrank a live edit.
+  // WRITE_OK means "the module holds what we sent", and the moment the user
+  // edits again that claim is false -- the working copy and the module differ,
+  // which is exactly what EDITED* exists to say. Leaving WROTE + VERIFIED up
+  // suppressed that warning for the rest of the session, so the screen
+  // asserted a verified match while ArmWrite was simultaneously reporting
+  // "8 bytes change". It also froze the staleness clock, so LIVE Ns ago never
+  // came back after the first write of a session.
+  //
+  // WRITE_BAD deliberately still outranks: a known-bad module is worth
+  // shouting about even mid-edit, and its whole point is that it survives.
+  const bool stale_ok = (write_state_ == Bus200eAppNS::WRITE_OK && edited_);
+
+  switch (stale_ok ? Bus200eAppNS::WRITE_NONE : write_state_) {
     case Bus200eAppNS::WRITE_ACTIVE:
       graphics.printf("WRITING %02X ...", target_);
       graphics.invertRect(0, 45, 128, 10);
@@ -1379,7 +1493,14 @@ void AppBus200e::DrawReadState() const {
     case Bus200eAppNS::WRITE_BAD:
       // The worst outcome the app can report, and the only one where the
       // module's contents are known to be wrong rather than merely unknown.
-      if (!verify_outside_ok_)      graphics.print("BAD: OTHER PRESETS!");
+      // "We could not check" comes FIRST and is its own message. A short
+      // read-back leaves verify_outside_ok_ false, but that flag then means
+      // "we never saw the other 29", not "the other 29 are damaged" -- and
+      // reporting OTHER PRESETS! would send the owner auditing 29 presets
+      // that are almost certainly fine, for a cause that was never observed.
+      // The module's contents are UNKNOWN here, which is its own bad news.
+      if (!verify_covered_)         graphics.print("BAD: read-back short");
+      else if (!verify_outside_ok_) graphics.print("BAD: OTHER PRESETS!");
       else if (verify_diff_ == 1)   graphics.print("BAD: 1 byte wrong");
       else if (verify_diff_ > 0)    graphics.printf("BAD: %d bytes wrong", verify_diff_);
       else                          graphics.print("BAD: verify failed");
@@ -1402,11 +1523,20 @@ void AppBus200e::DrawReadState() const {
     case Bus200eAppNS::READ_OK:
       if (edited_) {
         // Loud on purpose: these bytes are NOT what the module holds.
-        graphics.printf("EDITED*      wire %d", slot_);
+        graphics.print("EDITED*");
         graphics.invertRect(0, 45, 46, 10);
       } else {
-        graphics.printf("LIVE %lus ago  wire %d",
-                        (unsigned long)((millis() - read_ms_) / 1000u), slot_);
+        // No "wire %d" any more, and the age is clamped to two characters.
+        //
+        // Both halves were the same bug. The old format's fixed overhead was
+        // 17 of the 21 columns, so a 3-digit age (anything past 1m40) plus a
+        // 2-digit wire index overflowed and the LAST character fell off the
+        // screen -- turning "wire 10" into "wire 1", which is not obviously
+        // truncated because it is a perfectly well-formed slot number. The
+        // header already says "Slot 11" 33 pixels above; printing the same
+        // preset's 0-indexed twin below it was a trap rather than a
+        // disclosure, and it was the screen that precedes a 30-slot rewrite.
+        DrawAge(millis() - read_ms_);
       }
       break;
     case Bus200eAppNS::READ_FAIL:
@@ -1467,7 +1597,14 @@ void AppBus200e::DrawWriteConfirm() const {
   // The other 29 are re-sent verbatim from the read, and the read-back after
   // the transfer proves all 30 landed. Both halves of that promise are stated
   // here because this is the screen where consent is actually given.
-  graphics.print("29 re-sent, then chkd");
+  //
+  // "no undo" earns its space. The old line spent four columns on "chkd" --
+  // the only abbreviation of its kind in the firmware, on the one screen that
+  // can least afford to be skimmed -- to promise DETECTION, which a reader
+  // hears as PROTECTION. They are not the same thing: this instrument keeps
+  // no copy of the bank it is about to overwrite, so a verified failure is
+  // still a failure you cannot undo. Say that instead.
+  graphics.print("29 re-sent - no undo");
 
   graphics.setPrintPos(0, 56);
   graphics.print("encR:CONFIRM  encL:no");
@@ -1478,10 +1615,17 @@ void AppBus200e::DrawModuleHome() const {
   using namespace Bus200eAppNS;
   const char *model = Buchla200eModelForAddress(target_);
 
-  // Line 1: what we are talking to, and which preset. "~" because the
+  // Line 1: what we are talking to, and which preset. "?" because the
   // address only implies the model by convention -- clones squat addresses.
+  //
+  // This used to be "~", which is NOT IN THE FONT: gfx_font_6x8.h holds 92
+  // glyphs from 0x20, ending at '{' (0x7B), so '~' (0x7E) indexed three
+  // positions past the end of the table and drew whatever bytes followed. The
+  // hedge rendered as a 6x8 noise block that reads as display corruption, and
+  // the screen then asserted the model as fact. '?' is in the font and is
+  // already this firmware's unknown-marker ("?%d", "Z= ???").
   graphics.setPrintPos(0, 13);
-  graphics.printf("~%s @%02X", model ? model : "?", target_);
+  graphics.printf("?%s @%02X", model ? model : "?", target_);
   graphics.setPrintPos(80, 13);
   graphics.printf("Slot %d", slot_ + 1);          // 1-indexed for humans
 
@@ -1620,6 +1764,32 @@ void AppBus200e::DrawGen() const {
     if (i == gen_cursor_) graphics.invertRect(xs[i] - 1, ys[i] - 1, 56, 10);
   }
 
+  // A preview of the sequence these parameters produce, in the band that was
+  // blank (y=48..54). APPLY now stays on this screen, so this is the only
+  // place the result is visible -- without it "generate, look, adjust" would
+  // have nothing to look at. Compact geometry rather than DrawStageStrip's,
+  // whose y=31..43 band is occupied here by the parameter rows.
+  const Buchla251eSequence &s = working_slot_.sequences[seq_];
+  const int base = 54, h = 6;
+  graphics.drawHLine(kStripX, base, kBuchla251eStagesPerSequence * 2);
+  uint8_t peak = 0;
+  for (int i = 0; i < kBuchla251eStagesPerSequence; ++i)
+    if (s.stages[i].value > peak) peak = s.stages[i].value;
+  const int full = (peak < kStripMinFullScale) ? kStripMinFullScale : (int)peak;
+  for (int i = 0; i < kBuchla251eStagesPerSequence; ++i) {
+    const int x = kStripX + i * 2;
+    const int bh = ((int)s.stages[i].value * h) / full;
+    if (bh > 0) graphics.drawVLine(x, base - bh, bh);
+    // Same convention as the full strip: the loop marker crosses BELOW the
+    // baseline, which a data bar never does. Starts AT base-h (row 48), not
+    // above it: the GEN_REST row's glyphs occupy rows 44..51 and its cursor
+    // invert 43..52, so a marker starting at row 47 -- which the default
+    // 16-step pattern puts at x=34, right under "Rest 0" -- cut into the
+    // text. Two rows below the baseline is still unmistakably not a bar.
+    if (Buchla251eHasEndMarker(s.stages[i]))
+      graphics.drawVLine(x, base - h, h + 2);
+  }
+
   graphics.setPrintPos(0, 56);
   graphics.print("encR:APPLY encL:back");
 }
@@ -1667,7 +1837,9 @@ void AppBus200e::DrawRec() const {
   }
 
   graphics.setPrintPos(0, 46);
-  graphics.print("USB dev/host, DIN, bus");
+  // 20 chars, not 22: the old string was clipped mid-word to "...DIN, bu"
+  // by the right edge -- losing the very word the line exists to say.
+  graphics.print("USB host/dev DIN bus");
 
   graphics.setPrintPos(0, 56);
   if (rec_armed_) graphics.print("encR:STOP");
@@ -1685,6 +1857,18 @@ void AppBus200e::DrawTenths(int tenths, const char *suffix) const {
   const int frac = (tenths < 0 ? -tenths : tenths) % 10;
   const bool needs_sign = (tenths < 0 && whole == 0);
   graphics.printf("%s%d.%d%s", needs_sign ? "-" : "", whole, frac, suffix);
+}
+
+// "LIVE 45s ago" / "LIVE 2m ago" / "LIVE 9m+ ago" -- never more than 12
+// columns, whatever the age. The bank's freshness is the one thing on this
+// screen the user cannot check any other way, so the field must not be able
+// to overflow the 21-column row and drop characters off the right edge.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::DrawAge(uint32_t ms) const {
+  const uint32_t s = ms / 1000u;
+  if (s < 100)            graphics.printf("LIVE %lus ago", (unsigned long)s);
+  else if (s < 600)       graphics.printf("LIVE %lum ago", (unsigned long)(s / 60u));
+  else                    graphics.print("LIVE 9m+ ago");
 }
 
 FLASHMEM __attribute__((noinline))
@@ -1824,7 +2008,13 @@ void AppBus200e::DrawModule259e() const {
     if (row >= kRow259eCount) break;
     const int y = kRow259eY0 + i * kRow259eDY;
     DrawRow259e(row, y);
-    if (row == row_cursor_) graphics.invertRect(0, y - 1, 124, kRow259eDY + 1);
+    // Exactly the cursor row's 8-pixel cell -- not y-1 and not one row taller.
+    // The old band stole the bottom pixel row of the cell ABOVE, which at
+    // scroll 0 is the module identity line: it got a full-width white rule
+    // welded to its baseline and "259 A @28 / Slot 1" vanished entirely. Any
+    // label with a descender above the cursor (Morph, Warp, Sync) lost its
+    // tail into the bar and read as "Morp" with a stray speck below.
+    if (row == row_cursor_) graphics.invertRect(0, y, 124, kRow259eDY);
   }
 
   // Scrollbar: 19 rows in 3 makes position worth showing, and a bar costs no
@@ -1848,7 +2038,9 @@ void AppBus200e::DrawModule259e() const {
   graphics.setPrintPos(0, 56);
   graphics.print("Read");
   graphics.invertRect(-1, 55, 26, 10);
-  graphics.setPrintPos(36, 56);
+  // x=28, not 36: 28 + 16*6 = 124, inside the panel. At x=36 the string
+  // ran to 132 and rendered as "encL:back/scrol".
+  graphics.setPrintPos(28, 56);
   graphics.print("encL:back/scroll");
 }
 
@@ -1889,6 +2081,13 @@ FLASHMEM void AppBus200e::Init() {
 FLASHMEM size_t AppBus200e::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
   stream_buffer.Write<uint8_t>(addr_);
   stream_buffer.Write<uint8_t>(target_);
+  // The scan result. found_ is a bitmap over the MODULE TABLE, not over raw
+  // addresses, so it is only meaningful against the table it was built from
+  // -- stash the table size and refuse the set if a firmware update changed
+  // it, rather than silently reinterpreting old bits as different modules.
+  for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i)
+    stream_buffer.Write<uint8_t>(found_[i]);
+  stream_buffer.Write<uint8_t>((uint8_t)Buchla200eModuleCount());
   return stream_buffer.overflow() ? 0 : stream_buffer.written();
 }
 
@@ -1897,6 +2096,24 @@ FLASHMEM size_t AppBus200e::RestoreAppData(util::StreamBufferReader &stream_buff
   const uint8_t t = stream_buffer.Read<uint8_t>();
   addr_ = (a <= 0x7F) ? a : 0x5C;
   target_ = (t <= 0x7F) ? t : 0x5C;
+
+  uint8_t bits[Bus200eAppNS::kFoundBytes];
+  for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i)
+    bits[i] = stream_buffer.Read<uint8_t>();
+  const uint8_t table_n = stream_buffer.Read<uint8_t>();
+
+  // An underflow means this chunk predates the found set (a unit coming from
+  // older firmware): keep the empty list and let the user scan once.
+  if (!stream_buffer.underflow() && table_n == (uint8_t)Buchla200eModuleCount()) {
+    const int n = Buchla200eModuleCount();
+    int count = 0;
+    for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i) found_[i] = bits[i];
+    // Recompute the count rather than storing it: one source of truth means
+    // the list and the "N found" tally can never disagree.
+    for (int i = 0; i < n; ++i) if (IsFound(found_, i)) ++count;
+    found_count_ = count;
+    list_top_ = 0;
+  }
   return stream_buffer.underflow() ? 0 : stream_buffer.read();
 }
 
@@ -1919,11 +2136,43 @@ FLASHMEM void AppBus200e::HandleAppEvent(OC::AppEvent event) {
 
 void AppBus200e::Process(OC::IOFrame *ioframe) { BaseController(ioframe); }
 
+// Write the scan result out, once, at a moment when doing so is cheap and
+// safe. See the note in PumpScan for why this is not done there.
+//
+// Conditions, all of them necessary:
+//   - nothing of ours is on the wire (a scan, probe, read or write in flight
+//     would be interrupted by the flash windows SaveAppData holds irq off for)
+//   - we are not serving a card to a foreign master, so no third party's
+//     transfer can tear while our I2C slave is masked
+//   - the app ISR is quiet during the write, matching every other
+//     SaveAppData() call site in the firmware
+//   - PhzConfig's shared map is handed back afterwards, because
+//     SaveGlobalSettings leaves GLOBALS.CFG resident and does not restore it
+FLASHMEM void AppBus200e::ConsumeScanDirty() {
+#ifdef PRESET_BUS
+  if (!found_dirty_) return;
+  if (scan_state_ != Bus200eAppNS::SCAN_IDLE || probe_active_) return;
+  if (read_state_ == Bus200eAppNS::READ_ACTIVE || WriteBusy()) return;
+  if (OC::PresetBus::CardServing()) return;
+
+  found_dirty_ = false;
+  OC::CORE::app_isr_enabled = false;
+  OC::SaveAppData();
+  OC::CORE::app_isr_enabled = true;
+  // Hand the config map back: SaveGlobalSettings loaded GLOBALS.CFG into the
+  // shared map and left it there. We own no PhzConfig state ourselves, but
+  // the next app to write a file would inherit the wrong map.
+  OC::app_switcher.current_app()->DispatchAppEvent(OC::APP_EVENT_RESUME);
+  serial_printf("200e: scan set persisted (%d modules)\n", found_count_);
+#endif
+}
+
 FLASHMEM void AppBus200e::Loop() {
   PumpScan();
   PumpProbe();
   PumpRead();
   PumpWrite();
+  ConsumeScanDirty();   // no-op unless a scan just finished
 }
 
 FLASHMEM void AppBus200e::DrawMenu() const {
@@ -1959,6 +2208,24 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
   if (screen_ == Bus200eAppNS::SCR_WRITE_CONFIRM) {
     switch (event.control) {
       case OC::CONTROL_BUTTON_R:      // encR = confirm
+        // The screen must have been visible long enough to read before it
+        // will accept a yes.
+        //
+        // Without this the two-step guard was not a guard at all. The app
+        // switcher is "hold A, press encR"; on the module home A ALONE arms
+        // the write and here encR commits it, so the two halves of the most
+        // common navigation chord are, in order, arm and commit. A fumbled
+        // chord -- releasing A a few ms early -- committed 63,120 bytes to
+        // another module with the confirm screen on screen for 51 ms. The
+        // same hole opened from the other side: encR is "activate the
+        // highlighted action" on the screen that opens this one, so two
+        // presses of one button was a completed write. A two-step
+        // confirmation whose two steps are the same button is a one-step
+        // confirmation.
+        //
+        // Deliberately silent: a slip inside the window should feel like
+        // nothing happened, and the user reads the screen and presses again.
+        if (millis() - armed_ms_ < Bus200eAppNS::kConfirmDeadMs) break;
         if (write_block_ == BUCHLA200E_WRITE_OK) CommitWrite();
         break;
       case OC::CONTROL_BUTTON_L:      // encL = back/cancel
@@ -2043,22 +2310,45 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
 
   if (screen_ == Bus200eAppNS::SCR_MODULE_HOME) {
     const bool is259 = (CurrentModuleType() == Bus200eAppNS::MODTYPE_259E);
+    // A module we have no handler for gets NO consequential controls.
+    // DrawModuleHome's default branch draws only "no handler for this module
+    // type yet / encL:back", but this switch used to route the full 251e set
+    // underneath it: encR launched a real whole-bank BACKUP with nothing at
+    // all on screen to show for it, and A opened a WRITE dialog for a module
+    // the app had just said it could not handle. is259 was the only exclusion,
+    // so MODTYPE_UNKNOWN fell straight through to the 251e write path.
+    const bool known = (CurrentModuleType() != Bus200eAppNS::MODTYPE_UNKNOWN);
     switch (event.control) {
       case OC::CONTROL_BUTTON_L:      // encL = back
+        // Leaving is refused while a write is on the wire -- see the note in
+        // the module-select handler; this is the other half of that door.
+        if (WriteBusy()) {
+          last_refusal_ = BUCHLA200E_READ_WRITE_IN_FLIGHT;
+          break;
+        }
         screen_ = Bus200eAppNS::SCR_MODULE_SELECT;
         break;
       case OC::CONTROL_BUTTON_DOWN:   // B = cycle sequence A-D
         // The 259e has no sequences, so this does nothing there rather than
         // being repurposed into a gesture nothing on screen advertises.
-        if (!is259)
+        if (!is259 && known)
           seq_ = (uint8_t)((seq_ + 1) % kBuchla251eSequencesPerSlot);
         break;
       case OC::CONTROL_BUTTON_UP:     // A = primary action (Save)
         // Arms only; nothing reaches the bus until the confirm screen is
         // answered. A 259e has no write path yet, so A does nothing there.
-        if (!is259) ArmWrite();
+        if (!is259 && known) ArmWrite();
         break;
       case OC::CONTROL_BUTTON_R:      // encR = confirm/enter = run the action
+        // Gated on `known` like A and B above. Without this the unknown-module
+        // screen -- which draws only "no handler for this module type yet /
+        // encL:back" -- still ran the full 251e action set underneath: encR
+        // launched a real whole-bank BACKUP with nothing on screen to show
+        // for it, and encL could walk action_ round to ACT_SAVE and reach
+        // ArmWrite. The write guard did refuse that (zero expected bank
+        // bytes), but it refused it as "Read was incomplete", which names
+        // the wrong reason.
+        if (!known) break;
         if (is259) {
           StartRead();               // the only action a 259e page has
         } else if (action_ == Bus200eAppNS::ACT_READ) {
@@ -2066,7 +2356,11 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
         } else if (action_ == Bus200eAppNS::ACT_SAVE) {
           ArmWrite();
         } else if (action_ == Bus200eAppNS::ACT_EDIT) {
-          edit_stage_ = 0;
+          // edit_stage_ is deliberately NOT reset here. The core loop is
+          // Edit -> home -> Save -> Edit, and forgetting the cursor meant
+          // re-walking it on every lap: stage 30 cost 29 encL detents each
+          // time, with no acceleration, no wrap and no jump. The sequence
+          // letter already persisted; the stage now does too.
           screen_ = Bus200eAppNS::SCR_EDIT;
         } else if (action_ == Bus200eAppNS::ACT_GEN) {
           screen_ = Bus200eAppNS::SCR_GEN;
@@ -2146,6 +2440,18 @@ FLASHMEM void AppBus200e::HandleEncoderEvent(const UI::Event &event) {
       int s = (int)slot_ + event.value;
       CONSTRAIN(s, 0, Bus200eAppNS::kSlotCount - 1);
       if ((uint8_t)s != slot_) {
+        // An unsaved edit is the only place the user's intent exists, and
+        // changing slot re-decodes working_slot_ from the card image, which
+        // destroys it. One detent of the encoder you also PUSH to confirm --
+        // the most likely accidental gesture on this screen -- used to erase
+        // an edit silently, and worse, left edited_ set so the screen kept
+        // claiming EDITED* over bytes identical to the module's.
+        //
+        // Refuse instead, and name both ways out. Nothing is lost by asking.
+        if (edited_) {
+          last_refusal_ = BUCHLA200E_READ_UNSAVED_EDIT;
+          return;
+        }
         slot_ = (uint8_t)s;
         // The bank read covers all 30 slots, so browsing costs no bus
         // traffic -- but if the card image is gone the old slot's bytes

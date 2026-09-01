@@ -662,6 +662,14 @@ bool Ui::AppSettings(bool drawmenu) {
   static bool change_app = false;
   static bool save = false;
   static bool opened = false;
+  static bool cancel = false;
+  static bool encoder_r_held = false;
+  static bool accel_notice = false;
+  static elapsedMillis accel_notice_time;
+
+  // Long enough to read the word after looking down at the panel, short enough
+  // that the legend it covers is back before the next thing you try.
+  static constexpr uint32_t kAccelNoticeMs = 2000;
 
   // --- state change: entering App Menu
   if (!opened) {
@@ -672,30 +680,60 @@ bool Ui::AppSettings(bool drawmenu) {
 
   // View - graphics
   if (drawmenu) {
+    // The list runs on a 10px pitch rather than menu::kMenuLineH's 12. Five
+    // apps then end at y=49 and the bottom row is free for the legend below --
+    // which is the only thing on this screen that tells a newcomer what any of
+    // these unlabelled controls do. (The 12px pitch filled the screen and left
+    // four behaviours with zero labels between them.)
+    static constexpr weegfx::coord_t kAppLineH = 10;
+    static constexpr weegfx::coord_t kBarX = menu::kIndentDx + 8;
+    static constexpr weegfx::coord_t kNameX = kBarX + menu::kIndentDx + weegfx::Graphics::kFixedFontW;
+
     // assumes this is called from within a graphics frame context
     if (global_settings.encoders_enable_acceleration)
       graphics.drawBitmap8(120, 1, 4, bitmap_indicator_4x8);
 
-    menu::SettingsListItem item;
-    item.x = menu::kIndentDx + 8;
-    item.y = (64 - (5 * menu::kMenuLineH)) / 2;
-
+    weegfx::coord_t y = 0;
     for (int current = max(cursor.first_visible(), 0);
          current <= cursor.last_visible() && current < (int)app_container.num_apps();
-         ++current, item.y += menu::kMenuLineH) {
-      item.selected = current == cursor.cursor_pos();
-      item.SetPrintPos();
-      graphics.movePrintPos(weegfx::Graphics::kFixedFontW, 0);
+         ++current, y += kAppLineH) {
       // todo: make a secret button combo to switch to boring names
       // if (your_mom_is_boring)
       //   graphics.print(app_container[current]->boring_name());
       // else
-      graphics.print(app_container[current].name());
+      const char *name = app_container[current].name();
+      graphics.setPrintPos(kNameX, y + 1);
+      graphics.print(name);
       if (global_settings.current_app_id == app_container[current].id())
-        graphics.drawBitmap8(0, item.y + 1, 8, ZAP_ICON);
+        graphics.drawBitmap8(0, y + 1, 8, ZAP_ICON);
 
-      item.DrawCustom();
+      if (current == cursor.cursor_pos()) {
+        // The selection bar used to run to x=127 regardless: 118px of the
+        // screen's brightest object for a name that needs 66, so nearly half of
+        // it was blank. Hug the text instead -- the bar means "this one", and a
+        // bar the width of the name says that without shouting.
+        weegfx::coord_t w = (kNameX - kBarX)
+                          + weegfx::Graphics::kFixedFontW * (weegfx::coord_t)strlen(name)
+                          + menu::kIndentDx;
+        if (kBarX + w > menu::kDisplayWidth) w = menu::kDisplayWidth - kBarX;
+        graphics.invertRect(kBarX, y, w, kAppLineH - 1);
+      }
     }
+
+    // The legend. The two things nobody can guess are that encR picks and that
+    // HOLDING encR picks *and writes app data to EEPROM* -- the main way state
+    // is persisted here, and previously undocumented anywhere on the module.
+    // The hold hint takes the line over while encR is down, which is the one
+    // moment it is actionable.
+    graphics.drawHLine(0, 51, menu::kDisplayWidth);
+    graphics.setPrintPos(2, 54);
+    if (accel_notice && accel_notice_time < kAccelNoticeMs)
+      graphics.print(global_settings.encoders_enable_acceleration
+                     ? "Encoder accel: ON" : "Encoder accel: OFF");
+    else if (encoder_r_held)
+      graphics.print("keep holding to save");
+    else
+      graphics.print("encR:pick  encL:back");
 
 #ifdef VOR
     VBiasManager *vbias_m = vbias_m->get();
@@ -706,7 +744,7 @@ bool Ui::AppSettings(bool drawmenu) {
   }
 
   // UI - event handling
-  if (!change_app && idle_time() < APP_SELECTION_TIMEOUT_MS) {
+  if (!change_app && !cancel && idle_time() < APP_SELECTION_TIMEOUT_MS) {
     while (event_queue_.available()) {
       UI::Event event = event_queue_.PullEvent();
       if (IgnoreEvent(event))
@@ -721,9 +759,18 @@ bool Ui::AppSettings(bool drawmenu) {
       case CONTROL_BUTTON_R:
         save = event.type == UI::EVENT_BUTTON_LONG_PRESS;
         change_app = event.type != UI::EVENT_BUTTON_DOWN; // true on button release
+        encoder_r_held = UI::EVENT_BUTTON_DOWN == event.type; // legend: hold = save
         break;
       case CONTROL_BUTTON_L:
+        // encL is cancel everywhere else in this instrument -- the 200e app, the
+        // boot menus, the IO menus -- so it is what you reach for to back out of
+        // a switcher you opened by accident. It used to drop into DebugStats,
+        // a blocking loop full of numbers whose only exit (encR) it never
+        // stated: indistinguishable from a crash. Cancel here, and DebugStats
+        // moves to a deliberate hold, since it is a service tool.
         if (UI::EVENT_BUTTON_PRESS == event.type)
+            cancel = true;
+        else if (UI::EVENT_BUTTON_LONG_PRESS == event.type)
             ui.DebugStats();
         break;
       case CONTROL_BUTTON_UP:
@@ -736,11 +783,20 @@ bool Ui::AppSettings(bool drawmenu) {
 #endif
         break;
       case CONTROL_BUTTON_DOWN:
-        if (UI::EVENT_BUTTON_PRESS == event.type) {
+        // B is the button directly below the A you are holding to be in this
+        // screen, and this toggle changes how every encoder in the instrument
+        // responds, permanently, for every app. On a bare press its entire
+        // feedback was a 4x8 dot in the corner -- four pixels out of 8192, with
+        // no legend anywhere -- so a newcomer pressing buttons to work out how
+        // to choose an app could not possibly connect cause to effect. Now it
+        // wants a deliberate hold, and it answers in words on the legend line.
+        if (UI::EVENT_BUTTON_LONG_PRESS == event.type) {
             bool enabled = !global_settings.encoders_enable_acceleration;
             APPS_SERIAL_PRINTLN("Encoder acceleration: %s", enabled ? "enabled" : "disabled");
             ui.encoders_enable_acceleration(enabled);
             global_settings.encoders_enable_acceleration = enabled;
+            accel_notice = true;
+            accel_notice_time = 0;
         }
         break;
 
@@ -750,8 +806,11 @@ bool Ui::AppSettings(bool drawmenu) {
 
     return true;
   }
-  // else... idle time expired, or an app was selected via UI
+  // else... idle time expired, or an app was selected or the menu cancelled
   // cleanup and exit
+  cancel = false;
+  encoder_r_held = false;
+  accel_notice = false;
   event_queue_.Flush();
   event_queue_.Poke();
 

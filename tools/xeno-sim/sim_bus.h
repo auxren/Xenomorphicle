@@ -73,6 +73,20 @@ enum SimWriteFault {
   SIM_WRITE_DROP_TAIL,
   SIM_WRITE_FLIP_FIRST,    // one byte wrong in the FIRST slot
   SIM_WRITE_FLIP_LAST,     // one byte wrong in the LAST slot -- collateral
+  // Stores the bank perfectly, then TRUNCATES THE READ-BACK: the BACKUP that
+  // follows the RESTORE serves one slot instead of thirty and still goes
+  // quiet, so the master reports DONE having moved 2104 of 63120 bytes.
+  //
+  // This is NOT drop-tail with a different name, and the distinction is the
+  // whole point of the mode. drop-tail is a bad STORE observed through a GOOD
+  // read-back: the firmware sees all 63120 bytes and they legitimately match
+  // the intent, so "VERIFIED" is the true answer. This is a GOOD store
+  // observed through a BAD read-back: the firmware sees 3% of the bank, and
+  // the other 97% of the image is still the bytes the RESTORE was sourced
+  // from -- so a whole-bank hash of it matches the intent no matter what the
+  // module actually holds. Believing that hash is how a write earns
+  // "VERIFIED" on evidence it never received.
+  SIM_WRITE_SHORT_READBACK,
 };
 void SimBusSetWriteFault(SimWriteFault f);
 SimWriteFault SimBusWriteFault();
