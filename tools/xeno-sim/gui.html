@@ -88,6 +88,10 @@ button.btn:focus-visible { outline: 3px solid #1c53d6; outline-offset: 3px; }
 
 /* ---- OLED --------------------------------------------------------------- */
 .bay { margin: 18px 0 6px; display: flex; justify-content: center; }
+/* Knobs flank the screen, as on the real panel. align-items:center
+   puts their centres level with the OLED's, which is what the photo
+   shows -- not tucked under it. */
+.bay.knobrow { align-items: center; gap: 26px; margin-top: 20px; }
 .bezel {
   padding: 9px; border-radius: 6px; background: linear-gradient(#3c3f45, #1c1e22);
   box-shadow: inset 0 0 0 1px #55585e, 0 4px 10px rgba(0,0,0,.4);
@@ -100,7 +104,7 @@ canvas#oled {
 @media (max-width: 640px) { canvas#oled { width: 384px; height: 192px; } }
 
 /* ---- knobs -------------------------------------------------------------- */
-.knobrow { margin-top: 18px; }
+
 .cluster { display: flex; flex-direction: column; align-items: center; gap: 8px; }
 .knob {
   width: 92px; height: 92px; border-radius: 50%; position: relative;
@@ -218,11 +222,10 @@ machine. No UI logic lives in this page.</p>
           </div>
         </div>
 
-        <div class="bay">
-          <div class="bezel"><canvas id="oled" width="512" height="256"></canvas></div>
-        </div>
-
-        <div class="row knobrow" style="justify-content: space-around;">
+        <!-- The knobs FLANK the screen on the real panel rather than sitting
+             under it; see the reference photo. Keeping that relationship
+             matters because reach-from-the-screen is what the layout is for. -->
+        <div class="bay knobrow">
           <div class="cluster">
             <div class="knob" id="knobL" tabindex="0" role="button"
                  aria-label="left encoder: click to push, wheel or drag to turn"
@@ -233,6 +236,9 @@ machine. No UI logic lives in this page.</p>
             </div>
             <span class="cap small">encoder L — push = back</span>
           </div>
+
+          <div class="bezel"><canvas id="oled" width="512" height="256"></canvas></div>
+
           <div class="cluster">
             <div class="knob" id="knobR" tabindex="0" role="button"
                  aria-label="right encoder: click to push, wheel or drag to turn"
