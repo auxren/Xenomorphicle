@@ -12,7 +12,8 @@ are all compiled from `software/src/`, unmodified. Only hardware is replaced.
 cd tools/xeno-sim
 make                       # -> build/xeno-sim
 make gui                   # ...the panel in a browser (recommended)
-make check                 # the self-checks: determinism, gestures, the write path
+make check                 # the self-checks: determinism, gestures, the write
+                           # path, storage across a power cycle, chord guards
 ./build/xeno-sim           # interactive, in your own terminal
 ```
 
@@ -168,6 +169,15 @@ So `edgecheck.py` looks at the pixels. In columns 126-127 an honest row is
 uniform: all dark, or all lit under an `invertRect` (which is how this UI
 shouts). Two thirds of a glyph is neither. It exits non-zero on any offending
 row, and `selfcheck.sh` sweeps it over a dozen screens.
+
+One case is uniform in neither sense and is still honest: text right-aligned
+with `print_right(127)` legitimately ends at x=126. The debug-stats page's
+`R:exit` hint does exactly that. So the rule is not "is this column uniform"
+but **"is every lit pixel here accounted for by a glyph that decoded"** — a
+whole glyph decodes, two thirds of one matches nothing, and it is that same
+property which makes a truncation invisible to `fbtext.py` in the first place.
+The original defect is still caught: its 22nd character starts at x=126, where
+no cell can even be read, so those pixels belong to no decoded run.
 
 **No device captures have been compared yet.** The mechanism is here and tested
 against itself; the numbers that would turn "looks right" into "is right" need
@@ -363,12 +373,19 @@ toggle pacing) and the session controls live in visually distinct cards marked
 | `--replay FILE` | replay a recorded session |
 | `--at N` | with `--replay`: stop after event N |
 | `--app NAME` | boot into an app by name (`--app x` lists them) |
-| `--reset-settings` | take the first-run / EEPROM-erase path |
+| `--reset-settings` | take the first-run / EEPROM-erase path, answering its `ConfirmReset` prompt **OK** |
+| `--reset-cancel` | the same gesture, answered **CANCEL** — the only way to ask whether a refused reset left storage alone |
+| `--sd-card` | seat an SD card, so `SDcard_Ready` is true |
+| `--state FILE` | non-volatile memory: read FILE before boot, write it back at exit. Two runs sharing one FILE are a power cycle |
+| `--state-in FILE` / `--state-out FILE` | the halves of `--state`, separately |
+| `--dump-fs` | list stored files with sizes and CRCs, and nothing else |
+| `--snap-at MS` | capture the first complete frame drawn at or after MS (absolute), and let `--dump-fb` print that |
 | `--id-voltage V` | the hardware-ID divider the firmware reads at boot to choose its pin map (default 0.10) |
 | `--real-timing` | interactive only: pin the virtual clock to wall-clock, so a scan takes the ~60 s it takes on the module |
 | `--bus-off` | make `PresetBus::Enabled()` false |
 | `--capture-251e PATH` / `--capture-259e PATH` | different bank hex dumps |
 | `--write-fault WHAT` | make the simulated modules mishandle a RESTORE: `none` (default), `ignore`, `drop-tail`, `flip-first`, `flip-last`, `short-readback` — see *the write path* |
+| `--write-fault-once` | apply that fault to the **first** restore only, so the recovery write after it goes out to a module that behaves |
 | `--no-log` | omit the status/log lines under the frame |
 | `--stdio` | line protocol on stdin/stdout, for the browser front end |
 
@@ -394,6 +411,10 @@ Word aliases: `encl` `encr` (pushes), `encl-` `encl+` `encr-` `encr+` (turns),
 `note` `busnote` `wait` `quit`. Two extra scripted-only tokens:
 
 * `stepN` — advance exactly N simulated milliseconds (e.g. `step200`)
+* `snapN` — arm a frame capture N ms from now and return immediately; `--dump-fb`
+  then prints **that** frame instead of the one on screen at exit
+* `qencl+N@T` / `qencr-N@T` — queue N encoder detents for delivery T ms from
+  now, without advancing the clock
 * `<button>-down` / `<button>-up` — hold and release, which is how a chord or a
   timed hold is scripted. A bare token is still a tap.
 * `<button>-inN` — schedule a tap N simulated ms from now and return
@@ -413,11 +434,27 @@ fire while the firmware is spinning:
 r-in900,l-down,step1400,l-up,step200"
 ```
 
-What this still cannot do is **capture a frame from inside** such a loop: the
-loop owns the process until it ends, and by the time control returns the app
-menu has already redrawn over it. `selfcheck.sh` therefore asserts that the
-debug-stats page is entered, sees a scheduled press and exits — not what it
-draws. Its layout is unchecked here.
+Capturing a frame from **inside** such a loop needs the same idea pointed the
+other way, which is what `snapN` is: it arms a capture N ms ahead and returns
+at once, and the capture fires from the panel driver's last-page write — so
+what it keeps is one whole frame drawn from inside the loop, never a torn blend
+of two. `--snap-at MS` is the absolute-time form, for screens drawn during boot
+itself.
+
+Paging inside such a loop needs `qencl+N@T`. `Ui::DebugStats` pages on an encL
+**turn** while an encL **press** is its exit, and detents queued for delivery
+*now* are eaten by whatever is still on screen while the entry gesture is being
+held — the app menu takes them as list scrolling. The `@T` delay puts them past
+the long-press threshold, i.e. inside the loop.
+
+Together those make the debug-stats page checkable, and `selfcheck.sh` now
+asserts its layout — the exit hint is present, the title and the hint do not
+collide, and no page of it clips at the right edge:
+
+```sh
+./build/xeno-sim --keys "a-down,step60,r-down,step60,r-up,step60,a-up,step200,\
+r-in3000,qencl+3@700,l-down,snap1400,step3500,l-up,step200" --dump-fb
+```
 
 A terminal cannot report a key being *held*, so chords in interactive terminal
 mode are not possible — use `--keys` or the browser.
@@ -487,11 +524,15 @@ Read this before trusting a green screen here for anything.
   compare against — but no hardware is touched. The frame border says so on
   every frame. The simulator can tell you the write path's *decisions* are
   right. It cannot tell you a 251e will accept the bytes.
-* **Nothing persists.** The file system is a `std::map` that dies with the
-  process, and the EEPROM is an array. A Save screen that works here is not
-  evidence that settings come back after a power cycle, and none of LittleFS's
-  real behaviour — wear, erase timing, the 0-byte-file failure `PresetEngine`
-  guards against — exists.
+* **Persistence is opt-in, and it is not LittleFS.** The file system is a
+  `std::map` and the EEPROM an array, both of which die with the process unless
+  `--state FILE` is given: that reads an image before boot and writes it back at
+  exit, so two runs sharing one file are a power cycle. That is what makes
+  "does this come back afterwards" askable at all — but none of LittleFS's real
+  behaviour is modelled. No wear, no erase timing, and not the 0-byte-file
+  failure `PresetEngine` guards against. A clean round-trip here tells you which
+  BYTES the firmware chose to keep, and on which volume; it tells you nothing
+  about whether the flash would have kept them.
 * **Every CV input is a fixed, silent value, and there is no audio at all.**
   Any screen whose display follows CV is *still*: scopes do not move,
   quantizers do not step, CV-driven cursors do not wander. That is the shim,
@@ -522,9 +563,9 @@ Read this before trusting a green screen here for anything.
 * **Identification is the same lookup the firmware does**, so the simulator
   inherits its caveat: a clone squatting an address is indistinguishable here
   too, by construction.
-* **A `ConfirmReset` prompt is answered for you.** With no stored settings —
-  which is every boot, since nothing persists — `AppSwitcher::Init()` opens a
-  blocking prompt. The simulator schedules a real button press to answer it
+* **A `ConfirmReset` prompt is answered for you.** With no valid stored
+  settings — which is every boot unless `--state` supplies some —
+  `AppSwitcher::Init()` opens a blocking prompt. The simulator schedules a real button press to answer it
   (CANCEL by default; `--reset-settings` holds A+B through the splash, which is
   the module's own gesture, and then answers OK) and logs that it did. Nothing
   reaches inside the firmware to skip the screen.

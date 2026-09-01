@@ -324,6 +324,7 @@ private:
   uint32_t armed_ms_ = 0;          // millis() the confirm screen appeared
   bool found_dirty_ = false;       // scan result awaiting a safe write
   bool snap_here_ = false;         // a snapshot exists for target_
+  uint8_t recover_cursor_ = 0;     // 0 = keep, 1 = undo; safe end first
   uint32_t write_started_ms_ = 0;  // ditto for a restore
   // Set when a job vanished instead of finishing, so the status line can say
   // "lost" rather than blaming the module for an error it never reported.
@@ -1230,6 +1231,9 @@ void AppBus200e::PumpWrite() {
   // The verdict decides whether a recovery is on offer, so ask now rather
   // than opening the snapshot file on every draw.
   RefreshSnapshotFlag();
+  // Always back to `keep` when a verdict lands. A cursor that remembered
+  // UNDO would turn the next reflex encR into a 63,120-byte write.
+  recover_cursor_ = 0;
 #endif
 }
 
@@ -1755,8 +1759,18 @@ void AppBus200e::DrawModule251e() const {
   // So the row becomes the recovery prompt, and it appears exactly when it is
   // actionable: never when there is nothing to restore, never on a good write.
   if (write_state_ == WRITE_BAD && snap_here_) {
+    // Drawn as an action row of two, because that is what it replaces and
+    // this app teaches exactly one grammar: encL is where you are, encR is
+    // what it is. Reusing it means the recovery needs no new binding, puts
+    // two DIFFERENT controls in the path to an irreversible 63,120-byte
+    // write, and -- since the cursor starts on `keep` every time the verdict
+    // lands -- makes the reflex encR press the harmless one.
     graphics.setPrintPos(0, 56);
-    graphics.print("encR:UNDO  encL:keep");
+    graphics.print("keep");
+    if (recover_cursor_ == 0) graphics.invertRect(-1, 55, 26, 10);
+    graphics.setPrintPos(36, 56);
+    graphics.print("UNDO");
+    if (recover_cursor_ == 1) graphics.invertRect(35, 55, 26, 10);
     return;
   }
 
@@ -2336,6 +2350,18 @@ FLASHMEM void AppBus200e::ConsumeScanDirty() {
 
   OC::CORE::app_isr_enabled = false;
   PhzConfig::load_config();            // own GLOBALS.CFG before mutating it
+  // Re-state the global settings before writing, exactly as every other
+  // writer of this file does (Setup's bus-address and invert-display commits,
+  // SaveGlobalSettings, persist_cur_slot).
+  //
+  // Without it, a scan on a VIRGIN module wrote a GLOBALS.CFG containing only
+  // the two scan keys -- no METADATA_KEY, so global_settings.valid was false
+  // on the next boot and the factory-reset prompt opened on every power-up
+  // thereafter. The hole predates this code: it was masked because the scan
+  // used to persist via SaveAppData(), which calls SaveGlobalSettings() as a
+  // side effect. Moving off that sledgehammer removed the mask, which is
+  // exactly the kind of thing a lighter-weight path has to pay attention to.
+  OC::BuildGlobalSettingsValues();
   PhzConfig::setValue(Bus200eAppNS::kScanSetKey, bits);
   PhzConfig::setValue(Bus200eAppNS::kScanMetaKey, meta);
   PhzConfig::save_config();
@@ -2560,13 +2586,7 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
     const bool known = (CurrentModuleType() != Bus200eAppNS::MODTYPE_UNKNOWN);
     switch (event.control) {
       case OC::CONTROL_BUTTON_L:      // encL = back
-        // "keep": accept the module as it stands and put the ordinary action
-        // row back. The snapshot is deliberately NOT discarded -- the user may
-        // change their mind, and it costs one block that is already spent.
-        if (write_state_ == Bus200eAppNS::WRITE_BAD && snap_here_) {
-          write_state_ = Bus200eAppNS::WRITE_NONE;
-          break;
-        }
+
         // Leaving is refused while a write is on the wire: PumpWrite bails on
         // !WriteBusy(), so navigating away would let the transfer finish with
         // no read-back, no verdict, and no record that it happened.
@@ -2593,8 +2613,15 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
         // entries from a press the user aimed at "UNDO" would be acting on
         // something they cannot see.
         if (write_state_ == Bus200eAppNS::WRITE_BAD && snap_here_) {
-          screen_ = Bus200eAppNS::SCR_SNAP_CONFIRM;
-          armed_ms_ = millis();
+          if (recover_cursor_ == 1) {
+            screen_ = Bus200eAppNS::SCR_SNAP_CONFIRM;
+            armed_ms_ = millis();
+          } else {
+            // keep: accept the module as it stands, ordinary action row back.
+            // The snapshot is deliberately NOT discarded -- the user may
+            // change their mind, and the block is already spent.
+            write_state_ = Bus200eAppNS::WRITE_NONE;
+          }
           break;
         }
         // Gated on `known` like A and B above. Without this the unknown-module
@@ -2725,6 +2752,14 @@ FLASHMEM void AppBus200e::HandleEncoderEvent(const UI::Event &event) {
         }
       }
     } else if (event.control == OC::CONTROL_ENCODER_L) {
+      // While the recovery prompt stands in for the action row, encL drives
+      // ITS cursor -- same control, same meaning, different row.
+      if (write_state_ == Bus200eAppNS::WRITE_BAD && snap_here_) {
+        int c = (int)recover_cursor_ + (event.value > 0 ? 1 : -1);
+        CONSTRAIN(c, 0, 1);
+        recover_cursor_ = (uint8_t)c;
+        return;
+      }
       // On a 259e the action row is a single entry, so the left encoder is
       // free for what that page actually needs: scrolling 19 parameters
       // through a 3-row window.

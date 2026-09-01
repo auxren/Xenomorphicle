@@ -501,7 +501,11 @@ snap_bytes=$(snap_line --keys "$W251" | awk '{print $4}')
 # Both answers are well-formed screens, so this cannot pass by accident, and
 # the control below runs the identical script with the UNDO left out to prove
 # the two are actually distinguishable.
-UNDO_ARM='r,step400,r,step8000'      # encR opens the undo confirm, encR commits
+# Reaching the undo is three deliberate acts, and that is the design: the
+# recovery row is a cursor row in the app's ordinary grammar (encL turn moves,
+# encR runs), and its cursor starts on `keep`. So: one encL detent to UNDO,
+# encR to arm, and encR again past the 350ms dead window to commit.
+UNDO_ARM='],step100,r,step400,r,step8000'
 REDO='{,r,step3000,],],r,step10,r,step10,l,step10,],],r,step400'  # re-Read, same edit, arm
 
 undone=$($SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
@@ -512,7 +516,7 @@ undone=$($SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
   || bad "after an undo the same edit was not a change again (said: '$undone')"
 
 kept=$($SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
-            --keys "$W251,l,step200,$REDO" --dump-fb 2>/dev/null \
+            --keys "$W251,r,step300,$REDO" --dump-fb 2>/dev/null \
        | python3 fbtext.py - | grep '^y=36' | sed 's/^y=36 *x=0 *//')
 [ "$kept" = "No changes to write" ] \
   && ok "...and without the undo the same edit is no change, so that told us something" \
@@ -531,8 +535,13 @@ undo_verdict=$($SIM --app "200e Modules" --write-fault flip-last --write-fault-o
 # The recovery prompt is an OFFER, and an offer that appears when it cannot be
 # honoured is worse than none. It replaces the action row only when the module
 # is known bad AND a snapshot for THIS target exists.
+# The whole row, joined -- not its first run. The recovery row is two entries
+# ("keep" and "UNDO") and fbtext reports each as its own run, so a `head -1`
+# here answered "[inv] keep" to the question "is UNDO offered?" and got it
+# exactly backwards.
 row56() { $SIM --app "200e Modules" "$@" --dump-fb 2>/dev/null \
-            | python3 fbtext.py - | grep '^y=56' | head -1 | sed 's/^y=56 *x=[0-9]* *//'; }
+            | python3 fbtext.py - | grep '^y=56' | sed 's/^y=56 *x=[0-9]* *//' \
+            | tr '\n' ' '; }
 case "$(row56 --write-fault flip-last --keys "$W251")" in
   *UNDO*) ok "a BAD write offers the recovery prompt in place of the action row" ;;
   *) bad "a BAD write did not offer recovery (y=56 said: '$(row56 --write-fault flip-last --keys "$W251")')" ;;
@@ -558,7 +567,7 @@ esac
 # constant in a second place, so a change to one that misses the other has to
 # be caught here. Inside: the prompt is still up. Outside: it commits.
 undo_y13() { $SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
-                  --keys "$W251,r,step$1,r,step8000" --dump-fb 2>/dev/null \
+                  --keys "$W251,],step100,r,step$1,r,step8000" --dump-fb 2>/dev/null \
              | python3 fbtext.py - | grep '^y=13' | head -1 | sed 's/^y=13 *x=[0-9]* *//'; }
 case "$(undo_y13 10)" in
   *UNDO*) ok "a confirm 10ms after arming an undo does nothing -- the prompt is still up" ;;
@@ -569,12 +578,81 @@ esac
 # on its own this half would pass vacuously against the very regression the
 # half above catches. A committed undo is a write, and a write leaves a verdict.
 undo_late=$($SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
-                 --keys "$W251,r,step400,r,step8000" --dump-fb 2>/dev/null \
+                 --keys "$W251,],step100,r,step400,r,step8000" --dump-fb 2>/dev/null \
             | python3 fbtext.py - | grep '^y=46' | sed 's/^y=46 *x=0 *//')
 case "$undo_late" in
   *WROTE*|*VERIFIED*) ok "a confirm 400ms after arming an undo commits and reports a verdict" ;;
   *) bad "a confirm 400ms after arming an undo left no verdict (y=46: '$undo_late')" ;;
 esac
+
+
+# --- the two properties that make the recovery row safe to have at all ------
+#
+# The row replaces the action row on the screen a user reaches by being told
+# their module is damaged, and one of its entries rewrites 63,120 bytes. Both
+# assertions below are about the ARRANGEMENT rather than the wording, because
+# the arrangement is the safety.
+
+# 1. The cursor starts on the harmless end, every single time a verdict lands.
+#    A cursor that remembered UNDO would turn the next reflex encR -- the most
+#    practised press in the instrument -- into a whole-bank write.
+cursor_on() {  # returns the entry that is inverted, i.e. where the cursor is
+  $SIM --app "200e Modules" "$@" --dump-fb 2>/dev/null | python3 fbtext.py - \
+    | sed -n 's/^y=56 *x=[0-9]* *\[inv\] *//p' | head -1
+}
+[ "$(cursor_on --write-fault flip-last --keys "$W251")" = "keep" ] \
+  && ok "the recovery cursor starts on the harmless entry" \
+  || bad "the recovery cursor did not start on keep (on: '$(cursor_on --write-fault flip-last --keys "$W251")')"
+
+# ...and it is put back there on EVERY verdict, not just the first. The case
+# that matters is an undo that itself ends BAD: the cursor was deliberately
+# moved to UNDO to get there, a second verdict has just landed on the same
+# screen, and the reflex answer to a verdict is encR. If the cursor stayed
+# where the user last put it, that reflex would fire another 63,120-byte write
+# at a module already known to be wrong. (--write-fault without -once, so the
+# module keeps mishandling and the recovery write fails too.)
+undone_bad="$W251,],step100,r,step400,r,step8000"
+[ "$(cursor_on --write-fault flip-last --keys "$undone_bad")" = "keep" ] \
+  && ok "...and is back on the harmless entry after an undo that itself ends BAD" \
+  || bad "the recovery cursor stayed on UNDO through a second verdict"
+
+# The control: the cursor CAN be moved, so the two checks above are not simply
+# observing a row that never changes.
+[ "$(cursor_on --write-fault flip-last --keys "$W251,],step200")" = "UNDO" ] \
+  && ok "one encL detent moves the recovery cursor to UNDO, so it really is a cursor" \
+  || bad "the recovery cursor did not move on an encL detent"
+
+# 2. A reflex encR in the BAD state puts NOTHING on the wire. This is the whole
+#    reason the cursor defaults to `keep`, and it is the assertion most worth
+#    surviving someone later "simplifying" the row back to a single button.
+#    Asserted on the recovery write's own log line rather than on the screen:
+#    a redraw can hide a write, and the firmware says "undo -- restoring N
+#    snapshot bytes" exactly when the snapshot goes out. (Not counted against
+#    the module's RESTORE lines -- the displayed log is capped, so the first
+#    write of a long run scrolls off and a count there measures the cap.)
+sent_undo() {  # 1 if the recovery write reached the wire, 0 if not
+  $SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
+       --keys "$W251,$1" 2>&1 | grep -c 'undo -- restoring'
+}
+[ "$(sent_undo 'r,step300')" = "0" ] \
+  && ok "a reflex encR after a BAD verdict puts nothing on the wire" \
+  || bad "a reflex encR after a BAD verdict sent the recovery write"
+
+# Two of them, spaced past the confirm's dead window, which is the gesture that
+# actually reaches the wire when the cursor is pointed the wrong way. One press
+# is safe on its own merely because the confirm screen exists -- so the single
+# press above does NOT test the cursor's default, and only this pair does. It
+# is the exact shape of "verdict lands, user taps encR twice to make the screen
+# go away", and it must still cost nothing.
+[ "$(sent_undo 'r,step400,r,step8000')" = "0" ] \
+  && ok "two reflex encR presses after a BAD verdict still put nothing on the wire" \
+  || bad "two reflex encR presses committed a 63,120-byte recovery write"
+
+# ...and the deliberate three-step gesture DOES send it, so the check above is
+# measuring a real difference and not simply a marker that never appears.
+[ "$(sent_undo "$UNDO_ARM")" = "1" ] \
+  && ok "...while the deliberate encL-to-UNDO gesture does send it" \
+  || bad "the deliberate undo gesture never reached the wire"
 
 echo "small app state is not a whole-EEPROM rewrite"
 
@@ -618,12 +696,25 @@ found_virgin=$($SIM --app "200e Modules" --state-in "$IMG/base" \
   && ok "...and a module that never scanned still reports nothing found" \
   || bad "an unscanned module already claims responders (said: '$found_virgin')"
 
-# The sledgehammer itself. SaveAppData rewrote the whole EEPROM app-data page;
-# an 11-byte scan result has no business touching it. Compared as a CRC over
-# the whole array, so this holds whatever the layout becomes.
+# The sledgehammer itself, and the sharpest evidence of it. OC::SaveAppData()
+# calls SaveGlobalSettings(), which rewrites 000.SCL-003.SCL on the card -- so
+# an 11-byte scan result, on a module with a card seated, wrote four scale
+# files it has nothing to do with. Asserted as "the card gained nothing",
+# which is a property of the whole write rather than of those four names.
+$SIM --sd-card --app "200e Modules" --state-in "$IMG/base" --keys "$SCAN" \
+     --dump-fs 2>/dev/null > "$TMP/scanfs.txt"
+grep -q '^fs sd ' "$TMP/scanfs.txt" \
+  && bad "persisting the scan set wrote to the card: $(grep '^fs sd ' "$TMP/scanfs.txt" | tr '\n' ' ')" \
+  || ok "persisting the scan set writes nothing to the card"
+
+# The EEPROM is where calibration lives on this target -- app data does not,
+# it is in GLOBALS.CFG through PhzConfig. So this is not a re-test of the line
+# above; it is the standing invariant that scanning a bus never disturbs the
+# module's calibration, compared as a CRC over the whole array so it holds
+# whatever the layout becomes.
 ee() { grep '^eeprom ' "$1" | awk '{print $2}'; }   # the image's eeprom hex
-[ "$(ee "$IMG/base")" = "$(ee "$IMG/scan")" ] \
-  && ok "persisting the scan set leaves the EEPROM untouched" \
+[ -n "$(ee "$IMG/base")" ] && [ "$(ee "$IMG/base")" = "$(ee "$IMG/scan")" ] \
+  && ok "persisting the scan set leaves the calibration EEPROM untouched" \
   || bad "persisting the scan set rewrote the EEPROM"
 
 # Another app's stored state must survive it. The app the switcher saved is the
@@ -710,29 +801,50 @@ echo "a chord-opened screen ignores the chord that opened it"
 # chord's second button STILL HELD must leave exactly the frame that a clean
 # entry leaves. Anything the stray hold did -- moving a cursor, activating a
 # row, arming a timer, dismissing the screen -- changes pixels.
-absorbs() {  # name, clean keys, fumbled keys, then extra sim args
-  name=$1; clean=$2; fumbled=$3; shift 3
+absorbs() {  # name, expected-screen (or "-"), clean keys, fumbled keys, extra args
+  name=$1; want=$2; clean=$3; fumbled=$4; shift 4
   $SIM "$@" --keys "$clean"   --dump-fb 2>/dev/null > "$TMP/clean.hex"
   $SIM "$@" --keys "$fumbled" --dump-fb 2>/dev/null > "$TMP/fumbled.hex"
+
   # A clean entry must actually have drawn something, or two blank frames
   # would compare equal and the check would pass on nothing.
   if ! grep -q '[1-9A-Fa-f]' "$TMP/clean.hex"; then
     bad "$name: the clean entry drew an empty frame"; return
   fi
+
+  # The screen must still be OPEN. This is the half that catches the loudest
+  # form of the leak, and it is the half a frame comparison alone misses: the
+  # chord's second button is released a moment after the screen opens in the
+  # CLEAN case too, so with the guard removed both entries leak and both end up
+  # back at the app -- identical frames, and a comparison that agrees the
+  # instrument is fine. Naming the screen the gesture opened is what makes the
+  # two cases distinguishable. ("-" for a screen the simulator has no word for:
+  # the IO settings menu is drawn by the app, so g_ui_mode never changes.)
+  if [ "$want" != "-" ]; then
+    got=$($SIM "$@" --keys "$fumbled" 2>&1 \
+          | sed -n 's/^  \([a-z][a-z]*\)  *app=.*/\1/p' | tail -1)
+    if [ "$got" != "$want" ]; then
+      bad "$name: the held chord button closed the screen (screen '$got', wanted '$want')"
+      return
+    fi
+  fi
+
+  # ...and nothing subtler happened either: no cursor moved, no row activated,
+  # no timer armed. Anything the stray hold did changes pixels.
   cmp -s "$TMP/clean.hex" "$TMP/fumbled.hex" \
     && ok "$name absorbs a fumbled entry gesture" \
     || bad "$name acted on the chord button that was still held"
 }
-absorbs "the app switcher (A+encR, encR held)" \
+absorbs "the app switcher (A+encR, encR held)" menu \
         "a-down,step60,r-down,step60,r-up,step60,a-up,step900" \
         "a-down,step60,r-down,step60,a-up,step900,r-up,step60"
-absorbs "the screensaver (Z+A, A held)" \
+absorbs "the screensaver (Z+A, A held)" saver \
         "z-down,step60,a-down,step60,a-up,step60,z-up,step900" \
         "z-down,step60,a-down,step60,z-up,step900,a-up,step60"
-absorbs "the preset overlay (both encoders, encR held)" \
+absorbs "the preset overlay (both encoders, encR held)" preset \
         "l-down,step20,r-down,step80,l-up,r-up,step900" \
         "l-down,step20,r-down,step80,l-up,step900,r-up,step60"
-absorbs "the IO settings screen (A+encL, encL held)" \
+absorbs "the IO settings screen (A+encL, encL held)" - \
         "a-down,step60,l-down,step60,l-up,step60,a-up,step900" \
         "a-down,step60,l-down,step60,a-up,step900,l-up,step60" --app Scenery
 
@@ -848,6 +960,9 @@ sweep 200e-gen --app "200e Modules" --keys "$W251_READ,],],r,step10"
 sweep 200e-confirm --app "200e Modules" --keys "$W251_ARMED,step10"
 sweep 200e-verified --app "200e Modules" --keys "$W251"
 sweep 200e-bad --app "200e Modules" --write-fault ignore --keys "$W251"
+sweep 200e-recovery-row --app "200e Modules" --write-fault ignore --keys "$W251"
+sweep 200e-undo-confirm --app "200e Modules" --write-fault ignore \
+      --keys "$W251,],step100,r,step10"
 sweep setup --app "Setup/About"
 sweep scenery --app Scenery
 sweep screensaver --keys "z-down,step60,a-down,step60,a-up,step60,z-up,step300"
