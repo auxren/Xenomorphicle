@@ -24,7 +24,13 @@ INCLUDES  = -I. -I$(SRC) -I$(STUBS)
 APPFLAGS = -DARDUINO_TEENSY41 -DPRESET_BUS
 
 # Linked for real, unmodified, straight out of the firmware tree.
+# The 200e preset-bus overlay -- the screen both encoder pushes open -- is
+# compiled from the firmware source too, but through a symlink in shim/fw/ so
+# its quoted includes land on host stand-ins instead of the display driver and
+# util_math.h's ARM assembly. See shim/fw/README.md; the file itself is
+# unmodified.
 FW_SRCS = \
+  shim/fw/PresetBusUI.cpp \
   $(SRC)/Buchla200eModuleTable.cpp \
   $(SRC)/Buchla200eUiGate.cpp \
   $(SRC)/Buchla200eWriteGuard.cpp \
@@ -36,8 +42,8 @@ FW_SRCS = \
   $(SRC)/PresetBus200e.cpp \
   $(SRC)/src/extern/bjorklund.cpp
 
-SIM_SRCS = main.cpp sim_bus.cpp sim_capture.cpp sim_term.cpp \
-           shim/oc_shim.cpp shim/weegfx_host.cpp
+SIM_SRCS = main.cpp sim_bus.cpp sim_capture.cpp sim_preset.cpp sim_term.cpp \
+           sim_ui.cpp shim/oc_shim.cpp shim/weegfx_host.cpp
 
 FW_OBJS  = $(patsubst %,$(BUILD)/fw_%.o,$(notdir $(basename $(FW_SRCS))))
 SIM_OBJS = $(patsubst %,$(BUILD)/%.o,$(basename $(notdir $(SIM_SRCS))))
@@ -58,6 +64,10 @@ $(BUILD)/main.o: main.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(APPFLAGS) -c $< -o $@
 $(BUILD)/sim_bus.o: sim_bus.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(APPFLAGS) -c $< -o $@
+$(BUILD)/sim_preset.o: sim_preset.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(APPFLAGS) -c $< -o $@
+$(BUILD)/sim_ui.o: sim_ui.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(APPFLAGS) -c $< -o $@
 $(BUILD)/sim_capture.o: sim_capture.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 $(BUILD)/sim_term.o: sim_term.cpp | $(BUILD)
@@ -70,6 +80,12 @@ $(BUILD)/weegfx_host.o: shim/weegfx_host.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 # --- firmware sources, built bare as the host test suites build them ---
+# shim/fw first on the include path, and ONLY for this one file: that is what
+# makes <Arduino.h> and the quoted OC_* includes inside PresetBusUI.cpp resolve
+# to the host stand-ins. See shim/fw/README.md.
+$(BUILD)/fw_PresetBusUI.o: shim/fw/PresetBusUI.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) -Ishim/fw $(INCLUDES) $(APPFLAGS) -c $< -o $@
+
 $(BUILD)/fw_%.o: $(SRC)/%.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 $(BUILD)/fw_%.o: $(SRC)/src/extern/%.cpp | $(BUILD)

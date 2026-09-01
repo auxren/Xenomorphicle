@@ -8,7 +8,8 @@ unmodified; it draws through the **real** `weegfx::Graphics` renderer and the
 real 6x8 font from the firmware tree; its bus work goes through the **real**
 `Bus200eMaster` FSM with the firmware's own timeout constants; and the codecs,
 generator, recorder, module table and write guard are the firmware's `.cpp`
-files, linked. Only the hardware itself is faked.
+files, linked. So is `PresetBusUI.cpp`, the 200e preset-bus overlay both
+encoder pushes open. Only the hardware itself is faked.
 
 ## Build and run
 
@@ -65,10 +66,52 @@ of any screen — one would drift from the firmware and test nothing.
 
 The panel is drawn as it is: green **A** / **B** and blue **X** / **Y** in two
 rows, the `device` (USB-C) and `host` (USB-A) jacks, the grey `clock` button
-between them, the OLED in a bezel at 4x, and the two encoders below it. Click a
-button to press it; click an encoder to push it, wheel over it or drag around
-it to turn it, or use the `−` / `+` beside it (Shift for ×10). The terminal
-build's keys all work in the page too, and are listed in it.
+between them, the OLED in a bezel at 4x, and the two encoders flanking it. Click
+a button to press it (it stays down while the mouse is down); click an encoder
+to push it, wheel over it or drag around it to turn it, or use the `−` / `+`
+beside it (Shift for ×10). The terminal build's keys all work in the page too,
+and are listed in it.
+
+### Chords
+
+Several real gestures are **chords**, because the firmware dispatches on
+`event.mask` — the set of buttons *held* when one of them changed — not on the
+one that moved:
+
+| chord | what it opens |
+|---|---|
+| both encoder pushes | the 200e preset-bus overlay (`OC_ui.cpp` → `PresetBusUI::Enter()`) |
+| `A` (or `Z`) + right encoder push | the app menu |
+| `A` + `B` | screen flip, inside the Setup app |
+
+So the page models **held** state rather than firing one press per click, and
+there are three ways to express a chord:
+
+* **Keyboard** — `keydown` holds, `keyup` lets go, and auto-repeat is ignored.
+  Physically hold `a` and tap `r`. This is the direct way.
+* **Mouse** — a click cannot hold two things, so **right-click** (or
+  shift-click) a button or a knob to **latch** it down; it stays visibly
+  depressed and outlined until you click it again. Latch `encL`, then click
+  `encR`.
+* **Scripted** — `--keys` accepts `<button>-down` and `<button>-up`, which is
+  also how a long press is scripted:
+
+  ```sh
+  ./build/xeno-sim --keys "l-down,r,l-up"           # -> the preset-bus overlay
+  ./build/xeno-sim --keys "a-down,r,a-up"           # -> the app menu
+  ./build/xeno-sim --keys "l-down,step600,l-up"     # a 500ms hold -> STORE
+  ```
+
+The panel shows a **held** line under the screen listing what is currently
+down, so a forgotten latch is obvious rather than mysterious. What it lists is
+the *simulator's* `ui.read_immediate()` view, not the page's guess, so a latch
+out of step with the firmware would show up there. Tab-blur and page-unload
+release everything.
+
+The **terminal build cannot express a chord**: a TTY reports keystrokes, not
+which keys are being held, and contorting the interactive UI to fake it (a
+"sticky modifier" key, say) would model something the panel does not do. Use
+`--keys` with `-down` / `-up`, or the browser, for those.
 
 Two things the page is careful about:
 
@@ -95,12 +138,16 @@ drives none.
 
 ## Keys
 
-The panel has **A, B, X, Y and both encoder pushes**. `Z` / `CONTROL_BUTTON_M`
-is not wired on this hardware, so the simulator does not offer it.
+The panel has **A, B, X, Y and both encoder pushes**. `Z` /
+`CONTROL_BUTTON_M` is polled by the firmware on this hardware (`OC_gpio.cpp`
+gives it a pin in the ORN8 profile) but is not one of the six positions this
+panel draws, so it is reachable by key and by script only — which is enough to
+exercise the `Z` chords through the same code path the module uses.
 
 | key | control |
 |---|---|
-| `a` `b` `x` `y` | face buttons A / B / X / Y |
+| `a` `b` `x` `y` | face buttons A / B / X / Y — **held** while the key is down |
+| `z` | the Z button — off-panel, see above |
 | `l` `r` | left / right encoder **push** (encL = back/cancel, encR = confirm/enter) |
 | `[` `]` | left encoder turn, −1 / +1 |
 | `,` `.` | right encoder turn, −1 / +1 |
@@ -118,6 +165,8 @@ states that only exist mid-job:
 
 * `stepN` — advance exactly N simulated milliseconds (e.g. `step200`)
 * `+key` — apply the key **without** settling the bus afterwards
+* `<button>-down` / `<button>-up` — hold and release, for chords and long
+  presses (see **Chords** above)
 
 ```sh
 # press Read while a scan is walking -- the refusal path
@@ -158,6 +207,13 @@ banks and stamps `[SYNTHETIC BANK DATA]` into the frame border.
 * `Buchla251eSlotCodec`, `Buchla259eSlotCodec`, `Buchla251eGenerator`,
   `Buchla251eRecorder`, `Buchla200eModuleTable`, `Buchla200eWriteGuard`,
   `Buchla200eUiGate`, `bjorklund`
+* `PresetBusUI.cpp` — the 200e preset-bus overlay: its layout, its 7-segment
+  window, its STORE / RECALL hold timing, its rename grammar and its
+  confirmation banners are the module's own code, not a drawing of them. It is
+  compiled through a symlink in `shim/fw/` so that its quoted includes land on
+  host stand-ins instead of the display driver and `util_math.h`'s ARM inline
+  assembly — see `shim/fw/README.md` for exactly how, and for the discipline
+  that keeps it from growing.
 * `UI::Event`, `util_macros.h`, `util_stream_buffer.h`
 
 **Shimmed (`shim/oc_shim.h`, `sim_bus.cpp`):**
@@ -169,6 +225,19 @@ banks and stamps `[SYNTHETIC BANK DATA]` into the frame border.
 * `OC::UiControl` values, `OC::AppEvent`, `OC::IOConfig`, `TWOCCS` — copied
   constants (the real headers drag in the whole build-configuration tree)
 * the app base classes (`OC::AppBaseImpl`, `HSApplication`) and `gfxHeader()`
+* `OC::Ui` (`sim_ui.cpp`) — a **deliberate mirror** of `OC_ui.cpp`'s `Poll()`
+  and `DispatchEvents()`. The real ones cannot be linked (they reach the ADC,
+  the app registry and ARM inline assembly), but the mask semantics *are* the
+  thing the chords depend on, so the mirror follows them branch for branch and
+  names the lines it is following. `Poll()` runs once per simulated
+  millisecond, so `kLongPressTicks` (500) means 500 ms here too. **Keep the two
+  in sync** — if `OC_ui.cpp`'s dispatch changes and this does not, the
+  simulator will start lying about gestures.
+* `OC::PresetEngine`, `OC::DigitalInputs`, `HS::PokePopup`, `OC::app_switcher`
+  (`sim_preset.cpp`) — the environment the real `PresetBusUI.cpp` sits on. 30
+  slots in RAM, four of them pre-stored with invented names; a save or recall
+  completes after a plausible delay so the pending/banner path and the
+  `EMPTY SLOT n` refusal both run for real.
 
 `HSMIDI.h` is neutralised by pre-defining its include guard: `Bus200eApp.h`
 reaches it by a path relative to itself, so no `-I` can shadow it, and it pulls
@@ -204,8 +273,19 @@ Read this before trusting a green screen here for anything.
   inherits its caveat: a clone squatting an address is indistinguishable here
   too, by construction.
 * **No app switching, no storage, no screensaver, no IO frame.**
-  `SaveAppData`/`RestoreAppData` are never exercised; `HandleAppEvent` is never
-  fired; outputs go nowhere.
+  `SaveAppData`/`RestoreAppData` are never exercised; outputs go nowhere. The
+  `A`+`encR` and `A`+`encL` chords are dispatched by the real conditions, and
+  the log says which branch fired, but there is no app registry to draw: the
+  app menu, the IO settings screen and the screensaver get a **stand-in**
+  screen that says `SIMULATOR STAND-IN` on the glass. That is the one place in
+  this simulator where the pixels are not the firmware's, and it says so where
+  you are looking.
+* **The preset overlay's world is invented, even though the overlay is not.**
+  Its 30 slots live in RAM and go nowhere; a STORE writes nothing; no WPM is
+  present, so its `wpm` dot stays hollow; and the 225e last/next pulse jacks
+  can be *assigned* but will never pulse, because the simulator models no
+  trigger inputs. What the overlay itself decides — hold lengths, the banner
+  wording, when a recall is refused — is the module's own code.
 * **The terminal font is not the module's font.** Glyph shapes come from the
   real 6x8 table, but a half-block terminal cell is not an OLED pixel:
   contrast, persistence and the physical aspect ratio all differ. The browser
@@ -228,21 +308,34 @@ frame <2048 hex chars>          # 1024 bytes, vertically packed, as the SH1106 g
 caption ...                     # the terminal frame's caption
 status ...                      # the terminal's bus status line
 millis / busy / timing / synthetic
+held a+r                        # what ui.read_immediate() reports as down
+overlay 0                       # 1 while PresetBusUI owns the screen
 logtotal N
 log ...                         # the last 120 lines
 END
 ```
 
-Requests are one line each: `key <token>` (any interactive key or word alias),
-`enc <l|r> <signed delta>` (arbitrary turns, which the key tokens cannot
-express — this is what a drag or a wheel sends), `pump <ms>` (one refresh of
-simulated time, using the interactive loop's pacing rule), `state`, `bye`.
+Requests are one line each: `key <token>` (any interactive key or word alias —
+a tap: down, one tick, up), `btn <a|b|x|y|z|l|r> <down|up>` (the half of a press
+that makes a chord possible: the button stays held until an `up`),
+`release-all`, `enc <l|r> <signed delta>` (arbitrary turns, which the key tokens
+cannot express — this is what a drag or a wheel sends), `pump <ms>` (one refresh
+of simulated time, using the interactive loop's pacing rule), `state`, `bye`.
 Every request answers with one block in the shape above.
+
+The child is taken down on every exit path the server has: `atexit`, a
+`SIGTERM`/`SIGHUP` handler and an explicit `terminate` → `kill` in `stop()`. It
+also guards itself — in `--stdio` it exits when `getppid()` changes, so it
+cannot outlive the front end even if the front end dies badly. And an exception
+in one request handler cannot take the server down: it becomes a 500 or a 503
+with the traceback printed on the `xeno_gui.py` terminal, so the next crash
+leaves evidence.
 
 ## Not part of the firmware build
 
 No `platformio.ini` env references this directory and no file under
-`software/src/` was modified for it. `pio run -e T41_console -e T41_audio -e T40`
+`software/src/` was modified for it — `shim/fw/PresetBusUI.cpp` is a **symlink**
+to the firmware file, not a copy, so there is exactly one of it. `pio run -e T41_console -e T41_audio -e T40`
 is unaffected, and the GUI adds nothing to it: `make` on its own still produces
 a headless `build/xeno-sim`, and the server is a separate python3 script that
 is never built, imported or shipped.

@@ -9,6 +9,7 @@
 #include "PresetBus.h"     // real declarations; the definitions below are ours
 #include "shim/oc_shim.h"  // SimNowMs
 #include "sim_capture.h"
+#include "sim_preset.h"    // where a bus-wide SAVE/RECALL lands here
 
 namespace {
 
@@ -338,6 +339,19 @@ Bus200eMasterState MasterState() { return Bus200eMasterGetState(); }
 Bus200eMasterError MasterError() { return Bus200eMasterLastError(); }
 uint8_t *MasterCardImage() { return g_serving ? g_card : nullptr; }
 void MasterReset() { Bus200eMasterReset(); }
+
+// The preset overlay's two bus-wide actions. On the module these master a
+// general-call SAVE/RECALL frame that every 200e in the case obeys, and
+// dispatch the local PresetEngine as well. Here only the local half exists,
+// faked in sim_preset.cpp -- nothing is put on any wire, because there is no
+// wire.
+void BroadcastSave(uint8_t slot) { SimPresetRequestSave(slot); }
+void BroadcastRecall(uint8_t slot) { SimPresetRequestRecall(slot); }
+
+// No preset manager on the simulated bus, so the overlay's WPM dot stays
+// hollow. Inventing one would change what STORE means -- with a WPM present
+// the module is not the one holding the presets.
+bool WpmPresent() { return false; }
 
 bool ReadMidiRx(uint8_t &status, uint8_t &d1, uint8_t &d2) {
   if (g_midi_tail == g_midi_head) return false;

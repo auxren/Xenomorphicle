@@ -28,9 +28,13 @@ h1 { font-size: 15px; letter-spacing: .14em; text-transform: uppercase; margin: 
 h2 { font-size: 11px; letter-spacing: .16em; text-transform: uppercase;
      color: var(--dim); margin: 0 0 10px; font-weight: 600; }
 .sub { color: var(--dim); font-size: 12px; margin: 0 0 18px; }
-.wrap { display: grid; grid-template-columns: minmax(560px, 640px) minmax(320px, 1fr);
-        gap: 22px; align-items: start; max-width: 1180px; margin: 0 auto; }
-@media (max-width: 1000px) { .wrap { grid-template-columns: 1fr; } }
+/* The panel column has to fit the whole knob row: 512px of OLED + 2x9px bezel
+   padding + two 92px knobs + two 22px gaps + the panel's own 2x26px padding =
+   822px. Anything narrower clipped the encoders against the panel edges, which
+   is exactly what it looked like. */
+.wrap { display: grid; grid-template-columns: 822px minmax(300px, 1fr);
+        gap: 22px; align-items: start; max-width: 1240px; margin: 0 auto; }
+@media (max-width: 1200px) { .wrap { grid-template-columns: 1fr; max-width: 822px; } }
 
 /* ---- the honesty frame: the terminal build's captioned border, kept ------ */
 .simframe { border: 2px solid var(--warn); border-radius: 10px; overflow: hidden;
@@ -91,7 +95,7 @@ button.btn:focus-visible { outline: 3px solid #1c53d6; outline-offset: 3px; }
 /* Knobs flank the screen, as on the real panel. align-items:center
    puts their centres level with the OLED's, which is what the photo
    shows -- not tucked under it. */
-.bay.knobrow { align-items: center; gap: 26px; margin-top: 20px; }
+.bay.knobrow { align-items: center; gap: 22px; margin-top: 20px; }
 .bezel {
   padding: 9px; border-radius: 6px; background: linear-gradient(#3c3f45, #1c1e22);
   box-shadow: inset 0 0 0 1px #55585e, 0 4px 10px rgba(0,0,0,.4);
@@ -101,11 +105,23 @@ canvas#oled {
   image-rendering: pixelated; image-rendering: crisp-edges;
   border-radius: 2px;
 }
-@media (max-width: 640px) { canvas#oled { width: 384px; height: 192px; } }
+/* If the panel has to get smaller, the screen steps 4x -> 3x. Never anything
+   in between: the OLED is 128x64 real pixels drawn with image-rendering:
+   pixelated, and a fractional factor would blur them into a display the module
+   does not have. 3x makes the knob row 92+22+402+22+92 = 630px wide. */
+@media (max-width: 900px) {
+  canvas#oled { width: 384px; height: 192px; }
+  .wrap { max-width: 690px; }
+}
 
 /* ---- knobs -------------------------------------------------------------- */
 
-.cluster { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+/* Pinned to the knob's own width. The captions used to read "encoder L — push
+   = back", and a nowrap caption in a centred flex column sets the column's
+   width: those two strings were most of why the row overflowed and the knobs
+   sat clipped against the panel edges. The detail moved to the help panel. */
+.cluster { display: flex; flex-direction: column; align-items: center; gap: 8px;
+           width: 92px; }
 .knob {
   width: 92px; height: 92px; border-radius: 50%; position: relative;
   cursor: grab; touch-action: none; user-select: none;
@@ -134,6 +150,22 @@ canvas#oled {
 }
 .nudge button:hover { background: rgba(255,255,255,.75); }
 .nudge button:active { transform: translateY(1px); }
+
+/* ---- held state --------------------------------------------------------- */
+/* What is held is reported BY THE SIMULATOR (ui.read_immediate's own view),
+   not guessed by this page, so a latch that got out of step with the firmware
+   would show up here rather than hide. */
+.btn.held { transform: translateY(2px); filter: brightness(1.25);
+            box-shadow: 0 0 0 3px var(--warn), inset 0 -3px 6px rgba(0,0,0,.3),
+                        inset 0 3px 7px rgba(255,255,255,.34); }
+.knob.held { box-shadow: 0 0 0 3px var(--warn), inset 0 0 0 1px #000; }
+.heldbar { margin-top: 16px; display: flex; align-items: center; gap: 10px;
+           font: 700 10px/1.4 ui-monospace, Menlo, monospace;
+           letter-spacing: .12em; text-transform: uppercase;
+           color: rgba(35,34,92,.5); }
+#held { padding: 3px 8px; border-radius: 4px; background: rgba(35,34,92,.09);
+        color: rgba(35,34,92,.7); }
+#held.on { background: var(--warn); color: #fff; }
 
 .absent {
   margin-top: 20px; padding-top: 12px; border-top: 1px dashed rgba(35,34,92,.32);
@@ -188,7 +220,7 @@ machine. No UI logic lives in this page.</p>
 
         <div class="row">
           <div class="ctl">
-            <div class="slot"><button class="btn green" data-key="a" aria-label="button A"></button></div>
+            <div class="slot"><button class="btn green" data-btn="a" aria-label="button A"></button></div>
             <span class="cap">A</span>
           </div>
           <div class="ctl">
@@ -205,19 +237,19 @@ machine. No UI logic lives in this page.</p>
             <span class="cap small">host</span>
           </div>
           <div class="ctl">
-            <div class="slot"><button class="btn green" data-key="b" aria-label="button B"></button></div>
+            <div class="slot"><button class="btn green" data-btn="b" aria-label="button B"></button></div>
             <span class="cap">B</span>
           </div>
         </div>
 
         <div class="row">
           <div class="ctl">
-            <div class="slot"><button class="btn blue" data-key="x" aria-label="button X"></button></div>
+            <div class="slot"><button class="btn blue" data-btn="x" aria-label="button X"></button></div>
             <span class="cap">X</span>
           </div>
           <div class="ctl"></div><div class="ctl"></div><div class="ctl"></div>
           <div class="ctl">
-            <div class="slot"><button class="btn blue" data-key="y" aria-label="button Y"></button></div>
+            <div class="slot"><button class="btn blue" data-btn="y" aria-label="button Y"></button></div>
             <span class="cap">Y</span>
           </div>
         </div>
@@ -234,7 +266,7 @@ machine. No UI logic lives in this page.</p>
               <button data-turn="l" data-dir="-1" title="turn left encoder −1 (shift: −10)">−</button>
               <button data-turn="l" data-dir="1" title="turn left encoder +1 (shift: +10)">+</button>
             </div>
-            <span class="cap small">encoder L — push = back</span>
+            <span class="cap small">encL</span>
           </div>
 
           <div class="bezel"><canvas id="oled" width="512" height="256"></canvas></div>
@@ -247,8 +279,16 @@ machine. No UI logic lives in this page.</p>
               <button data-turn="r" data-dir="-1" title="turn right encoder −1 (shift: −10)">−</button>
               <button data-turn="r" data-dir="1" title="turn right encoder +1 (shift: +10)">+</button>
             </div>
-            <span class="cap small">encoder R — push = enter</span>
+            <span class="cap small">encR</span>
           </div>
+        </div>
+
+        <div class="heldbar">
+          <span>held</span><span id="held">nothing</span>
+          <span style="text-transform:none;letter-spacing:0;font-weight:400">
+            right-click or shift-click a button to latch it down; click it
+            again to let go
+          </span>
         </div>
 
         <p class="absent" id="absent">
@@ -289,10 +329,30 @@ machine. No UI logic lives in this page.</p>
     </div>
 
     <div class="card">
+      <h2>Chords — holding two controls at once</h2>
+      <p class="note" style="margin-top:0">Several real gestures are chords: the
+         firmware dispatches on the set of buttons <em>held</em>, not on the one
+         that moved. Both ways of holding are shown in the panel's
+         <strong>held</strong> line.</p>
+      <table class="keys">
+        <tr><td><kbd>l</kbd>+<kbd>r</kbd></td><td>both encoder pushes → the 200e preset-bus overlay</td></tr>
+        <tr><td><kbd>a</kbd>+<kbd>r</kbd></td><td>A + right encoder → the app menu</td></tr>
+        <tr><td><kbd>a</kbd>+<kbd>b</kbd></td><td>A + B → screen flip (in the Setup app)</td></tr>
+      </table>
+      <p class="note"><strong>Keyboard:</strong> hold the first key down and tap
+         the second — keys are held for as long as you hold them.<br>
+         <strong>Mouse:</strong> a click can only hold one thing, so
+         <strong>right-click</strong> (or shift-click) a button or knob to
+         <strong>latch</strong> it down; it stays visibly depressed and outlined
+         until you click it again. Latch encL, then click encR.</p>
+    </div>
+
+    <div class="card">
       <h2>Keyboard</h2>
       <table class="keys">
-        <tr><td><kbd>a</kbd> <kbd>b</kbd> <kbd>x</kbd> <kbd>y</kbd></td><td>face buttons A / B / X / Y</td></tr>
-        <tr><td><kbd>l</kbd> <kbd>r</kbd></td><td>left / right encoder push</td></tr>
+        <tr><td><kbd>a</kbd> <kbd>b</kbd> <kbd>x</kbd> <kbd>y</kbd></td><td>face buttons A / B / X / Y — held while the key is down</td></tr>
+        <tr><td><kbd>l</kbd> <kbd>r</kbd></td><td>left / right encoder push (back / enter) — likewise</td></tr>
+        <tr><td><kbd>z</kbd></td><td>the Z button: the firmware polls it, and it is in none of the six positions this panel draws</td></tr>
         <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>left encoder turn −1 / +1</td></tr>
         <tr><td><kbd>,</kbd> <kbd>.</kbd></td><td>right encoder turn −1 / +1</td></tr>
         <tr><td><kbd>{</kbd> <kbd>}</kbd> <kbd>&lt;</kbd> <kbd>&gt;</kbd></td><td>the same, ×10</td></tr>
@@ -300,7 +360,9 @@ machine. No UI logic lives in this page.</p>
       </table>
       <p class="note">Same letters as the terminal build. Mouse wheel over a knob
          turns it (down = +1); dragging around it turns it; a click pushes it.
-         <kbd>q</kbd> quits the terminal build and is inert here.</p>
+         Holding a button past 500 ms is a long press, which is what STORE in the
+         preset overlay wants. <kbd>q</kbd> quits the terminal build and is inert
+         here.</p>
     </div>
   </div>
 </div>
@@ -385,9 +447,50 @@ function apply(st) {
     pre.textContent = (st.log || []).join("\n");
     pre.scrollTop = pre.scrollHeight;
   }
+  showHeld(st.held || "");
+}
+
+// The held set comes from the simulator (OC::ui's own button_state_), so the
+// page never has to model it. A latch that somehow got out of step with the
+// firmware would show up here, which is the point.
+function showHeld(held) {
+  var toks = held ? held.split("+") : [];
+  var el = document.getElementById("held");
+  el.textContent = toks.length ? toks.join(" + ") : "nothing";
+  el.classList.toggle("on", toks.length > 0);
+  Array.prototype.forEach.call(document.querySelectorAll("[data-btn]"),
+    function (b) {
+      b.classList.toggle("held", toks.indexOf(b.getAttribute("data-btn")) >= 0);
+    });
+  document.getElementById("knobL").classList.toggle("held", toks.indexOf("l") >= 0);
+  document.getElementById("knobR").classList.toggle("held", toks.indexOf("r") >= 0);
 }
 
 function key(k) { send("/api/key?k=" + encodeURIComponent(k)); }
+
+// --- held buttons ----------------------------------------------------------
+// The firmware dispatches on event.mask -- the set of buttons held when one of
+// them changed -- so both encoder pushes together open the preset-bus overlay,
+// and A + right encoder opens the app menu. A page that only ever sent
+// fire-and-forget presses could never build a two-bit mask, so press and
+// release are separate here.
+var latched = {};
+
+function btn(tok, down) {
+  send("/api/btn?k=" + encodeURIComponent(tok) + "&s=" + (down ? "down" : "up"));
+}
+
+// A mouse cannot hold two things at once. Latching is the way out: the button
+// stays down (and stays visibly down) until it is clicked again.
+function toggleLatch(tok) {
+  if (latched[tok]) { delete latched[tok]; btn(tok, false); }
+  else { latched[tok] = true; btn(tok, true); }
+}
+
+function releaseAll() {
+  latched = {};
+  send("/api/release-all");
+}
 function turn(side, d) {
   if (!d) return;
   rotate(side, d);
@@ -401,8 +504,53 @@ function flash(el) {
   setTimeout(function () { el.classList.remove("active"); }, 130);
 }
 
+// The simulator's own controls in the side panel: one-shot, never held.
 Array.prototype.forEach.call(document.querySelectorAll("[data-key]"), function (el) {
   el.addEventListener("click", function () { flash(el); key(el.getAttribute("data-key")); });
+});
+
+// The panel's face buttons: held for as long as the mouse is down, so
+// press-and-hold works with one button. Shift-click or right-click latches
+// instead, which is how you build a chord with a mouse.
+Array.prototype.forEach.call(document.querySelectorAll("[data-btn]"), function (el) {
+  var tok = el.getAttribute("data-btn");
+  var holding = false;
+
+  el.addEventListener("contextmenu", function (e) {
+    e.preventDefault();
+    toggleLatch(tok);
+  });
+
+  el.addEventListener("pointerdown", function (e) {
+    if (e.button !== 0) return;            // right button is the latch
+    if (e.shiftKey) { toggleLatch(tok); return; }
+    if (latched[tok]) { toggleLatch(tok); return; }   // click again = let go
+    holding = true;
+    btn(tok, true);
+    try { el.setPointerCapture(e.pointerId); } catch (ignored) {}
+  });
+
+  function up(e) {
+    if (!holding) return;
+    holding = false;
+    try { el.releasePointerCapture(e.pointerId); } catch (ignored) {}
+    btn(tok, false);
+  }
+  el.addEventListener("pointerup", up);
+  el.addEventListener("pointercancel", up);
+
+  // Keyboard-accessible: space/enter on a focused button is a tap.
+  el.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    if (e.repeat) return;
+    btn(tok, true);
+  });
+  el.addEventListener("keyup", function (e) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    if (!latched[tok]) btn(tok, false);
+  });
 });
 
 Array.prototype.forEach.call(document.querySelectorAll("[data-turn]"), function (el) {
@@ -452,7 +600,15 @@ function wireKnob(id, side) {
   // behaves too.
   var dragging = false, prev = 0, swept = 0, carry = 0, t0 = 0;
 
+  // Latching, same gesture as the face buttons: this is what makes the
+  // both-encoders chord reachable with a mouse -- latch encL, then click encR.
+  el.addEventListener("contextmenu", function (e) {
+    e.preventDefault();
+    toggleLatch(side);
+  });
+
   el.addEventListener("pointerdown", function (e) {
+    if (e.shiftKey || latched[side]) { toggleLatch(side); return; }
     var r = el.getBoundingClientRect();
     dragging = true; swept = 0; carry = 0; t0 = Date.now();
     prev = Math.atan2(e.clientY - (r.top + r.height / 2),
@@ -483,36 +639,79 @@ function wireKnob(id, side) {
   el.addEventListener("pointercancel", release);
 
   el.addEventListener("keydown", function (e) {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flash(el); key(side); }
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      if (!e.repeat) { flash(el); btn(side, true); }
+    }
     else if (e.key === "ArrowLeft" || e.key === "ArrowDown") { e.preventDefault(); turn(side, -1); }
     else if (e.key === "ArrowRight" || e.key === "ArrowUp") { e.preventDefault(); turn(side, 1); }
+  });
+  el.addEventListener("keyup", function (e) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    if (!latched[side]) btn(side, false);
   });
 }
 wireKnob("knobL", "l");
 wireKnob("knobR", "r");
 
 // --- keyboard --------------------------------------------------------------
-var PANEL_KEYS = "abxylr[],.{}<>nNwt";
+// keydown holds, keyup lets go. Physically holding `a` and tapping `r` on the
+// keyboard therefore produces the real A + encR chord, mask and all -- the
+// keyboard is the one input device here that can express a chord directly.
+var HOLD_KEYS = "abxyzlr";              // the buttons; z is off-panel, see help
+var ONESHOT_KEYS = "[],.{}<>nNwt";      // turns and the simulator's own controls
+var TURN = { "[": ["l", -1], "]": ["l", 1], ",": ["r", -1], ".": ["r", 1],
+             "{": ["l", -10], "}": ["l", 10], "<": ["r", -10], ">": ["r", 10] };
+
+function keyTarget(k) {
+  if (k === "l") return document.getElementById("knobL");
+  if (k === "r") return document.getElementById("knobR");
+  if (TURN[k]) return document.getElementById(TURN[k][0] === "l" ? "knobL" : "knobR");
+  return document.querySelector('[data-btn="' + k + '"]') ||
+         document.querySelector('[data-key="' + k + '"]');
+}
+
+function typingTarget(t) {
+  if (!t) return false;
+  if (t.tagName === "INPUT" || t.tagName === "TEXTAREA") return true;
+  // A focused panel control has its own key handlers; leave it to them.
+  return !!(t.classList && (t.classList.contains("knob") ||
+                            t.hasAttribute("data-btn")));
+}
+
 document.addEventListener("keydown", function (e) {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  var t = e.target;
-  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
-  if (t && t.classList && t.classList.contains("knob")) return;   // arrows are the knob's
-  if (PANEL_KEYS.indexOf(e.key) < 0 || e.key.length !== 1) return;
-  e.preventDefault();
-  var el = document.querySelector('[data-key="' + e.key + '"]');
-  // The turn keys move the knurling too, so a keyboard turn looks like a turn.
-  var TURN = { "[": ["l", -1], "]": ["l", 1], ",": ["r", -1], ".": ["r", 1],
-               "{": ["l", -10], "}": ["l", 10], "<": ["r", -10], ">": ["r", 10] };
-  if (TURN[e.key]) {
-    el = document.getElementById(TURN[e.key][0] === "l" ? "knobL" : "knobR");
-    rotate(TURN[e.key][0], TURN[e.key][1]);
+  if (typingTarget(e.target)) return;
+  if (e.key.length !== 1) return;
+
+  if (HOLD_KEYS.indexOf(e.key) >= 0) {
+    e.preventDefault();
+    if (e.repeat) return;               // auto-repeat is not a second press
+    flash(keyTarget(e.key));
+    btn(e.key, true);
+    return;
   }
-  if (e.key === "l") el = document.getElementById("knobL");
-  if (e.key === "r") el = document.getElementById("knobR");
-  flash(el);
+  if (ONESHOT_KEYS.indexOf(e.key) < 0) return;
+  e.preventDefault();
+  if (TURN[e.key]) rotate(TURN[e.key][0], TURN[e.key][1]);
+  flash(keyTarget(e.key));
   key(e.key);
 });
+
+document.addEventListener("keyup", function (e) {
+  if (typingTarget(e.target)) return;
+  if (e.key.length !== 1 || HOLD_KEYS.indexOf(e.key) < 0) return;
+  e.preventDefault();
+  // A latched button ignores the keyboard letting go, so the two ways of
+  // holding cannot fight: the latch is released by clicking it.
+  if (!latched[e.key]) btn(e.key, false);
+});
+
+// A key held while the tab loses focus never gets its keyup, and a latch left
+// behind would silently change what the next click means. Let go of everything.
+window.addEventListener("blur", releaseAll);
+window.addEventListener("pagehide", releaseAll);
 
 // --- clock -----------------------------------------------------------------
 // One refresh's worth of simulated time per poll, charged in real elapsed ms.

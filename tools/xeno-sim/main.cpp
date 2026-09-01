@@ -16,14 +16,19 @@
 
 #include "apps/Bus200eApp.h"
 
+#include <unistd.h>     // getppid, for the --stdio orphan guard
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 
+#include "PresetBusUI.h"
 #include "sim_bus.h"
+#include "sim_preset.h"
 #include "sim_term.h"
+#include "sim_ui.h"
 
 namespace {
 
@@ -43,23 +48,35 @@ const char *kDefault259e =
 
 uint8_t g_next_note = 60;   // walks up so successive injections are visible
 
-void Button(uint16_t control) {
-  const UI::Event e(UI::EVENT_BUTTON_PRESS, control, 0, control);
-  g_app.HandleButtonEvent(e);
+// One simulated millisecond: the ISR path, the bus, then the main loop --
+// the same three contexts the firmware runs these in. OC::Ui::Poll() is the
+// first of those: on the module it is a 1kHz timer interrupt, and running it
+// once per simulated ms is what makes kLongPressTicks (500) mean 500 ms here
+// too.
+void Tick(uint32_t dt_ms) {
+  SimAdvanceMs(dt_ms);
+  SimUiPoll();              // ISR: buttons -> events, with the held mask
+  g_app.Controller();
+  SimBusTask();
+  SimPresetTask();
+  OC::PresetBusUI::Task();  // real: times the overlay's STORE/RECALL holds
+  SimUiDispatch(&g_app);    // loop: the queue -> chords, overlay, app
+  g_app.Loop();
+}
+
+// A press and release of one button, the way a click or a one-shot key token
+// means it. Two ticks, because the state machine needs to see both edges --
+// and because that is what the hardware does too.
+void Tap(uint16_t control) {
+  SimUiSetButton(control, true);
+  Tick(1);
+  SimUiSetButton(control, false);
+  Tick(1);
 }
 
 void Encoder(uint16_t control, int value) {
-  const UI::Event e(UI::EVENT_ENCODER, control, (int16_t)value, 0);
-  g_app.HandleEncoderEvent(e);
-}
-
-// One simulated millisecond: the ISR path, the bus, then the main loop --
-// the same three contexts the firmware runs these in.
-void Tick(uint32_t dt_ms) {
-  SimAdvanceMs(dt_ms);
-  g_app.Controller();
-  SimBusTask();
-  g_app.Loop();
+  SimUiEncoder(control, value);
+  Tick(1);
 }
 
 // Run the clock until the bus goes quiet, or until `cap_ms` of simulated time
@@ -74,9 +91,35 @@ void Settle(uint32_t cap_ms) {
   }
 }
 
+// The simulator's stand-in for the two screens it has no registry to draw.
+// Marked as a stand-in on the glass itself: the whole promise of this thing is
+// that what you see is firmware output, so the one place it is not has to say
+// so where you are looking.
+void DrawStandIn(const char *what, const char *why) {
+  graphics.drawFrame(0, 0, 128, 64);
+  graphics.setPrintPos(4, 4);
+  graphics.print("SIMULATOR STAND-IN");
+  graphics.drawHLine(1, 14, 126);
+  graphics.setPrintPos(4, 20);
+  graphics.print(what);
+  graphics.setPrintPos(4, 34);
+  graphics.print(why);
+  graphics.setPrintPos(4, 52);
+  graphics.print("any button = back");
+}
+
 void Redraw() {
   graphics.Begin(SimFrameBuffer(), weegfx::CLEAR_FRAME_ENABLE);
-  g_app.DrawMenu();
+  if (OC::PresetBusUI::Active()) {
+    // The real overlay, compiled from src/PresetBusUI.cpp. See shim/fw/.
+    OC::PresetBusUI::Draw();
+  } else if (SimUiMode() == OC::UI_MODE_APP_SETTINGS) {
+    DrawStandIn("app menu opened", "no app registry here");
+  } else if (SimUiMode() == OC::UI_MODE_SCREENSAVER) {
+    DrawStandIn("screensaver", "no screensaver here");
+  } else {
+    g_app.DrawMenu();
+  }
   graphics.End();
 }
 
@@ -90,19 +133,39 @@ const char *kLegend =
     "a/b/x/y buttons A B X Y   l/r encoder pushes (encL/encR)\n"
     "[ ] encL turn -/+   , . encR turn -/+   { } < > same, x10\n"
     "n note-on -> USB host port 0    N note-on -> 200e bus MIDI\n"
-    "w advance 1 simulated second    t toggle fast/real scan pacing    q quit";
+    "w advance 1 simulated second    t toggle fast/real scan pacing    q quit\n"
+    "chords need held buttons: a terminal cannot report a key being HELD, so\n"
+    "use --keys \"a-down,r,a-up\" or the browser front end for those.";
 
 // Applies one key. Returns false to quit.
+//
+// "<button>-down" / "<button>-up" hold and release, so a scripted run can
+// express a chord ("a-down,r,a-up" opens the app menu) or a long press
+// ("l-down,step600,l-up" is a STORE hold). A bare token is still a tap, so
+// every existing --keys script means what it always did.
 bool ApplyKey(const std::string &k) {
   if (k.empty()) return true;
   if (k == "q" || k == "quit") return false;
 
-  if (k == "a") { Button(OC::CONTROL_BUTTON_UP); return true; }
-  if (k == "b") { Button(OC::CONTROL_BUTTON_DOWN); return true; }
-  if (k == "x") { Button(OC::CONTROL_BUTTON_UP2); return true; }
-  if (k == "y") { Button(OC::CONTROL_BUTTON_DOWN2); return true; }
-  if (k == "l" || k == "encl") { Button(OC::CONTROL_BUTTON_L); return true; }
-  if (k == "r" || k == "encr") { Button(OC::CONTROL_BUTTON_R); return true; }
+  {
+    const size_t dash = k.rfind('-');
+    if (dash != std::string::npos && dash > 0) {
+      const std::string tail = k.substr(dash + 1);
+      if (tail == "down" || tail == "up") {
+        const uint16_t c = SimUiControlForToken(k.substr(0, dash));
+        if (c) {
+          SimUiSetButton(c, tail == "down");
+          Tick(1);
+          return true;
+        }
+      }
+    }
+  }
+
+  {
+    const uint16_t c = SimUiControlForToken(k);
+    if (c) { Tap(c); return true; }
+  }
 
   if (k == "[" || k == "encl-") { Encoder(OC::CONTROL_ENCODER_L, -1); return true; }
   if (k == "]" || k == "encl+") { Encoder(OC::CONTROL_ENCODER_L, +1); return true; }
@@ -146,6 +209,17 @@ void EncoderDelta(bool right, int delta) {
   Encoder(right ? OC::CONTROL_ENCODER_R : OC::CONTROL_ENCODER_L, delta);
 }
 
+// Hold or release one button. This is the whole point of the down/up split:
+// event.mask carries the set of buttons held, and the module's three chords
+// (both encoders -> preset bus, A + encR -> app menu, A + B -> screen flip)
+// are dispatched on that mask, not on the button that moved.
+void ButtonEdge(const std::string &tok, bool down) {
+  const uint16_t c = SimUiControlForToken(tok);
+  if (!c) return;
+  SimUiSetButton(c, down);
+  Tick(1);
+}
+
 // One refresh's worth of simulated time, with the interactive loop's pacing
 // rule: fast pacing compresses only the WAITING, so a scan still redraws.
 void Pump(uint32_t budget_ms) {
@@ -182,10 +256,17 @@ void PrintScreen(bool with_chrome) {
 //
 // Requests are one line:
 //     key <token>      one of the interactive keys, or a word alias
+//     btn <tok> down   hold a button (a b x y z l r) -- it stays held
+//     btn <tok> up     release it
 //     enc <l|r> <n>    encoder turn by an arbitrary signed delta
 //     pump <ms>        advance the clock by one refresh, interactive pacing
 //     state            report without changing anything
 //     bye              exit
+//
+// `key` is a tap: down, one tick, up. `btn` is the half of it that makes a
+// chord possible, and the front end sends it from keydown/keyup and from its
+// latches. `state`'s "held" line reports what is held, so a forgotten latch is
+// visible rather than mysterious.
 //
 // Every reply is a block of "<name> <value>" lines ended by a line "END". The
 // frame comes back as 1024 bytes of the real vertically-packed framebuffer,
@@ -217,6 +298,8 @@ void EmitState() {
   printf("status %s\n", Flatten(SimBusStatusLine()).c_str());
   printf("millis %lu\n", (unsigned long)SimNowMs());
   printf("busy %d\n", SimBusBusy() ? 1 : 0);
+  printf("held %s\n", SimUiHeldTokens().c_str());
+  printf("overlay %d\n", OC::PresetBusUI::Active() ? 1 : 0);
   printf("timing %s\n", SimBusRealTiming() ? "real" : "fast");
   printf("synthetic %d\n", SimBusUsingSyntheticBanks() ? 1 : 0);
 
@@ -232,8 +315,18 @@ void EmitState() {
 
 int RunStdio() {
   char buf[512];
+  // Orphan guard. Normally the front end's death closes this pipe and fgets
+  // returns EOF, which is enough -- but "normally" is doing a lot of work in
+  // that sentence, and an orphaned simulator holding its captures open with
+  // nothing to talk to has been seen. If our parent is gone, so are we.
+  const pid_t parent = getppid();
+
   EmitState();                       // greet with the boot screen
   while (fgets(buf, sizeof(buf), stdin)) {
+    if (getppid() != parent) {
+      fprintf(stderr, "xeno-sim: parent %d is gone, exiting\n", (int)parent);
+      return 0;
+    }
     std::string line(buf);
     while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
       line.pop_back();
@@ -254,6 +347,13 @@ int RunStdio() {
       // "q" quits the terminal build; here there is nothing to quit, so it is
       // inert rather than a way for a stray click to kill the server.
       if (tok[1] != "q") ApplyKey(tok[1]);
+    } else if (tok[0] == "btn" && tok.size() >= 3) {
+      ButtonEdge(tok[1], tok[2] == "down");
+    } else if (tok[0] == "release-all") {
+      // The front end sends this on page unload and on window blur, so a
+      // latch or a held key cannot survive into a session nobody is watching.
+      SimUiReleaseAll();
+      Tick(1);
     } else if (tok[0] == "enc" && tok.size() >= 3) {
       EncoderDelta(tok[1] == "r", (int)strtol(tok[2].c_str(), nullptr, 10));
     } else if (tok[0] == "pump" && tok.size() >= 2) {
@@ -281,6 +381,11 @@ void Usage() {
       "  --no-log             omit the status/log lines under the frame\n"
       "  --help\n"
       "\nKeys:\n%s\n"
+      "\nA --keys token may be \"<button>-down\" / \"<button>-up\" (buttons are\n"
+      "a b x y z l r), which is how a chord or a long press is scripted:\n"
+      "  --keys \"l-down,r,l-up\"           both encoders -> preset-bus overlay\n"
+      "  --keys \"a-down,r,a-up\"           A + encR      -> app menu\n"
+      "  --keys \"l-down,step600,l-up\"     a 500ms hold  -> STORE\n"
       "\nThe simulated bus is 0x20 \"210\", 0x28 \"259 A\", 0x5C \"251 A\".\n"
       "NOTHING here touches real hardware. Writes are discarded.\n",
       kLegend);
@@ -316,6 +421,8 @@ int main(int argc, char **argv) {
   usbHostMIDI[1].set_name("usbHostMIDI[1]");
   MIDI1.set_name("MIDI1");
 
+  OC::ui.Init();
+  SimPresetInit(&g_app);
   SimBusInit(cfg);
   if (scripted && cfg.real_timing)
     SimLog("--real-timing has no effect with --keys: scripted mode always "

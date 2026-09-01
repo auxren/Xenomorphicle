@@ -15,11 +15,14 @@ Stdlib only, binds 127.0.0.1 only.
 """
 
 import argparse
+import atexit
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
+import traceback
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -36,6 +39,10 @@ WORD_KEYS = {
     "encl", "encr", "encl-", "encl+", "encr-", "encr+",
     "note", "busnote", "wait",
 }
+# Buttons that can be held. The panel has six; z is the Z button the firmware
+# polls (OC_gpio.cpp gives it a pin on this hardware) and the browser reaches by
+# keyboard only, because it is not one of the six drawn on the panel.
+BUTTONS = {"a", "b", "x", "y", "z", "l", "r", "encl", "encr"}
 
 
 class Sim:
@@ -43,10 +50,16 @@ class Sim:
 
     def __init__(self, argv):
         self.lock = threading.Lock()
+        self.dead = None            # the reason, once it is gone
         self.proc = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             text=True, bufsize=1,
         )
+        # Whatever takes this process down -- a clean ctrl-C, sys.exit, an
+        # uncaught exception, SIGTERM -- takes the child with it. Before this,
+        # only the ctrl-C path did, and a crash left an orphaned xeno-sim
+        # holding its captures open with nothing to talk to.
+        atexit.register(self.stop)
         self.greeting = self._read_block()
 
     def _read_block(self):
@@ -62,7 +75,7 @@ class Sim:
             name, _, value = line.partition(" ")
             if name == "log":
                 state["log"].append(value)
-            elif name in ("busy", "synthetic"):
+            elif name in ("busy", "synthetic", "overlay"):
                 state[name] = value == "1"
             elif name in ("millis", "logtotal"):
                 state[name] = int(value or 0)
@@ -71,21 +84,45 @@ class Sim:
 
     def command(self, line):
         with self.lock:
+            if self.dead:
+                raise RuntimeError(self.dead)
             if self.proc.poll() is not None:
-                raise RuntimeError("xeno-sim exited")
-            self.proc.stdin.write(line + "\n")
-            self.proc.stdin.flush()
-            return self._read_block()
+                self.dead = "xeno-sim exited (status %s)" % self.proc.poll()
+                raise RuntimeError(self.dead)
+            try:
+                self.proc.stdin.write(line + "\n")
+                self.proc.stdin.flush()
+                return self._read_block()
+            except Exception as e:
+                # One desynchronised reply poisons every later one, so the
+                # child is written off here rather than left half-talking.
+                self.dead = "xeno-sim: %s" % e
+                raise
 
     def stop(self):
+        """Take the child down. Safe to call more than once."""
+        proc = getattr(self, "proc", None)
+        if proc is None or proc.poll() is not None:
+            return
+        self.dead = self.dead or "stopping"
         try:
-            self.command("bye")
+            proc.stdin.write("bye\n")
+            proc.stdin.flush()
         except Exception:
             pass
         try:
-            self.proc.terminate()
+            proc.stdin.close()      # EOF ends its read loop even if "bye" lost
         except Exception:
             pass
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()         # last resort; nothing survives this
+                proc.wait(timeout=2)
+            except Exception:
+                pass
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -94,6 +131,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         pass    # the interesting log is the simulator's, shown in the page
+
+    def handle_error(self, *args):
+        # socketserver's default prints a banner and swallows nothing, but it
+        # is easy to lose in a quiet terminal. Say plainly that this is the
+        # server surviving a request, and print the traceback: the next crash
+        # should leave evidence rather than a silent stop.
+        sys.stderr.write("xeno-gui: request handler raised --\n")
+        traceback.print_exc()
+        sys.stderr.flush()
 
     def _send(self, code, ctype, body):
         if isinstance(body, str):
@@ -109,6 +155,24 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, "application/json", json.dumps(obj))
 
     def do_GET(self):
+        # Nothing a single request does may take the server down with it. An
+        # unexpected exception becomes a 500 with the traceback on the
+        # terminal, so the page reports "lost the simulator" and the operator
+        # gets something to read.
+        try:
+            self._get()
+        except Exception:
+            sys.stderr.write("xeno-gui: unhandled error serving %s --\n"
+                             % self.path)
+            traceback.print_exc()
+            sys.stderr.flush()
+            try:
+                self._json({"error": "server error; see the xeno_gui.py "
+                                     "terminal for the traceback"}, 500)
+            except Exception:
+                pass
+
+    def _get(self):
         # A page on the open internet can resolve its own name to 127.0.0.1 and
         # then talk to whatever is listening. Requiring a loopback Host closes
         # that, and costs nothing for the intended use.
@@ -141,6 +205,22 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "unknown key %r" % k}, 400)
                     return
                 st = self.sim.command("key " + k)
+            elif url.path == "/api/btn":
+                # The half of a press that makes a chord possible: the button
+                # stays held until an "up" arrives, so event.mask can carry two
+                # bits and the module's chords dispatch the way they do on the
+                # panel.
+                k = (q.get("k") or [""])[0]
+                s = (q.get("s") or [""])[0]
+                if k not in BUTTONS:
+                    self._json({"error": "unknown button %r" % k}, 400)
+                    return
+                if s not in ("down", "up"):
+                    self._json({"error": "s must be down or up"}, 400)
+                    return
+                st = self.sim.command("btn %s %s" % (k, s))
+            elif url.path == "/api/release-all":
+                st = self.sim.command("release-all")
             elif url.path == "/api/enc":
                 side = (q.get("side") or ["l"])[0]
                 if side not in ("l", "r"):
@@ -162,6 +242,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, "text/plain", "not found\n")
                 return
         except Exception as e:
+            # Losing the child is expected enough to be a 503 rather than a
+            # crash -- but the traceback still goes to the terminal, because a
+            # simulator that quietly stops answering is the thing that wasted
+            # an afternoon.
+            sys.stderr.write("xeno-gui: simulator command failed --\n")
+            traceback.print_exc()
+            sys.stderr.flush()
             self._json({"error": str(e)}, 503)
             return
 
@@ -194,6 +281,21 @@ def main():
         argv += ["--capture-259e", args.capture_259e]
 
     Handler.sim = Sim(argv)
+
+    # A signal that would otherwise end the process without unwinding: turn it
+    # into a normal exit so atexit runs and the child goes with us.
+    def bye(signum, _frame):
+        sys.stderr.write("xeno-gui: signal %d, stopping\n" % signum)
+        Handler.sim.stop()
+        sys.exit(0)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, bye)
+        except (ValueError, OSError, AttributeError):
+            pass    # not the main thread, or the platform lacks it
+
+    ThreadingHTTPServer.daemon_threads = True
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = "http://127.0.0.1:%d/" % args.port
     print("xeno-sim GUI on %s   (127.0.0.1 only; ctrl-C to stop)" % url)

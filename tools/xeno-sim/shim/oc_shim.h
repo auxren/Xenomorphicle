@@ -127,35 +127,14 @@ uint8_t *SimFrameBuffer();
 void gfxHeader(const char *str, const uint8_t *icon = nullptr);
 
 // --- OC namespace ----------------------------------------------------------
+// The panel's control bitmasks, OC::Ui and OC::AppEvent live in shim/fw/,
+// because the real PresetBusUI.cpp -- which the simulator compiles and links
+// unmodified -- includes "OC_ui.h" and "OC_apps.h" by those names and has to
+// see the same definitions the app does. See shim/fw/README.md.
+#include "fw/OC_apps.h"
+#include "fw/OC_ui.h"
+
 namespace OC {
-
-// Values copied verbatim from OC_ui.h (the non-NORTHERNLIGHT_2OC_LEFTSIDE
-// branch, which is what T41_console / T41_audio / T40 build). Copied rather
-// than included because OC_ui.h drags in OC_config.h, ui_button.h and the rest
-// of the runtime. If the panel mapping ever changes, this must change with it.
-enum UiControl : uint16_t {
-  CONTROL_BUTTON_UP    = 1 << 0,
-  CONTROL_BUTTON_DOWN  = 1 << 1,
-  CONTROL_BUTTON_L     = 1 << 2,
-  CONTROL_BUTTON_R     = 1 << 3,
-  CONTROL_BUTTON_M     = 1 << 4,   // "Z": NOT wired on this hardware
-  CONTROL_BUTTON_UP2   = 1 << 5,
-  CONTROL_BUTTON_DOWN2 = 1 << 6,
-  CONTROL_ENCODER_L    = 1 << 8,
-  CONTROL_ENCODER_R    = 1 << 9,
-
-  CONTROL_BUTTON_A = CONTROL_BUTTON_UP,
-  CONTROL_BUTTON_B = CONTROL_BUTTON_DOWN,
-  CONTROL_BUTTON_X = CONTROL_BUTTON_UP2,
-  CONTROL_BUTTON_Y = CONTROL_BUTTON_DOWN2,
-};
-
-enum AppEvent {
-  APP_EVENT_SUSPEND,
-  APP_EVENT_RESUME,
-  APP_EVENT_SCREENSAVER_ON,
-  APP_EVENT_SCREENSAVER_OFF,
-};
 
 enum OutputMode { OUTPUT_MODE_OFF, OUTPUT_MODE_UNI, OUTPUT_MODE_BIPOLAR };
 
