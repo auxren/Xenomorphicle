@@ -228,9 +228,9 @@ machine. No UI logic lives in this page.</p>
             <span class="cap small">device</span>
           </div>
           <div class="ctl">
-            <div class="slot"><button class="btn grey" id="clockbtn" aria-label="clock button (not wired to the UI)"></button></div>
+            <div class="slot"><button class="btn grey" data-btn="z" id="clockbtn" aria-label="clock button (Z)"></button></div>
             <span class="cap">clock</span>
-            <span class="cap small">not wired to the UI</span>
+            <span class="cap small">Z — binding unconfirmed</span>
           </div>
           <div class="ctl">
             <div class="slot"><div class="jack"><div class="usb-a"></div></div></div>
@@ -303,7 +303,9 @@ machine. No UI logic lives in this page.</p>
 
   <div>
     <div class="card">
-      <h2>Bus status</h2>
+      <h2>Instrument</h2>
+      <div class="mono" id="screenline">—</div>
+      <h2 style="margin-top:14px">Bus status</h2>
       <div class="mono" id="status">—</div>
       <p class="note">Simulated clock: <span id="clockms" class="mono">0</span> ms.
          Master state, bytes moved and pacing come straight from the real
@@ -318,6 +320,20 @@ machine. No UI logic lives in this page.</p>
       <button class="simbtn" data-key="t" id="pacebtn">Scan pacing: <span id="pace">fast</span> — toggle <kbd>t</kbd></button>
       <p class="note">These four exist only in the simulator. Nothing on the panel
          above does any of them.</p>
+    </div>
+
+    <div class="card sim">
+      <h2>Session — not on the panel</h2>
+      <button class="simbtn" id="copysession">Copy session to clipboard</button>
+      <button class="simbtn" id="dlsession">Download session file</button>
+      <button class="simbtn" id="copyframe">Copy this frame as hex</button>
+      <p class="note" id="sessionnote">Every button, encoder detent and
+         injected event since boot, with the simulated milliseconds between
+         them. Paste it into a message, or save it and replay it with
+         <code>./build/xeno-sim --replay session.txt</code> — the same session
+         produces the same frames, every time. The frame copies out in the
+         module console's own capture format, so
+         <code>python3 fbdiff.py device.hex sim.hex</code> compares them.</p>
     </div>
 
     <div class="card">
@@ -426,6 +442,69 @@ function send(url) {
   return chain;
 }
 
+var lastFrameHex = "";
+
+// --- session export --------------------------------------------------------
+// A session is the whole repro: the inputs and the simulated milliseconds
+// between them. Handing it over as text is the point, so both buttons produce
+// exactly what --replay reads back.
+function fetchSession() {
+  return fetch("/api/session").then(function (r) { return r.json(); })
+    .then(function (st) { apply(st); return (st.session || []).join("\n") + "\n"; });
+}
+
+function noteSession(msg) {
+  var el = document.getElementById("sessionnote");
+  var was = el.innerHTML;
+  el.textContent = msg;
+  setTimeout(function () { el.innerHTML = was; }, 2600);
+}
+
+function copyText(text, what) {
+  // navigator.clipboard needs a secure context; 127.0.0.1 counts, but the
+  // textarea fallback is here for the cases where it does not.
+  function fallback() {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    noteSession(ok ? (what + " copied — paste it into a message.")
+                   : ("Could not copy. " + what + " is " + text.length + " characters; " +
+                      "use the download button instead."));
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      function () { noteSession(what + " copied — paste it into a message."); },
+      fallback);
+  } else {
+    fallback();
+  }
+}
+
+document.getElementById("copysession").addEventListener("click", function () {
+  fetchSession().then(function (t) { copyText(t, "Session"); }, failed);
+});
+
+document.getElementById("dlsession").addEventListener("click", function () {
+  fetchSession().then(function (t) {
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([t], {type: "text/plain"}));
+    a.download = "xeno-session.txt";
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    noteSession("Session saved. Replay it with --replay xeno-session.txt.");
+  }, failed);
+});
+
+document.getElementById("copyframe").addEventListener("click", function () {
+  copyText(lastFrameHex.toUpperCase() + "\n", "Frame");
+});
+
 function failed(e) {
   var el = document.getElementById("offline");
   el.style.display = "block";
@@ -439,6 +518,10 @@ function apply(st) {
   drawFrame(st.frame);
   if (st.caption) document.getElementById("caption").textContent = st.caption;
   document.getElementById("status").textContent = st.status || "";
+  document.getElementById("screenline").textContent =
+    "screen " + (st.screen || "?") + "   app " + (st.app || "?") +
+    (st.overlay ? "   (preset overlay open)" : "");
+  lastFrameHex = st.frame || lastFrameHex;
   document.getElementById("clockms").textContent = st.millis;
   document.getElementById("pace").textContent = st.timing;
   if (st.logtotal !== lastLogTotal) {
@@ -560,17 +643,12 @@ Array.prototype.forEach.call(document.querySelectorAll("[data-turn]"), function 
   });
 });
 
-// The clock button is real hardware and really is inert: it fires no UI control
-// on this module. Say so out loud rather than swallow the click.
-document.getElementById("clockbtn").addEventListener("click", function () {
-  var el = document.getElementById("absent");
-  var was = el.textContent;
-  el.textContent = "The clock button fires no UI control on this hardware — " +
-                   "it is drawn because it is on the panel, and it does nothing here " +
-                   "because it does nothing there.";
-  el.style.color = "#a03418";
-  setTimeout(function () { el.textContent = was; el.style.color = ""; }, 3200);
-});
+// The clock button is wired here as Z (CONTROL_BUTTON_M), which is what the
+// firmware polls: OC_gpio.cpp gives but_mid pin 20 on this hardware and
+// OC::Ui::Poll reads it with the other six. Hold it and press A for the
+// screensaver, or hold it and press the right encoder for the app menu.
+// What has NOT been confirmed on the bench is that the grey button on the
+// panel is the thing on pin 20 -- see README.md.
 
 // --- encoders --------------------------------------------------------------
 // Turning is relative, like the hardware: every gesture resolves to a count of

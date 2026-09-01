@@ -34,14 +34,16 @@ PAGE = os.path.join(HERE, "gui.html")
 # Only these reach the simulator's key handler. Anything else is dropped here
 # rather than shipped to the child, so a malformed request cannot desynchronise
 # the line protocol.
-KEYS = set("abxylr[],.{}<>nNwtq")
+KEYS = set("abxyzlr[],.{}<>nNwtq1234")
 WORD_KEYS = {
     "encl", "encr", "encl-", "encl+", "encr-", "encr+",
     "note", "busnote", "wait",
 }
-# Buttons that can be held. The panel has six; z is the Z button the firmware
-# polls (OC_gpio.cpp gives it a pin on this hardware) and the browser reaches by
-# keyboard only, because it is not one of the six drawn on the panel.
+# Buttons that can be held. Seven, including z -- the grey `clock` button. The
+# firmware initialises but_mid on pin 20 for this hardware and OC::Ui polls it
+# as CONTROL_BUTTON_M, so the simulator drives it like any other button. Its
+# binding to the physical grey button has not been confirmed on the bench; see
+# README.md.
 BUTTONS = {"a", "b", "x", "y", "z", "l", "r", "encl", "encr"}
 
 
@@ -75,6 +77,8 @@ class Sim:
             name, _, value = line.partition(" ")
             if name == "log":
                 state["log"].append(value)
+            elif name == "session":
+                state.setdefault("session", []).append(value)
             elif name in ("busy", "synthetic", "overlay"):
                 state[name] = value == "1"
             elif name in ("millis", "logtotal"):
@@ -219,6 +223,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "s must be down or up"}, 400)
                     return
                 st = self.sim.command("btn %s %s" % (k, s))
+            elif url.path == "/api/session":
+                # The recorded session, for the copy/download buttons. Reading
+                # it changes nothing.
+                st = self.sim.command("session")
             elif url.path == "/api/release-all":
                 st = self.sim.command("release-all")
             elif url.path == "/api/enc":
