@@ -124,9 +124,40 @@ static constexpr uint16_t kManifestKey = 8 << 8;    // == PRESETBUS_KEY
 static constexpr uint16_t kSchemaKey  = kManifestKey | 0;
 static constexpr uint16_t kFlagsKey   = kManifestKey | 1;
 static constexpr uint64_t kSchemaVersion = 1;
-// current bus slot, persisted (debounced) into GLOBALS.CFG so boot can
-// restore the preset the case was on -- 200e power-up semantics
+// Where firmware before the EEPROM record (below) kept the current slot: a
+// key in GLOBALS.CFG. Read once at boot to migrate; never written again. The
+// key may linger in old GLOBALS.CFG files and in the 'G' section of old
+// containers, and is ignored there.
 static constexpr uint16_t kCurSlotKey = kManifestKey | 0x13;
+
+// The current bus slot, persisted (debounced) so boot can restore the preset
+// the case was on -- 200e power-up semantics. Four bytes of emulated EEPROM
+// (EEPROM_PRESETBUS_START, OC_config.h): magic, slot, ~slot, spare. Erased
+// flash reads 0xFF, and 0xFF is not ~0xFF, so a never-written record fails
+// the complement check instead of decoding as slot 255.
+//
+// Not a file. A LittleFS write costs a 64 KB block erase with interrupts off
+// (~270 ms of dead audio, USB and bus), and this write lands three seconds
+// after every preset change -- i.e. while the performer is playing the sound
+// they just recalled. An emulated-EEPROM byte is a single 2-byte flash program
+// and is skipped when the value has not changed (cores/teensy4/eeprom.c).
+static constexpr uint8_t kCurSlotMagic = 'P';
+
+FLASHMEM static bool cur_slot_load(uint8_t *slot) {
+  uint8_t rec[EEPROM_PRESETBUS_SIZE];
+  EEPROMStorage::read(EEPROM_PRESETBUS_START, rec, sizeof(rec));
+  if (rec[0] != kCurSlotMagic || rec[2] != (uint8_t)~rec[1]) return false;
+  if (rec[1] >= kNumSlots) return false;
+  *slot = rec[1];
+  return true;
+}
+
+FLASHMEM static void cur_slot_store(uint8_t slot) {
+  const uint8_t rec[EEPROM_PRESETBUS_SIZE] = {
+    kCurSlotMagic, slot, (uint8_t)~slot, 0xFF,
+  };
+  EEPROMStorage::update(EEPROM_PRESETBUS_START, rec, sizeof(rec));
+}
 
 // Quadrants writes its live preset id under this bare (bank-globals) key
 // when handling APP_EVENT_FLUSH, so the extractor knows which preset block
@@ -177,11 +208,10 @@ static uint32_t req_dropped = 0;
 static int8_t last_slot = -1;
 static bool last_was_save = false;
 static uint32_t cur_slot_dirty_ms = 0;   // 0 = clean
-// What GLOBALS.CFG holds under kCurSlotKey, mirrored so persist_cur_slot can
-// tell "already there" from "needs a write" without reloading the file. This
-// engine is the key's only writer (recall applies globals to RAM, never back
-// to GLOBALS.CFG), so the mirror cannot go stale behind our back. -1 = unknown
-// or absent, which forces the read-compare-write path once.
+// What the EEPROM record holds, mirrored so persist_cur_slot can skip the
+// common case (a bus save, or the manager re-sending the current preset)
+// without a read. This engine is the record's only writer. -1 = unknown or
+// absent.
 static int8_t persisted_slot = -1;
 static uint32_t op_count = 0;            // completed save/recall operations
 static bool last_save_ok = false;
@@ -1160,45 +1190,39 @@ bool RequestRecall(uint8_t slot) { return enqueue(REQ_RECALL, slot); }
 uint32_t RequestsDropped() { return req_dropped; }
 
 // persist the current slot ~3s after preset activity settles, so
-// trigger-driven preset cycling never write-hammers GLOBALS.CFG
+// trigger-driven preset cycling never write-hammers the record. Touches
+// neither PhzConfig's map nor the app: nothing here to hand back or RESUME.
 FLASHMEM static void persist_cur_slot() {
   cur_slot_dirty_ms = 0;
-  if (last_slot < 0) return;
-  // Recalling the slot that is already persisted (the common case: a bus
-  // save, or the manager re-sending the current preset) must cost nothing.
-  // Before the mirror existed this reloaded GLOBALS.CFG and RESUMEd the app
-  // every time just to discover that, and for Quadrants a RESUME is a bank
-  // reload -- 3s after every preset op, for no state change at all.
-  if (persisted_slot == last_slot) return;
-  PhzConfig::load_config();
-  uint64_t v = 0;
-  PhzConfig::getValue(kCurSlotKey, v);
-  if ((int64_t)v != last_slot) {
-    PhzConfig::setValue(kCurSlotKey, (uint64_t)last_slot);
-    if (PhzConfig::save_config()) persisted_slot = last_slot;
-    serial_printf("PresetEngine: current slot %d persisted%s\n", last_slot,
-                  persisted_slot == last_slot ? "" : " FAILED");
-  } else {
-    persisted_slot = last_slot;
-  }
-  // CRITICAL: hand the shared map back to the active app. Quadrants
-  // assumes bank-map residency; leaving GLOBALS loaded here would make
-  // its next preset save overwrite the bank file with the wrong map.
-  app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
+  if (last_slot < 0 || persisted_slot == last_slot) return;
+  cur_slot_store((uint8_t)last_slot);
+  uint8_t check = 0;
+  const bool ok = cur_slot_load(&check) && check == last_slot;
+  persisted_slot = ok ? last_slot : -1;
+  serial_printf("PresetEngine: current slot %d persisted%s\n", last_slot,
+                ok ? "" : " FAILED");
 }
 
 FLASHMEM void BootRecall() {
-  // GLOBALS.CFG is the loaded map right after boot restore
-  uint64_t v = 0;
-  PhzConfig::load_config();
-  if (!PhzConfig::getValue(kCurSlotKey, v) || v >= kNumSlots) return;
-  persisted_slot = (int8_t)v;   // seed the mirror from the one read boot does
-  if (!SlotUsed((uint8_t)v)) return;
-  serial_printf("PresetEngine: boot recall slot %d\n", (int)v);
+  uint8_t slot = 0;
+  if (!cur_slot_load(&slot)) {
+    // No record yet: either a fresh module or firmware that kept the slot in
+    // GLOBALS.CFG, which is still the loaded map right after boot restore.
+    // Migrate it into the record so this branch runs once.
+    uint64_t v = 0;
+    PhzConfig::load_config();
+    if (!PhzConfig::getValue(kCurSlotKey, v) || v >= kNumSlots) return;
+    slot = (uint8_t)v;
+    cur_slot_store(slot);
+    serial_printf("PresetEngine: slot %d migrated from GLOBALS.CFG\n", slot);
+  }
+  persisted_slot = (int8_t)slot;   // seed the mirror from the one read boot does
+  if (!SlotUsed(slot)) return;
+  serial_printf("PresetEngine: boot recall slot %d\n", slot);
   // Local only -- no bus broadcast at power-up. Queued as its own op so the
   // keep-live-Captain rule travels with THIS request rather than sitting in
   // a static that whatever recall ran first would consume.
-  enqueue(REQ_BOOT_RECALL, (uint8_t)v);
+  enqueue(REQ_BOOT_RECALL, slot);
 }
 
 FLASHMEM void Process() {

@@ -71,11 +71,22 @@ static constexpr unsigned long SETTINGS_SAVE_TIMEOUT_MS = 1000;
 #define EEPROM_GLOBALSETTINGS_START EEPROM_CALIBRATIONDATA_END
 
 #define EEPROM_APPDATA_START EEPROM_GLOBALSETTINGS_END
-#define EEPROM_APPDATA_END EEPROMStorage::LENGTH
 
 #ifdef ARDUINO_TEENSY41
-#define EEPROM_APPDATA_BINARY_SIZE (EEPROM_APPDATA_END - EEPROM_APPDATA_START - 160)
+// The top 4 bytes of the emulated EEPROM hold the current preset-bus slot
+// (PresetEngine.cpp: persist_cur_slot / BootRecall). It lives here and not in
+// GLOBALS.CFG because a LittleFS write is a 64 KB block erase with interrupts
+// off -- ~270 ms of dead audio, USB and bus, three seconds after every preset
+// change -- while an emulated-EEPROM byte is one 2-byte program (eeprom.c),
+// skipped outright when the value is unchanged. Carved off the app-data
+// region explicitly; the 160-byte reserve became 156 so BINARY_SIZE stays
+// 3900 and app data stored by earlier firmware still validates.
+#define EEPROM_PRESETBUS_SIZE 4
+#define EEPROM_PRESETBUS_START (EEPROMStorage::LENGTH - EEPROM_PRESETBUS_SIZE)
+#define EEPROM_APPDATA_END EEPROM_PRESETBUS_START
+#define EEPROM_APPDATA_BINARY_SIZE (EEPROM_APPDATA_END - EEPROM_APPDATA_START - 156)
 #else
+#define EEPROM_APPDATA_END EEPROMStorage::LENGTH
 // This is the available space for all apps' settings (\sa OC_apps.ino)
 #define EEPROM_APPDATA_BINARY_SIZE (EEPROM_APPDATA_END - EEPROM_APPDATA_START - 32)
 #endif

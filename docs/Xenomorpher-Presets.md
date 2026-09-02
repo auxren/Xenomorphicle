@@ -120,9 +120,13 @@ but it is why saving is not something to do from a hot path.
 **About 3 ms.** A recall validates the container, moves bytes, and switches
 the app; it writes nothing, so it never erases and never compacts. The only
 write it causes is deferred: three seconds after the last recall the current
-slot number is persisted to `GLOBALS.CFG` so the next boot lands on it, and
-that write is one block erase — unless the slot is already the persisted one,
-in which case nothing is written.
+slot number is persisted so the next boot lands on it. That record lives in
+the emulated EEPROM, not in a file — four bytes at the top of the EEPROM map
+(`EEPROM_PRESETBUS_START`), written as one 2-byte flash program and skipped
+when unchanged. It used to be a key in `GLOBALS.CFG`, which made every
+preset change cost a 64 KB erase with interrupts off three seconds later,
+while the performer was playing the sound they had just recalled. Modules
+upgraded from that firmware migrate the key into the record on first boot.
 
 The 3 ms depends on the directory log being short, and here is the trap. A
 littlefs `open()` walks the directory log from the start, CRC-checking every
