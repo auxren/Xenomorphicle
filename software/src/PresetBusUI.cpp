@@ -458,16 +458,18 @@ void Task() {
   // from following only made the write land on the wrong slot instead of
   // the right one. Nothing is written; the panel then follows.
   //
-  // A RECALL hold keeps its gate: it is a statement about the slot that was
-  // showing when the button went down, and following the bus mid-hold would
-  // recall the bus's slot instead. The op count is left unconsumed, so the
-  // catch-up happens the moment the button lifts. A rename needs no gate:
-  // it is bound to edit_slot, not sel, and the digit shows edit_slot while
-  // it runs.
+  // A RECALL hold keeps its gate until it fires: it is a statement about the
+  // slot that was showing when the button went down, and following the bus
+  // mid-hold would recall the bus's slot instead. The op count is left
+  // unconsumed, so the catch-up happens the moment the hold fires or the
+  // button lifts -- a fired hold is spent (one shot, re-armed by release),
+  // so there is nothing left to protect while the finger stays down. A
+  // rename needs no gate: it is bound to edit_slot, not sel, and the digit
+  // shows edit_slot while it runs.
   static uint32_t seen_opcount = 0;
   if (PresetEngine::OpCount() != seen_opcount && pending_slot < 0 && hold_start_ms && !store_fired)
     cancel_store_hold();
-  const bool mid_gesture = hold_start_ms || recall_hold_ms;
+  const bool mid_gesture = hold_start_ms || (recall_hold_ms && !recall_fired);
   if (pending_slot < 0 && !mid_gesture && PresetEngine::OpCount() != seen_opcount) {
     seen_opcount = PresetEngine::OpCount();
     // BusSlot, not LastSlot: a recall the engine refused (EMPTY SLOT) still
@@ -549,15 +551,20 @@ void Task() {
 
     // completion watch: the engine bumps OpCount when the op finishes
     if (pending_slot >= 0) {
-      if (PresetEngine::OpCount() != pending_opcount &&
-          (PresetEngine::LastWasSave() != pending_was_save ||
-           PresetEngine::BusSlot() != pending_slot)) {
-        // some OTHER op finished first (the engine queues, so a bus recall
-        // that was already in line lands before our STORE): not ours, keep
-        // waiting rather than announce "STORED" on its behalf
+      // Which finished op answers the gesture? A STORE only its own: the
+      // engine queues, so a bus recall already in line lands before our
+      // SAVE, and announcing "STORED" on its behalf would be a lie. A RECALL
+      // is answered by ANY recall: the engine merges a recall queued behind
+      // ours over it (the case applies the last one anyway), so a manager's
+      // recall 5 arriving while a SAVE held ours up is what the case did --
+      // waiting for "recall 3" then meant 4 s of a panel stuck on 3, the
+      // follow blocked, and "RECALL FAILED" for a recall that did happen.
+      const bool other_op = PresetEngine::LastWasSave() != pending_was_save ||
+                            (pending_was_save && PresetEngine::BusSlot() != pending_slot);
+      if (PresetEngine::OpCount() != pending_opcount && other_op) {
         pending_opcount = PresetEngine::OpCount();
       } else if (PresetEngine::OpCount() != pending_opcount) {
-        const uint8_t shown = (uint8_t)pending_slot + 1;
+        const uint8_t shown = (uint8_t)PresetEngine::BusSlot() + 1;
         if (pending_was_save) {
           snprintf(banner, sizeof(banner),
                    PresetEngine::LastSaveOk() ? "STORED %d" : "STORE ERR %d", shown);

@@ -313,18 +313,22 @@ FLASHMEM static void pump_broadcast() {
   Wire.write(f, sizeof(f));
   const uint8_t err = Wire.endTransmission();
   if (err == 0) {
-    Bus200eSuppressFrame(f, sizeof(f));
-    drain_ring();  // consume our own self-echo while suppression is fresh
-  }
-
-  if (err == 0) {
     bcast_dequeue();
     bcast_tx++;
-    // our slave never hears our own TX (the self-echo above was just
-    // suppressed and dropped): dispatch locally so this module saves/
-    // recalls in lockstep with the rest of the bus
+    // the only thing our slave hears of our own TX is the self-echo, which
+    // the drain below suppresses and drops: dispatch locally so this module
+    // saves/recalls in lockstep with the rest of the bus. BEFORE the drain:
+    // the wire order is the engine order. A manager frame that follows ours
+    // on the wire could be sitting in the ring by the time the drain parses
+    // it, and dispatching ours after it would run "recall 5, then save 3"
+    // for a wire that said "save 3, then recall 5" -- preset 5's state
+    // written into slot 3. Whether the ring can hold a whole frame that
+    // fast is not something to depend on; the enqueue is instant, so the
+    // suppression window is as fresh at the drain as it was.
     if ((cmd >> 8) == 0x02) PresetEngine::RequestSave(cmd & 0x1F);
     else PresetEngine::RequestRecall(cmd & 0x1F);
+    Bus200eSuppressFrame(f, sizeof(f));
+    drain_ring();  // consume our own self-echo while suppression is fresh
     if (verbose) Serial.printf("PresetBus: broadcast %s %d\n",
                                (cmd >> 8) == 0x02 ? "SAVE" : "RECALL",
                                cmd & 0x1F);

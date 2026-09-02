@@ -200,6 +200,15 @@ $SIM --keys "$ENTER,$NEXT_TR1,l-down,step200,wpm5,step200" --dump-fb 2>/dev/null
   | python3 fbtext.py - | grep -q 'STORE OFF' \
   && ok "and the panel says STORE OFF" \
   || bad "the STORE cancelled by a manager recall left no word on the panel"
+# A RECALL hold that has fired is spent (one shot, re-armed by release), so
+# the follow gate lifts with the fire, not the release: a manager recall
+# while the finger is still down moves the panel at once, and a pulse then
+# steps from where the case is. It used to step from the slot the hold
+# recalled -- 0 -> 1 while the case went 5 -> 6.
+$SIM --full-log --keys "$ENTER,$NEXT_TR1,r-down,step300,wpm5,step300,1,step300,r-up,step1500" > "$TMP/wf4" 2>&1
+[ "$(grep -o 'recall slot [0-9]*$' "$TMP/wf4" | tr '\n' '|')" = "recall slot 0|recall slot 5|recall slot 6|" ] \
+  && ok "RECALL hold fired and still held: manager recalls 5, NEXT pulse recalls 6" \
+  || bad "RECALL hold fired and still held: recalls went $(grep -o 'recall slot [0-9]*$' "$TMP/wf4" | tr '\n' '|'), wanted 0|5|6"
 
 # A rename is bound to the slot it was opened on. A pulse mid-edit moves the
 # selection (it is a performance event; it cannot wait for a menu), and the
