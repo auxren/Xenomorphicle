@@ -25,6 +25,17 @@ hardware/firmware, and the implementation follows the *corrected* model:
    a backup/restore corrupts the user's card data. This became the 1.5s
    post-transfer TX holdoff (`Bus200eLastTransferMs()` consulted by
    `tx_gate_open()` and the bus-stuck detector).
+3. **A module announces the end of a card transfer.** Bench capture
+   2026-09-02: right after the last of the 63120 bytes of a BACKUP we had
+   asked for reached our card, the 251e at 0x5C mastered `[04 22 5C 0A 5C]`
+   — the module→manager form a QUERY reply uses (dest 0x22, src = module),
+   command 0x0A, one payload byte (its own address). Nothing in 2WIRELESS
+   handles it (a WPM in card mode swallows it into FRAM as data, which is
+   why its backup dumps end 5 bytes long) and no prior note knew it.
+   Decoded as `BUS200E_OP_XFER_DONE`; the master FSM uses it as evidence,
+   shortening its post-activity quiet wait from 1500 ms to 200 ms for the
+   job's own module (DONE at 7.4 s instead of 8.2 s on that read). One
+   module type, one direction (BACKUP) observed; a RESTORE has not been.
 
 ## Acceptance criteria
 
