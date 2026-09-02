@@ -145,6 +145,9 @@ void start_calibration();
 // remote bench control: suspend/switch/resume to an app (loop context only)
 void SwitchToApp(size_t index);
 void SwitchToDefaultApp();
+// re-run AppSwitcher::Init live (Backup restore, factory reset): same
+// choreography as SwitchToApp around it (loop context only)
+void ReinitApps(bool reset_settings);
 size_t NumApps();
 void ListApps();  // console: index, id, name of every app in the container
 

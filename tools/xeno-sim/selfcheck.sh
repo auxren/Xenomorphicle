@@ -123,6 +123,20 @@ grep -q 'AB$' "$TMP/p3" \
   && ok "a rename interrupted by a NEXT pulse still lands on the slot it was opened on" \
   || bad "a rename interrupted by a NEXT pulse landed elsewhere (slot 1 row: $(cat "$TMP/p3"))"
 
+# A factory reset from Setup (encR arms, B commits) re-runs AppSwitcher::Init
+# live. It used to switch to the default app with the ISR still running and
+# never sent it RESUME; now it goes through the same stop/switch/resume
+# choreography as the app menu, and the default app must be up and drawing.
+echo "a runtime factory reset lands in the default app, resumed"
+$SIM --app "Setup/About" --keys "r,step500,b,step2000" > "$TMP/fr1" 2>&1
+grep -q 'Filesystem formatted' "$TMP/fr1" \
+  && ok "encR then B in Setup erases storage" \
+  || bad "encR then B in Setup did not reach the erase"
+$SIM --app "Setup/About" --keys "r,step500,b,step2000" --dump-fb 2>/dev/null \
+  | python3 fbtext.py - | grep -q '^y=1 .*200e Modules' \
+  && ok "and the default app is drawing afterwards" \
+  || bad "the default app is not drawing after the reset"
+
 echo "screens are reachable"
 reaches() {  # name, keys, expected screen word
   $SIM --keys "$2" 2>&1 | grep -q "^  $3 " \

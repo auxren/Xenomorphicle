@@ -525,10 +525,20 @@ bool AppSwitcher::Init(bool reset_settings) {
   // Skipped once a reset is already confirmed: the answer couldn't change it.
   bool stored_valid = false;
 #ifdef __IMXRT1062__
-  // Peeking the already-loaded PhzConfig map is a pure read.
+  // Peeking the PhzConfig map is a pure read -- but only of whatever file is
+  // IN the map. At boot that is GLOBALS.CFG. At runtime it is whichever file
+  // was touched last: CAPTAIN.DAT after Captain's Suspend, a bank after
+  // Quadrants, a slot section after a bus recall. Peeking one of those finds
+  // no METADATA_KEY, which read as "no stored settings", which went down the
+  // defaults branch, whose SaveGlobalSettings() then loaded the REAL
+  // GLOBALS.CFG and overwrote it with factory values. A Backup restore, run
+  // in the wrong app order, silently reset the user's scales and MIDI maps.
+  // Loading the globals file first costs one file read and makes the answer
+  // about storage, not about what happened to be in RAM.
   uint64_t metadata = 0;
   bool have_metadata = false;
   if (!caller_confirmed) {
+    if (runtime_call) PhzConfig::load_config();
     have_metadata = PhzConfig::getValue(METADATA_KEY, metadata);
     if (have_metadata)
       stored_valid = Unpack(metadata, PackLocation{17, 1}); // v2.0 first-run bit
@@ -1047,6 +1057,41 @@ FLASHMEM void SwitchToApp(size_t index) {
 }
 
 FLASHMEM void SwitchToDefaultApp() { SwitchToApp(DEFAULT_APP_INDEX); }
+
+// Re-run AppSwitcher::Init while the instrument is running: a Backup restore
+// (reload what the SysEx just wrote to EEPROM) or Setup's factory reset.
+//
+// Both used to call app_switcher.Init() bare, and Backup's call came from
+// inside the app ISR -- ListenForSysEx runs in Process(). Init then spent
+// 100+ ms in that ISR (its closing delay, plus file reads and, on the
+// defaults branch, a flash write) with USB starved underneath it, ran
+// InitDefaults() over the very app whose Process() it was executing inside,
+// and swapped current_app_ out from under it. Neither caller sent the new app
+// APP_EVENT_RESUME: Init at boot leaves that to setup(), so a runtime Init
+// landed in Captain with no CAPTAIN.DAT loaded and, with audio, no output
+// path built. This is the same suspend / stop ISR / switch / resume
+// choreography SwitchToApp uses, with Init in the middle. Loop context only.
+FLASHMEM void ReinitApps(bool reset_settings) {
+  app_switcher.current_app()->DispatchAppEvent(APP_EVENT_SUSPEND);
+  CORE::app_isr_enabled = false;
+  delay(1);
+  FreqMeasure.end();
+  DigitalInputs::reInit();
+#ifdef AUDIO_INTERFACE
+  AudioNoInterrupts();
+#endif
+  app_switcher.Init(reset_settings);
+  // A reset formatted the filesystem: the engine's RAM copy of the slot
+  // names now describes presets that no longer exist.
+  if (reset_settings) PresetEngine::Init();
+  app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
+#ifdef AUDIO_INTERFACE
+  AudioInterrupts();
+#endif
+  CORE::app_isr_enabled = true;
+  CORE::app_loop_enabled = true;
+  ::MENU_REDRAW = 1;
+}
 
 // The container is file-static (apps/_config.h), so the console's app table
 // has to be printed from here. Index is what SwitchToApp() takes; id is what

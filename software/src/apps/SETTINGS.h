@@ -770,7 +770,10 @@ public:
     }
 
     void FactoryReset() {
-      OC::app_switcher.Init(true);
+      // Not a bare Init(): that switched to the default app with the ISR
+      // still running and never sent it RESUME. ReinitApps does the same
+      // stop/switch/resume dance the app menu does, around the reset.
+      OC::ReinitApps(true);
     }
 };
 

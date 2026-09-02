@@ -156,12 +156,36 @@ public:
       uint16_t address = p * 32;
       for (int b = 0; b < 32; b++) EEPROM.write(address++, V[ix++]);
 
-      // Reset on last packet
-      if (p == ((EEPROM_CALIBRATIONDATA_END / 32) - 1)
-          || p == ((EEPROMStorage::LENGTH / 32) - 1)) {
+      // Last packet: the EEPROM now holds the backup, and the live copies
+      // must be reloaded from it. Not here -- this runs in the app ISR
+      // (ListenForSysEx is called from Process), and AppSwitcher::Init is
+      // 100+ ms of file I/O that ends by switching the current app out from
+      // under the very Process() call we are inside. Loop() picks it up.
+      if (p == ((EEPROM_CALIBRATIONDATA_END / 32) - 1)) {
         receiving = 0;
-        OC::app_switcher.Init(0);
+        reload_pending_ = RELOAD_CALIBRATION;
+      } else if (p == ((EEPROMStorage::LENGTH / 32) - 1)) {
+        receiving = 0;
+        reload_pending_ = RELOAD_APPDATA;
       }
+    }
+  }
+
+  // Loop context: apply a finished restore.
+  void ApplyPendingReload() {
+    const uint8_t what = reload_pending_;
+    if (!what) return;
+    reload_pending_ = 0;
+    if (what == RELOAD_CALIBRATION) {
+      // Init() never reloaded calibration -- that happens once, in setup() --
+      // so a restored calibration took effect only after the next power
+      // cycle, with nothing on screen to say so. Read it back the way boot
+      // does. ADC::Init keeps a pointer to calibration_data.adc, and the DAC
+      // tables are read per sample, so the values apply without a re-init.
+      OC::calibration_load();
+      OC::SetFlipMode(OC::calibration_data.flipcontrols());
+    } else {
+      OC::ReinitApps(false);
     }
   }
 
@@ -170,6 +194,8 @@ private:
   bool receiving = 0;
   uint8_t packet = 0;
   bool restore_armed_ = 0;
+  enum : uint8_t { RELOAD_CALIBRATION = 1, RELOAD_APPDATA = 2 };
+  volatile uint8_t reload_pending_ = 0;   // set in the ISR, consumed in Loop()
   uint32_t armed_ms_ = 0;    // millis() the confirm screen appeared
   bool b_down_solo_ = 0;     // B went down alone, after that screen appeared
 
@@ -286,7 +312,7 @@ void AppBackup::HandleAppEvent(OC::AppEvent event) {
   if (event == OC::APP_EVENT_SUSPEND || event == OC::APP_EVENT_SCREENSAVER_ON)
     Disarm();
 }
-void AppBackup::Loop() {} // Deprecated
+void AppBackup::Loop() { ApplyPendingReload(); }
 FLASHMEM
 void AppBackup::DrawScreensaver() const {
   View();
