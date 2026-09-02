@@ -637,7 +637,7 @@ size_t AppScenery::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
 
 size_t AppScenery::RestoreAppData(util::StreamBufferReader &stream_buffer) {
 #ifndef __IMXRT1062__
-  for (int i = 0; i < 4; ++i) {
+  for (int i = 0; i < NR_OF_SCENE_PRESETS; ++i) {
     scene_presets[i].Restore(stream_buffer);
   }
   LoadPreset();
