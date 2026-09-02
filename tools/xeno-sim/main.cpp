@@ -124,6 +124,7 @@ const char *kLegend =
     "l/r encoder pushes (encL/encR)   [ ] encL turn -/+   , . encR turn -/+\n"
     "{ } < > the same, x10            1-4 pulse TR1-TR4 (225e last/next jacks)\n"
     "~1-~4 a zero-width spike on TR1-TR4, seen only by the edge latch\n"
+    "export / import: the console's E and J, every slot to/from the card\n"
     "n note-on -> USB host port 0     N note-on -> 200e bus MIDI\n"
     "w advance 1 simulated second     t toggle fast/real scan pacing   q quit\n"
     "chords need held buttons: a terminal cannot report a key being HELD, so\n"
@@ -230,6 +231,24 @@ bool ApplyKey(const std::string &k) {
     return true;
   }
   if (k == "w" || k == "wait") { Advance(1000); return true; }
+  // The bench console's E and J: every slot to the card, every slot the card
+  // holds back in. The console itself is not compiled here, so the engine
+  // calls are made directly and each slot's verdict is logged by name.
+  if (k == "export" || k == "import") {
+    const bool imp = (k == "import");
+    SimSessionRecord(k);
+    static const char *const verdict[] = {
+      "ok", "no card", "empty", "bad slot", "bad file", "legacy", "FAILED" };
+    for (uint8_t i = 0; i < OC::PresetEngine::kNumSlots; ++i) {
+      const OC::PresetEngine::ExportResult r =
+          imp ? OC::PresetEngine::ImportSlot(i) : OC::PresetEngine::ExportSlot(i);
+      if (r == OC::PresetEngine::EXPORT_EMPTY) continue;
+      SimLog("%s slot %d: %s", imp ? "import" : "export", i,
+             (unsigned)r < 7 ? verdict[r] : "?");
+    }
+    Advance(5);
+    return true;
+  }
   if (k == "t") {
     SimBusSetRealTiming(!SimBusRealTiming());
     SimSessionRecord(std::string("timing ") +

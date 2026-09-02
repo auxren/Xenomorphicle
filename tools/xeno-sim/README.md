@@ -49,7 +49,12 @@ changes what is highlighted, **hold the left encoder 500 ms to STORE**, **hold
 the right encoder 250 ms to RECALL**, and both progress bars fill for real —
 they are timed by `PresetBusUI::Task()` against `ui.read_immediate()`, and the
 simulator drives that from actual held pin state. `1` `2` `3` `4` pulse TR1-TR4,
-which is what the 225e last/next jacks are wired to.
+which is what the 225e last/next jacks are wired to; `~1`..`~4` are the same
+jacks with a zero-width spike — high and low again before any time passes —
+that only the GPIO block's edge latch can see. The simulator sets the port's
+ISR flag on the active-going edge the way the silicon does, so
+`DigitalInputs::Scan()` sees real edges here and the preset overlay's
+NEXT/LAST stepping runs on the latched-edge path it uses on hardware.
 
 The boot-time gestures — hold the left encoder through the splash for
 Calibrate, the right encoder for the app menu — run too, but there is no flag
@@ -147,11 +152,14 @@ check assert what a person would actually read, instead of a frame hash that
 says only "something moved". `selfcheck.sh` uses it for the whole 200e write
 path.
 
-`corrupt_slot.py IN OUT SLOT SECTION [--fix-sum]` damages one preset container
-inside a `--state` file: one bit flipped in the named section's payload, and
-with `--fix-sum` the container's section checksum recomputed so the damage gets
-past the engine and reaches PhzConfig's own reader. `selfcheck.sh` recalls both
-and expects `BAD PRESET` from each layer.
+`corrupt_slot.py IN OUT SLOT SECTION [--fix-sum] [--sd]` damages one preset
+container inside a `--state` file: one bit flipped in the named section's
+payload, and with `--fix-sum` the container's section checksum recomputed so
+the damage gets past the engine and reaches PhzConfig's own reader. `--sd`
+damages the copy on the card volume instead — an exported container — for the
+import path. `selfcheck.sh` recalls both and expects `BAD PRESET` from each
+layer, and imports the damaged card copy expecting `bad file` with the local
+slot untouched.
 
 `edgecheck.py` reads the same capture for the one thing `fbtext.py` structurally
 cannot see: **text clipped at the right edge**.
@@ -407,6 +415,8 @@ toggle pacing) and the session controls live in visually distinct cards marked
 | `,` `.` | right encoder turn, −1 / +1 |
 | `{` `}` `<` `>` | the same, ×10 |
 | `1` `2` `3` `4` | pulse TR1-TR4 |
+| `~1` `~2` `~3` `~4` | a zero-width spike on TR1-TR4, seen only by the edge latch |
+| `export` `import` | the bench console's `E` and `J`: every slot to / from the card |
 | `n` | note-on into `usbHostMIDI[0]` — the port the k-board lives on |
 | `N` | note-on into the 200e bus MIDI RX ring |
 | `w` | advance one simulated second |

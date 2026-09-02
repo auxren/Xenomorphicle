@@ -612,30 +612,32 @@ FLASHMEM static bool cw_commit(ContainerWriter &w, const char *tmp, const char *
 // Open a slot container and read its directory. Returns false when the file
 // is absent or not a container -- the caller then falls back to the legacy
 // multi-file layout.
+FLASHMEM static bool container_parse(File &f, SectionEntry *sec, int &n) {
+  ContainerHeader h;
+  if (f.read((uint8_t *)&h, sizeof(h)) != sizeof(h) ||
+      h.fourcc != kContainerFourcc || h.version != kContainerVersion ||
+      h.count > kMaxSections)
+    return false;
+  n = h.count;
+  for (int i = 0; i < n; ++i) {
+    if (f.read((uint8_t *)&sec[i], sizeof(sec[i])) != sizeof(sec[i]))
+      return false;
+    // a section must lie inside the file
+    if (sec[i].offset < kPayloadStart ||
+        (uint64_t)sec[i].offset + sec[i].length > (uint64_t)f.size())
+      return false;
+  }
+  return true;
+}
+
 FLASHMEM static bool container_open(uint8_t slot, File &f, SectionEntry *sec, int &n) {
   char name[12];
   container_name(name, slot);
   f = preset_fs().open(name, FILE_READ);
   if (!f) return false;
-  ContainerHeader h;
-  if (f.read((uint8_t *)&h, sizeof(h)) != sizeof(h) ||
-      h.fourcc != kContainerFourcc || h.version != kContainerVersion ||
-      h.count > kMaxSections) {
+  if (!container_parse(f, sec, n)) {
     f.close();
     return false;
-  }
-  n = h.count;
-  for (int i = 0; i < n; ++i) {
-    if (f.read((uint8_t *)&sec[i], sizeof(sec[i])) != sizeof(sec[i])) {
-      f.close();
-      return false;
-    }
-    // a section must lie inside the file
-    if (sec[i].offset < kPayloadStart ||
-        (uint64_t)sec[i].offset + sec[i].length > (uint64_t)f.size()) {
-      f.close();
-      return false;
-    }
   }
   return true;
 }
@@ -683,6 +685,23 @@ FLASHMEM static bool section_sum_ok(File &f, const SectionEntry &e) {
     left -= want;
   }
   return sum == e.checksum;
+}
+
+// Everything a recall would check before applying, on an arbitrary file:
+// directory parses, every section adds up, and the two sections no preset
+// is complete without are present. This is the bar for a container that
+// arrives from OUTSIDE (a card import) before it may replace a local slot,
+// and for proving an export actually landed on the card.
+FLASHMEM static bool container_verify(FS &fs, const char *name) {
+  File f = fs.open(name, FILE_READ);
+  if (!f) return false;
+  SectionEntry sec[kMaxSections];
+  int n = 0;
+  bool ok = container_parse(f, sec, n);
+  for (int i = 0; ok && i < n; ++i) ok = section_sum_ok(f, sec[i]);
+  if (ok) ok = find_section(sec, n, 'A') && find_section(sec, n, 'G');
+  f.close();
+  return ok;
 }
 
 // True when `dest` already holds exactly the section's bytes. Reads only,
@@ -1568,12 +1587,10 @@ FLASHMEM ExportResult ExportSlot(uint8_t slot) {
 
   if (!copy_file(preset_fs(), name, *card, name)) return EXPORT_FAILED;
 
-  // Prove it landed. A card that reports a successful write and stores
-  // nothing is the exact failure this whole engine is built to notice.
-  File v = card->open(name, FILE_READ);
-  const bool ok = v && v.size() >= (int)kPayloadStart;
-  if (v) v.close();
-  if (!ok) { card->remove(name); return EXPORT_FAILED; }
+  // Prove it landed, whole. A card that reports a successful write and
+  // stores nothing is the exact failure this whole engine is built to
+  // notice -- and a size check alone passed a right-sized file of garbage.
+  if (!container_verify(*card, name)) { card->remove(name); return EXPORT_FAILED; }
 
   serial_printf("PresetEngine: exported slot %d to card\n", slot);
   return EXPORT_OK;
@@ -1593,25 +1610,23 @@ FLASHMEM ExportResult ImportSlot(uint8_t slot) {
     if (!have) return EXPORT_EMPTY;
   }
 
-  // Stage through a scratch name and only publish after the copy parses as a
-  // container. Writing straight to PB_NN.PBS would destroy a good local
-  // preset on the strength of a card we have not read yet.
+  // Stage through a scratch name and only publish after the copy verifies
+  // as a container a recall would accept: directory, every checksum, the A
+  // and G sections present. Writing straight to PB_NN.PBS would destroy a
+  // good local preset on the strength of a card we have not read yet -- and
+  // so would checking only the 16-byte header, which is all this did: a
+  // card file truncated or bit-rotted past that point kept its fourcc,
+  // replaced the local slot, and the next recall said BAD PRESET with the
+  // good copy already gone.
   static const char *const kImpTmp = "PB_IMP.TMP";
   preset_fs().remove(kImpTmp);
   if (!copy_file(*card, name, preset_fs(), kImpTmp)) {
     preset_fs().remove(kImpTmp);
     return EXPORT_FAILED;
   }
-  {
-    File v = preset_fs().open(kImpTmp, FILE_READ);
-    ContainerHeader h;
-    const bool ok = v && v.size() >= (int)kPayloadStart &&
-                    v.read((uint8_t *)&h, sizeof(h)) == (int)sizeof(h) &&
-                    h.fourcc == kContainerFourcc &&
-                    h.version == kContainerVersion &&
-                    h.count <= kMaxSections;
-    if (v) v.close();
-    if (!ok) { preset_fs().remove(kImpTmp); return EXPORT_BAD_FILE; }
+  if (!container_verify(preset_fs(), kImpTmp)) {
+    preset_fs().remove(kImpTmp);
+    return EXPORT_BAD_FILE;
   }
 
   // Rename-first, same discipline as cw_commit: on LittleFS the slot is

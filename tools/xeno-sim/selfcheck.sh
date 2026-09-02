@@ -532,6 +532,39 @@ else
   bad "the stored preset set changed with the card state"
 fi
 
+# The card's actual job: export puts a container on it, import brings one
+# back. And an import must never retire a good local slot on the strength
+# of a card file it has not verified: ImportSlot used to check the 16-byte
+# header and nothing else, so a card copy damaged past that point replaced
+# the local slot and the next recall said BAD PRESET with the good copy
+# already gone. Damage the CARD copy (corrupt_slot.py --sd) and import.
+cp "$IMG/xfer" "$IMG/exp"
+$SIM --sd-card --state "$IMG/exp" --keys "export,step100" 2>&1 | grep -q 'export slot 0: ok' \
+  && ok "a stored slot exports to the card" \
+  || bad "the slot did not export"
+grep -q '^file sd PB_00.PBS ' "$IMG/exp" \
+  && ok "...and the container is on the card afterwards" \
+  || bad "no PB_00.PBS on the card after export"
+python3 corrupt_slot.py "$IMG/exp" "$IMG/expbad" 0 G --sd
+cp "$IMG/expbad" "$IMG/imp"
+$SIM --sd-card --state "$IMG/imp" --keys "import,step100" 2>&1 | grep -q 'import slot 0: bad file' \
+  && ok "a damaged card copy is refused on import" \
+  || bad "a damaged card copy was not refused on import"
+grep '^file lfs PB_00.PBS ' "$IMG/exp" > "$TMP/pb_before" || true
+grep '^file lfs PB_00.PBS ' "$IMG/imp" > "$TMP/pb_after"  || true
+if [ ! -s "$TMP/pb_before" ]; then
+  bad "no local container to protect, so the check below is vacuous"
+elif cmp -s "$TMP/pb_before" "$TMP/pb_after"; then
+  ok "...and the local slot is byte-identical to before"
+else
+  bad "the refused import still changed the local slot"
+fi
+# Control: the undamaged card copy imports.
+cp "$IMG/exp" "$IMG/impok"
+$SIM --sd-card --state "$IMG/impok" --keys "import,step100" 2>&1 | grep -q 'import slot 0: ok' \
+  && ok "an undamaged card copy imports (control)" \
+  || bad "the undamaged card copy did not import"
+
 echo "a damaged preset is refused, whichever layer sees the damage"
 
 # One bit flipped inside the stored G section. The container's own section
