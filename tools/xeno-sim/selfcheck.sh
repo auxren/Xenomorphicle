@@ -517,6 +517,34 @@ else
   bad "the stored preset set changed with the card state"
 fi
 
+echo "a damaged preset is refused, whichever layer sees the damage"
+
+# One bit flipped inside the stored G section. The container's own section
+# checksum catches that first; with the checksum recomputed (corrupt_slot.py
+# --fix-sum) the damage reaches PhzConfig's reader, which used to accept a
+# G section whose config half failed as long as its data half passed --
+# and recalled it, app id and all, from the garbage. The control is the
+# undamaged image, which must still recall.
+$SIM --state-out "$IMG/good" --keys "$ENTER,l-down,step600,l-up,step4000" >/dev/null 2>&1
+$SIM --state-in "$IMG/good" --keys "$ENTER,r-down,step300,r-up,step3000" 2>&1 \
+  | grep -q 'recall slot 0 done' \
+  && ok "the undamaged slot recalls (control)" \
+  || bad "the undamaged slot did not recall, so the two refusals below prove nothing"
+python3 corrupt_slot.py "$IMG/good" "$IMG/bad1" 0 G
+python3 corrupt_slot.py "$IMG/good" "$IMG/bad2" 0 G --fix-sum
+$SIM --state-in "$IMG/bad1" --keys "$ENTER,r-down,step300,r-up,step3000" 2>&1 \
+  | grep -q 'refused (BAD PRESET)' \
+  && ok "a flipped bit in the G section is refused by the container checksum" \
+  || bad "a flipped bit in the G section was not refused"
+$SIM --state-in "$IMG/bad2" --keys "$ENTER,r-down,step300,r-up,step3000" 2>&1 \
+  | grep -q 'refused (BAD PRESET)' \
+  && ok "...and with the container checksum patched, by PhzConfig's own" \
+  || bad "a G section with a bad PhzConfig chunk checksum was recalled"
+$SIM --state-in "$IMG/bad2" --keys "$ENTER,r-down,step300,r-up,step3000,b,step500" --dump-fb 2>/dev/null \
+  | python3 fbtext.py - | grep -q '^y=1 ' \
+  && ok "the refused recall leaves an app drawing" \
+  || bad "nothing drawn after the refused recall"
+
 echo "the pre-write bank snapshot"
 
 # Before this existed the write path could DETECT that it had damaged a preset
