@@ -127,7 +127,10 @@ BUS_CODE static void dispatch(Bus200eCmd *c) {
 
     case BUS200E_OP_BACKUP:
     case BUS200E_OP_RESTORE:
-      last_transfer_ms = now_ms | 1;   // any module: the card window is open
+      // any module: the card window is open. 0 means "never", so a zero
+      // reading becomes 1 -- not `| 1`, which would round an even reading
+      // up and make now - last_transfer_ms wrap for the rest of that ms.
+      last_transfer_ms = now_ms ? now_ms : 1;
       if (c->mod_addr != module_addr) break;
       if (job.active) {   // one transfer at a time; a second request is dropped
         Bus200eCmd d = { BUS200E_OP_DROPPED, c->op, 0, 0, 0 };
