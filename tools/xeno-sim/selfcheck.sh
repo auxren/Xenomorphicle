@@ -972,7 +972,7 @@ undone_bad="$W251,],step100,r,step400,r,step8000"
 #    write of a long run scrolls off and a count there measures the cap.)
 sent_undo() {  # 1 if the recovery write reached the wire, 0 if not
   $SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
-       --keys "$W251,$1" 2>&1 | grep -c 'undo -- restoring'
+       --full-log --keys "$W251,$1" 2>&1 | grep -c 'undo -- restoring'
 }
 [ "$(sent_undo 'r,step300')" = "0" ] \
   && ok "a reflex encR after a BAD verdict puts nothing on the wire" \
@@ -1054,7 +1054,10 @@ $SIM --app "200e Modules" --full-log --keys "wpmsave0,step3000,$W251,wpm0,step30
 # like. The tail is dots until the first byte moves, then the bank's percent
 # (the sim moves 30 bytes/ms, so 900 ms in is about a third of 63120), and
 # "100%" once every byte is in and the master is waiting for the module to
-# fall quiet -- that last stretch is real, and the row says so.
+# fall quiet -- that last stretch is real, and the row says so. It is short
+# now: the fake 251e announces the end of its BACKUP like the real one does
+# (XFER_DONE, sim_bus.cpp), so the master waits 200 ms after the last byte
+# instead of 1500, and the row reads LIVE from ~2.6 s.
 # ---------------------------------------------------------------------------
 echo "a bank transfer shows its progress"
 xfer_row() {
@@ -1067,9 +1070,12 @@ xfer_row() {
 echo "$(xfer_row 900)" | grep -qE '^reading 251 A [1-9][0-9]?%$' \
   && ok "a percentage once bytes are moving ($(xfer_row 900))" \
   || bad "no mid-transfer percentage, got '$(xfer_row 900)'"
-[ "$(xfer_row 3000)" = "reading 251 A 100%" ] \
+[ "$(xfer_row 2400)" = "reading 251 A 100%" ] \
   && ok "100% while waiting for the module to fall quiet" \
-  || bad "expected 'reading 251 A 100%' after the bytes, got '$(xfer_row 3000)'"
+  || bad "expected 'reading 251 A 100%' after the bytes, got '$(xfer_row 2400)'"
+[ "$(xfer_row 2800)" = "LIVE 0s ago" ] \
+  && ok "...and LIVE within half a second of the module's announcement" \
+  || bad "expected 'LIVE 0s ago' 400 ms after the announcement, got '$(xfer_row 2800)'"
 # the same tail on the write's two phases: "WRITING" is the restore, "VERIFY"
 # the read-back that follows it, and each counts from 0 again
 $SIM --app "200e Modules" --keys "$W251_ARMED,step400,+r,step900" --dump-fb 2>/dev/null \

@@ -67,6 +67,13 @@ bool g_xfer_restore = false;
 uint32_t g_xfer_start = 0;      // when the target starts touching the card
 uint32_t g_xfer_end = 0;        // when it stops
 uint32_t g_xfer_bytes = 0;
+// A real 251e masters [04 22 <mod> 0A <mod>] the moment its last BACKUP
+// byte is in the card (bench 2026-09-02; see parse_frame in
+// PresetBus200e.cpp). The fake does the same for a complete BACKUP, and
+// nothing for a RESTORE (never observed) or for the truncated-read-back
+// fault (a module that stopped early has nothing to announce).
+bool g_xfer_announce = false;
+uint8_t g_xfer_mod = 0;
 // The card's byte counters, shaped exactly like the BusCardStats pair the
 // firmware reads on hardware (see master_card_activity in PresetBus.cpp):
 // FREE-RUNNING and cumulative, one for each direction, because the master
@@ -226,6 +233,8 @@ int ops_send_frame(const uint8_t *b, uint8_t n) {
     g_xfer_start = SimNowMs() + kXferStartMs;
     g_xfer_end = g_xfer_start + moved / kXferBytesPerMs + 1;
     g_xfer_bytes = moved;
+    g_xfer_announce = !restore && moved == bytes;
+    g_xfer_mod = mod;
     return 0;
   }
 
@@ -365,7 +374,14 @@ void SimBusTask() {
                                 : g_xfer_bytes;
     (g_xfer_restore ? g_card_bytes_read : g_card_bytes_written) =
         g_xfer_base + moved;
-    if (now >= g_xfer_end) g_xfer_pending = false;
+    if (now >= g_xfer_end) {
+      g_xfer_pending = false;
+      if (g_xfer_announce) {
+        g_xfer_announce = false;
+        SimLog("XFER_DONE from %02X", g_xfer_mod);
+        Bus200eMasterXferDone(g_xfer_mod);
+      }
+    }
   }
 
   Bus200eMasterTask();
