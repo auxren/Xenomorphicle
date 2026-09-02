@@ -199,17 +199,21 @@ BUS_CODE static void parse_frame(void) {
     return;
   }
 
-  // TRANSFER DONE: the same module -> manager shape, command byte 0x0A. Seen
-  // on the bench 2026-09-02, once per job, from a Buchla 251e at 0x5C right
-  // after the last of the 63120 bytes of a BACKUP it had been asked for
-  // landed in our card: [04 22 5C 0A 5C] -- one payload byte, the module's
-  // own address again. Neither the 2WIRELESS source nor any prior note
-  // knows this frame (a WPM in card mode swallows it into FRAM as data),
-  // so its meaning rests on that one observation: the module telling the
-  // manager it has finished with the card. Bus200eMaster treats it as
+  // TRANSFER DONE: [04 dest src 0A src] -- a module announcing, once per
+  // job, that it has finished with the card. Seen on the bench 2026-09-02
+  // from both module types we have, right after the last byte of a BACKUP
+  // we had asked for landed in our card:
+  //   251e at 0x5C, 63120 bytes:  [04 22 5C 0A 5C]   (dest = manager 0x22)
+  //   259e at 0x28,   990 bytes:  [04 00 28 0A 28]   (dest = general call)
+  // Same command byte, same one-byte payload (the module's own address
+  // again), different destination column -- so both are accepted. Neither
+  // the 2WIRELESS source nor any prior note knows this frame (a WPM in card
+  // mode swallows it into FRAM as data). Bus200eMaster treats it as
   // evidence, not proof -- it shortens the quiet wait, it does not replace
-  // it. Whether a RESTORE ends the same way has not been seen.
-  if (n == 5 && f[0] == 4 && f[1] == 0x22 && f[2] != 0x22 && f[3] == 0x0A) {
+  // it. Whether a RESTORE ends the same way has not been seen. No short
+  // command starts with 0x04, so the shape cannot shadow one.
+  if (n == 5 && f[0] == 4 && (f[1] == 0x22 || f[1] == 0x00) &&
+      f[2] != 0x22 && f[3] == 0x0A) {
     stats.frames_long++;
     c.op = BUS200E_OP_XFER_DONE;
     c.mod_addr = f[2];

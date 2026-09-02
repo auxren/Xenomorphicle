@@ -397,6 +397,10 @@ FLASHMEM static void probe_wpm() {
 static uint8_t *card_image = nullptr;
 static uint32_t card_flush_arm_ms = 0;
 static uint32_t card_seen_writes = 0;
+static uint32_t card_seen_reads = 0;
+static uint32_t card_last_ms = 0;        // last byte moved through our card
+static uint32_t card_last_us = 0;
+static uint32_t card_gap_max_us = 0;     // longest inter-chunk gap this burst
 // The write burst now dirtying the image arrived while one of OUR master
 // jobs was open -- it is a bank we asked a module for, not a module backing
 // itself up to us. See card_task() for why that decides whether it persists.
@@ -535,6 +539,7 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   card_file_crc = (got == BUSCARD_SIZE) ? Buchla200eCrc32(card_image, BUSCARD_SIZE) : 0;
   BusCardInit(card_image, BUSCARD_SIZE);
   card_seen_writes = 0;
+  card_seen_reads = 0;
   card_flush_arm_ms = 0;
   card_burst_ours = false;
   card_addr7 = addr7;
@@ -751,7 +756,23 @@ FLASHMEM static void report_query() {
 static void card_task() {
   if (!card_serving) return;
   const BusCardStats *cs = BusCardGetStats();
-  if (cs->bytes_written != card_seen_writes) {
+  const bool wrote = cs->bytes_written != card_seen_writes;
+  if (wrote || cs->bytes_read != card_seen_reads) {
+    // Either direction: tx_gate_open() holds our master off the bus while a
+    // module is chunking into or out of us. The gap statistic is what sized
+    // that hold (b prints it); a gap over a second is the burst boundary.
+    const uint32_t now_us = micros();
+    const uint32_t gap = now_us - card_last_us;
+    if (card_last_us && gap < 1000000) {
+      if (gap > card_gap_max_us) card_gap_max_us = gap;
+    } else {
+      card_gap_max_us = 0;
+    }
+    card_last_us = now_us;
+    card_last_ms = millis() ? millis() : 1;
+    card_seen_reads = cs->bytes_read;
+  }
+  if (wrote) {
     card_seen_writes = cs->bytes_written;
     card_flush_arm_ms = millis();
     if (MasterTransferring()) card_burst_ours = true;
@@ -998,15 +1019,49 @@ FLASHMEM void Init() {
                 Bus200eModuleAddress());
 }
 
-// Master-TX gate shared by every pump: quiet bus AND no card-transfer
-// window open. A preset manager's FRAM backup/restore swallows every byte
-// on the bus (receiveEvent in fram mode), so any TX during the window
-// corrupts the user's backup; hold off until well past its 1s done-detect.
-static bool tx_gate_open() {
+// Master-TX gate shared by every pump: quiet bus AND no card transfer in
+// progress, ours or anyone's.
+//
+// A card transfer is one module mastering chunk after chunk (a 259e: 45
+// writes of 22 bytes; a 251e: 63120 bytes over 7 s), and between chunks the
+// bus is idle -- BBF clear, nothing in our ring -- for longer than this gate
+// used to need. So the 5 s WPM presence probe fired between two chunks of a
+// 259e BACKUP into our card, arbitrated the module's next START off the
+// bus (0x50 beats 0x51 by the last address bit), and the bank arrived 33
+// bytes short: 957 of 990, one chunk gone and another cut off, on a read
+// the app then showed as good (bench 2026-09-02, ~6% of 259e reads by the
+// probe's duty cycle; a 251e read is exposed for its whole 7 s). Three
+// holds close it:
+//   - our own master job, from its command until DONE (the FSM never
+//     transmits in those states, so it cannot gate itself out);
+//   - any byte through our served card within the last CARD_QUIET_MS,
+//     either direction -- a module backing itself up into us on a WPM-less
+//     bus is the same traffic without a job of ours around it;
+//   - a manager's BACKUP/RESTORE command seen on the general call: the
+//     transfer itself runs at 0x50, invisible to our slave, so for
+//     FOREIGN_XFER_WINDOW_MS after the command any bus activity at all
+//     (BBF, sampled every Task() pass) is taken as that transfer still
+//     running, on top of the flat 1.5 s that covered its done-detect.
+//     A WPM in card mode swallows every byte on the bus as FRAM data, so
+//     a TX inside the window corrupts the user's backup, not just a chunk.
+#define CARD_QUIET_MS          500
+#define FOREIGN_XFER_WINDOW_MS 15000   // matches the master's HARD_CAP
+#define FOREIGN_XFER_GAP_MS    20
+static uint32_t last_bbf_ms = 0;
+
+FLASHMEM static bool tx_gate_open() {
   if (uint8_t(ring_w - ring_r) != 0) return false;
-  if (millis() - last_rx_ms < 2) return false;
+  const uint32_t now = millis();
+  if (now - last_rx_ms < 2) return false;
+  const Bus200eMasterState ms = Bus200eMasterGetState();
+  if (ms == BUS200E_MASTER_WAIT_ACTIVITY || ms == BUS200E_MASTER_TRANSFERRING)
+    return false;
+  if (card_last_ms && now - card_last_ms < CARD_QUIET_MS) return false;
   const uint32_t t = Bus200eLastTransferMs();
-  if (t && millis() - t < 1500) return false;
+  if (t && now - t < 1500) return false;
+  if (t && now - t < FOREIGN_XFER_WINDOW_MS && last_bbf_ms
+      && now - last_bbf_ms < FOREIGN_XFER_GAP_MS)
+    return false;
   if (LPI2C1_MSR & LPI2C_MSR_BBF) return false;
   return true;
 }
@@ -1026,6 +1081,8 @@ void Task() {
   }
 
   drain_ring();
+  if (LPI2C1_MSR & LPI2C_MSR_BBF) last_bbf_ms = millis() ? millis() : 1;
+  card_task();   // before the pumps: tx_gate_open() reads what it stamps
 
   if (Bus200eQueryPending()) try_query_reply();
   Bus200eTask();   // card-transfer job engine (self-clears with null hooks)
@@ -1037,7 +1094,6 @@ void Task() {
   pump_broadcast();
   pump_midi_tx();
   probe_wpm();
-  card_task();
   bus_stuck_check();
 }
 
@@ -1088,11 +1144,12 @@ FLASHMEM void DebugDump() {
                   dialect, d->frames_long, d->frames_short, wpm_probes);
     if (card_serving || BusCardAttached()) {
       const BusCardStats *cs = BusCardGetStats();
-      Serial.printf("card: serving=%d addr=%02X dirty=%d ptr=%04lX w_txn=%lu r_txn=%lu wr=%lu rd=%lu\n",
+      Serial.printf("card: serving=%d addr=%02X dirty=%d ptr=%04lX w_txn=%lu r_txn=%lu wr=%lu rd=%lu gap=%luus\n",
                     (int)card_serving, card_addr7, BusCardDirty(),
                     (unsigned long)BusCardPointer(),
                     cs->txns_write, cs->txns_read,
-                    cs->bytes_written, cs->bytes_read);
+                    cs->bytes_written, cs->bytes_read,
+                    (unsigned long)card_gap_max_us);
     }
     Serial.printf("bcast: tx=%lu drop=%lu queued=%u\n",
                   bcast_tx, bcast_drop, bcast_q.size());

@@ -1181,6 +1181,22 @@ found_empty_virgin=$($SIM --case-off --app "200e Modules" --state-in "$IMG/base"
   && ok "...while a module with nothing remembered still reports nothing" \
   || bad "an empty scan on an unscanned module reported '$found_empty_virgin'"
 
+# The list cursor follows the target. From the 251e's home (last of the
+# three responders) encL opens the list and one detent back must land on the
+# middle module, 0x28 -- not on the first, which is where a cursor that was
+# never synced to the target went (bench 2026-09-02).
+list_sel() {  # keys after opening the list -> the selected address
+  $SIM --app "200e Modules" --state-in "$IMG/scan" \
+       --keys "step2000,l,step100,$1,step100" --dump-fb 2>/dev/null \
+    | python3 fbtext.py - | grep '^y=15 .*\[inv\]' | sed 's/.*\[inv\] *//' | head -1
+}
+[ "$(list_sel '[')" = "28" ] \
+  && ok "one detent back from the 251e's home selects the module before it" \
+  || bad "the list cursor was not on the target's row (selected '$(list_sel '[')')"
+[ "$(list_sel '[,[')" = "20" ] && [ "$(list_sel ']')" = "5C" ] \
+  && ok "...and the list clamps at both ends from there" \
+  || bad "list clamp off: '$(list_sel '[,[')' / '$(list_sel ']')'"
+
 # The sledgehammer itself, and the sharpest evidence of it. OC::SaveAppData()
 # calls SaveGlobalSettings(), which rewrites 000.SCL-003.SCL on the card -- so
 # an 11-byte scan result, on a module with a card seated, wrote four scale

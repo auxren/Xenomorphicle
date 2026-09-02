@@ -34,8 +34,11 @@ hardware/firmware, and the implementation follows the *corrected* model:
    why its backup dumps end 5 bytes long) and no prior note knew it.
    Decoded as `BUS200E_OP_XFER_DONE`; the master FSM uses it as evidence,
    shortening its post-activity quiet wait from 1500 ms to 200 ms for the
-   job's own module (DONE at 7.4 s instead of 8.2 s on that read). One
-   module type, one direction (BACKUP) observed; a RESTORE has not been.
+   job's own module (DONE at 7.4 s instead of 8.2 s on that read). The
+   259e at 0x28 does the same after its 990-byte BACKUP, but addresses the
+   frame to the general call rather than the manager: `[04 00 28 0A 28]`.
+   Both destination columns are accepted. Two module types, one direction
+   (BACKUP) observed; a RESTORE has not been.
 
 ## Acceptance criteria
 
@@ -70,6 +73,7 @@ field use demands it.
 | 4 | Tests touching the real bus | All protocol logic host-tested (88+41 checks, CI-gated); live-bus actions are explicit console commands; the soak exercises only normal operations | CI `ci.yml`; soak design |
 | 5 | Our own flash writes under a 251e bank transfer | While the 200e app has a BACKUP/RESTORE open the 251e is the I2C master writing into / reading out of our card slave, and every LittleFS erase here masks interrupts. A bus RECALL/SAVE landing then (70-150 ms blocked) could leave a 251e that stops waiting holding half a bank, or read as a false BAD on the verify pass. `PresetEngine::Process` holds the request until `PresetBus::MasterTransferring()` drops (45 s cap, sized from a measured 10.8 s real BACKUP), and the card-image flush and the slot/app EEPROM record wait the same way | xeno-sim selfcheck "a bus RECALL waits for a 200e bank transfer"; live 2026-09-02: `jr` + WPM recall → `request deferred` at 1.8 s, ran at 8.2 s after DONE, read intact |
 | 6 | The card-image flush itself | Rewriting the 64 KB PBCARD.BIN costs **1088 ms wall** with interrupts masked for most of it (DWT-measured; `millis()` saw only 131 ms because systick is masked during the LittleFS_Program erases) — audio, USB, display and our bus slave all stall. A bank we asked a module for (200e-app Read, console `m`, bridge verify) is now kept in RAM and never written (`card_burst_ours`); a burst that lands with no master job open — a module backing itself up into a served card on a WPM-less bus — still persists, and is skipped by CRC when the content is unchanged | Live 2026-09-02 (`cbf93754`): `jr` → 63120 bytes in, `card image kept in RAM, PBCARD.BIN untouched` at 9.70 s, `b` shows `dirty=0`; earlier the same read logged `card image saved in 1088 ms wall` |
+| 7 | Our own master TX between the chunks of a card transfer | A module chunks a BACKUP into our served card (259e: 45 writes of 22 bytes, done in ~100 ms; 251e: 63120 bytes over 7 s, inter-chunk gaps up to **5.2 ms** measured) and between chunks the bus is idle by every test the old gate applied (ring empty, 2 ms RX-quiet, BBF clear). The 5 s presence probe — a START to 0x50 — fired in one such gap, won arbitration over the module's START to 0x51 (last address bit), and the bank arrived 957 of 990 bytes on a read the app then showed as good. `tx_gate_open()` now also holds while our master job is in WAIT_ACTIVITY/TRANSFERRING, for 500 ms after any byte through our card in either direction, and for 15 s after a foreign BACKUP/RESTORE command whenever BBF was seen within the last 20 ms; `card_task()` runs before the pumps so the stamp is current. `b` prints `gap=` (longest inter-chunk gap of the burst) to keep the holds sized | Live 2026-09-02 (`b198f197`): 259e read 990/990 `gap=415us`; 251e reads 63120/63120 `gap=5195us` and `5243us`, `probes` frozen for the burst and advancing again ~500 ms after the last chunk; WPM recall via curl unaffected (7 ms) |
 
 ## Robustness added beyond the spec
 
@@ -80,5 +84,5 @@ field use demands it.
   wedged module reboots into boot-recall instead of holding the bus hostage.
 - ISR flag-ordering and TDF-stall fixes from adversarial review (round 3).
 
-*Last updated 2026-09-02; regenerate against `docs/upstream-prs.md` when the
+*Last updated 2026-09-02 (b198f197); regenerate against `docs/upstream-prs.md` when the
 PR packages move.*

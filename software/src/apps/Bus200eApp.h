@@ -525,6 +525,7 @@ private:
   int SeqEndStage() const;     // 0-indexed stage holding the end marker, or -1
   uint8_t SeqPeakRaw() const;
   int FoundIndexToTableIndex(int nth) const;
+  void SyncListToAddr();       // list cursor onto addr_'s row, if it responded
 
   // edit / gen / rec
   void DrawEdit() const;
@@ -1477,6 +1478,24 @@ int AppBus200e::FoundIndexToTableIndex(int nth) const {
     ++seen;
   }
   return -1;
+}
+
+// The list cursor (list_top_) and the target (addr_) are one thing while
+// encL scrolls, but they drift apart whenever addr_ is set some other way --
+// entering the list from a module's home page, the remembered set landing
+// straight on the home page at boot, encR editing the address by hand. Left
+// unsynced, the first detent moved relative to row 0: from the 251e's home
+// (last of three) one click down landed on the FIRST module, not the middle
+// one. Bench 2026-09-02.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::SyncListToAddr() {
+  const int count = Buchla200eModuleCount();
+  int nth = 0;
+  for (int i = 0; i < count; ++i) {
+    if (!IsFound(found_, i)) continue;
+    if (Buchla200eModuleAt(i)->addr == addr_) { list_top_ = nth; return; }
+    ++nth;
+  }
 }
 
 FLASHMEM __attribute__((noinline))
@@ -2517,6 +2536,7 @@ FLASHMEM void AppBus200e::LoadScanSet() {
   for (int i = 0; i < n; ++i) if (IsFound(found_, i)) ++count;
   found_count_ = count;
   list_top_ = 0;
+  SyncListToAddr();
   if (count)
     serial_printf("200e: %d modules remembered; no scan needed\n", count);
 
@@ -2716,6 +2736,7 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
           break;
         }
         screen_ = Bus200eAppNS::SCR_MODULE_SELECT;
+        SyncListToAddr();
         break;
       case OC::CONTROL_BUTTON_DOWN:   // B = cycle sequence A-D
         // The 259e has no sequences, so this does nothing there rather than
@@ -2901,6 +2922,7 @@ FLASHMEM void AppBus200e::HandleEncoderEvent(const UI::Event &event) {
     int a = (int)addr_ + event.value;
     CONSTRAIN(a, 0, 0x7F);
     addr_ = (uint8_t)a;
+    SyncListToAddr();   // dialing onto a responder puts the cursor on its row
     return;
   }
 

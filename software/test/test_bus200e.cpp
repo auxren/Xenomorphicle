@@ -642,6 +642,17 @@ static void test_xfer_done_parse(void) {
   CHECK(last_op() != BUS200E_OP_XFER_DONE);
   CHECK(n_xdone == 1);
 
+  // the 259e's form of the same announcement: general-call destination
+  // instead of the manager's 0x22 (bench 2026-09-02, after a 990-byte BACKUP)
+  FRAME(0x04, 0x00, 0x28, 0x0A, 0x28);
+  CHECK(last_op() == BUS200E_OP_XFER_DONE);
+  CHECK(n_xdone == 2 && xdone_from == 0x28);
+
+  // any other destination column stays undecoded
+  FRAME(0x04, 0x50, 0x28, 0x0A, 0x28);
+  CHECK(last_op() != BUS200E_OP_XFER_DONE);
+  CHECK(n_xdone == 2);
+
   // log-only when the hook is absent
   Bus200eOps no_xd = fake_ops;
   no_xd.xfer_done = 0;
