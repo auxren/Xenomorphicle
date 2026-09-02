@@ -26,6 +26,8 @@
 
 #pragma once
 
+#include "PresetEngine.h"
+
 static constexpr int MIDI_SETUP_COUNT = 4;
 static constexpr int MIDI_PARAMETER_COUNT = 40;
 static constexpr int MIDI_CURRENT_SETUP = (MIDI_PARAMETER_COUNT * MIDI_SETUP_COUNT);
@@ -309,7 +311,12 @@ public:
         // Only hit flash when something is actually unsaved: this runs on
         // every app-menu entry, and an unconditional CAPTAIN.DAT rewrite
         // (sector erases included) made the menu gesture take seconds.
-        if (dirty || LiveChecksum() != saved_checksum) StoreData();
+        // And not at all when a bus recall is about to replace CAPTAIN.DAT
+        // with the slot's copy: that erase bought nothing but 250 ms of
+        // frozen audio. The edits are gone either way -- that is what a
+        // 200e recall means -- so no bytes are lost that were not already.
+        const bool replaced = OC::PresetEngine::RecallReplacing() & OC::PresetEngine::REPLACES_CAPTAIN;
+        if (!replaced && (dirty || LiveChecksum() != saved_checksum)) StoreData();
 #endif
 #if defined(ARDUINO_TEENSY41)
         // T41 only: device profiles need the USB host ports

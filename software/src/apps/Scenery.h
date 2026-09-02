@@ -228,7 +228,11 @@ public:
     }
 
     void Suspend() {
-      if (preset_modified) SavePreset();
+      // Not when a bus recall is about to overwrite SCENERY.DAT anyway: the
+      // 64 KB erase would freeze audio for 250 ms to store bytes that the
+      // slot's copy replaces a millisecond later.
+      const bool replaced = OC::PresetEngine::RecallReplacing() & OC::PresetEngine::REPLACES_SCENERY;
+      if (preset_modified && !replaced) SavePreset();
     }
     void Resume() {
 #ifdef __IMXRT1062__

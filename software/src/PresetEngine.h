@@ -37,6 +37,7 @@
 // LIVE: validate, stop the app ISR, restore chunks + globals, switch app,
 // RESUME under AudioNoInterrupts. See docs in the plan / bring-up notes.
 // ---------------------------------------------------------------------------
+#include <stddef.h>
 #include <stdint.h>
 
 namespace OC {
@@ -72,6 +73,21 @@ uint32_t StampMs();
 // Quadrants recall interplay: after a recall, Resume() consumes this hint
 // (>= 0 = load this bank number fresh from disk, preset 0) exactly once.
 int ConsumeQuadrantsRecallHint();
+
+// What the recall in progress is about to overwrite. Non-zero only while
+// RecallSlot has the outgoing app in APP_EVENT_SUSPEND, and only for the
+// stores the slot actually carries (a slot saved on a module that never ran
+// Scenery has no 'S' section, and SCENERY.DAT then survives the recall).
+// A Suspend handler's auto-save to one of these files is replaced by the
+// slot's copy a millisecond later: one 64 KB erase with interrupts off,
+// 250-295 ms of frozen audio and MIDI, for bytes nobody will ever read.
+// The app-menu Suspend, where that save is the whole point, sees 0.
+enum RecallReplaces : uint8_t {
+  REPLACES_BANK    = 1 << 0,   // BANK_255.DAT on quad_fs()
+  REPLACES_SCENERY = 1 << 1,   // SCENERY.DAT
+  REPLACES_CAPTAIN = 1 << 2,   // CAPTAIN.DAT (never at the boot recall)
+};
+uint8_t RecallReplacing();
 
 // status for UI / debug
 int8_t LastSlot();            // -1 = none yet
@@ -137,6 +153,10 @@ inline uint32_t RequestsDropped() { return 0; }
 inline bool SaveSlot(uint8_t) { return false; }
 inline bool RecallSlot(uint8_t) { return false; }
 inline int ConsumeQuadrantsRecallHint() { return -1; }
+enum RecallReplaces : uint8_t {
+  REPLACES_BANK = 1 << 0, REPLACES_SCENERY = 1 << 1, REPLACES_CAPTAIN = 1 << 2,
+};
+inline uint8_t RecallReplacing() { return 0; }
 inline int8_t LastSlot() { return -1; }
 inline uint32_t OpCount() { return 0; }
 inline bool LastSaveOk() { return false; }

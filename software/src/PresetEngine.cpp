@@ -169,6 +169,11 @@ enum ContentFlags : uint8_t {
   CONTENT_SCENERY = 1 << 1,
   CONTENT_CAPTAIN = 1 << 2,
 };
+// The manifest bits double as the public "about to be replaced" mask.
+static_assert(int(CONTENT_BANK) == int(REPLACES_BANK) &&
+              int(CONTENT_SCENERY) == int(REPLACES_SCENERY) &&
+              int(CONTENT_CAPTAIN) == int(REPLACES_CAPTAIN),
+              "RecallReplaces mirrors ContentFlags");
 
 // LittleFS_Program's erase-sector size, which is also its allocation unit:
 // SECTOR_SIZE in the core's LittleFS.cpp, keyed off the board exactly as it
@@ -226,6 +231,7 @@ static const char *last_recall_err = nullptr;
 static bool busy = false;
 static int quad_recall_hint = -1;
 static bool skip_captain_restore = false;  // boot recall only
+static uint8_t recall_replacing = 0;       // RecallReplacing(): step 2 only
 
 static DMAMEM AppData capture;               // RAM capture buffer (~4KB)
 
@@ -1099,7 +1105,16 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   // slot is the common case in a case where other modules own most slots,
   // and it must not cost the running app a Suspend/Resume round trip (for
   // Quadrants that is an audio-graph rebuild).
+  //
+  // Tell the handler which of its files step 4 is about to overwrite, so it
+  // can skip an auto-save that would be erased before anyone read it (a
+  // dirty Captain paid a 64 KB erase, interrupts off, for exactly that).
+  // Mirrors what recall_stage_files will do, including the boot-recall
+  // Captain exception: only the stores the slot carries, per its manifest.
+  recall_replacing = (uint8_t)(flags & (CONTENT_BANK | CONTENT_SCENERY | CONTENT_CAPTAIN));
+  if (skip_captain_restore) recall_replacing &= (uint8_t)~CONTENT_CAPTAIN;
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_SUSPEND);
+  recall_replacing = 0;
   // Those handlers persist through the shared PhzConfig map (bank file,
   // SCENERY.DAT, CAPTAIN.DAT), so the slot's G section staged in step 1 may
   // be gone by now. Stage it again: RAM plus one container open, ~1 ms.
@@ -1293,6 +1308,8 @@ FLASHMEM void Process() {
   if (cur_slot_dirty_ms && millis() - cur_slot_dirty_ms > 3000)
     persist_cur_slot();
 }
+
+uint8_t RecallReplacing() { return recall_replacing; }
 
 FLASHMEM int ConsumeQuadrantsRecallHint() {
   const int h = quad_recall_hint;

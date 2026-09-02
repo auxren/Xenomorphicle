@@ -307,6 +307,7 @@ FLASHMEM bool deserialize(const uint8_t *buf, size_t len) {
     const bool has_data = chunk_from_mem(buf, len, &pos, "PX", data_store);
     if (!has_config && !has_data) {
       SERIAL_PRINTLN("PhzConfig: bad image at %u\n", (unsigned)before);
+      (void)before;   // only the debug print reads it
       return false;
     }
     any = true;

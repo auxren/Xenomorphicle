@@ -84,7 +84,13 @@ public:
     }
     void Suspend() {
         if (preset_id >= 0) {
-            if (HS::auto_save_enabled)
+            // A recall lands in the scratch bank (255). Recall-after-recall,
+            // the bus's normal rhythm, would auto-save into BANK_255.DAT and
+            // then watch the next slot's copy overwrite it. A user bank is a
+            // real save and still gets one.
+            const bool replaced = bank_num == 255 &&
+              (OC::PresetEngine::RecallReplacing() & OC::PresetEngine::REPLACES_BANK);
+            if (HS::auto_save_enabled && !replaced)
               StoreToPreset(preset_id);
             // TODO
             //OnSendSysEx();
