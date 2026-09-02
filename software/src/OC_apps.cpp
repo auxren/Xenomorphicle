@@ -257,6 +257,29 @@ static void SaveGlobalSettings() {
 #endif
 }
 
+#ifdef __IMXRT1062__
+// Persist which app is on screen, and nothing heavier. A hardware module
+// comes back from a power cycle as it was left, and on this one "as it was
+// left" includes the app: the app menu's plain press and a bus recall both
+// change it, and until now neither wrote it down -- only the menu's long
+// press did, as a side effect of SaveAppData(), which also rewrites every
+// app's EEPROM chunk and the SD Scala files. So a power cycle came back in
+// whatever app had last been long-press-saved, which could be several
+// switches stale.
+//
+// This is the same globals file SaveGlobalSettings() writes, taken through
+// the light path Setup uses for invert-display: reload, restate the globals,
+// save (a no-op when nothing changed, so a switch that lands on the same app
+// costs no flash write). It leaves PhzConfig's shared map holding GLOBALS;
+// both callers dispatch APP_EVENT_RESUME to the new app right after, which
+// hands the map back.
+FLASHMEM void SaveCurrentAppChoice() {
+  PhzConfig::load_config();
+  BuildGlobalSettingsValues();
+  PhzConfig::save_config();
+}
+#endif
+
 /* old eeprom space checking logic
 static constexpr size_t total_storage_size() {
     size_t used = 0;
@@ -971,6 +994,12 @@ bool Ui::AppSettings(bool drawmenu) {
         draw_save_message((cnt++) >> 4);
       save = false;
     }
+#ifdef __IMXRT1062__
+    // The plain press still leaves every app's data unsaved, as it always
+    // has; the choice of app itself is remembered either way. (SaveAppData
+    // above already wrote it on the long press.)
+    else SaveCurrentAppChoice();
+#endif
     change_app = false;
   }
 

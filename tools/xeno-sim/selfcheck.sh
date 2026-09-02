@@ -1092,6 +1092,42 @@ $SIM --app "200e Modules" --state-in "$IMG/scan" \
   && ok "a preset still stores after a scan persists, so the config map was handed back" \
   || bad "a preset store failed after a scan persisted"
 
+echo "a power cycle comes back in the app that was on screen"
+
+# The bench report: "I power cycled and it booted into Captain even though I
+# was in 200e." Two holes stacked. The power-up recall switched to the
+# PRESET's app (the slot had been stored from Captain), and the app menu's
+# plain press never wrote the choice down at all -- only the long press did,
+# as a side effect of saving every app's data. So the boot app was whatever
+# had last been long-press-saved, however many switches ago.
+#
+# Slot 0 stored from Pong; then a plain-press switch to Scenery (encR twice
+# up the list from Pong); then power. The recall must still run (the slot is
+# the module's state) and the screen must still be Scenery.
+rm -f "$IMG/keepapp"
+$SIM --app "Pong 2.0" --state-out "$IMG/keepapp" \
+     --keys "$ENTER,l-down,step600,l-up,step4000,$MENU,encr-,encr-,step100,r,step600" \
+     >/dev/null 2>&1
+$SIM --state-in "$IMG/keepapp" --keys "step2000" > "$TMP/keepapp" 2>&1
+keep_app=$(sed -n 's/^  [a-z][a-z]*  *app=\(.*\)  held=.*/\1/p' "$TMP/keepapp" | tail -1)
+if ! grep -q 'boot recall slot 0' "$TMP/keepapp"; then
+  bad "the power-up recall of slot 0 did not run (app came up as '$keep_app')"
+elif [ "$keep_app" = "Scenery" ]; then
+  ok "power-up recalls the slot but keeps the app that was on screen (plain-press switch)"
+else
+  bad "power-up switched to the preset's app instead of the one on screen ('$keep_app')"
+fi
+
+# The same rule from the other side: a bus recall that lands in another app
+# has changed what is on screen, so THAT is what the next power-up shows.
+# From the Scenery image above, recall slot 0 (Pong) through the overlay.
+cp "$IMG/keepapp" "$IMG/keepapp2"
+$SIM --state "$IMG/keepapp2" --keys "step2000,$ENTER,r-down,step300,r-up,step4000" \
+     >/dev/null 2>&1
+$SIM --state-in "$IMG/keepapp2" --keys "step2000" 2>&1 | grep -Eq '^  [a-z]+ +app=Pong 2.0' \
+  && ok "a bus recall into another app is what the next power-up comes back in" \
+  || bad "after a bus recall into Pong, power-up came back somewhere else"
+
 echo "the boot path decides before it mutates"
 
 # AppSwitcher::Init() used to run InitDefaults() on every app and zero the user

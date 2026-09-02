@@ -244,7 +244,10 @@ static bool last_save_ok = false;
 static const char *last_recall_err = nullptr;
 static bool busy = false;
 static int quad_recall_hint = -1;
-static bool skip_captain_restore = false;  // boot recall only
+// True only while the power-up recall runs. That recall restores the
+// preset's state but keeps two things that are the module's own rather
+// than the scene's: the live Captain config and the app on screen.
+static bool boot_recall = false;
 static uint8_t recall_replacing = 0;       // RecallReplacing(): step 2 only
 
 static DMAMEM AppData capture;               // RAM capture buffer (~4KB)
@@ -1078,7 +1081,7 @@ FLASHMEM static void recall_stage_files(uint8_t slot, bool from_container,
     }
     // Boot recall deliberately keeps the LIVE Captain config -- see the note
     // on the legacy branch below.
-    if ((flags & CONTENT_CAPTAIN) && !skip_captain_restore &&
+    if ((flags & CONTENT_CAPTAIN) && !boot_recall &&
         (e = find_section(sec, n, 'C')) != nullptr) {
       section_to_file(f, *e, "CAPTAIN.DAT", PhzConfig::myfs);
       watchdog_feed();
@@ -1103,7 +1106,7 @@ FLASHMEM static void recall_stage_files(uint8_t slot, bool from_container,
   // module's MIDI-interface setup (autosaved continuously), not scene
   // state - restoring the slot's snapshot at power-up silently rewound
   // the owner's mapping edits. Explicit recalls still restore it.
-  if ((flags & CONTENT_CAPTAIN) && !skip_captain_restore) {
+  if ((flags & CONTENT_CAPTAIN) && !boot_recall) {
     slot_name(name, slot, 'C', "DAT");
     copy_file(preset_fs(), name, PhzConfig::myfs, "CAPTAIN.DAT");
     watchdog_feed();
@@ -1183,7 +1186,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   // Mirrors what recall_stage_files will do, including the boot-recall
   // Captain exception: only the stores the slot carries, per its manifest.
   recall_replacing = (uint8_t)(flags & (CONTENT_BANK | CONTENT_SCENERY | CONTENT_CAPTAIN));
-  if (skip_captain_restore) recall_replacing &= (uint8_t)~CONTENT_CAPTAIN;
+  if (boot_recall) recall_replacing &= (uint8_t)~CONTENT_CAPTAIN;
   recall_replacing |= RECALL_SUSPEND;
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_SUSPEND);
   recall_replacing = 0;
@@ -1218,14 +1221,30 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   watchdog_feed();
   ph[3] = wall.lap_ms();
 
-  // 6. switch to the slot's app (missing app: stay put, partial recall)
-  const size_t idx = ResolveAppIndexByID(slot_app_id);
+  // 6. switch to the slot's app (missing app: stay put, partial recall).
+  // The boot recall keeps the app the module was in instead, for the same
+  // reason it keeps the live Captain config: which app is on screen is the
+  // module's own state, written down whenever it changes (the app menu, and
+  // the runtime recall below). A power cycle used to come back in the
+  // preset's app after the user had deliberately switched away from it --
+  // in the 200e app, back up in Captain. global_settings.current_app_id
+  // still holds the boot app here; nothing in step 5 touches it.
+  const size_t idx = ResolveAppIndexByID(boot_recall ? global_settings.current_app_id
+                                                     : slot_app_id);
 
   FreqMeasure.end();
   DigitalInputs::reInit();
 
-  AudioNoInterrupts();
   app_switcher.set_current_app(idx);
+  // Remember the app so the next power-up lands in it (a no-op flash-wise
+  // when the recall stays in the same app, which is the trigger-driven
+  // case). Not at boot: the app did not change there, and the slot's
+  // globals just restored into RAM would make every power-up a flash
+  // write. Outside the audio mute below: a flash write is no reason to
+  // hold the audio path. The RESUME that follows hands PhzConfig's map back.
+  if (!boot_recall) SaveCurrentAppChoice();
+
+  AudioNoInterrupts();
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
   AudioInterrupts();
   watchdog_feed();
@@ -1354,12 +1373,12 @@ FLASHMEM void Process() {
         break;
       case REQ_RECALL:
         RecallSlot(r.slot);
-        skip_captain_restore = false;   // only ever true for the boot recall
+        boot_recall = false;   // belt and braces: only REQ_BOOT_RECALL sets it
         break;
       case REQ_BOOT_RECALL:
-        skip_captain_restore = true;
+        boot_recall = true;
         RecallSlot(r.slot);
-        skip_captain_restore = false;
+        boot_recall = false;
         break;
     }
   }

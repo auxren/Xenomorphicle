@@ -246,6 +246,12 @@ void SimRuntimeBoot(bool reset_settings, bool answer_cancel) {
   OC::PresetEngine::Init();
   OC::PresetBus::Init();
   OC::PresetBusUI::Init();
+  // Main.cpp:607. Queues the power-up recall of the last bus preset (the
+  // EEPROM record is part of a --state image). It was left out for a long
+  // time, so the sim booted every image as if no preset had ever been
+  // recalled -- and the boot recall's own rules (keep the live Captain
+  // config, keep the app on screen) had no check that could see them.
+  OC::PresetEngine::BootRecall();
 
   OC::ui.Splashscreen(firstrun, 1);      // the welcome frame
   if (start_cal) OC::start_calibration();

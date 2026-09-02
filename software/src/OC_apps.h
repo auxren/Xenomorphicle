@@ -52,6 +52,9 @@ void BuildAppData(AppData &data);
 void ApplyAppData(const AppData &data);
 void BuildGlobalSettingsValues();
 void RestoreGlobalSettingsFromConfig(uint8_t scala_loaded_mask = 0);
+// write the globals file so the app on screen survives a power cycle; the
+// caller hands PhzConfig's map back to the app (APP_EVENT_RESUME) afterwards
+void SaveCurrentAppChoice();
 // app-container index for an app id; falls back to the current app
 size_t ResolveAppIndexByID(uint16_t app_id);
 #endif
