@@ -147,6 +147,12 @@ check assert what a person would actually read, instead of a frame hash that
 says only "something moved". `selfcheck.sh` uses it for the whole 200e write
 path.
 
+`corrupt_slot.py IN OUT SLOT SECTION [--fix-sum]` damages one preset container
+inside a `--state` file: one bit flipped in the named section's payload, and
+with `--fix-sum` the container's section checksum recomputed so the damage gets
+past the engine and reaches PhzConfig's own reader. `selfcheck.sh` recalls both
+and expects `BAD PRESET` from each layer.
+
 `edgecheck.py` reads the same capture for the one thing `fbtext.py` structurally
 cannot see: **text clipped at the right edge**.
 
@@ -379,6 +385,7 @@ toggle pacing) and the session controls live in visually distinct cards marked
 | `--state FILE` | non-volatile memory: read FILE before boot, write it back at exit. Two runs sharing one FILE are a power cycle |
 | `--state-in FILE` / `--state-out FILE` | the halves of `--state`, separately |
 | `--dump-fs` | list stored files with sizes and CRCs, and nothing else |
+| `--test-phzconfig` | no boot: run the PhzConfig codec checks (serialize/deserialize, save/load, `save_filtered`, the clean-map skip, and the same damaged images through both readers) against the RAM volume, and exit with the result |
 | `--snap-at MS` | capture the first complete frame drawn at or after MS (absolute), and let `--dump-fb` print that |
 | `--id-voltage V` | the hardware-ID divider the firmware reads at boot to choose its pin map (default 0.10) |
 | `--real-timing` | interactive only: pin the virtual clock to wall-clock, so a scan takes the ~60 s it takes on the module |
