@@ -1066,9 +1066,10 @@ grep -q '^fs sd ' "$TMP/scanfs.txt" \
 # The EEPROM is where calibration lives on this target -- app data does not,
 # it is in GLOBALS.CFG through PhzConfig. So this is not a re-test of the line
 # above; it is the standing invariant that scanning a bus never disturbs the
-# module's calibration, compared as a CRC over the whole array so it holds
-# whatever the layout becomes.
-ee() { grep '^eeprom ' "$1" | awk '{print $2}'; }   # the image's eeprom hex
+# module's calibration, compared over the whole array so it holds whatever
+# the layout becomes -- minus the top 8 bytes, the engine's power-down record
+# (EEPROM_PRESETBUS_SIZE), which the --app switch above legitimately writes.
+ee() { grep '^eeprom ' "$1" | awk '{print $2}' | sed 's/.\{16\}$//'; }
 [ -n "$(ee "$IMG/base")" ] && [ "$(ee "$IMG/base")" = "$(ee "$IMG/scan")" ] \
   && ok "persisting the scan set leaves the calibration EEPROM untouched" \
   || bad "persisting the scan set rewrote the EEPROM"
@@ -1103,10 +1104,13 @@ echo "a power cycle comes back in the app that was on screen"
 #
 # Slot 0 stored from Pong; then a plain-press switch to Scenery (encR twice
 # up the list from Pong); then power. The recall must still run (the slot is
-# the module's state) and the screen must still be Scenery.
+# the module's state) and the screen must still be Scenery. The switches
+# below sit for 4 s first: the app is written down with the slot, ~3 s after
+# the last change, one cheap EEPROM program -- not a GLOBALS.CFG block erase
+# in the middle of a recall.
 rm -f "$IMG/keepapp"
 $SIM --app "Pong 2.0" --state-out "$IMG/keepapp" \
-     --keys "$ENTER,l-down,step600,l-up,step4000,$MENU,encr-,encr-,step100,r,step600" \
+     --keys "$ENTER,l-down,step600,l-up,step4000,$MENU,encr-,encr-,step100,r,step4000" \
      >/dev/null 2>&1
 $SIM --state-in "$IMG/keepapp" --keys "step2000" > "$TMP/keepapp" 2>&1
 keep_app=$(sed -n 's/^  [a-z][a-z]*  *app=\(.*\)  held=.*/\1/p' "$TMP/keepapp" | tail -1)
@@ -1131,7 +1135,7 @@ $SIM --state-in "$IMG/keepapp2" --keys "step2000" 2>&1 | grep -Eq '^  [a-z]+ +ap
 # ...and the console's remote switch (SwitchToApp, which --app goes through):
 # the Orin's 'a' has to stick the way a menu pick does.
 rm -f "$IMG/keepapp3"
-$SIM --app "Back It Up!" --state-out "$IMG/keepapp3" --keys "step300" >/dev/null 2>&1
+$SIM --app "Back It Up!" --state-out "$IMG/keepapp3" --keys "step4000" >/dev/null 2>&1
 $SIM --state-in "$IMG/keepapp3" --keys "step2000" 2>&1 | grep -Eq '^  [a-z]+ +app=Back It Up!' \
   && ok "a remote app switch (console 'A') is what the next power-up comes back in" \
   || bad "after a remote switch to Back It Up!, power-up came back somewhere else"

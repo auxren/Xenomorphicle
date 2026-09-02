@@ -104,6 +104,17 @@ const char *LastRecallError();  // why the last recall refused; nullptr = ok
 // reads the persisted current slot and queues a local recall if it still
 // validates. Call once from setup(), after the apps have started.
 void BootRecall();  // skips Captain-config restore: boot keeps live edits
+// The app on screen is part of the same power-down record as the slot: a
+// power cycle comes back in it, whether it got there by the app menu, a
+// console switch or a bus recall into another app. NoteAppOnScreen() marks
+// the record dirty (written ~3 s later, one cheap EEPROM program, never a
+// GLOBALS.CFG block erase); every app switch calls it. BootAppChoice()
+// hands AppSwitcher::Init the recorded app before it resumes anything --
+// false when the record has none, and the GLOBALS.CFG app stands.
+// ForgetCurrent() blanks the record: a settings reset.
+void NoteAppOnScreen();
+bool BootAppChoice(uint16_t *app_id);
+void ForgetCurrent();
 bool SlotUsed(uint8_t slot);  // slot has a stored preset on disk
 
 // slot names: flat PBNAMES.BIN sidecar (16 chars max, RAM-cached at Init;
@@ -175,6 +186,9 @@ inline uint32_t OpCount() { return 0; }
 inline bool LastSaveOk() { return false; }
 inline const char *LastRecallError() { return nullptr; }
 inline void BootRecall() {}
+inline void NoteAppOnScreen() {}
+inline bool BootAppChoice(uint16_t *) { return false; }
+inline void ForgetCurrent() {}
 inline bool SlotUsed(uint8_t) { return false; }
 static constexpr size_t kNameLen = 16;
 inline const char *SlotName(uint8_t) { return ""; }

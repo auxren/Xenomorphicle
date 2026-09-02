@@ -257,29 +257,6 @@ static void SaveGlobalSettings() {
 #endif
 }
 
-#ifdef __IMXRT1062__
-// Persist which app is on screen, and nothing heavier. A hardware module
-// comes back from a power cycle as it was left, and on this one "as it was
-// left" includes the app: the app menu's plain press and a bus recall both
-// change it, and until now neither wrote it down -- only the menu's long
-// press did, as a side effect of SaveAppData(), which also rewrites every
-// app's EEPROM chunk and the SD Scala files. So a power cycle came back in
-// whatever app had last been long-press-saved, which could be several
-// switches stale.
-//
-// This is the same globals file SaveGlobalSettings() writes, taken through
-// the light path Setup uses for invert-display: reload, restate the globals,
-// save (a no-op when nothing changed, so a switch that lands on the same app
-// costs no flash write). It leaves PhzConfig's shared map holding GLOBALS;
-// both callers dispatch APP_EVENT_RESUME to the new app right after, which
-// hands the map back.
-FLASHMEM void SaveCurrentAppChoice() {
-  PhzConfig::load_config();
-  BuildGlobalSettingsValues();
-  PhzConfig::save_config();
-}
-#endif
-
 /* old eeprom space checking logic
 static constexpr size_t total_storage_size() {
     size_t used = 0;
@@ -687,6 +664,9 @@ bool AppSwitcher::Init(bool reset_settings) {
     APPS_SERIAL_PRINTLN("Using defaults...");
     global_settings.valid = true;
     SaveGlobalSettings();
+    // Defaults means the default app too; the engine's power-down record
+    // would otherwise bring back the app (and slot) from before the reset.
+    PresetEngine::ForgetCurrent();
     // gs_restored stays false: a confirmed reset reports firstrun so the
     // caller shows the welcome splash over factory defaults.
   } else {
@@ -703,6 +683,11 @@ bool AppSwitcher::Init(bool reset_settings) {
       //global_settings.DAC_scaling = Unpack(metadata, PackLocation{32, 32});
       //OC::DAC::restore_scaling(global_settings.DAC_scaling);
     }
+    // The app on screen at power-down beats the one GLOBALS.CFG names: the
+    // file is only rewritten by the app menu's long press (and Setup), the
+    // engine's record by every switch. Before set_current_app below, so the
+    // first RESUME is already the right app and nothing is resumed twice.
+    PresetEngine::BootAppChoice(&global_settings.current_app_id);
 
     // User Scales from SD Scala files take precedence over config values
     char filename[] = "000.SCL";
@@ -994,12 +979,12 @@ bool Ui::AppSettings(bool drawmenu) {
         draw_save_message((cnt++) >> 4);
       save = false;
     }
-#ifdef __IMXRT1062__
     // The plain press still leaves every app's data unsaved, as it always
-    // has; the choice of app itself is remembered either way. (SaveAppData
-    // above already wrote it on the long press.)
-    else SaveCurrentAppChoice();
-#endif
+    // has; the choice of app itself is remembered either way, through the
+    // engine's power-down record (a cheap EEPROM write, ~3 s later). The
+    // long press wrote it to GLOBALS.CFG too, as SaveGlobalSettings always
+    // has; the record wins at boot.
+    PresetEngine::NoteAppOnScreen();
     change_app = false;
   }
 
@@ -1078,10 +1063,8 @@ FLASHMEM void SwitchToApp(size_t index) {
   // Same rule as the panel: the app on screen is what the next power-up
   // shows. The Orin's 'a' (Captain) has to stick across a power cycle the
   // way a menu pick does, or the bench flow depends on which preset was
-  // last recalled. RESUME hands PhzConfig's map back.
-#ifdef __IMXRT1062__
-  SaveCurrentAppChoice();
-#endif
+  // last recalled.
+  PresetEngine::NoteAppOnScreen();
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
 #ifdef AUDIO_INTERFACE
   AudioInterrupts();

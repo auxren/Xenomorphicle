@@ -140,31 +140,49 @@ static constexpr uint64_t kSchemaVersion = 1;
 // containers, and is ignored there.
 static constexpr uint16_t kCurSlotKey = kManifestKey | 0x13;
 
-// The current bus slot, persisted (debounced) so boot can restore the preset
-// the case was on -- 200e power-up semantics. Four bytes of emulated EEPROM
-// (EEPROM_PRESETBUS_START, OC_config.h): magic, slot, ~slot, spare. Erased
+// The current record: what the module was doing at power-down, persisted
+// (debounced) so boot can put it back -- the bus slot the case was on (200e
+// power-up semantics) and the app that was on screen. Eight bytes of
+// emulated EEPROM (EEPROM_PRESETBUS_START, OC_config.h):
+//
+//   magic 'P', slot, ~slot, app lo, app hi, ~app lo, ~app hi, spare
+//
+// Each field carries its own complement so it validates on its own. Erased
 // flash reads 0xFF, and 0xFF is not ~0xFF, so a never-written record fails
-// the complement check instead of decoding as slot 255.
+// the check instead of decoding as slot 255; "no slot" is written as 0xFF
+// with a real complement (0x00) and rejected by the range check either way.
+// The record was four bytes (slot only) before it carried the app: an old
+// record has erased bytes where the app goes, so the app reads as absent and
+// boot falls back to the app GLOBALS.CFG names, exactly as before.
 //
 // Not a file. A LittleFS write costs a 64 KB block erase with interrupts off
 // (~270 ms of dead audio, USB and bus), and this write lands three seconds
 // after every preset change -- i.e. while the performer is playing the sound
 // they just recalled. An emulated-EEPROM byte is a single 2-byte flash program
 // and is skipped when the value has not changed (cores/teensy4/eeprom.c).
-static constexpr uint8_t kCurSlotMagic = 'P';
+// The app used to be written through GLOBALS.CFG on every switch; a
+// cross-app bus recall measured 286 ms wall, 277 of them that write.
+static constexpr uint8_t kCurRecMagic = 'P';
 
-FLASHMEM static bool cur_slot_load(uint8_t *slot) {
+// slot: -1 = none (or absent/invalid); app: 0 = absent. Returns whether the
+// record exists at all (magic), which is what the boot migration asks.
+FLASHMEM static bool cur_rec_load(int8_t *slot, uint16_t *app) {
   uint8_t rec[EEPROM_PRESETBUS_SIZE];
   EEPROMStorage::read(EEPROM_PRESETBUS_START, rec, sizeof(rec));
-  if (rec[0] != kCurSlotMagic || rec[2] != (uint8_t)~rec[1]) return false;
-  if (rec[1] >= kNumSlots) return false;
-  *slot = rec[1];
+  *slot = -1;
+  *app = 0;
+  if (rec[0] != kCurRecMagic) return false;
+  if (rec[2] == (uint8_t)~rec[1] && rec[1] < kNumSlots) *slot = (int8_t)rec[1];
+  if (rec[5] == (uint8_t)~rec[3] && rec[6] == (uint8_t)~rec[4])
+    *app = (uint16_t)(rec[3] | (rec[4] << 8));
   return true;
 }
 
-FLASHMEM static void cur_slot_store(uint8_t slot) {
+FLASHMEM static void cur_rec_store(int8_t slot, uint16_t app) {
+  const uint8_t s = slot < 0 ? 0xFF : (uint8_t)slot;
+  const uint8_t lo = (uint8_t)app, hi = (uint8_t)(app >> 8);
   const uint8_t rec[EEPROM_PRESETBUS_SIZE] = {
-    kCurSlotMagic, slot, (uint8_t)~slot, 0xFF,
+    kCurRecMagic, s, (uint8_t)~s, lo, hi, (uint8_t)~lo, (uint8_t)~hi, 0xFF,
   };
   EEPROMStorage::update(EEPROM_PRESETBUS_START, rec, sizeof(rec));
 }
@@ -226,12 +244,13 @@ static int8_t last_slot = -1;
 // NEXT pulse has to step to 8, not to last_slot + 1. -1 = none yet.
 static int8_t bus_slot = -1;
 static bool last_was_save = false;
-static uint32_t cur_slot_dirty_ms = 0;   // 0 = clean
-// What the EEPROM record holds, mirrored so persist_cur_slot can skip the
+static uint32_t cur_slot_dirty_ms = 0;   // 0 = clean; stamps slot AND app changes
+// What the EEPROM record holds, mirrored so persist_cur_record can skip the
 // common case (a bus save, or the manager re-sending the current preset)
-// without a read. This engine is the record's only writer. -1 = unknown or
-// absent.
+// without a read. This engine is the record's only writer. -1 / 0 = unknown
+// or absent.
 static int8_t persisted_slot = -1;
+static uint16_t persisted_app = 0;
 static uint32_t op_count = 0;            // completed save/recall operations
 static bool last_save_ok = false;
 // Why the most recent recall refused, or nullptr if it succeeded. A recall
@@ -1236,13 +1255,11 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   DigitalInputs::reInit();
 
   app_switcher.set_current_app(idx);
-  // Remember the app so the next power-up lands in it (a no-op flash-wise
-  // when the recall stays in the same app, which is the trigger-driven
-  // case). Not at boot: the app did not change there, and the slot's
-  // globals just restored into RAM would make every power-up a flash
-  // write. Outside the audio mute below: a flash write is no reason to
-  // hold the audio path. The RESUME that follows hands PhzConfig's map back.
-  if (!boot_recall) SaveCurrentAppChoice();
+  // The app on screen is remembered through the current record, stamped
+  // dirty with the slot below -- one debounced EEPROM write for both. NOT
+  // through GLOBALS.CFG: that made a cross-app recall 286 ms, 277 of them a
+  // LittleFS block erase with interrupts off, against 10 ms for a same-app
+  // recall. The RESUME that follows hands PhzConfig's map back.
 
   AudioNoInterrupts();
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
@@ -1307,35 +1324,61 @@ bool RequestSave(uint8_t slot) { return enqueue(REQ_SAVE, slot); }
 bool RequestRecall(uint8_t slot) { return enqueue(REQ_RECALL, slot); }
 uint32_t RequestsDropped() { return req_q.dropped; }
 
-// persist the current slot ~3s after preset activity settles, so
-// trigger-driven preset cycling never write-hammers the record. Touches
-// neither PhzConfig's map nor the app: nothing here to hand back or RESUME.
-FLASHMEM static void persist_cur_slot() {
+// persist the current record ~3s after activity settles, so trigger-driven
+// preset cycling never write-hammers it. Touches neither PhzConfig's map nor
+// the app: nothing here to hand back or RESUME.
+FLASHMEM static void persist_cur_record() {
   cur_slot_dirty_ms = 0;
-  if (last_slot < 0 || persisted_slot == last_slot) return;
-  cur_slot_store((uint8_t)last_slot);
-  uint8_t check = 0;
-  const bool ok = cur_slot_load(&check) && check == last_slot;
+  const uint16_t app = global_settings.current_app_id;
+  if (persisted_slot == last_slot && persisted_app == app) return;
+  cur_rec_store(last_slot, app);
+  int8_t s = -1;
+  uint16_t a = 0;
+  const bool ok = cur_rec_load(&s, &a) && s == last_slot && a == app;
   persisted_slot = ok ? last_slot : -1;
-  serial_printf("PresetEngine: current slot %d persisted%s\n", last_slot,
+  persisted_app = ok ? app : 0;
+  serial_printf("PresetEngine: slot %d app %04x persisted%s\n", last_slot, app,
                 ok ? "" : " FAILED");
 }
 
+void NoteAppOnScreen() { cur_slot_dirty_ms = StampMs(); }
+
+FLASHMEM bool BootAppChoice(uint16_t *app_id) {
+  int8_t slot = -1;
+  uint16_t app = 0;
+  if (!cur_rec_load(&slot, &app) || !app) return false;
+  *app_id = app;
+  return true;
+}
+
+FLASHMEM void ForgetCurrent() {
+  cur_rec_store(-1, 0);
+  persisted_slot = -1;
+  persisted_app = 0;
+  cur_slot_dirty_ms = 0;
+}
+
 FLASHMEM void BootRecall() {
-  uint8_t slot = 0;
-  if (!cur_slot_load(&slot)) {
+  int8_t slot = -1;
+  uint16_t app = 0;
+  if (!cur_rec_load(&slot, &app)) {
     // No record yet: either a fresh module or firmware that kept the slot in
     // GLOBALS.CFG, which is still the loaded map right after boot restore.
     // Migrate it into the record so this branch runs once.
     uint64_t v = 0;
     PhzConfig::load_config();
     if (!PhzConfig::getValue(kCurSlotKey, v) || v >= kNumSlots) return;
-    slot = (uint8_t)v;
-    cur_slot_store(slot);
+    slot = (int8_t)v;
+    cur_rec_store(slot, 0);
     serial_printf("PresetEngine: slot %d migrated from GLOBALS.CFG\n", slot);
   }
-  persisted_slot = (int8_t)slot;   // seed the mirror from the one read boot does
-  if (!SlotUsed(slot)) return;
+  // Seed the mirror from the one read boot does. An app that failed to
+  // resolve (removed from the build) is on screen as the default now, and
+  // the mirror disagreeing with it is what gets the record corrected.
+  persisted_slot = slot;
+  persisted_app = app;
+  if (app && app != global_settings.current_app_id) cur_slot_dirty_ms = StampMs();
+  if (slot < 0 || !SlotUsed((uint8_t)slot)) return;
   serial_printf("PresetEngine: boot recall slot %d\n", slot);
   // Local only -- no bus broadcast at power-up. Queued as its own op so the
   // keep-live-Captain rule travels with THIS request rather than sitting in
@@ -1383,7 +1426,7 @@ FLASHMEM void Process() {
     }
   }
   if (cur_slot_dirty_ms && millis() - cur_slot_dirty_ms > 3000)
-    persist_cur_slot();
+    persist_cur_record();
   // Names an import left in the cache. The console's batch flushes itself;
   // this is the net under any caller that does not.
   FlushSlotNames();
