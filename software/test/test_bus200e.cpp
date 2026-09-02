@@ -86,9 +86,13 @@ static void f_query_reply(uint8_t from_addr, const uint8_t *ver, uint8_t n) {
   n_qreply++;
 }
 
+static int n_xdone = 0;
+static uint8_t xdone_from;
+static void f_xfer_done(uint8_t from_addr) { xdone_from = from_addr; n_xdone++; }
+
 static const Bus200eOps fake_ops = {
   f_save, f_recall, kRecSize, f_slot_read, f_slot_write, f_card_write, f_card_read,
-  f_midi, f_query_reply,
+  f_midi, f_query_reply, f_xfer_done,
 };
 
 static void reset(const Bus200eOps *ops) {
@@ -98,6 +102,8 @@ static void reset(const Bus200eOps *ops) {
   n_qreply = 0;
   qreply_from = 0;
   qreply_len = 0;
+  n_xdone = 0;
+  xdone_from = 0;
   memset(qreply_ver, 0, sizeof(qreply_ver));
   fail_card_write = 0;
   reject_odd_writes = 0;
@@ -608,6 +614,43 @@ static void test_query_reply_parse(void) {
 
 // The reply branch is checked ahead of the long/PRIMO command branch, so it
 // must not be able to swallow anything that used to parse as a command.
+// The frame a Buchla 251e at 0x5C mastered right after the last byte of a
+// BACKUP it had been asked for reached our card (bench, 2026-09-02):
+// [04 22 5C 0A 5C]. Module -> manager form, command 0x0A, one payload byte.
+static void test_xfer_done_parse(void) {
+  printf("test_xfer_done_parse\n");
+  reset(&fake_ops);
+  FRAME(0x04, 0x22, 0x5C, 0x0A, 0x5C);
+  CHECK(last_op() == BUS200E_OP_XFER_DONE);
+  CHECK(n_xdone == 1 && xdone_from == 0x5C);
+  {
+    Bus200eCmd c;
+    CHECK(Bus200eLogRead(0, &c));
+    CHECK(c.mod_addr == 0x5C);
+    CHECK(c.arg == 0x5C);
+  }
+  CHECK(Bus200eGetStats()->frames_long == 1);
+
+  // the manager's own BACKUP command carries 0x04 in the cmd column and
+  // 0x22 in the SRC column: still a command, never mistaken for this
+  FRAME(0x07, 0x00, 0x22, 0x04, 0x5C, 0x01, 0x00, 0x00);
+  CHECK(last_op() == BUS200E_OP_BACKUP);
+  CHECK(n_xdone == 1);
+
+  // a 0x0A with the columns of a command (src 0x22) is not an announcement
+  FRAME(0x04, 0x00, 0x22, 0x0A, 0x5C);
+  CHECK(last_op() != BUS200E_OP_XFER_DONE);
+  CHECK(n_xdone == 1);
+
+  // log-only when the hook is absent
+  Bus200eOps no_xd = fake_ops;
+  no_xd.xfer_done = 0;
+  reset(&no_xd);
+  FRAME(0x04, 0x22, 0x28, 0x0A, 0x28);
+  CHECK(last_op() == BUS200E_OP_XFER_DONE);
+  CHECK(n_xdone == 0);
+}
+
 static void test_query_reply_does_not_shadow_commands(void) {
   printf("test_query_reply_does_not_shadow_commands\n");
   reset(&fake_ops);
@@ -682,6 +725,7 @@ int main() {
   test_build_query_frame();
   test_build_query_frame_round_trips_through_parser();
   test_query_reply_parse();
+  test_xfer_done_parse();
   test_query_reply_does_not_shadow_commands();
 
   printf("\ntest_bus200e: %d checks, %d failures\n", checks, fails);

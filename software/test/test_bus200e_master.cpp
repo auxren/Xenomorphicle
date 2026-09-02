@@ -168,6 +168,56 @@ static void test_backup_happy_path(void) {
   CHECK(Bus200eMasterBytesTransferred() == 400);
 }
 
+// The target's end-of-transfer announcement (Bus200eMasterXferDone) shortens
+// the quiet wait to BUS200E_MASTER_QUIET_ACKED_MS; it never ends the job on
+// its own, and only the job's own module, during the job, is heard.
+static void test_xfer_done_shortens_quiet(void) {
+  printf("test_xfer_done_shortens_quiet\n");
+  reset();
+  // an announcement with no job open is ignored
+  Bus200eMasterXferDone(0x3C);
+  CHECK(Bus200eMasterAcked() == 0);
+
+  CHECK(Bus200eMasterBackup(0x3C, 0x02) == 0);
+  Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_WAIT_ACTIVITY);
+  fake_activity = 40; fake_now += 100; Bus200eMasterTask();
+  fake_activity = 400; fake_now += 800; Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_TRANSFERRING);
+
+  // some other module's announcement: not ours
+  Bus200eMasterXferDone(0x28);
+  CHECK(Bus200eMasterAcked() == 0);
+  fake_now += BUS200E_MASTER_QUIET_ACKED_MS + 50;
+  Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_TRANSFERRING);
+
+  // bytes still moving while the target announces: the short quiet window
+  // starts from the LAST activity, not from the announcement
+  fake_activity = 500; fake_now += 100; Bus200eMasterTask();
+  Bus200eMasterXferDone(0x3C | 0x80);   // high bit masked like everywhere else
+  CHECK(Bus200eMasterAcked() == 1);
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_TRANSFERRING);
+  fake_activity = 520; fake_now += 100; Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_TRANSFERRING);
+  fake_now += BUS200E_MASTER_QUIET_ACKED_MS - 50; Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_TRANSFERRING);
+  fake_now += 100; Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_DONE);
+  CHECK(Bus200eMasterBytesTransferred() == 520);
+
+  // a new job starts un-acked, and its quiet wait is the long one again
+  Bus200eMasterReset();
+  CHECK(Bus200eMasterBackup(0x3C, 0x02) == 0);
+  CHECK(Bus200eMasterAcked() == 0);
+  Bus200eMasterTask();
+  fake_activity = 600; fake_now += 100; Bus200eMasterTask();
+  fake_now += BUS200E_MASTER_QUIET_ACKED_MS + 100; Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_TRANSFERRING);
+  fake_now += BUS200E_MASTER_QUIET_DONE_MS; Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_DONE);
+}
+
 // Bus200eMasterBytesTransferred() must report the delta for THIS job only,
 // never a stale figure left over from a previous one -- this is exactly the
 // bug DumpCard() hit against BusCardStats::bytes_written (a lifetime
@@ -668,6 +718,7 @@ int main() {
   test_find_free_card();
   test_bad_ops_rejected();
   test_backup_happy_path();
+  test_xfer_done_shortens_quiet();
   test_bytes_transferred_no_cross_job_leakage();
   test_bytes_transferred_zero_on_early_failure();
   test_restore_uses_restore_opcode();

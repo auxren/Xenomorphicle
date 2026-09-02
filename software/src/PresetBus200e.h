@@ -76,6 +76,10 @@ typedef enum {
   // mem_off carry the first three version characters for the debug ring (the
   // same field reuse the bus-MIDI case makes -- see parse_frame()).
   BUS200E_OP_QUERY_REPLY,
+  // A module announcing the end of a card transfer (cmd 0x0A, module ->
+  // manager form, see parse_frame()). mod_addr = the module; arg = the one
+  // payload byte (its own address, on the only module seen so far).
+  BUS200E_OP_XFER_DONE,
 } Bus200eOp;
 
 typedef struct {
@@ -114,6 +118,11 @@ typedef struct {
   // so existing positional initializers keep initializing what they always
   // did.
   void (*query_reply)(uint8_t from_addr, const uint8_t *ver, uint8_t n);
+  // A module's end-of-transfer announcement (cmd 0x0A, see
+  // BUS200E_OP_XFER_DONE). `from_addr` is the module that just finished
+  // writing to (BACKUP) or reading from (RESTORE, presumed) a card. NULL =
+  // log-only. Appended at the end of the struct, as query_reply was.
+  void (*xfer_done)(uint8_t from_addr);
 } Bus200eOps;
 
 typedef struct {

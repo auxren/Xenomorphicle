@@ -161,6 +161,21 @@ int Bus200eMasterIsRestore(void);      // 1 = RESTORE, 0 = BACKUP, of the active
 // (e.g. PresetBus.cpp's DumpCard()) want this, not BusCardGetStats().
 uint32_t Bus200eMasterBytesTransferred(void);
 
+// The target module announced the end of its transfer (BUS200E_OP_XFER_DONE,
+// cmd 0x0A -- see parse_frame() in PresetBus200e.cpp for the one bench
+// observation this rests on). Fed by the ops->xfer_done adapter in
+// PresetBus.cpp. Only an announcement from THIS job's module, while the job
+// is in WAIT_ACTIVITY or TRANSFERRING, counts; anything else is ignored.
+// It never ends the job by itself: activity still has to go quiet, only for
+// BUS200E_MASTER_QUIET_ACKED_MS instead of BUS200E_MASTER_QUIET_DONE_MS.
+// A module is the I2C master of both its card writes and this frame, so the
+// frame cannot overtake its own last write -- but a module that announces
+// early, or one whose announcement means something else, still gets the
+// short quiet check rather than an instant DONE.
+void Bus200eMasterXferDone(uint8_t from_addr);
+// 1 once the current/last job's module has announced (cleared by start_job).
+int Bus200eMasterAcked(void);
+
 // Acknowledge a DONE/FAILED result and return to IDLE. Starting a new job
 // (Backup/Restore) also implicitly does this once the FSM allows it (only
 // from DONE/FAILED/IDLE -- see Bus200eMasterError::BUSY).
@@ -175,6 +190,9 @@ void Bus200eMasterReset(void);
                                                   // activity started = done
                                                   // (matches PresetBus.cpp's
                                                   // own card-transfer holdoff)
+#define BUS200E_MASTER_QUIET_ACKED_MS       200  // ...or this much once the
+                                                  // module has announced it is
+                                                  // done (Bus200eMasterXferDone)
 #define BUS200E_MASTER_HARD_CAP_MS        15000  // absolute safety net
 
 // ---------------------------------------------------------------------------

@@ -199,6 +199,26 @@ BUS_CODE static void parse_frame(void) {
     return;
   }
 
+  // TRANSFER DONE: the same module -> manager shape, command byte 0x0A. Seen
+  // on the bench 2026-09-02, once per job, from a Buchla 251e at 0x5C right
+  // after the last of the 63120 bytes of a BACKUP it had been asked for
+  // landed in our card: [04 22 5C 0A 5C] -- one payload byte, the module's
+  // own address again. Neither the 2WIRELESS source nor any prior note
+  // knows this frame (a WPM in card mode swallows it into FRAM as data),
+  // so its meaning rests on that one observation: the module telling the
+  // manager it has finished with the card. Bus200eMaster treats it as
+  // evidence, not proof -- it shortens the quiet wait, it does not replace
+  // it. Whether a RESTORE ends the same way has not been seen.
+  if (n == 5 && f[0] == 4 && f[1] == 0x22 && f[2] != 0x22 && f[3] == 0x0A) {
+    stats.frames_long++;
+    c.op = BUS200E_OP_XFER_DONE;
+    c.mod_addr = f[2];
+    c.arg = f[4];
+    if (bus_ops && bus_ops->xfer_done) bus_ops->xfer_done(f[2]);
+    dispatch(&c);
+    return;
+  }
+
   // LONG / PRIMO framing: [nBytes, destAddr, srcAddr=0x22, cmd, args...],
   // where nBytes counts the bytes that follow it. No short command collides
   // with this shape.

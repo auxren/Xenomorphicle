@@ -203,11 +203,20 @@ static void cb_query_reply(uint8_t from_addr, const uint8_t *ver, uint8_t n) {
   }
 }
 
+// A module saying it is done with the card -- the 251e's [04 22 5C 0A 5C]
+// after a BACKUP. Same route as a QUERY reply; the master FSM decides
+// whether it is talking about the job we have open.
+static void cb_xfer_done(uint8_t from_addr) {
+  Bus200eMasterXferDone(from_addr);
+  if (verbose) Serial.printf("PresetBus: transfer done from %02X\n", from_addr);
+}
+
 static const Bus200eOps kOps = {
   cb_save, cb_recall,
   0, nullptr, nullptr, nullptr, nullptr,  // card transfers: phase 2
   cb_midi,
   cb_query_reply,
+  cb_xfer_done,
 };
 
 static bool tx_gate_open();  // defined with Task() below
@@ -1114,11 +1123,12 @@ FLASHMEM void DebugDump() {
     };
     const Bus200eMasterState ms = Bus200eMasterGetState();
     const Bus200eMasterError me = Bus200eMasterLastError();
-    Serial.printf("master: state=%s error=%s mod=%02X card_lo=%02X restore=%d bytes=%lu\n",
+    Serial.printf("master: state=%s error=%s mod=%02X card_lo=%02X restore=%d bytes=%lu acked=%d\n",
                   ms <= 6 ? mstates[ms] : "?", me <= 5 ? merrs[me] : "?",
                   Bus200eMasterModAddr(), Bus200eMasterCardAddr(),
                   Bus200eMasterIsRestore(),
-                  (unsigned long)Bus200eMasterBytesTransferred());
+                  (unsigned long)Bus200eMasterBytesTransferred(),
+                  Bus200eMasterAcked());
   }
   {
     static const char *const qstates[] = {
@@ -1142,14 +1152,14 @@ FLASHMEM void DebugDump() {
   static const char *const opnames[] = {
     "none", "RECALL", "SAVE", "REMOTE_EN", "REMOTE_DIS", "POLL_DONE",
     "QUERY", "BACKUP", "RESTORE", "MIDI", "CLOCK", "UNKNOWN", "DROPPED",
-    "QRY_REPLY",
+    "QRY_REPLY", "XFER_DONE",
   };
   const uint32_t total = Bus200eLogTotal();
   Serial.printf("decoded commands (%lu total, newest first):\n", total);
   Bus200eCmd c;
   for (uint32_t i = 0; i < 10 && Bus200eLogRead(i, &c); ++i) {
     Serial.printf("  %-10s arg=%u mod=%02X card=%02X off=%04X\n",
-                  c.op <= BUS200E_OP_QUERY_REPLY ? opnames[c.op] : "?",
+                  c.op <= BUS200E_OP_XFER_DONE ? opnames[c.op] : "?",
                   c.arg, c.mod_addr,
                   c.card_lo, c.mem_off);
   }

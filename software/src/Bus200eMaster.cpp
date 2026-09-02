@@ -26,6 +26,7 @@ static uint32_t phase_start_ms;         // current-state entry time
 static uint32_t activity_baseline;      // card_activity() sampled at send time
 static uint32_t last_activity_val;
 static uint32_t last_activity_change_ms;
+static int      job_acked;              // target announced XFER_DONE
 
 // ---- QUERY sibling FSM state (see Bus200eMaster.h) -------------------------
 static Bus200eQueryState  q_state = BUS200E_QUERY_IDLE;
@@ -68,6 +69,7 @@ MASTER_CODE void Bus200eMasterInit(const Bus200eMasterOps *o) {
   activity_baseline = 0;
   last_activity_val = 0;
   last_activity_change_ms = 0;
+  job_acked = 0;
 }
 
 MASTER_CODE int Bus200eMasterFindFreeCard(const uint8_t *candidates, uint8_t n,
@@ -102,6 +104,7 @@ MASTER_CODE static int start_job(uint8_t mod_addr, uint8_t card_lo, int is_resto
   activity_baseline = 0;
   last_activity_val = 0;
   last_activity_change_ms = send_start_ms;
+  job_acked = 0;
   state = BUS200E_MASTER_SENDING;
   return 0;
 }
@@ -170,7 +173,9 @@ MASTER_CODE void Bus200eMasterTask(void) {
         last_activity_val = act;
         last_activity_change_ms = now;
       }
-      if (now - last_activity_change_ms > BUS200E_MASTER_QUIET_DONE_MS) {
+      const uint32_t quiet = job_acked ? BUS200E_MASTER_QUIET_ACKED_MS
+                                       : BUS200E_MASTER_QUIET_DONE_MS;
+      if (now - last_activity_change_ms > quiet) {
         state = BUS200E_MASTER_DONE;
         return;
       }
@@ -197,6 +202,16 @@ int Bus200eMasterIsRestore(void) { return job_is_restore; }
 uint32_t Bus200eMasterBytesTransferred(void) {
   return last_activity_val - activity_baseline;
 }
+
+void Bus200eMasterXferDone(uint8_t from_addr) {
+  if (state != BUS200E_MASTER_WAIT_ACTIVITY &&
+      state != BUS200E_MASTER_TRANSFERRING)
+    return;
+  if ((from_addr & 0x7F) != job_mod_addr) return;
+  job_acked = 1;
+}
+
+int Bus200eMasterAcked(void) { return job_acked; }
 
 void Bus200eMasterReset(void) {
   if (state == BUS200E_MASTER_DONE || state == BUS200E_MASTER_FAILED)
