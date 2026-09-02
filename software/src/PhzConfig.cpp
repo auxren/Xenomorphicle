@@ -17,8 +17,19 @@
 
 namespace PhzConfig {
 
-LittleFS_Program myfs;
+XenoFS myfs;
 File dataFile;
+
+uint32_t XenoFS::rootLogBytes() {
+  if (!mounted) return 0;
+  // lfs_dir_open fetches the directory's metadata pair; m.off is how far
+  // into the block the valid log extends, i.e. what every open() re-walks.
+  lfs_dir_t dir;
+  if (lfs_dir_open(&lfs, &dir, "/") < 0) return 0;
+  const uint32_t used = dir.m.off;
+  lfs_dir_close(&lfs, &dir);
+  return used;
+}
 ConfigMap cfg_store;
 ConfigMap data_store;
 
@@ -86,6 +97,26 @@ void Init()
     return;
   }
   SERIAL_PRINTLN("LittleFS initialized.");
+
+  // Bound the root directory's metadata log. littlefs appends one commit per
+  // file create/close/rename and rewrites (compacts) the log only when it
+  // reaches metadata_max, which the library leaves at 0 = the whole 64 KB
+  // block. Every open() walks that log from the start, CRC-checking each
+  // commit, so a log fattened by small commits taxes every file operation
+  // after it: measured 4.5 ms per open() with the log at 60 KB, which put a
+  // 5-file preset recall at 25-30 ms instead of 6. At 8 KB an open() costs
+  // under a millisecond and compaction runs every ~60 commits. Compaction
+  // erases the pair's other block (~280 ms, interrupts off), but it can only
+  // fire on a commit, and every commit here already sits inside an operation
+  // that erases a data block (a save, the current-slot persist); a recall
+  // never commits. littlefs splits a directory into a second metadata pair
+  // (two more of the 64 blocks the presets are budgeted against) when the
+  // COMPACTED content exceeds metadata_max/2 (lfs_dir_compact). Compacted,
+  // the root is one name tag + one CTZ tag per file, ~28 bytes; this
+  // module's ~40 files come to ~1.2 KB against a 4 KB limit. Effective from
+  // the next commit: littlefs reads the threshold through the config pointer
+  // it kept at mount.
+  myfs.setMetadataMax(8192);
 
 #ifdef MTP_INTERFACE
   MTP.addFilesystem(myfs, "Internal_LFS");

@@ -17,7 +17,22 @@ namespace PhzConfig {
 
   const char * const CONFIG_FILENAME = "GLOBALS.CFG";
 
-  extern LittleFS_Program myfs;
+  // LittleFS_Program plus the two things the library keeps protected that
+  // this module has to see: how full the root directory's metadata log is,
+  // and the compaction threshold that bounds it. Every open() on littlefs
+  // walks that log from the start, CRC-checking each commit, so a log that
+  // has grown fat on small commits (a CrashReport append, a slot-number
+  // write, a rename) taxes every file operation afterwards. The threshold
+  // (config.metadata_max) is read by littlefs at commit time through the
+  // pointer it kept at mount, so it can be set after begin().
+  class XenoFS : public LittleFS_Program {
+  public:
+    uint32_t rootLogBytes();          // bytes of the root log in use; 0 = unmounted
+    uint32_t metadataMax() const { return config.metadata_max; }  // 0 = block_size
+    void setMetadataMax(uint32_t bytes) { config.metadata_max = bytes; }
+  };
+
+  extern XenoFS myfs;
 
   // Forward Decl
   void Init();

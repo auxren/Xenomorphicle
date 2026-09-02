@@ -88,25 +88,51 @@ cheerfully reporting over a megabyte free.
 
 ### How long a save takes
 
-Measured on hardware, saving repeatedly to one slot:
+Measured on hardware, forty consecutive saves to one slot:
 
 ```
- 336  347  358  418  380  390  403  471  423  433  446  898 ms
-  69   73   80   88   89   98  105  115  115  122  128  140 ms
+ 253 286 277 280 287 259 287 [527] 280 284 276 278 292 275 278 278 265 [685]
+ 282 265 270 286 281 283 277 285 276 [528] 284 275 276 285 271 285 259 263
+ 293 286 [554] 259 ms
 ```
 
-A sawtooth. Each save costs a little more than the last as LittleFS fills its
-current block, then one save pays for compaction — the 898 ms above — and the
-baseline resets. Block usage does not grow across the cycle; nothing leaks.
+The baseline is **one 64 KB block erase, about 250–295 ms**, and that is the
+floor: LittleFS_Program erases with interrupts off, so audio, USB and the
+preset bus all stand still for it. The container is staged in RAM and written
+once, so a save never erases more than the block its file lands in.
 
-So budget **roughly 70–500 ms for a save, and occasionally about a second**.
+Every tenth save or so costs a second erase (the bracketed ones, 530–690 ms).
+That is littlefs compacting the root directory: every file create, close,
+delete or rename appends a commit to the directory's log, and when the log
+reaches its cap the pair's other block is erased and the log rewritten with
+one entry per file. The cap is set to 8 KB in `PhzConfig::Init` — the library
+default is the whole 64 KB block, and that default is a trap, see below.
+Block usage does not grow across the cycle; nothing leaks.
+
+So budget **roughly 300 ms for a save, and every tenth one about 600 ms**.
 That matters because a save blocks `loop()` for its whole duration, which is
 the condition that used to expose a fault in the USB audio input path. That
 fault is fixed and guarded (see the note at the top of `src/Audio/USB_F32.cpp`),
 but it is why saving is not something to do from a hot path.
 
-A recall is much cheaper — it validates, then moves bytes — and does not
-compact.
+### How long a recall takes
+
+**About 3 ms.** A recall validates the container, moves bytes, and switches
+the app; it writes nothing, so it never erases and never compacts. The only
+write it causes is deferred: three seconds after the last recall the current
+slot number is persisted to `GLOBALS.CFG` so the next boot lands on it, and
+that write is one block erase — unless the slot is already the persisted one,
+in which case nothing is written.
+
+The 3 ms depends on the directory log being short, and here is the trap. A
+littlefs `open()` walks the directory log from the start, CRC-checking every
+commit, so its cost is linear in log fill: measured at **4.5 ms per open
+with the log at 60 KB**, which put a five-file recall at 25–30 ms, against
+0.2 ms per open after compaction. The log had been fattened not by presets but
+by dozens of `CRASH.LOG` appends during a boot loop — small commits from
+anywhere count. With the cap at 8 KB an open costs under a millisecond at
+worst. The console's `h` key prints the current per-open cost and the log
+fill, which is the first thing to check if a recall ever feels slow.
 
 ### Slots saved by older firmware
 

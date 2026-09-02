@@ -61,6 +61,7 @@ in front of them. `x` rewrites all 30 slots of the target module.
 | `g` | save globals + app data now |
 | `l` | list LittleFS files |
 | `s` | list SD card files |
+| `h` | LittleFS health: cost of one `open()`, root metadata-log fill, blocks used |
 | `r` | print LittleFS `CRASH.LOG` |
 | `K` | ButtonWatch — name the physical buttons as you press them |
 

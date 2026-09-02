@@ -1156,7 +1156,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
                           OC::Bus200eBridgeUsb::Polling() ? "on" : "off");
 #endif
             Serial.println("-- files --");
-            Serial.println("l list LittleFS   s list SD");
+            Serial.println("l list LittleFS   s list SD   h LittleFS health (open() cost)");
             Serial.println("-- DANGER --");
             Serial.println("C RESET config file   F ERASE ALL LittleFS files");
 #endif
@@ -1360,6 +1360,30 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.println(" -=- SD Card -=- ");
             PhzConfig::listFiles(SD);
             break;
+          case 'h': {
+            // LittleFS health: what one open() costs right now, and why.
+            // Recall and save timings drifted 3-5x slower across a crash
+            // loop that appended dozens of CrashReports; this is the number
+            // that says whether the root metadata log is the reason.
+            Serial.println(" -=- LittleFS health -=- ");
+            const uint32_t t0 = micros();
+            int opened = 0;
+            for (int i = 0; i < 10; ++i) {
+              File f = PhzConfig::myfs.open(PhzConfig::CONFIG_FILENAME, FILE_READ);
+              if (f) { ++opened; f.close(); }
+            }
+            const uint32_t per_open_us = (micros() - t0) / 10;
+            const uint32_t log = PhzConfig::myfs.rootLogBytes();
+            const uint32_t cap = PhzConfig::myfs.metadataMax();
+            Serial.printf("open(%s): %lu us each (%d/10 ok)\n",
+                          PhzConfig::CONFIG_FILENAME, (unsigned long)per_open_us, opened);
+            Serial.printf("root metadata log: %lu bytes used, compacts at %lu\n",
+                          (unsigned long)log, (unsigned long)(cap ? cap : 65536));
+            Serial.printf("blocks: %lu / %lu used (64 KB each)\n",   // no %llu on Teensy printf
+                          (unsigned long)(PhzConfig::myfs.usedSize() / 65536),
+                          (unsigned long)(PhzConfig::myfs.totalSize() / 65536));
+            break;
+          }
           case 'F':
             if (millis() - destructive_arm_ms >= 3000 || destructive_arm_key != 'F') {
               destructive_arm_ms = millis();
