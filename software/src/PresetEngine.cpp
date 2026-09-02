@@ -1638,6 +1638,77 @@ FLASHMEM void DiscardSnapshot() { preset_fs().remove(kSnapFile); }
 // and parsing the destination: a copy that lands corrupt must not be reported
 // as success, and on import it must never retire a good local container.
 
+// The container to the card with the slot's CURRENT name in its manifest.
+// SaveSlot packs the name at save time, and a rename since then only touched
+// the name store -- rewriting a 10 KB container for sixteen bytes of name
+// would cost a block erase on every rename. So the copy is where the two
+// meet: the G section is read into the staging buffer, the name records
+// poked (chunk checksum kept right by PhzConfig::poke), the section sum
+// recomputed, and the bytes streamed out with that section and the patched
+// directory substituted. A container from before the name keys has nothing
+// to poke and is copied as it is. The card copy is verified afterwards, so
+// a mistake here reads as EXPORT_FAILED, never as a bad file on the card.
+FLASHMEM static bool export_container(uint8_t slot, FS &card, const char *name) {
+  File f;
+  SectionEntry sec[kMaxSections];
+  int n = 0;
+  if (!container_open(slot, f, sec, n)) return false;
+  SectionEntry *g = nullptr;
+  for (int i = 0; i < n; ++i)
+    if (sec[i].kind == 'G') g = &sec[i];
+  bool patch = g && section_to_mem(f, *g, sec_buf, kSecBufBytes);
+  if (patch) {
+    uint64_t nm[2];
+    pack_name(slot, nm);
+    patch = PhzConfig::poke(sec_buf, g->length, kNameKey0, nm[0]) &&
+            PhzConfig::poke(sec_buf, g->length, kNameKey1, nm[1]);
+    if (patch) g->checksum = sum16(sec_buf, g->length);
+  }
+  // A poke that found the first key and not the second has half-patched the
+  // buffer -- SaveSlot writes both or neither, so that is a damaged
+  // manifest. Re-read the section rather than export the mixture.
+  if (!patch && g && !section_to_mem(f, *g, sec_buf, kSecBufBytes)) {
+    f.close();
+    return false;
+  }
+
+  ContainerHeader h;
+  if (!f.seek(0) || f.read((uint8_t *)&h, sizeof(h)) != sizeof(h)) {
+    f.close();
+    return false;
+  }
+  card.remove(name);
+  File dst = card.open(name, FILE_WRITE_BEGIN);
+  if (!dst) { f.close(); return false; }
+  bool ok = cw_put(dst, (const uint8_t *)&h, sizeof(h));
+  for (int i = 0; i < kMaxSections && ok; ++i) {
+    const SectionEntry e = (i < n) ? sec[i] : SectionEntry{ 0, 0, 0, 0, 0 };
+    ok = cw_put(dst, (const uint8_t *)&e, sizeof(e));
+  }
+  // Payload, in file order, with the G byte range taken from the buffer.
+  const uint32_t size = (uint32_t)f.size();
+  uint32_t pos = kPayloadStart;
+  ok = ok && f.seek(pos);
+  uint8_t buf[512];
+  while (ok && pos < size) {
+    const uint32_t want = (size - pos) < sizeof(buf) ? (size - pos) : sizeof(buf);
+    ok = f.read(buf, want) == (int)want;
+    if (ok && g) {
+      const uint32_t lo = pos > g->offset ? pos : g->offset;
+      const uint32_t hi = (pos + want) < (g->offset + g->length)
+                              ? (pos + want) : (g->offset + g->length);
+      if (lo < hi) memcpy(buf + (lo - pos), sec_buf + (lo - g->offset), hi - lo);
+    }
+    ok = ok && dst.write(buf, want) == want;
+    pos += want;
+    watchdog_feed();
+  }
+  f.close();
+  dst.close();
+  if (!ok) card.remove(name);
+  return ok;
+}
+
 FLASHMEM ExportResult ExportSlot(uint8_t slot) {
   if (slot >= kNumSlots) return EXPORT_BAD_SLOT;
   FS *card = card_fs();
@@ -1665,7 +1736,7 @@ FLASHMEM ExportResult ExportSlot(uint8_t slot) {
   // (and that a recall would refuse). Say which side is broken.
   if (!container_verify(preset_fs(), name)) return EXPORT_BAD_FILE;
 
-  if (!copy_file(preset_fs(), name, *card, name)) return EXPORT_FAILED;
+  if (!export_container(slot, *card, name)) return EXPORT_FAILED;
 
   // Prove it landed, whole. A card that reports a successful write and
   // stores nothing is the exact failure this whole engine is built to

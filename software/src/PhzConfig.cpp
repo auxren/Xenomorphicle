@@ -323,27 +323,47 @@ FLASHMEM bool deserialize(const uint8_t *buf, size_t len) {
   return any;
 }
 
+// Locate a "PZ" record's value bytes; null when the image is malformed or
+// the key is absent. Shared by peek and poke so they cannot disagree about
+// what a record is.
+static uint8_t *pz_find(uint8_t *buf, size_t len, KEY key) {
+  if (len < HEADER_SIZE || buf[0] != 'P' || buf[1] != 'Z') return nullptr;
+  const size_t count = (size_t)buf[2] | (size_t)buf[3] << 8;
+  const size_t body = count * (sizeof(KEY) + sizeof(VALUE));
+  if (HEADER_SIZE + body > len) return nullptr;
+  uint8_t *p = buf + HEADER_SIZE;
+  for (size_t i = 0; i < count; ++i) {
+    KEY k;
+    memcpy(&k, p, sizeof(k));
+    if (k == key) return p + sizeof(k);
+    p += sizeof(KEY) + sizeof(VALUE);
+  }
+  return nullptr;
+}
+
 // Same walk as chunk_from_mem's "PZ" pass, minus the store: a lookup, not a
 // load. The checksum is not verified here -- the caller has already proven
 // the section (container_verify / recall_stage_head), and a peek that
 // touched nothing but still failed a whole image for one flipped bit would
 // only take a name away from a preset that recalls fine.
 FLASHMEM bool peek(const uint8_t *buf, size_t len, KEY key, VALUE &value) {
-  if (len < HEADER_SIZE || buf[0] != 'P' || buf[1] != 'Z') return false;
-  const size_t count = (size_t)buf[2] | (size_t)buf[3] << 8;
-  const size_t body = count * (sizeof(KEY) + sizeof(VALUE));
-  if (HEADER_SIZE + body > len) return false;
-  const uint8_t *p = buf + HEADER_SIZE;
-  for (size_t i = 0; i < count; ++i) {
-    KEY k;
-    memcpy(&k, p, sizeof(k));
-    if (k == key) {
-      memcpy(&value, p + sizeof(k), sizeof(value));
-      return true;
-    }
-    p += sizeof(KEY) + sizeof(VALUE);
-  }
-  return false;
+  const uint8_t *v = pz_find(const_cast<uint8_t *>(buf), len, key);
+  if (!v) return false;
+  memcpy(&value, v, sizeof(value));
+  return true;
+}
+
+FLASHMEM bool poke(uint8_t *buf, size_t len, KEY key, VALUE value) {
+  uint8_t *v = pz_find(buf, len, key);
+  if (!v) return false;
+  VALUE old;
+  memcpy(&old, v, sizeof(old));
+  memcpy(v, &value, sizeof(value));
+  // The chunk header carries the xor of every value (chunk_header): fold the
+  // old one out and the new one in, byte-wise, in the header's byte order.
+  for (int i = 0; i < 8; ++i)
+    buf[4 + i] ^= (uint8_t)((old ^ value) >> (8 * i));
+  return true;
 }
 
 bool save_config(const char* filename, FS &fs)

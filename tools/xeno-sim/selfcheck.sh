@@ -602,6 +602,26 @@ grep -q 'name slot 0: "Drone A"' "$TMP/names.txt" \
 $SIM --state-in "$IMG/recv" --keys "names" 2>&1 | grep -q 'name slot 0: "Drone A"' \
   && ok "...and the name survives a power cycle" \
   || bad "the imported name was not written to the name store"
+# A rename after the store only touches the name store; the container still
+# carries the name it was saved under. Export must send the CURRENT name --
+# the one on the panel -- not the one packed at save time.
+rm -f "$IMG/renamed"
+$SIM --sd-card --state-out "$IMG/renamed" \
+     --keys "name0=Drone A,$ENTER,l-down,step600,l-up,step4000,name0=Drone B,export,step100" \
+     >/dev/null 2>&1
+grep -v '^file lfs ' "$IMG/renamed" > "$IMG/recv3"
+$SIM --sd-card --state "$IMG/recv3" --keys "import,step100,names" 2>&1 \
+  | grep -q 'name slot 0: "Drone B"' \
+  && ok "a slot renamed after it was stored exports under its current name" \
+  || bad "the export carried the name from save time, not the rename"
+# ...and the exported container is still whole: the patched G section and
+# directory verify on the way back in (the import above proves that) AND
+# recall on the receiving module.
+$SIM --sd-card --state "$IMG/recv3" --keys "$ENTER,r-down,step300,r-up,step3000" 2>&1 \
+  | grep -q 'recall slot 0 done' \
+  && ok "...and the name-patched container recalls on the receiving module" \
+  || bad "the name-patched container did not recall"
+
 # The name is the preset's, not the slot's: importing a preset that was
 # stored UNNAMED over a slot the receiving module had named must clear that
 # name, or the panel would show "Keep" over a preset nobody called that.

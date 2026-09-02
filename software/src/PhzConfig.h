@@ -65,6 +65,11 @@ namespace PhzConfig {
   // Scans the "PZ" chunk only; false when the image is malformed or the key
   // is absent.
   bool peek(const uint8_t *buf, size_t len, KEY key, VALUE &value);
+  // The write side of peek: replace one EXISTING value in a serialized image
+  // in place, keeping the chunk's checksum right. False (image untouched)
+  // when the key is not there -- this never adds a record, since that would
+  // move every byte after it.
+  bool poke(uint8_t *buf, size_t len, KEY key, VALUE value);
 
   // True when the map differs from the file it was last loaded from or saved
   // to. save_config skips the write when it is false and the target is that
@@ -104,6 +109,7 @@ namespace PhzConfig {
   inline size_t serialize(uint8_t *, size_t, bool (*)(KEY) = nullptr, KEY (*)(KEY) = nullptr) { return 0; }
   inline bool deserialize(const uint8_t *, size_t) { return false; }
   inline bool peek(const uint8_t *, size_t, KEY, VALUE &) { return false; }
+  inline bool poke(uint8_t *, size_t, KEY, VALUE) { return false; }
   inline bool unsaved_changes() { return false; }
 
   inline void setValue(KEY, VALUE) {}
