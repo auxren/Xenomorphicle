@@ -746,25 +746,46 @@ FLASHMEM static bool container_verify(FS &fs, const char *name) {
   return ok;
 }
 
-// True when `dest` already holds exactly the section's bytes. Reads only,
-// which on memory-mapped flash costs nothing next to the block erase the
-// rewrite would take -- a recall that changes nothing about Captain's setup
-// should not stall the module for a quarter second re-writing CAPTAIN.DAT.
-FLASHMEM static bool section_matches_file(File &f, const SectionEntry &e,
-                                          const char *dest, FS &fs) {
+// Does `dest` already hold exactly the section's bytes? Reads only, which
+// on memory-mapped flash costs nothing next to the sector erase the rewrite
+// would take -- a recall that changes nothing about Captain's setup should
+// not stall the module re-writing CAPTAIN.DAT.
+//
+// Answers with WHERE the two differ rather than a bare no, because a bare
+// no hid a bug: through a whole soak two slots carrying the same-sized
+// Captain image compared unequal on every recall, and nothing on the
+// console said whether the content differed or only the record order
+// (PhzConfig serialized in unordered_map order; it now sorts by key).
+// kSectionSame when identical; kSectionNoFile when there is nothing to
+// compare against; otherwise the first differing offset, with a length
+// mismatch counted as differing at the shorter length.
+static constexpr int32_t kSectionSame = -1;
+static constexpr int32_t kSectionNoFile = -2;
+FLASHMEM static int32_t section_diff_offset(File &f, const SectionEntry &e,
+                                            const char *dest, FS &fs,
+                                            uint32_t *file_size) {
   File d = fs.open(dest, FILE_READ);
-  if (!d) return false;
-  bool same = (uint32_t)d.size() == e.length && f.seek(e.offset);
+  if (!d) { *file_size = 0; return kSectionNoFile; }
+  *file_size = d.size();
+  const uint32_t common = *file_size < e.length ? *file_size : e.length;
+  int32_t result = kSectionSame;
+  if (!f.seek(e.offset)) result = 0;
   uint8_t a[128], b[128];
-  uint32_t left = e.length;
-  while (same && left) {
-    const uint32_t want = left < sizeof(a) ? left : sizeof(a);
-    same = f.read(a, want) == (int)want && d.read(b, want) == (int)want &&
-           memcmp(a, b, want) == 0;
-    left -= want;
+  uint32_t pos = 0;
+  while (result == kSectionSame && pos < common) {
+    const uint32_t want = common - pos < sizeof(a) ? common - pos : sizeof(a);
+    if (f.read(a, want) != (int)want || d.read(b, want) != (int)want) {
+      result = (int32_t)pos;
+      break;
+    }
+    for (uint32_t i = 0; i < want; ++i) {
+      if (a[i] != b[i]) { result = (int32_t)(pos + i); break; }
+    }
+    pos += want;
   }
+  if (result == kSectionSame && *file_size != e.length) result = (int32_t)common;
   d.close();
-  return same;
+  return result;
 }
 
 // Extract one section back out to a standalone file. Verifying the checksum
@@ -779,7 +800,9 @@ FLASHMEM static bool section_matches_file(File &f, const SectionEntry &e,
 // printed at the end is what keeps that visible on the console.
 FLASHMEM static bool section_to_file(File &f, const SectionEntry &e,
                                      const char *dest, FS &fs) {
-  if (section_matches_file(f, e, dest, fs)) return true;
+  uint32_t on_flash = 0;
+  const int32_t diff = section_diff_offset(f, e, dest, fs, &on_flash);
+  if (diff == kSectionSame) return true;
   if (!f.seek(e.offset)) return false;
   WallClock wall;
   wall.start();
@@ -807,9 +830,14 @@ FLASHMEM static bool section_to_file(File &f, const SectionEntry &e,
   fs.remove(dest);
   ok = fs.rename(kScratch, dest);
   if (!ok) fs.remove(kScratch);
-  serial_printf("PresetEngine: restored %s (%lu bytes) write %lu ms, rename %lu ms\n",
-                dest, (unsigned long)e.length, (unsigned long)write_ms,
-                (unsigned long)wall.lap_ms());
+  const unsigned long rename_ms = wall.lap_ms();
+  if (diff == kSectionNoFile)
+    serial_printf("PresetEngine: restored %s (%lu bytes, was absent) write %lu ms, rename %lu ms\n",
+                  dest, (unsigned long)e.length, (unsigned long)write_ms, rename_ms);
+  else
+    serial_printf("PresetEngine: restored %s (%lu bytes, was %lu, differs at +%ld) write %lu ms, rename %lu ms\n",
+                  dest, (unsigned long)e.length, (unsigned long)on_flash,
+                  (long)diff, (unsigned long)write_ms, rename_ms);
   return ok;
 }
 

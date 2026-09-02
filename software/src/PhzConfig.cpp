@@ -6,6 +6,8 @@
  */
 #ifdef __IMXRT1062__
 #include <string.h>
+#include <algorithm>
+#include <vector>
 #include "PhzConfig.h"
 #include "HSUtils.h"
 #include "util/util_misc.h"
@@ -446,6 +448,23 @@ static void chunk_header(uint8_t *h, const char *sig, ConfigMap &store) {
   for (int i = 0; i < 8; ++i) h[4 + i] = (uint8_t)(checksum >> (8 * i));
 }
 
+// Records go out in ascending key order, not in the map's own order. An
+// unordered_map iterates in bucket order, which depends on how it was built
+// (insertion sequence, rehashes), so two saves of the SAME content could
+// differ byte for byte -- and the preset engine decides whether a recall
+// must rewrite CAPTAIN.DAT/SCENERY.DAT by comparing bytes
+// (section_matches_file): on the bench two slots holding identical Captain
+// setups were still costing a sector erase on every recall between them.
+// Sorting makes "same content" and "same bytes" the same question. Loading
+// never cared about order (insert_or_assign), so old files stay readable.
+static std::vector<KEY> sorted_keys(const ConfigMap &store) {
+  std::vector<KEY> keys;
+  keys.reserve(store.size());
+  for (auto &i : store) keys.push_back(i.first);
+  std::sort(keys.begin(), keys.end());
+  return keys;
+}
+
 size_t save_chunk(const size_t offset, const char* sig, ConfigMap &store) {
   uint8_t header_buf[HEADER_SIZE];
   chunk_header(header_buf, sig, store);
@@ -455,11 +474,12 @@ size_t save_chunk(const size_t offset, const char* sig, ConfigMap &store) {
   }
 
   size_t bytes_written = 0;
-  for (auto &i : store)
+  for (const KEY key : sorted_keys(store))
   {
-    int result = dataFile.write((const uint8_t*)&i.first, sizeof(i.first)) +
-                dataFile.write((const uint8_t*)&i.second, sizeof(i.second));
-    if (result != (sizeof(i.first) + sizeof(i.second))) {
+    const VALUE value = store.find(key)->second;
+    int result = dataFile.write((const uint8_t*)&key, sizeof(key)) +
+                dataFile.write((const uint8_t*)&value, sizeof(value));
+    if (result != (sizeof(key) + sizeof(value))) {
       // something went wrong
       SERIAL_PRINTLN("!! ERROR while writing file !!\n   Result = %d\n", result);
       return 0;
@@ -479,9 +499,10 @@ static size_t chunk_to_mem(uint8_t *buf, size_t cap, const char *sig,
   if (need > cap) return 0;
   chunk_header(buf, sig, store);
   uint8_t *p = buf + HEADER_SIZE;
-  for (auto &i : store) {
-    memcpy(p, &i.first, sizeof(i.first));   p += sizeof(i.first);
-    memcpy(p, &i.second, sizeof(i.second)); p += sizeof(i.second);
+  for (const KEY key : sorted_keys(store)) {
+    const VALUE value = store.find(key)->second;
+    memcpy(p, &key, sizeof(key));     p += sizeof(key);
+    memcpy(p, &value, sizeof(value)); p += sizeof(value);
   }
   return need;
 }

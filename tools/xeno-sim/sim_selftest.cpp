@@ -71,7 +71,7 @@ bool sample_intact() {
 
 std::vector<uint8_t> serialized(bool (*pred)(KEY) = nullptr,
                                 KEY (*remap)(KEY) = nullptr) {
-  std::vector<uint8_t> buf(4096);
+  std::vector<uint8_t> buf(16384);
   const size_t n = PhzConfig::serialize(buf.data(), buf.size(), pred, remap);
   buf.resize(n);
   return buf;
@@ -295,6 +295,58 @@ void test_file_damage() {
   CHECK(PhzConfig::unsaved_changes());
 }
 
+// The preset engine skips rewriting CAPTAIN.DAT/SCENERY.DAT on recall when
+// the slot's bytes equal the file's bytes -- which only works if the same
+// content always produces the same bytes. An unordered_map does not promise
+// that: its iteration order depends on insertion history and rehashes. So
+// build one map two ways (ascending, then descending with a rehash forced
+// in between) and demand identical images, in ascending key order.
+void test_deterministic_order() {
+  printf("the same content serializes to the same bytes whatever built the map\n");
+  constexpr int kKeys = 300;   // enough inserts to rehash a few times
+  PhzConfig::clear_config();
+  for (int i = 0; i < kKeys; ++i) {
+    PhzConfig::setValue((KEY)(i * 37 % 4096), (VALUE)i * 0x9E3779B97F4A7C15ull);
+    PhzConfig::setData((KEY)(i * 53 % 2048), (VALUE)i);
+  }
+  const auto forward = serialized();
+
+  PhzConfig::clear_config();
+  // a different history: a burst of keys that are then removed, so the
+  // table has been through rehashes the forward build never saw
+  for (int i = 0; i < 2000; ++i) PhzConfig::setValue((KEY)(0x8000 + i), i);
+  for (int i = 0; i < 2000; ++i) PhzConfig::deleteKey((KEY)(0x8000 + i));
+  for (int i = kKeys - 1; i >= 0; --i) {
+    PhzConfig::setData((KEY)(i * 53 % 2048), (VALUE)i);
+    PhzConfig::setValue((KEY)(i * 37 % 4096), (VALUE)i * 0x9E3779B97F4A7C15ull);
+  }
+  const auto backward = serialized();
+  CHECK(forward.size() == 2 * kHeader + 2 * kKeys * kRecord);   // not a vacuous match of two empties
+  CHECK(forward == backward);
+
+  // and the order really is ascending, in both chunks
+  size_t pos = 0;
+  for (int chunk = 0; chunk < 2; ++chunk) {
+    const size_t count = forward[pos + 2] | (size_t)forward[pos + 3] << 8;
+    CHECK(count == (size_t)kKeys);   // 37 and 53 are coprime to the moduli: no collisions
+    pos += kHeader;
+    KEY prev = 0;
+    bool ascending = true;
+    for (size_t i = 0; i < count; ++i, pos += kRecord) {
+      KEY k;
+      memcpy(&k, &forward[pos], sizeof(k));
+      if (i && k <= prev) ascending = false;
+      prev = k;
+    }
+    CHECK(ascending);
+  }
+  CHECK(pos == forward.size());
+
+  // the file path writes the same bytes as the RAM path
+  CHECK(PhzConfig::save_config("T_ORD.CFG", PhzConfig::myfs));
+  CHECK(file_bytes("T_ORD.CFG") == forward);
+}
+
 void test_save_filtered() {
   printf("save_filtered writes the filtered image and leaves the live map alone\n");
   fill_sample();
@@ -317,6 +369,7 @@ int SimPhzConfigSelfTest() {
   test_file_round_trip();
   test_file_reads_serialized_images();
   test_file_damage();
+  test_deterministic_order();
   test_save_filtered();
   printf("%d checks, %d failed\n", g_checks, g_fails);
   return g_fails ? 1 : 0;
