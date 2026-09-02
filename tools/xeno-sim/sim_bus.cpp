@@ -468,6 +468,13 @@ int MasterRestore(uint8_t mod_addr) {
 
 Bus200eMasterState MasterState() { return Bus200eMasterGetState(); }
 Bus200eMasterError MasterError() { return Bus200eMasterLastError(); }
+bool MasterTransferring() {
+  const Bus200eMasterState st = Bus200eMasterGetState();
+  const bool in_flight = (st != BUS200E_MASTER_IDLE &&
+                          st != BUS200E_MASTER_DONE &&
+                          st != BUS200E_MASTER_FAILED);
+  return in_flight;
+}
 uint8_t *MasterCardImage() { return g_serving ? g_card : nullptr; }
 void MasterReset() { Bus200eMasterReset(); }
 

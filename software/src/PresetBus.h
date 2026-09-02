@@ -128,6 +128,14 @@ int MasterBackup(uint8_t mod_addr);
 int MasterRestore(uint8_t mod_addr);
 Bus200eMasterState MasterState();
 Bus200eMasterError MasterError();
+// True while a BACKUP or RESTORE job is open: the target module is moving a
+// whole bank into or out of our card slave, and anything that masks
+// interrupts for long (a preset recall's flash writes) stalls that transfer
+// on a stretched clock. PresetEngine::Process defers bus SAVE/RECALL requests
+// on it. Both directions: a torn RESTORE leaves the module holding half a
+// bank, and a torn BACKUP after a write is the verify pass reading 3% of the
+// evidence and calling the write BAD.
+bool MasterTransferring();
 uint8_t *MasterCardImage();   // the 64K card buffer; NULL unless CardServing()
 void MasterReset();           // acknowledge a DONE/FAILED result, back to IDLE
 // hex-dump the last completed master transfer's bytes (0..
@@ -215,6 +223,7 @@ inline int MasterBackup(uint8_t) { return -1; }
 inline int MasterRestore(uint8_t) { return -1; }
 inline Bus200eMasterState MasterState() { return BUS200E_MASTER_IDLE; }
 inline Bus200eMasterError MasterError() { return BUS200E_MASTER_ERR_NONE; }
+inline bool MasterTransferring() { return false; }
 inline uint8_t *MasterCardImage() { return nullptr; }
 inline void MasterReset() {}
 inline void DumpCard() {}

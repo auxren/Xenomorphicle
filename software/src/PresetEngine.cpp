@@ -268,6 +268,18 @@ static bool last_save_ok = false;
 static const char *last_recall_err = nullptr;
 static bool busy = false;
 static int quad_recall_hint = -1;
+// When Process() first held a request back for a bank transfer in flight
+// (0 = not holding). See the deferral note in Process().
+//
+// The cap is sized from the bench, not from the sim: a real 251e BACKUP ran
+// 10.8 s from the encR tap to "card image saved" (2026-09-02), so a write --
+// RESTORE plus the verify BACKUP the app chains straight after it -- is ~22 s
+// of transfer with nothing wrong, and two jobs at the master's 15 s hard cap
+// are 30 s. 45 s is past any chain the app starts on its own; only a user
+// starting job after job reaches it, and then the manager's request has
+// waited long enough.
+static uint32_t deferred_since = 0;
+static constexpr uint32_t kDeferCapMs = 45000;
 // True only while the power-up recall runs. That recall restores the
 // preset's state but keeps two things that are the module's own rather
 // than the scene's: the live Captain config and the app on screen.
@@ -1465,7 +1477,40 @@ FLASHMEM void Process() {
   // ONE request per pass, in arrival order. Draining the whole queue here
   // would keep loop() -- and with it the UI, USB and the bus parser that
   // feeds this queue -- starved for as long as the bus kept sending.
+  //
+  // ...but not while the 200e app has a whole-bank transfer on the wire. The
+  // target module is moving 63,120 bytes into or out of our card slave, and a
+  // recall (or save) here blocks loop() for 70-150 ms and masks every
+  // interrupt for each flash erase inside that. The slave hardware
+  // clock-stretches through it (RXSTALL/TXDSTALL), but a 251e that gives up
+  // waiting on a RESTORE leaves the module holding half a bank -- exactly the
+  // failure the app's verify pass then has to catch and offer an undo for --
+  // and on the verify BACKUP itself it reads as a false BAD over a write
+  // that landed. The request is not dropped: it stays at the head of the
+  // queue (a newer recall still replaces it) and runs the moment the
+  // transfer ends. Between the RESTORE and the verify BACKUP the app chains
+  // after it there is no pass where the master looks idle: the FSM steps to
+  // DONE in PresetBus::Task(), which runs after this function, and the app's
+  // loop starts the read-back before this function runs again. Capped
+  // (kDeferCapMs, sized above) so a user starting job after job cannot hold
+  // a manager's RECALL hostage; the FSM's own timeouts close every single
+  // job well inside that.
+  if (!req_q.empty() && PresetBus::MasterTransferring()) {
+    if (!deferred_since) {
+      deferred_since = StampMs();
+      serial_printf("PresetEngine: request deferred, bank transfer on the wire\n");
+    }
+    if (millis() - deferred_since < kDeferCapMs) return;
+    serial_printf("PresetEngine: transfer still on the wire after %lu s; "
+                  "running the request anyway\n",
+                  (unsigned long)(kDeferCapMs / 1000));
+  }
   if (!req_q.empty()) {
+    if (deferred_since) {
+      serial_printf("PresetEngine: deferred request runs, waited %lu ms\n",
+                    (unsigned long)(millis() - deferred_since));
+      deferred_since = 0;
+    }
     const auto r = req_q.front();
     req_q.pop();
     switch (r.op) {

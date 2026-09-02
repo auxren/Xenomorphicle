@@ -994,6 +994,59 @@ sent_undo() {  # 1 if the recovery write reached the wire, 0 if not
   && ok "...while the deliberate encL-to-UNDO gesture does send it" \
   || bad "the deliberate undo gesture never reached the wire"
 
+# ---------------------------------------------------------------------------
+# A manager's RECALL that lands while a bank is on the wire waits for it.
+#
+# The 251e is the I2C master for the 63,120-byte transfer; we are the card
+# it writes into or reads out of. A recall meanwhile blocks loop() for
+# 70-150 ms and masks interrupts across each flash erase, and a 251e that
+# gives up waiting on a RESTORE is left holding half a bank. So Process()
+# holds the request until the master FSM is idle again and runs it then --
+# after the verify read-back too, since a torn read-back says BAD over a
+# write that landed.
+#
+# The `+r` matters: an unprefixed key settles the bus before the next token,
+# which would finish the whole write before the RECALL is ever queued and
+# make the ordering below true of the unfixed code as well.
+echo "a bus RECALL waits for a 200e bank transfer to leave the wire"
+
+MIDXFER="wpmsave0,step3000,$W251_ARMED,step400,+r,step500,wpm0,step30000"
+$SIM --app "200e Modules" --full-log --keys "$MIDXFER" 2>&1 \
+  | grep -nE 'RESTORE 5C|BACKUP 5C|manager RECALL|PresetEngine: (request deferred|deferred request|recall slot 0 done)' \
+  > "$TMP/midxfer"
+
+grep -q 'request deferred, bank transfer on the wire' "$TMP/midxfer" \
+  && ok "the engine says it is holding the request" \
+  || bad "no deferral logged for a RECALL mid-transfer: $(cat "$TMP/midxfer")"
+
+# Log order is the proof: the recall's completion line must come after BOTH
+# transfer lines -- the RESTORE and the verify BACKUP the app chains after
+# it. Line numbers from grep -n make "after" a number comparison.
+restore_ln=$(grep 'RESTORE 5C' "$TMP/midxfer" | head -1 | cut -d: -f1)
+verify_ln=$(grep 'BACKUP 5C' "$TMP/midxfer" | tail -1 | cut -d: -f1)
+recall_ln=$(grep 'manager RECALL' "$TMP/midxfer" | cut -d: -f1)
+done_ln=$(grep 'recall slot 0 done' "$TMP/midxfer" | cut -d: -f1)
+if [ -n "$restore_ln" ] && [ -n "$verify_ln" ] && [ -n "$recall_ln" ] && [ -n "$done_ln" ] \
+   && [ "$recall_ln" -gt "$restore_ln" ] && [ "$recall_ln" -lt "$verify_ln" ] \
+   && [ "$done_ln" -gt "$verify_ln" ]; then
+  ok "the RECALL arrived mid-transfer and ran only after the verify read-back"
+else
+  bad "recall ordering wrong (restore@$restore_ln recall@$recall_ln verify@$verify_ln done@$done_ln): $(cat "$TMP/midxfer")"
+fi
+
+# ...and the write it waited behind is not the worse for it.
+$SIM --app "200e Modules" --keys "$MIDXFER" --dump-fb 2>/dev/null \
+  | python3 fbtext.py - | grep -q 'WROTE + VERIFIED' \
+  && ok "the write behind the held RECALL still verified" \
+  || bad "the write did not verify with a RECALL held behind it"
+
+# The hold is a hold, not a drop: a RECALL with nothing on the wire runs at
+# once and logs no deferral -- otherwise every recall would wait.
+$SIM --app "200e Modules" --full-log --keys "wpmsave0,step3000,$W251,wpm0,step3000" 2>&1 \
+  | grep -q 'request deferred' \
+  && bad "a RECALL with the bus idle was deferred" \
+  || ok "a RECALL with the bus idle is not deferred"
+
 echo "small app state is not a whole-EEPROM rewrite"
 
 # The 200e scan result is ~11 bytes. It used to reach storage through
