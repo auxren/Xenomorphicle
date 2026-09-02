@@ -11,12 +11,15 @@
 //        to preset 0) + bank globals + audio applet graph
 //   'S'  Scenery       'C'  Captain MIDI
 //
-// One file per slot is not tidiness, it is arithmetic. LittleFS_Program uses
-// 64 KB erase sectors on T4.1, so the 4 MB partition is 64 BLOCKS and every
-// file costs a whole one however few bytes it holds. The previous layout wrote
-// 3-5 files per slot -- 90-150 blocks for 30 slots against a budget of 64 --
-// and would have exhausted the filesystem around slot 20 while cheerfully
-// reporting well over a megabyte free. Sections are opaque byte ranges, which
+// One file per slot is not tidiness, it is arithmetic. Every file costs whole
+// erase blocks however few bytes it holds, and under the core's LittleFS
+// geometry (64 KB blocks, so the 4 MB partition was 64 BLOCKS) the previous
+// layout's 3-5 files per slot -- 90-150 blocks for 30 slots -- would have
+// exhausted the filesystem around slot 20 while cheerfully reporting well
+// over a megabyte free. PhzConfig::XenoFS has since moved the partition to
+// 4 KB blocks (1024 of them), which makes this comfortable rather than
+// necessary; one container per slot stays because it is also one open, one
+// checksum and one rename per recall. Sections are opaque byte ranges, which
 // is what let this change stay entirely out of PhzConfig.
 //
 // Slots live on INTERNAL FLASH, always, card or no card. This used to follow
@@ -79,8 +82,9 @@ int ConsumeQuadrantsRecallHint();
 // stores the slot actually carries (a slot saved on a module that never ran
 // Scenery has no 'S' section, and SCENERY.DAT then survives the recall).
 // A Suspend handler's auto-save to one of these files is replaced by the
-// slot's copy a millisecond later: one 64 KB erase with interrupts off,
-// 250-295 ms of frozen audio and MIDI, for bytes nobody will ever read.
+// slot's copy a millisecond later: a flash erase with interrupts off
+// (250-295 ms of frozen audio and MIDI as measured under 64 KB blocks; ~45 ms
+// a sector under 4 KB ones) for bytes nobody will ever read.
 // The app-menu Suspend, where that save is the whole point, sees 0.
 // RECALL_SUSPEND is set for every recall Suspend whatever the slot carries:
 // for work that belongs to the menu gesture and not to a performance
@@ -130,7 +134,7 @@ bool LastWasSave();
 bool Busy();
 
 // ---- pre-write bank snapshot -----------------------------------------------
-// One 64 KB block holding the last good copy of a module's bank, taken before
+// One file holding the last good copy of a module's bank, taken before
 // a write goes on the wire. The 200e write path can DETECT that it damaged a
 // preset the user never touched, but until this existed it could not repair
 // one: only hashes of the other 29 slots were kept, and the verify read-back

@@ -11,7 +11,9 @@
 struct lfs_t {};
 struct lfs_mdir_t { uint32_t off = 0; };
 struct lfs_dir_t { lfs_mdir_t m; };
-struct lfs_config { uint32_t metadata_max = 0; };
+// block_size is what XenoFS::blockBytes() reports; the preset engine's
+// free-space guard divides by it. 4096 is the geometry the real XenoFS mounts.
+struct lfs_config { uint32_t metadata_max = 0; uint32_t block_size = 4096; };
 inline int lfs_dir_open(lfs_t *, lfs_dir_t *, const char *) { return -1; }
 inline int lfs_dir_close(lfs_t *, lfs_dir_t *) { return 0; }
 

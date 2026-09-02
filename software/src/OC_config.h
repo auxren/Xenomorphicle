@@ -76,11 +76,12 @@ static constexpr unsigned long SETTINGS_SAVE_TIMEOUT_MS = 1000;
 // The top 8 bytes of the emulated EEPROM hold what the module was doing at
 // power-down: the current preset-bus slot and the app on screen
 // (PresetEngine.cpp: the "current record"). It lives here and not in
-// GLOBALS.CFG because a LittleFS write is a 64 KB block erase with interrupts
-// off -- ~270 ms of dead audio, USB and bus, three seconds after every preset
-// change, or right inside a cross-app recall -- while an emulated-EEPROM byte
-// is one 2-byte program (eeprom.c), skipped outright when the value is
-// unchanged. Carved off the app-data region explicitly; the 160-byte reserve
+// GLOBALS.CFG because a LittleFS write is a flash erase with interrupts off
+// (~270 ms of dead audio, USB and bus under the core's 64 KB blocks when this
+// was measured; ~45 ms per sector under XenoFS's 4 KB ones) three seconds
+// after every preset change, or right inside a cross-app recall -- while an
+// emulated-EEPROM byte is one 2-byte program (eeprom.c), skipped outright
+// when the value is unchanged. Carved off the app-data region explicitly; the 160-byte reserve
 // became 152 so BINARY_SIZE stays 3900 and app data stored by earlier
 // firmware still validates. (The record was 4 bytes before it carried the
 // app; the reserve shrank in step, 156 -> 152.)

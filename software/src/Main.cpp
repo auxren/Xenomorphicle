@@ -1454,11 +1454,13 @@ FLASHMEM __attribute__((noinline)) void loop() {
             const uint32_t cap = PhzConfig::myfs.metadataMax();
             Serial.printf("open(%s): %lu us each (%d/10 ok)\n",
                           PhzConfig::CONFIG_FILENAME, (unsigned long)per_open_us, opened);
+            const uint32_t block = PhzConfig::myfs.blockBytes();
             Serial.printf("root metadata log: %lu bytes used, compacts at %lu\n",
-                          (unsigned long)log, (unsigned long)(cap ? cap : 65536));
-            Serial.printf("blocks: %lu / %lu used (64 KB each)\n",   // no %llu on Teensy printf
-                          (unsigned long)(PhzConfig::myfs.usedSize() / 65536),
-                          (unsigned long)(PhzConfig::myfs.totalSize() / 65536));
+                          (unsigned long)log, (unsigned long)(cap ? cap : block));
+            Serial.printf("blocks: %lu / %lu used (%lu KB each)\n",   // no %llu on Teensy printf
+                          (unsigned long)(PhzConfig::myfs.usedSize() / block),
+                          (unsigned long)(PhzConfig::myfs.totalSize() / block),
+                          (unsigned long)(block >> 10));
             break;
           }
           case 'F':

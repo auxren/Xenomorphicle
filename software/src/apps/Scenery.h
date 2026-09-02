@@ -229,8 +229,9 @@ public:
 
     void Suspend() {
       // Not when a bus recall is about to overwrite SCENERY.DAT anyway: the
-      // 64 KB erase would freeze audio for 250 ms to store bytes that the
-      // slot's copy replaces a millisecond later.
+      // flash erase would freeze audio (250 ms under the core's 64 KB blocks,
+      // ~45 ms per 4 KB sector now) to store bytes that the slot's copy
+      // replaces a millisecond later.
       const bool replaced = OC::PresetEngine::RecallReplacing() & OC::PresetEngine::REPLACES_SCENERY;
       if (preset_modified && !replaced) SavePreset();
     }

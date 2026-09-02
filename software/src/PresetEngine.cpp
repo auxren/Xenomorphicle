@@ -155,7 +155,7 @@ static constexpr uint16_t kCurSlotKey = kManifestKey | 0x13;
 // record has erased bytes where the app goes, so the app reads as absent and
 // boot falls back to the app GLOBALS.CFG names, exactly as before.
 //
-// Not a file. A LittleFS write costs a 64 KB block erase with interrupts off
+// Not a file. A LittleFS write costs a flash erase with interrupts off
 // (~270 ms of dead audio, USB and bus), and this write lands three seconds
 // after every preset change -- i.e. while the performer is playing the sound
 // they just recalled. An emulated-EEPROM byte is a single 2-byte flash program
@@ -203,17 +203,22 @@ static_assert(int(CONTENT_BANK) == int(REPLACES_BANK) &&
               int(CONTENT_CAPTAIN) == int(REPLACES_CAPTAIN),
               "RecallReplaces mirrors ContentFlags");
 
-// LittleFS_Program's erase-sector size, which is also its allocation unit:
-// SECTOR_SIZE in the core's LittleFS.cpp, keyed off the board exactly as it
-// is there. A 4 MB partition on T4.1 is therefore only 64 blocks in total,
-// and every file consumes one whether it holds 588 bytes or 64 KB.
-#if defined(ARDUINO_TEENSY41)
-static constexpr uint32_t kLfsBlockBytes = 65536;
-#else
-static constexpr uint32_t kLfsBlockBytes = 32768;
-#endif
-// container + the scratch file it renames through + metadata slack
-static constexpr uint32_t kSaveBlocksNeeded = 3;
+// The filesystem's erase block, which is also its allocation unit: every
+// file consumes whole blocks however few bytes it holds. It is whatever
+// PhzConfig::XenoFS mounted with -- 4 KB on T4.1 (1024 blocks in the 4 MB
+// partition), the core's 32 KB on a T4.0 -- read at run time so the space
+// guard below cannot drift from the geometry. Under the core's original
+// 64 KB blocks that partition was only 64 blocks, which is what forced one
+// container per slot (see the slot-container comment).
+static uint32_t lfs_block_bytes() {
+  const uint32_t b = PhzConfig::myfs.blockBytes();
+  return b ? b : 4096;
+}
+// A save's worst case in bytes: the container (sections bounded by sec_buf
+// plus one AppData plus two small files, well under 32 KB) and the scratch
+// copy it renames through, plus metadata-pair slack. Turned into blocks of
+// the mounted size at the guard.
+static constexpr uint32_t kSaveBytesNeeded = 65536;
 
 // ---- state -----------------------------------------------------------------
 
@@ -297,8 +302,8 @@ static uint8_t extract_preset;
 //
 // The Cortex-M7 DWT cycle counter (enabled at startup) is unaffected by
 // PRIMASK. It wraps every ~7 s at 600 MHz, so it is read as laps -- each one
-// shorter than any single flash op can be (a 64 KB block erase is 2 s worst
-// case) -- and summed in 64 bits.
+// shorter than any single flash op can be (a 64 KB block erase, the core's
+// geometry, is 2 s worst case) -- and summed in 64 bits.
 struct WallClock {
   uint32_t last;
   uint64_t cycles;
@@ -323,9 +328,10 @@ struct WallClock {
 // store. The card is for carrying presets between modules, not for holding
 // them -- see ExportSlot/ImportSlot at the end of this file.
 //
-// It fits: 30 containers is 30 of the 64 blocks LittleFS_Program gives us on
-// T4.1, and the whole steady-state budget lands near 43. The old routing was
-// never a capacity decision anyway; SD was simply the newer, roomier disk.
+// It fits: 30 containers of ~5 KB is 60 of the 1024 4 KB blocks XenoFS gives
+// us on T4.1 (it fit even under the core's 64 KB blocks, at 30 of 64). The
+// old routing was never a capacity decision anyway; SD was simply the newer,
+// roomier disk.
 static FS &preset_fs() { return PhzConfig::myfs; }
 
 // Where QUADRANTS keeps its banks, which is a genuinely different question:
@@ -414,17 +420,21 @@ FLASHMEM static bool read_appdata_file(uint8_t slot) {
 
 // ---- slot container --------------------------------------------------------
 //
-// WHY ONE FILE PER SLOT. LittleFS_Program allocates whole erase sectors, and
-// on Teensy 4.1 that sector is 65536 bytes (SECTOR_SIZE in the core's
-// LittleFS.cpp; 32768 on a T4.0). Every file costs at least one whole block
-// no matter how little it holds -- the 588-byte PB_04_A.BIN measured on the
-// bench occupied 64 KB. With a 4 MB partition that is only 64 blocks TOTAL,
-// so the old layout's 3-5 files per slot could not survive its own 30 slots:
-// 30 x 3 = 90 blocks against a 64-block filesystem, i.e. the filesystem ran
-// out somewhere around slot 20 while reporting well over a megabyte free.
+// WHY ONE FILE PER SLOT. LittleFS allocates whole erase blocks, and when
+// this was written the partition used the core's geometry: 65536-byte
+// sectors on Teensy 4.1 (SECTOR_SIZE in the core's LittleFS.cpp; 32768 on a
+// T4.0). Every file costs at least one whole block no matter how little it
+// holds -- the 588-byte PB_04_A.BIN measured on the bench occupied 64 KB.
+// With a 4 MB partition that was only 64 blocks TOTAL, so the old layout's
+// 3-5 files per slot could not survive its own 30 slots: 30 x 3 = 90 blocks
+// against a 64-block filesystem, i.e. the filesystem ran out somewhere
+// around slot 20 while reporting well over a megabyte free.
 //
-// Packing every section into one file makes a slot cost one block instead of
-// three-to-five, which is what actually makes 30 slots fit. Layout:
+// Packing every section into one file made a slot cost one block instead of
+// three-to-five, which is what made 30 slots fit. PhzConfig::XenoFS has
+// since remounted the partition in 4 KB blocks, so the pressure is gone;
+// the container stays because it is also one open, one checksum and one
+// rename per recall. Layout:
 //
 //   0x00  ContainerHeader                     16 bytes
 //   0x10  SectionEntry[kMaxSections]          6 x 12 = 72 bytes
@@ -435,8 +445,8 @@ FLASHMEM static bool read_appdata_file(uint8_t slot) {
 // summed), then header, directory and payloads go down in order. It used to
 // reserve the directory and seek back to backfill it once the lengths were
 // known. On littlefs a write behind the end of an open file relocates the
-// block -- a fresh 64 KB erase with interrupts off, then a byte-by-byte copy
-// of everything after the write -- so that one backfill cost as much as the
+// block -- a fresh erase with interrupts off, then a byte-by-byte copy of
+// everything after the write -- so that one backfill cost as much as the
 // whole container. Reads are cheap here (memory-mapped flash); erases are
 // what a save is made of, and the plan/write split gets it down to the one
 // the container's own block needs.
@@ -675,7 +685,8 @@ FLASHMEM static bool container_open(uint8_t slot, File &f, SectionEntry *sec, in
 
 // Retire the pre-container files for a slot once its container is safely on
 // disk. This is what actually reclaims the blocks: each of these cost a whole
-// 64 KB sector, so a converted slot hands back two to four of them.
+// erase block (64 KB under the geometry they were written in), so a converted
+// slot hands back two to four of them.
 FLASHMEM static void remove_legacy_slot(uint8_t slot) {
   static const char kinds[] = { 'G', 'A', 'B', 'S', 'C' };
   static const char *const exts[] = { "CFG", "BIN", "DAT", "DAT", "DAT" };
@@ -759,10 +770,19 @@ FLASHMEM static bool section_matches_file(File &f, const SectionEntry &e,
 // Extract one section back out to a standalone file. Verifying the checksum
 // before the destination is touched is not possible in one pass without a
 // buffer, so the copy is written to a scratch name and only then renamed.
+//
+// Where a recall's time goes, measured: the write+close is the whole cost.
+// Under the core's 64 KB blocks a 1794-byte CAPTAIN.DAT took 250-270 ms
+// there (one block erase, interrupts off) with the remove/open/rename around
+// it at 0/2/6-8 ms, which is why the scratch-and-rename was never worth
+// dropping; under XenoFS's 4 KB blocks the same write is ~58 ms. The line
+// printed at the end is what keeps that visible on the console.
 FLASHMEM static bool section_to_file(File &f, const SectionEntry &e,
                                      const char *dest, FS &fs) {
   if (section_matches_file(f, e, dest, fs)) return true;
   if (!f.seek(e.offset)) return false;
+  WallClock wall;
+  wall.start();
   static const char *const kScratch = "PB_XTR.TMP";
   fs.remove(kScratch);
   File d = fs.open(kScratch, FILE_WRITE_BEGIN);
@@ -781,11 +801,15 @@ FLASHMEM static bool section_to_file(File &f, const SectionEntry &e,
     watchdog_feed();
   }
   d.close();
+  const uint32_t write_ms = wall.lap_ms();
   if (ok) ok = (sum == e.checksum);
   if (!ok) { fs.remove(kScratch); return false; }
   fs.remove(dest);
   ok = fs.rename(kScratch, dest);
   if (!ok) fs.remove(kScratch);
+  serial_printf("PresetEngine: restored %s (%lu bytes) write %lu ms, rename %lu ms\n",
+                dest, (unsigned long)e.length, (unsigned long)write_ms,
+                (unsigned long)wall.lap_ms());
   return ok;
 }
 
@@ -821,29 +845,31 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   // disabled the only thing standing between a full filesystem and a torn
   // write, for every user with a card seated.
   //
-  // This MUST be denominated in blocks, not bytes. LittleFS_Program hands out
-  // whole erase sectors -- kLfsBlockBytes below -- so a slot that needs one
-  // block cannot be placed when one block is not free, however many spare
-  // BYTES the filesystem reports. The previous 24 KB threshold was smaller
-  // than a single T4.1 sector, so it cheerfully green-lit saves the allocator
-  // had no room for; the failure then surfaced as a torn write far downstream
-  // instead of an honest refusal here.
+  // This MUST be denominated in blocks, not bytes. LittleFS hands out whole
+  // erase blocks -- lfs_block_bytes() -- so a slot that needs one block
+  // cannot be placed when one block is not free, however many spare BYTES
+  // the filesystem reports. The previous 24 KB threshold was smaller than a
+  // single block under the core's 64 KB geometry, so it cheerfully
+  // green-lit saves the allocator had no room for; the failure then
+  // surfaced as a torn write far downstream instead of an honest refusal
+  // here.
   //
-  // A save needs the container plus the scratch files it renames through, so
-  // require kSaveBlocksNeeded free rather than exactly one.
+  // A save needs the container plus the scratch file it renames through, so
+  // require kSaveBytesNeeded worth of blocks rather than exactly one.
   //
   // usedSize() has been observed reporting == totalSize() on a healthy FS,
   // so treat that state as "unknown" and rely on post-write verification.
   {
     const uint64_t total = PhzConfig::myfs.totalSize();
     const uint64_t used = PhzConfig::myfs.usedSize();
-    if (used < total &&
-        (total - used) / kLfsBlockBytes < kSaveBlocksNeeded) {
+    const uint32_t block = lfs_block_bytes();
+    const uint32_t blocks_needed = (kSaveBytesNeeded + block - 1) / block;
+    if (used < total && (total - used) / block < blocks_needed) {
       HS::PokePopup(HS::MESSAGE_POPUP, "Disk full !!");
       busy = false;
       serial_printf("PresetEngine: save refused, %lu KB free < %lu blocks\n",
                     (unsigned long)((total - used) >> 10),
-                    (unsigned long)kSaveBlocksNeeded);
+                    (unsigned long)blocks_needed);
       return false;
     }
   }
@@ -1201,7 +1227,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   //
   // Tell the handler which of its files step 4 is about to overwrite, so it
   // can skip an auto-save that would be erased before anyone read it (a
-  // dirty Captain paid a 64 KB erase, interrupts off, for exactly that).
+  // dirty Captain paid a flash erase, interrupts off, for exactly that).
   // Mirrors what recall_stage_files will do, including the boot-recall
   // Captain exception: only the stores the slot carries, per its manifest.
   recall_replacing = (uint8_t)(flags & (CONTENT_BANK | CONTENT_SCENERY | CONTENT_CAPTAIN));
@@ -1574,9 +1600,10 @@ bool Busy() { return busy; }
 // could never repair it: the screen said "BAD: OTHER PRESETS!" and one press
 // later said "No changes to write".
 //
-// A 251e bank is 63,120 bytes -- 96.3% of one 64 KB LittleFS block, so this
-// costs exactly one of the 64 we have. That only became affordable when slots
-// stopped costing 3-5 files each; it is the same discovery paying off twice.
+// A 251e bank is 63,120 bytes: 16 of XenoFS's 4 KB blocks (it was 96.3% of
+// one of the core's 64 KB blocks, exactly one of the 64 the partition then
+// had, which only became affordable when slots stopped costing 3-5 files
+// each -- the same discovery paying off twice).
 //
 // Deliberately ONE snapshot, not a history: it is a safety net for the write
 // happening right now, not a backup system. Naming it after the address it

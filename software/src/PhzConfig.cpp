@@ -15,6 +15,14 @@
 #include <MTP_Teensy.h>
 #endif
 
+#ifdef XENOFS_OWNS_GEOMETRY
+// cores/teensy4/eeprom.c and the linker script, for XenoFS's flash geometry
+extern "C" void eepromemu_flash_write(void *addr, const void *data, uint32_t len);
+extern "C" void eepromemu_flash_erase_sector(void *addr);
+extern "C" void eepromemu_flash_erase_64K_block(void *addr);
+extern unsigned long _flashimagelen;
+#endif
+
 namespace PhzConfig {
 
 XenoFS myfs;
@@ -30,15 +38,246 @@ uint32_t XenoFS::rootLogBytes() {
   lfs_dir_close(&lfs, &dir);
   return used;
 }
+
+#ifdef XENOFS_OWNS_GEOMETRY
+// ---- 4 KB flash geometry ---------------------------------------------------
+//
+// The core's LittleFS_Program::begin (libraries/LittleFS/src/LittleFS.cpp)
+// with two changes: the block size, and what happens to a partition that
+// was written by the core's version. Everything else -- where the partition
+// sits, the 64 KB rounding of its size, the 128-byte read/prog/cache/
+// lookahead sizes, block_cycles -- is kept identical on purpose: the
+// partition must occupy exactly the bytes the core's layout occupied, or
+// the migration below has nothing to read.
+//
+// 128 bytes of lookahead is 1024 bits: exactly the 4 MB / 4 KB block count,
+// so the allocator still sees the whole disk in one pass.
+
+static constexpr uint32_t kFlashBytes   = 0x7C0000;  // FLASH_SIZE, Teensy 4.1 (LittleFS.cpp)
+static constexpr uint32_t kXenoBlock    = 4096;      // W25Q64JV sector erase: ~45 ms typ
+static constexpr uint32_t kLegacyBlock  = 65536;     // the core's SECTOR_SIZE: ~150 ms typ, 2 s max
+
+uint32_t XenoFS::flash_base = 0;
+
+int XenoFS::flash_read(const struct lfs_config *c, lfs_block_t block,
+                       lfs_off_t off, void *buf, lfs_size_t size) {
+  memcpy(buf, (const uint8_t *)(flash_base + block * c->block_size + off), size);
+  return 0;
+}
+int XenoFS::flash_prog(const struct lfs_config *c, lfs_block_t block,
+                       lfs_off_t off, const void *buf, lfs_size_t size) {
+  eepromemu_flash_write((uint8_t *)(flash_base + block * c->block_size + off), buf, size);
+  return 0;
+}
+int XenoFS::flash_erase(const struct lfs_config *c, lfs_block_t block) {
+  uint8_t *p = (uint8_t *)(flash_base + block * c->block_size);
+  if (c->block_size == kLegacyBlock) eepromemu_flash_erase_64K_block(p);
+  else eepromemu_flash_erase_sector(p);
+  return 0;
+}
+
+FLASHMEM void XenoFS::configure(uint32_t partition_bytes, uint32_t block_bytes) {
+  memset(&lfs, 0, sizeof(lfs));
+  memset(&config, 0, sizeof(config));
+  config.context = (void *)flash_base;
+  config.read = &flash_read;
+  config.prog = &flash_prog;
+  config.erase = &flash_erase;
+  config.sync = &flash_sync;
+  config.read_size = 128;
+  config.prog_size = 128;
+  config.block_size = block_bytes;
+  config.block_count = partition_bytes / block_bytes;
+  config.block_cycles = 800;
+  config.cache_size = 128;
+  config.lookahead_size = 128;
+  config.name_max = LFS_NAME_MAX;
+}
+
+// Which block size the partition was formatted with, read from the
+// superblock ourselves. This cannot be left to lfs_mount: littlefs 2.4 does
+// not compare the superblock's block_size against the config's, and a
+// partition formatted in 64 KB blocks MOUNTS under a 4 KB config -- the
+// root log at offset 0 parses the same up to the first 4 KB, with every
+// file's block pointers then read at the wrong stride. Writes on top of
+// that would shred the old contents, and the migration would have nothing
+// left to read.
+//
+// The superblock is the first entry of the root metadata pair's log: a tag,
+// the eight bytes "littlefs", a tag, then lfs_superblock_t (version,
+// block_size, block_count, ...) little-endian -- the order lfs_rawformat
+// commits them and compaction preserves. The pair's two blocks are the
+// first two of the partition under either geometry, so the candidates are
+// the 4 KB at offset 0 and at offset 4096 (block 1 of ours). Offset 65536,
+// block 1 of the old layout, is deliberately not consulted: it keeps a
+// stale 64 KB superblock after the migration formats over blocks 0 and 1.
+// A block_size that is not one of the two, or a block_count that does not
+// match the partition, is a corrupt or foreign log, not a vote.
+FLASHMEM static uint32_t superblock_block_size(uint32_t base, uint32_t partition) {
+  static const uint32_t offsets[] = { 0, kXenoBlock };
+  for (uint32_t off : offsets) {
+    const uint8_t *p = (const uint8_t *)(base + off);
+    for (uint32_t i = 4; i + 16 + 12 <= kXenoBlock; ++i) {
+      if (memcmp(p + i, "littlefs", 8) != 0) continue;
+      uint32_t bs, bc;
+      memcpy(&bs, p + i + 8 + 4 + 4, 4);
+      memcpy(&bc, p + i + 8 + 4 + 8, 4);
+      if ((bs == kXenoBlock || bs == kLegacyBlock) && bc == partition / bs) return bs;
+    }
+  }
+  return 0;
+}
+
+FLASHMEM bool XenoFS::begin(uint32_t size) {
+  configured = false;
+  mounted = false;
+  flash_base = 0;
+  size = (size + 0xFFFF) & 0xFFFF0000;   // the core's rounding: same bytes, same place
+  if (size == 0) return false;
+  const uint32_t program_size = (uint32_t)&_flashimagelen;
+  if (program_size >= kFlashBytes || size > kFlashBytes - program_size) return false;
+  flash_base = 0x60000000 + kFlashBytes - size;
+
+  const uint32_t on_disk = superblock_block_size(flash_base, size);
+  if (on_disk == kLegacyBlock) {
+    configure(size, kLegacyBlock);
+    configured = true;
+    if (lfs_mount(&lfs, &config) >= 0) {
+      serial_printf("LittleFS: 64 KB layout found, migrating to 4 KB sectors\n");
+      return migrate_legacy();
+    }
+    serial_printf("LittleFS: 64 KB layout will not mount; reformatting\n");
+  } else if (on_disk == kXenoBlock) {
+    configure(size, kXenoBlock);
+    configured = true;
+    if (lfs_mount(&lfs, &config) >= 0) {
+      mounted = true;
+      return true;
+    }
+    serial_printf("LittleFS: 4 KB layout will not mount; reformatting\n");
+  } else {
+    serial_printf("LittleFS: no superblock; formatting\n");
+  }
+
+  // Blank flash, or nothing recoverable. A fresh disk in our layout, which
+  // is also what the core does with a partition it cannot mount.
+  configure(size, kXenoBlock);
+  configured = true;
+  if (lfs_format(&lfs, &config) < 0) return false;
+  if (lfs_mount(&lfs, &config) < 0) return false;
+  mounted = true;
+  return true;
+}
+
+// Called with the legacy layout mounted; returns mounted on the 4 KB layout
+// with every file carried across, or false with nothing mounted.
+//
+// Everything is lifted into RAM first because the two layouts share the
+// same flash: the moment the new one is formatted, the old directory is
+// gone. This module's whole partition is ~220 KB of content (37 files), a
+// fraction of the 512 KB OCRAM heap that is still untouched this early in
+// setup; a file that does not get its buffer is reported and skipped, never
+// silently dropped. GLOBALS.* go first so the settings are what survive if
+// anything has to give.
+FLASHMEM bool XenoFS::migrate_legacy() {
+  struct Held { char name[16]; uint8_t *data; uint32_t size; bool kept; };
+  static constexpr int kMaxHeld = 96;
+  Held held[kMaxHeld];
+  int count = 0, over = 0;
+  const uint32_t partition = config.block_count * config.block_size;
+
+  lfs_dir_t dir;
+  if (lfs_dir_open(&lfs, &dir, "/") < 0) {
+    // Cannot even list it: stay on the layout that mounted rather than
+    // format over files nobody has read.
+    serial_printf("LittleFS: legacy root unreadable, staying on 64 KB layout\n");
+    mounted = true;
+    return true;
+  }
+  struct lfs_info info;
+  while (lfs_dir_read(&lfs, &dir, &info) > 0) {
+    if (info.type != LFS_TYPE_REG) continue;
+    if (strlen(info.name) >= sizeof(held[0].name)) { ++over; continue; }
+    if (count == kMaxHeld) { ++over; continue; }
+    Held &h = held[count++];
+    strcpy(h.name, info.name);
+    h.data = nullptr;
+    h.size = info.size;
+    h.kept = false;
+  }
+  lfs_dir_close(&lfs, &dir);
+
+  uint32_t bytes = 0;
+  for (int pass = 0; pass < 2; ++pass) {
+    for (int i = 0; i < count; ++i) {
+      Held &h = held[i];
+      const bool globals = strncmp(h.name, "GLOBALS", 7) == 0;
+      if (globals != (pass == 0)) continue;
+      if (h.size) {
+        h.data = (uint8_t *)malloc(h.size);
+        if (!h.data) {
+          serial_printf("LittleFS: no RAM for %s (%lu bytes), dropped\n",
+                        h.name, (unsigned long)h.size);
+          continue;
+        }
+        lfs_file_t f;
+        if (lfs_file_open(&lfs, &f, h.name, LFS_O_RDONLY) < 0) {
+          free(h.data); h.data = nullptr;
+          serial_printf("LittleFS: cannot read %s, dropped\n", h.name);
+          continue;
+        }
+        const lfs_ssize_t got = lfs_file_read(&lfs, &f, h.data, h.size);
+        lfs_file_close(&lfs, &f);
+        if (got != (lfs_ssize_t)h.size) {
+          free(h.data); h.data = nullptr;
+          serial_printf("LittleFS: short read on %s, dropped\n", h.name);
+          continue;
+        }
+      }
+      h.kept = true;
+      bytes += h.size;
+    }
+  }
+  lfs_unmount(&lfs);
+
+  configure(partition, kXenoBlock);
+  if (lfs_format(&lfs, &config) < 0 || lfs_mount(&lfs, &config) < 0) {
+    for (int i = 0; i < count; ++i) free(held[i].data);
+    serial_printf("LittleFS: format failed, %d files lost\n", count);
+    return false;
+  }
+  mounted = true;
+
+  int written = 0;
+  for (int i = 0; i < count; ++i) {
+    Held &h = held[i];
+    if (!h.kept) continue;
+    lfs_file_t f;
+    bool ok = lfs_file_open(&lfs, &f, h.name, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC) >= 0;
+    if (ok) {
+      ok = h.size == 0 || lfs_file_write(&lfs, &f, h.data, h.size) == (lfs_ssize_t)h.size;
+      ok = (lfs_file_close(&lfs, &f) >= 0) && ok;
+    }
+    if (ok) ++written;
+    else serial_printf("LittleFS: could not write %s back\n", h.name);
+    free(h.data);
+    h.data = nullptr;
+  }
+  serial_printf("LittleFS: migrated %d files, %lu bytes (%d dropped)\n",
+                written, (unsigned long)bytes, count + over - written);
+  return true;
+}
+#endif // XENOFS_OWNS_GEOMETRY
+
 ConfigMap cfg_store;
 ConfigMap data_store;
 
 // Change tracking, so a save that would rewrite a file with its own contents
 // can be skipped. Every flash write is expensive here in a way that is easy
 // to miss: LittleFS_Program's program and erase run with interrupts OFF
-// (cores/teensy4/eeprom.c), and a new file costs a 64 KB block erase --
-// ~250 ms on the bench, during which audio, USB and the preset bus all
-// stall. Captain's FLUSH handler and Quadrants' preset autosave both write
+// (cores/teensy4/eeprom.c), and a new file costs block erases -- ~250 ms
+// on the bench under the core's 64 KB blocks, ~45 ms per 4 KB sector under
+// XenoFS's -- during which audio, USB and the preset bus all stall. Captain's FLUSH handler and Quadrants' preset autosave both write
 // files whose contents have usually not changed; before this they paid the
 // full price every time.
 //
@@ -98,25 +337,24 @@ void Init()
   }
   SERIAL_PRINTLN("LittleFS initialized.");
 
-  // Bound the root directory's metadata log. littlefs appends one commit per
-  // file create/close/rename and rewrites (compacts) the log only when it
-  // reaches metadata_max, which the library leaves at 0 = the whole 64 KB
-  // block. Every open() walks that log from the start, CRC-checking each
-  // commit, so a log fattened by small commits taxes every file operation
-  // after it: measured 4.5 ms per open() with the log at 60 KB, which put a
-  // 5-file preset recall at 25-30 ms instead of 6. At 8 KB an open() costs
-  // under a millisecond and compaction runs every ~60 commits. Compaction
-  // erases the pair's other block (~280 ms, interrupts off), but it can only
-  // fire on a commit, and every commit here already sits inside an operation
-  // that erases a data block (a save, the current-slot persist); a recall
-  // never commits. littlefs splits a directory into a second metadata pair
-  // (two more of the 64 blocks the presets are budgeted against) when the
-  // COMPACTED content exceeds metadata_max/2 (lfs_dir_compact). Compacted,
-  // the root is one name tag + one CTZ tag per file, ~28 bytes; this
-  // module's ~40 files come to ~1.2 KB against a 4 KB limit. Effective from
-  // the next commit: littlefs reads the threshold through the config pointer
-  // it kept at mount.
-  myfs.setMetadataMax(8192);
+  // The root directory's metadata log. littlefs appends one commit per file
+  // create/close/rename and rewrites (compacts) the log only when it reaches
+  // metadata_max, 0 = the whole block. Every open() walks that log from the
+  // start, CRC-checking each commit, so a log fattened by small commits taxes
+  // every file operation after it: measured 4.5 ms per open() with the log at
+  // 60 KB under the core's 64 KB blocks, which put a 5-file preset recall at
+  // 25-30 ms instead of 6; capping it at 8 KB brought an open() under a
+  // millisecond. With XenoFS's 4 KB blocks the block itself is that bound
+  // (metadata_max must not exceed block_size), compaction erases one 4 KB
+  // sector (~45 ms, interrupts off) every ~30 commits, and every commit here
+  // already sits inside an operation that erases data blocks (a save, a
+  // restore); a recall never commits. littlefs splits a directory into a
+  // second metadata pair when the COMPACTED content exceeds half the bound
+  // (lfs_dir_compact): one name tag + one CTZ tag per file, ~28 bytes, so
+  // the root stays a single pair up to ~70 files; this module keeps ~40.
+  // Left at the default (0 = block_size) on purpose; setMetadataMax remains
+  // for a T4.0 build, whose 32 KB blocks still want the cap.
+  if (myfs.blockBytes() > 8192) myfs.setMetadataMax(8192);
 
 #ifdef MTP_INTERFACE
   MTP.addFilesystem(myfs, "Internal_LFS");
@@ -190,8 +428,8 @@ bool unsaved_changes() { return map_dirty; }
 //
 // This used to write a placeholder header, the records, then seek back to
 // backfill the count and checksum. On littlefs a write behind the end of an
-// open file is copy-on-write: the block is relocated -- a fresh 64 KB erase
-// -- and everything after the write position is copied over byte by byte
+// open file is copy-on-write: the block is relocated -- a fresh erase --
+// and everything after the write position is copied over byte by byte
 // through the 128-byte cache (lfs_file_flush). Two chunks meant two extra
 // erases per save on top of the one the file itself costs, which is how a
 // 2 KB config took a second to write. The count and checksum are cheap to
