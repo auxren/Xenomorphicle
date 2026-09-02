@@ -248,6 +248,8 @@ extern "C" FLASHMEM void startup_middle_hook(void) {
   memset((void *)0x20200000, 0, (uint32_t)&_heap_start - 0x20200000u);
 }
 
+FLASHMEM static void print_build_stamp(Print &out);  // defined with SelfTest
+
 // Capture CrashReport text at boot so it can be appended to CRASH.LOG once
 // LittleFS is mounted (the Serial print is gone if nobody was watching).
 // buffer lives in RAM2 (DMAMEM) - DTCM stack headroom is precious,
@@ -573,6 +575,7 @@ FLASHMEM void setup() {
     cl = PhzConfig::myfs.open("CRASH.LOG", FILE_WRITE);  // append
     if (cl) {
       cl.printf("--- boot @ %lu ms ---\n", millis());
+      print_build_stamp(cl);
       cl.write((const uint8_t *)crash_capture.buf, crash_capture.len);
       cl.close();
       Serial.println("CrashReport appended to CRASH.LOG");
@@ -673,8 +676,23 @@ FLASHMEM __attribute__((noinline)) static void ButtonWatch() {
 }
 
 extern char _heap_end[], *__brkval;
+
+// Build fingerprint. A CrashReport's code address only means something against
+// the ELF that produced it, and three DACCVIOL entries at "0x58552" in
+// CRASH.LOG could not be tied to any build once the .pio directory had been
+// rebuilt over. __DATE__/__TIME__ is Main.cpp's compile time (stale if Main.cpp
+// was not rebuilt), so the link-time image length and ITCM end go with it:
+// together they change with essentially any code edit.
+extern char _flashimagelen[], _etext[];
+FLASHMEM static void print_build_stamp(Print &out) {
+  out.printf("build: " __DATE__ " " __TIME__ " image=%lu etext=%08lX\n",
+             (unsigned long)(uintptr_t)_flashimagelen,
+             (unsigned long)(uintptr_t)_etext);
+}
+
 FLASHMEM __attribute__((noinline)) static void SelfTest() {
   Serial.println("=== selftest ===");
+  print_build_stamp(Serial);
   // SRC_SRSR (i.MX RT1060 RM 21.6.3): bit 1 = lockup_sysresetreq, bit 4 =
   // wdog_rst_b, bit 5 = JTAG. Bit 1 is AMBIGUOUS by design -- CPU lockup OR
   // a software write of SYSRESETREQ, which is how the core's own fault
@@ -687,6 +705,16 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
                 : (boot_gpr5 == kFaultRebootMarker) ? " [FAULT-REBOOT]"
                                                     : " [LOCKUP or SW-RESET]",
                 (boot_srsr & (1 << 4)) ? " [WDOG]" : "");
+  {
+    // CrashReport stamps each entry with the RTC's "system time" and nothing
+    // else on the console shows what the RTC reads, so a CRASH.LOG entry could
+    // not be dated: 17:07 is either wall-clock or 17 hours since power-on.
+    const uint32_t t = rtc_get();
+    Serial.printf("rtc: %lu s = %02lu:%02lu:%02lu on day %lu since 1970-01-01\n",
+                  (unsigned long)t, (unsigned long)(t / 3600 % 24),
+                  (unsigned long)(t / 60 % 60), (unsigned long)(t % 60),
+                  (unsigned long)(t / 86400));
+  }
   Serial.printf("watchdog: %s (128s, fed from loop)\n",
                 watchdog_armed ? "armed" : "OFF");
   Serial.printf("stack: %lu bytes never touched (of ~%lu free; 0 = guard hit)\n",
@@ -907,6 +935,13 @@ FLASHMEM __attribute__((noinline)) void loop() {
       static bool lrecall_pending = false;
       static uint8_t lrecall_digits = 0;
       static uint8_t lrecall_value = 0;
+      // 'A' bench trigger: switch to any app by container index, 2 decimal
+      // digits. 'a' only reaches Captain, which left cross-app preset recall
+      // -- the one path where a slot changes the running app -- untestable
+      // from a headless bench: every slot saved here was the same app.
+      static bool app_switch_pending = false;
+      static uint8_t app_switch_digits = 0;
+      static uint8_t app_switch_value = 0;
       static bool recall_slot_pending = false;
       static uint8_t recall_slot_digits = 0;
       static uint8_t recall_slot_value = 0;
@@ -962,6 +997,23 @@ FLASHMEM __attribute__((noinline)) void loop() {
           Serial.printf("  MasterBackup() returned %d (0=accepted; "
                         "watch 'b' for progress)\n", rc);
 #endif
+          continue;
+        }
+        if (app_switch_pending) {
+          if (cmd < '0' || cmd > '9') {
+            Serial.println("app switch: cancelled (not a decimal digit)");
+            app_switch_pending = false;
+            continue;
+          }
+          app_switch_value = (uint8_t)(app_switch_value * 10 + (cmd - '0'));
+          if (++app_switch_digits < 2) continue;
+          app_switch_pending = false;
+          if (app_switch_value >= OC::NumApps()) {
+            Serial.printf("app switch: index %d out of range (0-%u)\n",
+                          app_switch_value, (unsigned)OC::NumApps() - 1);
+            continue;
+          }
+          OC::SwitchToApp(app_switch_value);
           continue;
         }
         if (query_addr_pending) {
@@ -1132,7 +1184,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.println("-=[ PEW PEW NERDS! ]=-");
             Serial.println("-- system --");
 #if defined(__IMXRT1062__)
-            Serial.println("t selftest   a activate Captain MIDI");
+            Serial.println("t selftest   a activate Captain MIDI   A switch app by index (lists them)");
 #endif
             Serial.printf("I app ISR [%s]   D display [%s]   L app loop [%s]\n",
                           OC::CORE::app_isr_enabled ? "on" : "OFF",
@@ -1352,6 +1404,11 @@ FLASHMEM __attribute__((noinline)) void loop() {
           case 't': SelfTest(); break;  // one-shot system health report
           case 'K': ButtonWatch(); break;  // name the physical buttons
           case 'a': OC::SwitchToDefaultApp(); break;  // remote: activate Captain
+          case 'A':  // switch to any app by container index (2 decimal digits)
+            Serial.println("app switch: type 2 decimal digits for the index");
+            OC::ListApps();
+            app_switch_pending = true; app_switch_digits = 0; app_switch_value = 0;
+            break;
           case 'l':
             Serial.println(" -=- LittleFS -=- ");
             PhzConfig::listFiles();

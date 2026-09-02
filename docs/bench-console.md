@@ -23,6 +23,7 @@ stray typing is harmless but will spew capture bytes.
 | `z` | print this key map with live toggle states |
 | `t` | selftest — one-shot health report (see below) |
 | `a` | activate Captain MIDI (suspend/switch/resume, same path as the app menu; for headless benches where boot recall restored a different app) |
+| `A` | list the app table (index, id, name), then type 2 decimal digits to switch to one by index — same path as `a`, any app. This is how a cross-app preset slot gets made from a headless bench |
 | `I` | toggle app ISR |
 | `D` | toggle display redraw |
 | `L` | toggle app loop |
@@ -81,7 +82,9 @@ of them.
 
 ```
 === selftest ===
+build: Sep  1 2026 17:53:02 image=624640 etext=0005F718
 uptime=123s  reset_cause(SRC_SRSR)=00000001
+rtc: 1788285220 s = 17:53:40 on day 20697 since 1970-01-01
 watchdog: armed (128s, fed from loop)
 loop rate ~4200 Hz
 core delta5ms=83 (expect ~83)
@@ -96,6 +99,13 @@ captain: poll_gap_max=1180us echoes=0
 === selftest done ===
 ```
 
+- **build** — Main.cpp's compile time plus the linked image length and ITCM
+  end. The same line heads every CRASH.LOG entry, because a CrashReport's
+  code address is only meaningful against the ELF that produced it; match
+  this line to know whether an entry came from the firmware that is running.
+- **rtc** — what the RTC reads, as a wall-clock time of day. CrashReport
+  stamps entries with this clock ("system time"), so this is how to date
+  them. The loader sets it from the host at flash time.
 - **reset_cause** — raw `SRC_SRSR` hex. A ` [WDOG]` suffix means the last
   reboot was a watchdog timeout, i.e. `loop()` wedged and the module
   self-recovered. Investigate CRASH.LOG and the bus stats.

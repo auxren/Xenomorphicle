@@ -145,6 +145,8 @@ void start_calibration();
 // remote bench control: suspend/switch/resume to an app (loop context only)
 void SwitchToApp(size_t index);
 void SwitchToDefaultApp();
+size_t NumApps();
+void ListApps();  // console: index, id, name of every app in the container
 
 template <typename T, typename Traits> class AppBaseImpl : public AppBase {
 public:

@@ -1048,4 +1048,17 @@ FLASHMEM void SwitchToApp(size_t index) {
 
 FLASHMEM void SwitchToDefaultApp() { SwitchToApp(DEFAULT_APP_INDEX); }
 
+// The container is file-static (apps/_config.h), so the console's app table
+// has to be printed from here. Index is what SwitchToApp() takes; id is what
+// a preset slot records, so the two can be matched against 'b' and a
+// container's manifest.
+size_t NumApps() { return app_container.num_apps(); }
+FLASHMEM void ListApps() {
+  for (size_t i = 0; i < app_container.num_apps(); ++i) {
+    const RuntimeSlot &slot = app_container[i];
+    Serial.printf("  %2u  %04x  %s%s\n", (unsigned)i, slot.id(), slot.name(),
+                  slot.instance == app_switcher.current_app() ? "  <- current" : "");
+  }
+}
+
 }; // namespace OC
