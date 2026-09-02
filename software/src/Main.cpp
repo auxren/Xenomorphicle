@@ -682,10 +682,15 @@ extern char _heap_end[], *__brkval;
 // CRASH.LOG could not be tied to any build once the .pio directory had been
 // rebuilt over. __DATE__/__TIME__ is Main.cpp's compile time (stale if Main.cpp
 // was not rebuilt), so the link-time image length and ITCM end go with it:
-// together they change with essentially any code edit.
+// together they change with essentially any code edit. The git revision
+// (res/progname.py, "dirty" suffix when the tree had edits) names the source.
 extern char _flashimagelen[], _etext[];
+#ifndef OC_BUILD_TAG
+#define OC_BUILD_TAG "?"
+#endif
 FLASHMEM static void print_build_stamp(Print &out) {
-  out.printf("build: " __DATE__ " " __TIME__ " image=%lu etext=%08lX\n",
+  out.printf("build: " __DATE__ " " __TIME__ " git=" OC_BUILD_TAG
+             " image=%lu etext=%08lX\n",
              (unsigned long)(uintptr_t)_flashimagelen,
              (unsigned long)(uintptr_t)_etext);
 }

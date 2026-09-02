@@ -132,6 +132,14 @@ const settings::ValueAttributes CaptainSettings[] = {
 
 enum CaptainsKeys : uint16_t {
   SETUP_KEY = 0,
+  // The SysEx class-0 globals (bend range, poly mode, PC channel, trigger
+  // length), packed one per byte in that order. They were in the checksum
+  // that decides whether Suspend rewrites CAPTAIN.DAT, but not in the file:
+  // a SET from the host bought a 64 KB erase that stored nothing, and the
+  // value died at the next Resume. Signed with kMidiGlobalsMagic in bits
+  // 32-39 so a file that predates the key, or a foreign key, is ignored
+  // whole rather than half-applied (PC channel 0 is a legal value).
+  MIDI_GLOBALS_KEY = 1,
 
   // upper 7 bits of mapping key
   INPUT_MAP_KEY = 1 << 9,
@@ -144,6 +152,7 @@ enum CaptainsKeys : uint16_t {
 // keys can never parse as profiles. Names at +16.
 static constexpr uint16_t DEVICE_PROFILE_KEY = 9 << 8;
 static constexpr uint64_t kProfileMagic = 0xA5ULL << 48;
+static constexpr uint64_t kMidiGlobalsMagic = 0xC1ULL << 32;
 static constexpr int kDeviceProfiles = 8;
 
 const char* const midi_messages[7] = {
@@ -327,6 +336,23 @@ public:
         if (usb_configuration) OnSendSysEx();
     }
 
+    // the class-0 SysEx globals as one word, byte order = parameter order
+    uint32_t PackMidiGlobals() const {
+        auto &M = frame.MIDIState;
+        return uint32_t(M.bend_range) | (uint32_t(M.poly_mode) << 8)
+             | (uint32_t(M.pc_channel) << 16) | (uint32_t(HS::trig_length) << 24);
+    }
+    // same ranges as set_param: a file cannot smuggle a value SysEx refuses
+    void ApplyMidiGlobals(uint32_t g) {
+        auto &M = frame.MIDIState;
+        const uint8_t bend = g & 0xff, poly = (g >> 8) & 0xff,
+                      pc = (g >> 16) & 0xff, trig = (g >> 24) & 0xff;
+        if (bend >= 1 && bend <= 24) M.bend_range = bend;
+        if (poly <= 2) { M.poly_mode = poly; M.UpdateMaxPolyphony(); }
+        if (pc <= 16) M.pc_channel = pc;
+        if (trig >= 1) HS::trig_length = trig;
+    }
+
 #ifdef __IMXRT1062__
     void StoreData();  // out-of-class (FLASHMEM + LTO)
     void Resume() {
@@ -342,13 +368,8 @@ public:
             if (PhzConfig::getValue(OUTPUT_MAP_KEY + i + s*HS::MIDIFrame::kOutPorts, data))
               setups[s].outports[i] = data;
         }
-        UnpackSetup(active_setup);
-        LeaveDetail();
-        saved_checksum = live_checksum_prev = LiveChecksum();
-    }
-#else
-    // T3.x: setups[] persist via SaveAppData/RestoreAppData (EEPROM pool)
-    void Resume() {
+        if (PhzConfig::getValue(MIDI_GLOBALS_KEY, data) && (data >> 32) == (kMidiGlobalsMagic >> 32))
+            ApplyMidiGlobals(uint32_t(data));
         UnpackSetup(active_setup);
         LeaveDetail();
         saved_checksum = live_checksum_prev = LiveChecksum();
@@ -356,10 +377,19 @@ public:
         // Coming back from another app, a device that never unplugged is not
         // an "arrival", so its bound setup was never re-selected - the bind
         // looked dead until you physically replugged. Re-run the check once,
-        // quietly, against whatever is actually connected.
+        // quietly, against whatever is actually connected. (This sat in the
+        // T3.x Resume below for a week, where ARDUINO_TEENSY41 is never
+        // defined: the fix had been shipped to the one branch it cannot run on.)
         reapply_bindings_ = true;
         next_dev_poll_ms = millis() + 250;   // let the app finish resuming
 #endif
+    }
+#else
+    // T3.x: setups[] persist via SaveAppData/RestoreAppData (EEPROM pool)
+    void Resume() {
+        UnpackSetup(active_setup);
+        LeaveDetail();
+        saved_checksum = live_checksum_prev = LiveChecksum();
     }
 #endif
 
@@ -1962,8 +1992,7 @@ FLASHMEM uint32_t AppCaptainMIDI::LiveChecksum() const {
         for (int i = 0; i < MIDIMAP_MAX; ++i) mix(setups[s].inmaps[i]);
         for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i) mix(setups[s].outports[i]);
     }
-    mix(uint64_t(frame.MIDIState.bend_range) | (uint64_t(frame.MIDIState.poly_mode) << 8)
-        | (uint64_t(frame.MIDIState.pc_channel) << 16) | (uint64_t(HS::trig_length) << 24));
+    mix(PackMidiGlobals());
     return h;
 }
 
@@ -2111,6 +2140,7 @@ FLASHMEM void AppCaptainMIDI::StoreData() {
       for (int i = 0; i < HS::MIDIFrame::kOutPorts; ++i)
         PhzConfig::setValue(OUTPUT_MAP_KEY + i + s*HS::MIDIFrame::kOutPorts, setups[s].outports[i]);
     }
+    PhzConfig::setValue(MIDI_GLOBALS_KEY, kMidiGlobalsMagic | PackMidiGlobals());
     PhzConfig::save_config("CAPTAIN.DAT");
 }
 #endif  // __IMXRT1062__
