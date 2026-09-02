@@ -38,6 +38,7 @@
 #include "sim_host.h"
 #include "sim_input.h"
 #include "sim_runtime.h"
+#include "sim_selftest.h"
 #include "sim_session.h"
 #include "sim_storage.h"
 #include "sim_term.h"
@@ -442,6 +443,9 @@ void Usage() {
       "  --dump-fb            print the framebuffer in the console's own\n"
       "                       capture format (2048 uppercase hex digits) and\n"
       "                       nothing else -- compare with fbdiff.py\n"
+      "  --test-phzconfig     run the PhzConfig codec checks (serialize,\n"
+      "                       load/save, damage) against the RAM volume and\n"
+      "                       exit -- no boot; used by selfcheck.sh\n"
       "  --stdio              line protocol on stdin/stdout, for the browser\n"
       "                       front end -- see xeno_gui.py\n"
       "  --record FILE        write the session to FILE on exit\n"
@@ -595,6 +599,7 @@ int main(int argc, char **argv) {
     const std::string a = argv[i];
     const bool has_next = (i + 1 < argc);
     if (a == "--help" || a == "-h") { Usage(); return 0; }
+    else if (a == "--test-phzconfig") return SimPhzConfigSelfTest();
     else if (a == "--keys" && has_next) { keys = argv[++i]; scripted = true; }
     else if (a == "--dump-frames") dump_frames = true;
     else if (a == "--dump-fb") { dump_fb = true; show_log = false; }

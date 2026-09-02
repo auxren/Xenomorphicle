@@ -270,18 +270,23 @@ FLASHMEM size_t serialize(uint8_t *buf, size_t cap,
   return a + b;
 }
 
-// One chunk out of a RAM image; advances *pos. Validation matches
-// load_chunk: signature, record count, xor-of-values checksum.
-static bool chunk_from_mem(const uint8_t *buf, size_t len, size_t *pos,
-                           const char *sig, ConfigMap &store) {
-  if (*pos + HEADER_SIZE > len) return false;
+// One chunk out of a RAM image; advances *pos past a chunk it recognised.
+// Validation matches load_chunk: signature, record count, xor-of-values
+// checksum. "Not this chunk" and "this chunk, but damaged" are different
+// answers: the first sends the caller on to the other signature, the second
+// has to fail the whole image, or a container with a corrupt G section would
+// recall the half of it that happened to verify.
+enum ChunkResult : uint8_t { CHUNK_ABSENT, CHUNK_OK, CHUNK_CORRUPT };
+static ChunkResult chunk_from_mem(const uint8_t *buf, size_t len, size_t *pos,
+                                  const char *sig, ConfigMap &store) {
+  if (*pos + HEADER_SIZE > len) return CHUNK_ABSENT;
   const uint8_t *h = buf + *pos;
-  if (h[0] != sig[0] || h[1] != sig[1]) return false;
+  if (h[0] != sig[0] || h[1] != sig[1]) return CHUNK_ABSENT;
   const size_t count = (size_t)h[2] | (size_t)h[3] << 8;
   uint64_t expected = 0;
   for (int i = 0; i < 8; ++i) expected |= (uint64_t)h[4 + i] << (8 * i);
   const size_t body = count * (sizeof(KEY) + sizeof(VALUE));
-  if (*pos + HEADER_SIZE + body > len) return false;
+  if (*pos + HEADER_SIZE + body > len) return CHUNK_CORRUPT;
   const uint8_t *p = h + HEADER_SIZE;
   uint64_t computed = 0;
   for (size_t i = 0; i < count; ++i) {
@@ -292,7 +297,7 @@ static bool chunk_from_mem(const uint8_t *buf, size_t len, size_t *pos,
     computed ^= v;
   }
   *pos += HEADER_SIZE + body;
-  return computed == expected;
+  return computed == expected ? CHUNK_OK : CHUNK_CORRUPT;
 }
 
 FLASHMEM bool deserialize(const uint8_t *buf, size_t len) {
@@ -303,11 +308,14 @@ FLASHMEM bool deserialize(const uint8_t *buf, size_t len) {
   bool any = false;
   while (pos < len) {
     const size_t before = pos;
-    const bool has_config = chunk_from_mem(buf, len, &pos, "PZ", cfg_store);
-    const bool has_data = chunk_from_mem(buf, len, &pos, "PX", data_store);
-    if (!has_config && !has_data) {
+    const ChunkResult c = chunk_from_mem(buf, len, &pos, "PZ", cfg_store);
+    const ChunkResult d = chunk_from_mem(buf, len, &pos, "PX", data_store);
+    if (c == CHUNK_CORRUPT || d == CHUNK_CORRUPT ||
+        (c == CHUNK_ABSENT && d == CHUNK_ABSENT)) {
       SERIAL_PRINTLN("PhzConfig: bad image at %u\n", (unsigned)before);
       (void)before;   // only the debug print reads it
+      cfg_store.clear();
+      data_store.clear();
       return false;
     }
     any = true;
@@ -428,29 +436,38 @@ FLASHMEM bool save_filtered(const char* filename, FS &fs,
     return success;
 }
 
-bool load_chunk(uint8_t *buf, const char *sig, ConfigMap &store) {
+// The header is read-only here: the caller tries both signatures against the
+// same twelve bytes, so the record bytes go through their own buffer. They
+// used to go through `buf`, which left the last record's key where the next
+// signature check looked -- a key of 0x5850 ('P','X') would have read the
+// records that followed as a second data chunk with a garbage count.
+bool load_chunk(const uint8_t *hdr, const char *sig, ConfigMap &store) {
   // quick signature check
-  if (buf[0] != sig[0] || buf[1] != sig[1]) return false;
+  if (hdr[0] != sig[0] || hdr[1] != sig[1]) return false;
 
   size_t record_count = 0;
-  size_t expected_record_count = uint16_t(buf[2]) | uint16_t(buf[3]) << 8;
+  size_t expected_record_count = uint16_t(hdr[2]) | uint16_t(hdr[3]) << 8;
   uint64_t expected_checksum =
-          (uint64_t)buf[4] |
-          (uint64_t)buf[5] << 8 |
-          (uint64_t)buf[6] << 16 |
-          (uint64_t)buf[7] << 24 |
-          (uint64_t)buf[8] << 32 |
-          (uint64_t)buf[9] << 40 |
-          (uint64_t)buf[10] << 48 |
-          (uint64_t)buf[11] << 56;
+          (uint64_t)hdr[4] |
+          (uint64_t)hdr[5] << 8 |
+          (uint64_t)hdr[6] << 16 |
+          (uint64_t)hdr[7] << 24 |
+          (uint64_t)hdr[8] << 32 |
+          (uint64_t)hdr[9] << 40 |
+          (uint64_t)hdr[10] << 48 |
+          (uint64_t)hdr[11] << 56;
   uint64_t computed_checksum = 0;
 
+  static_assert(sizeof(KEY) + sizeof(VALUE) == 10, "config data size mismatch");
+  uint8_t buf[sizeof(KEY) + sizeof(VALUE)];
   size_t pos = 0;
-  while (dataFile.available()) {
+  // Bounded by the header's count, not by end-of-file: a chunk with no
+  // records (a filtered save that matched nothing) is followed by the next
+  // chunk's header, which is not records.
+  while (record_count < expected_record_count && dataFile.available()) {
     uint8_t n = dataFile.read();
     buf[pos++] = n;
 
-    static_assert(sizeof(KEY) + sizeof(VALUE) == 10, "config data size mismatch");
     if (pos >= (sizeof(KEY) + sizeof(VALUE))) {
       store.insert_or_assign(
           (uint16_t)buf[0] |
@@ -478,10 +495,15 @@ bool load_chunk(uint8_t *buf, const char *sig, ConfigMap &store) {
 
       ++record_count;
       pos = 0;
-
-      // Multiple chunks can be packed in series in one file
-      if (record_count == expected_record_count) break;
     }
+  }
+  // Multiple chunks can be packed in series in one file; a chunk that ends
+  // early, or mid-record, is a truncated file, not a short chunk.
+  if (record_count != expected_record_count || pos != 0) {
+    SERIAL_PRINTLN("Loaded %u Records. (expected %u) -- truncated\n",
+                   record_count, expected_record_count);
+    HS::PokePopup(HS::MESSAGE_POPUP, "Corrupt File!!");
+    return false;
   }
   SERIAL_PRINTLN("Loaded %u Records. (expected %u)\n", record_count, expected_record_count);
   SERIAL_PRINTLN("Checksum: %s (actual: %lx%lx)\n",
@@ -509,7 +531,7 @@ bool load_config(const char* filename, FS &fs)
     return false;
   }
 
-  uint8_t buf[12];
+  uint8_t buf[HEADER_SIZE];
   size_t pos = 0;
 
   do {
@@ -518,6 +540,14 @@ bool load_config(const char* filename, FS &fs)
     while (dataFile.available() && pos < HEADER_SIZE) {
       uint8_t n = dataFile.read();
       buf[pos++] = n;
+    }
+    // A partial header is a truncated file. It used to be checked against
+    // whatever the previous header left in buf, which is how a file with a
+    // few stray bytes on the end could pass its signature check.
+    if (pos != HEADER_SIZE) {
+      SERIAL_PRINTLN("PhzConfig: short header (%u bytes)\n", (unsigned)pos);
+      dataFile.close();
+      return false;
     }
 
     // check for every chunk signature

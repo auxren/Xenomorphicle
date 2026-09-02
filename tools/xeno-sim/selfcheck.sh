@@ -38,6 +38,13 @@ SIM="deadline 60 $SIM"
 # The gesture that opens the preset overlay: both encoder buttons, held.
 ENTER='l-down,step20,r-down,step80,l-up,r-up,step200'
 
+echo "the PhzConfig codec (the real PhzConfig.cpp against the RAM volume)"
+if $SIM --test-phzconfig > "$TMP/phz" 2>&1; then
+  ok "$(tail -1 "$TMP/phz")"
+else
+  bad "PhzConfig codec checks failed:"; grep FAIL "$TMP/phz"
+fi
+
 echo "determinism"
 $SIM --dump-fb > "$TMP/d1"
 $SIM --dump-fb > "$TMP/d2"
