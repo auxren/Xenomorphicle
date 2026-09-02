@@ -774,6 +774,32 @@ public:
       // still running and never sent it RESUME. ReinitApps does the same
       // stop/switch/resume dance the app menu does, around the reset.
       OC::ReinitApps(true);
+
+      // Then start over. The erase rewrote storage, but a reset is not only
+      // storage: the preset-bus module address, the overlay's trigger
+      // assignments, the clock routing, the engine's current-slot mirror
+      // all live in RAM copies seeded once at boot, and every one of them
+      // would keep the pre-reset value until the next power cycle -- and
+      // the first save from any of them would write it straight back into
+      // the fresh GLOBALS.CFG. A restart makes "factory" true everywhere at
+      // once, and brings up the first-run splash the way a new module does.
+      // SCB_AIRCR is the ARM SYSRESETREQ register the Teensy core's own fault
+      // handler reboots through; the simulator has no such register, and
+      // there the reset simply continues into the default app.
+#ifdef SCB_AIRCR
+      uint32_t start = millis();
+      while(millis() < start + SETTINGS_SAVE_TIMEOUT_MS) {
+        GRAPHICS_BEGIN_FRAME(true);
+        gfxPos(5, 10);
+        graphics.print("Factory reset done");
+        gfxPos(5, 19);
+        graphics.print("restarting...");
+        GRAPHICS_END_FRAME();
+      }
+      Serial.flush();
+      SCB_AIRCR = 0x05FA0004;
+      while (true) ;
+#endif
     }
 };
 
