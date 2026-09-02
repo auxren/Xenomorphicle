@@ -1659,6 +1659,11 @@ FLASHMEM ExportResult ExportSlot(uint8_t slot) {
     if (!container_open(slot, c, sec, n)) return EXPORT_LEGACY;
     c.close();
   }
+  // A local container whose checksums no longer hold would copy fine and
+  // fail the card-side verify below, reported as FAILED -- which sends
+  // someone looking at the card for a slot that is damaged on the module
+  // (and that a recall would refuse). Say which side is broken.
+  if (!container_verify(preset_fs(), name)) return EXPORT_BAD_FILE;
 
   if (!copy_file(preset_fs(), name, *card, name)) return EXPORT_FAILED;
 

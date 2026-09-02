@@ -144,7 +144,8 @@ enum ExportResult : uint8_t {
   EXPORT_NO_CARD,    // no card seated
   EXPORT_EMPTY,      // nothing in that slot on the source side
   EXPORT_BAD_SLOT,   // slot >= kNumSlots
-  EXPORT_BAD_FILE,   // the card's file is not a container we understand
+  EXPORT_BAD_FILE,   // the file is damaged: on import the card's copy, on
+                     // export the module's own slot (a recall would refuse it)
   EXPORT_LEGACY,     // pre-container slot; re-save it to convert, then export
   EXPORT_FAILED,     // the copy did not land
 };

@@ -1256,13 +1256,16 @@ FLASHMEM __attribute__((noinline)) void loop() {
           // Console-only for now -- there is deliberately no panel gesture
           // yet, because a half-built one would be worse than none.
           case 'E': {   // export every used slot
-            int n = 0, fail = 0, legacy = 0, nocard = 0;
+            int n = 0, fail = 0, legacy = 0, nocard = 0, damaged = 0;
             for (uint8_t i = 0; i < OC::PresetEngine::kNumSlots; ++i) {
               switch (OC::PresetEngine::ExportSlot(i)) {
                 case OC::PresetEngine::EXPORT_OK:     ++n; break;
                 case OC::PresetEngine::EXPORT_EMPTY:  break;
                 case OC::PresetEngine::EXPORT_LEGACY: ++legacy; break;
                 case OC::PresetEngine::EXPORT_NO_CARD: ++nocard; break;
+                case OC::PresetEngine::EXPORT_BAD_FILE:
+                  Serial.printf("slot %d is damaged on the module\n", i);
+                  ++damaged; break;
                 default: ++fail; break;
               }
             }
@@ -1274,6 +1277,10 @@ FLASHMEM __attribute__((noinline)) void loop() {
             if (legacy)
               Serial.printf("%d slot(s) are pre-container: save each one once "
                             "to convert it, then export again\n", legacy);
+            if (damaged)
+              Serial.printf("%d slot(s) are damaged on the module and were not "
+                            "exported: a recall would refuse them too; re-save "
+                            "each one to replace it\n", damaged);
             if (fail) Serial.printf("%d slot(s) FAILED to copy\n", fail);
             break;
           }

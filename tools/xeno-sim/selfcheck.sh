@@ -565,6 +565,18 @@ $SIM --sd-card --state "$IMG/impok" --keys "import,step100" 2>&1 | grep -q 'impo
   && ok "an undamaged card copy imports (control)" \
   || bad "the undamaged card copy did not import"
 
+# The other direction: a slot damaged on the MODULE. It used to copy to the
+# card, fail the card-side verify, and report FAILED -- pointing at the card
+# for a slot the module itself would refuse to recall. Export must name the
+# side that is broken and leave nothing on the card.
+python3 corrupt_slot.py "$IMG/xfer" "$IMG/localbad" 0 G
+$SIM --sd-card --state "$IMG/localbad" --keys "export,step100" 2>&1 | grep -q 'export slot 0: bad file' \
+  && ok "a slot damaged on the module is reported as damaged, not as a card failure" \
+  || bad "a damaged local slot did not export as 'bad file'"
+grep -q '^file sd PB_00.PBS ' "$IMG/localbad" \
+  && bad "the damaged slot left a copy on the card" \
+  || ok "...and nothing was left on the card"
+
 # The name goes with the preset. It lives in a sidecar (PBNAMES.BIN), which
 # an export used to leave behind: a card carried the preset and not what it
 # was called, and an import on another module -- or after a reflash -- landed
