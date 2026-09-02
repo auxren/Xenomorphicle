@@ -1047,6 +1047,40 @@ $SIM --app "200e Modules" --full-log --keys "wpmsave0,step3000,$W251,wpm0,step30
   && bad "a RECALL with the bus idle was deferred" \
   || ok "a RECALL with the bus idle is not deferred"
 
+# ---------------------------------------------------------------------------
+# A bank transfer shows its progress. On the module a 251e read is ~11 s from
+# the tap to the result and a write is twice that; the status row used to
+# hold "reading 251 A ..." for the whole of it, which is what a hang looks
+# like. The tail is dots until the first byte moves, then the bank's percent
+# (the sim moves 30 bytes/ms, so 900 ms in is about a third of 63120), and
+# "100%" once every byte is in and the master is waiting for the module to
+# fall quiet -- that last stretch is real, and the row says so.
+# ---------------------------------------------------------------------------
+echo "a bank transfer shows its progress"
+xfer_row() {
+  $SIM --app "200e Modules" --keys "l,step200,r,step10,+r,step$1" --dump-fb 2>/dev/null \
+    | python3 fbtext.py - | grep '^y=46' | sed 's/^y=46 *x=0 *//'
+}
+[ "$(xfer_row 50)" = "reading 251 A ..." ] \
+  && ok "dots before the first byte moves" \
+  || bad "expected 'reading 251 A ...' before the transfer, got '$(xfer_row 50)'"
+echo "$(xfer_row 900)" | grep -qE '^reading 251 A [1-9][0-9]?%$' \
+  && ok "a percentage once bytes are moving ($(xfer_row 900))" \
+  || bad "no mid-transfer percentage, got '$(xfer_row 900)'"
+[ "$(xfer_row 3000)" = "reading 251 A 100%" ] \
+  && ok "100% while waiting for the module to fall quiet" \
+  || bad "expected 'reading 251 A 100%' after the bytes, got '$(xfer_row 3000)'"
+# the same tail on the write's two phases: "WRITING" is the restore, "VERIFY"
+# the read-back that follows it, and each counts from 0 again
+$SIM --app "200e Modules" --keys "$W251_ARMED,step400,+r,step900" --dump-fb 2>/dev/null \
+  | python3 fbtext.py - | grep -qE '^y=46 .*WRITING 251 A [1-9][0-9]?%$' \
+  && ok "WRITING shows its percentage" \
+  || bad "WRITING has no percentage"
+$SIM --app "200e Modules" --keys "$W251_ARMED,step400,+r,step5000" --dump-fb 2>/dev/null \
+  | python3 fbtext.py - | grep -qE '^y=46 .*VERIFY 251 A ([1-9][0-9]?|100)%$' \
+  && ok "VERIFY counts from 0 again" \
+  || bad "VERIFY has no percentage of its own"
+
 echo "small app state is not a whole-EEPROM rewrite"
 
 # The 200e scan result is ~11 bytes. It used to reach storage through

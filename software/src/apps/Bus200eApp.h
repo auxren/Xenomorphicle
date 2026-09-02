@@ -521,6 +521,7 @@ private:
   void DrawStageStrip() const;
   void DrawStageStripCursor() const;
   void DrawReadState() const;
+  void DrawXferTail(const char *verb) const;  // " ..." or " NN%"
   int SeqEndStage() const;     // 0-indexed stage holding the end marker, or -1
   uint8_t SeqPeakRaw() const;
   int FoundIndexToTableIndex(int nth) const;
@@ -1580,6 +1581,30 @@ void AppBus200e::DrawStageStripCursor() const {
   graphics.drawHLine(x - 1, kStripBase + 3, 3);
 }
 
+// The tail of an in-flight line: " ..." until the first byte moves, then the
+// bank's percentage. A real 251e read is ~11 s from the tap to the result
+// (measured 2026-09-02: bytes done at 6.7 s, then the master waits for the
+// module to fall quiet) and a write is that twice over; a line that does not
+// change for 11 s reads as a hang, and the panel's only other feedback is
+// the 251e's own display. The percent is bytes moved over the whole bank
+// (Bus200eMasterBytesTransferred rebaselines per job, so the verify pass
+// counts from 0 again), clamped, so "100%" means "every byte is in, waiting
+// for the module to finish" -- which is exactly what that last stretch is.
+//
+// Sized for the longest name: "reading 285 FS A 100%" is 21 columns, the
+// screen's width. Nothing else on this line gets longer.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::DrawXferTail(const char *verb) const {
+  uint32_t pct = 0;
+#ifdef PRESET_BUS
+  const uint32_t total = ExpectedBankBytes();
+  const uint32_t moved = Bus200eMasterBytesTransferred();
+  if (total && moved) pct = moved >= total ? 100 : moved * 100 / total;
+#endif
+  if (pct) graphics.printf("%s %s %lu%%", verb, TargetName(), (unsigned long)pct);
+  else     graphics.printf("%s %s ...", verb, TargetName());
+}
+
 // Provenance line. This is the whole reason the screen is trustworthy: the
 // target module's own panel will happily keep showing something else.
 FLASHMEM __attribute__((noinline))
@@ -1612,7 +1637,7 @@ void AppBus200e::DrawReadState() const {
 
   switch (stale_ok ? Bus200eAppNS::WRITE_NONE : write_state_) {
     case Bus200eAppNS::WRITE_ACTIVE:
-      graphics.printf("WRITING %s ...", TargetName());
+      DrawXferTail("WRITING");
       graphics.invertRect(0, 45, 128, 10);
       return;
     case Bus200eAppNS::WRITE_VERIFYING:
@@ -1620,7 +1645,7 @@ void AppBus200e::DrawReadState() const {
       // "done sending" is never mistaken on screen for "confirmed stored".
       // "VERIFY", not "VERIFYING": the longest model name (285 FS A) plus
       // the dots has to fit 21 columns.
-      graphics.printf("VERIFY %s ...", TargetName());
+      DrawXferTail("VERIFY");
       graphics.invertRect(0, 45, 128, 10);
       return;
     case Bus200eAppNS::WRITE_OK:
@@ -1656,7 +1681,7 @@ void AppBus200e::DrawReadState() const {
 
   switch (read_state_) {
     case Bus200eAppNS::READ_ACTIVE:
-      graphics.printf("reading %s ...", TargetName());
+      DrawXferTail("reading");
       break;
     case Bus200eAppNS::READ_OK:
       if (edited_) {
