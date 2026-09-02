@@ -29,6 +29,7 @@ stray typing is harmless but will spew capture bytes.
 | `L` | toggle app loop |
 | `i` | scan all I2C addresses |
 | `u` | dump USB host port device identities (VID/PID/product) + the Captain MIDI per-device profile table |
+| `j` | **press the panel** — then one key: `l` `r` `a` `b` `z` `x` `y` tap that button (capitals hold it), `[` `]` turn encL one detent, `-` `+` turn encR. Goes through the real UI event queue, so it reaches whatever screen is up; any other key cancels. This is how a headless bench walks the 200e app (`jl` on the module list starts a scan; `jr` picks the target) |
 
 ### Preset engine / bus
 | key | action |
@@ -58,10 +59,16 @@ in front of them. `x` rewrites all 30 slots of the target module. A second `x`
 with a **different** address inside the window is a fresh arm, not a
 confirmation — it used to fire at the new address unconfirmed.
 
-Every multi-character prompt (`x`, `q`, `w`, `A`, `N`, `V`) eats the next
+Every multi-character prompt (`x`, `q`, `w`, `A`, `N`, `V`, `j`) eats the next
 keystrokes as digits, and a scripted console helper that probes with a key
 before each command will feed that probe into an open prompt. Send the digits
 in the same write as the key, and never leave a prompt armed between calls.
+
+The same goes for `pew!` itself: a helper that re-sends the unlock whenever a
+command draws no reply will, on an already-unlocked console, type `p` (the
+overlay opens), `e`, `w` (the patch prompt arms) and `!`. Two things make a
+reply go missing on an unlocked console: a second process holding the port,
+and a command that legitimately prints nothing. One `p` closes the overlay.
 
 ### Files
 | key | action |
