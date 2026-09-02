@@ -1128,6 +1128,14 @@ $SIM --state-in "$IMG/keepapp2" --keys "step2000" 2>&1 | grep -Eq '^  [a-z]+ +ap
   && ok "a bus recall into another app is what the next power-up comes back in" \
   || bad "after a bus recall into Pong, power-up came back somewhere else"
 
+# ...and the console's remote switch (SwitchToApp, which --app goes through):
+# the Orin's 'a' has to stick the way a menu pick does.
+rm -f "$IMG/keepapp3"
+$SIM --app "Back It Up!" --state-out "$IMG/keepapp3" --keys "step300" >/dev/null 2>&1
+$SIM --state-in "$IMG/keepapp3" --keys "step2000" 2>&1 | grep -Eq '^  [a-z]+ +app=Back It Up!' \
+  && ok "a remote app switch (console 'A') is what the next power-up comes back in" \
+  || bad "after a remote switch to Back It Up!, power-up came back somewhere else"
+
 echo "the boot path decides before it mutates"
 
 # AppSwitcher::Init() used to run InitDefaults() on every app and zero the user

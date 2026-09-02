@@ -1075,6 +1075,13 @@ FLASHMEM void SwitchToApp(size_t index) {
   AudioNoInterrupts();
 #endif
   app_switcher.set_current_app(index);
+  // Same rule as the panel: the app on screen is what the next power-up
+  // shows. The Orin's 'a' (Captain) has to stick across a power cycle the
+  // way a menu pick does, or the bench flow depends on which preset was
+  // last recalled. RESUME hands PhzConfig's map back.
+#ifdef __IMXRT1062__
+  SaveCurrentAppChoice();
+#endif
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
 #ifdef AUDIO_INTERFACE
   AudioInterrupts();
