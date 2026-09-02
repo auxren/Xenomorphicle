@@ -417,6 +417,8 @@ toggle pacing) and the session controls live in visually distinct cards marked
 | `1` `2` `3` `4` | pulse TR1-TR4 |
 | `~1` `~2` `~3` `~4` | a zero-width spike on TR1-TR4, seen only by the edge latch |
 | `export` `import` | the bench console's `E` and `J`: every slot to / from the card |
+| `name3=Drone` | names slot 3, as the panel's rename does (store written at once) |
+| `names` | logs every named slot |
 | `n` | note-on into `usbHostMIDI[0]` — the port the k-board lives on |
 | `N` | note-on into the 200e bus MIDI RX ring |
 | `w` | advance one simulated second |

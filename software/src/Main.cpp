@@ -1292,6 +1292,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
               if (r == OC::PresetEngine::EXPORT_OK) ++n;
               else if (r != OC::PresetEngine::EXPORT_EMPTY) ++fail;
             }
+            OC::PresetEngine::FlushSlotNames();   // one write for the batch
             Serial.printf("card holds %d, imported %d, %d failed\n",
                           have, n, fail);
             break;

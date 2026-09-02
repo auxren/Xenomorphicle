@@ -565,6 +565,48 @@ $SIM --sd-card --state "$IMG/impok" --keys "import,step100" 2>&1 | grep -q 'impo
   && ok "an undamaged card copy imports (control)" \
   || bad "the undamaged card copy did not import"
 
+# The name goes with the preset. It lives in a sidecar (PBNAMES.BIN), which
+# an export used to leave behind: a card carried the preset and not what it
+# was called, and an import on another module -- or after a reflash -- landed
+# thirty presets named nothing. Name a slot, store it, export it, then import
+# it into a module whose name store says otherwise, and read the name back.
+rm -f "$IMG/named"
+$SIM --sd-card --state-out "$IMG/named" \
+     --keys "name0=Drone A,$ENTER,l-down,step600,l-up,step4000,export,step100" 2>&1 \
+  | grep -q 'export slot 0: ok' \
+  || bad "the named slot did not export"
+# The receiving module: same card, but its own slot 0 is named something else
+# (and holds nothing, so only the name store can be the source of "Drone A").
+grep -v '^file lfs ' "$IMG/named" > "$IMG/recv"   # keep the card, drop the module
+$SIM --sd-card --state "$IMG/recv" \
+     --keys "name0=Stale,import,step100,names" 2>&1 > "$TMP/names.txt"
+grep -q 'import slot 0: ok' "$TMP/names.txt" \
+  || bad "the receiving module did not import slot 0"
+grep -q 'name slot 0: "Drone A"' "$TMP/names.txt" \
+  && ok "an imported preset arrives with the name it was exported under" \
+  || bad "the imported preset lost its name: $(grep 'name slot' "$TMP/names.txt")"
+# ...and it is in the store, not just the cache: a fresh boot from the
+# receiving module's image still knows the name.
+$SIM --state-in "$IMG/recv" --keys "names" 2>&1 | grep -q 'name slot 0: "Drone A"' \
+  && ok "...and the name survives a power cycle" \
+  || bad "the imported name was not written to the name store"
+# The name is the preset's, not the slot's: importing a preset that was
+# stored UNNAMED over a slot the receiving module had named must clear that
+# name, or the panel would show "Keep" over a preset nobody called that.
+# (A container from before names travelled carries no name key at all and
+# leaves the local name alone -- absent is "unknown", not "unnamed".)
+rm -f "$IMG/unnamed"
+$SIM --sd-card --state-out "$IMG/unnamed" \
+     --keys "$ENTER,l-down,step600,l-up,step4000,export,step100" >/dev/null 2>&1
+grep -v '^file lfs ' "$IMG/unnamed" > "$IMG/recv2"
+$SIM --sd-card --state "$IMG/recv2" --keys "name0=Keep,import,step100,names" 2>&1 \
+  > "$TMP/names2.txt"
+grep -q 'import slot 0: ok' "$TMP/names2.txt" \
+  || bad "the unnamed preset did not import"
+grep -q 'name slot 0:' "$TMP/names2.txt" \
+  && bad "an unnamed preset left the stale local name in place: $(grep 'name slot' "$TMP/names2.txt")" \
+  || ok "an unnamed preset clears the stale local name on import"
+
 echo "a damaged preset is refused, whichever layer sees the damage"
 
 # One bit flipped inside the stored G section. The container's own section

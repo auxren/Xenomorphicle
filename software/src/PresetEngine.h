@@ -111,6 +111,10 @@ bool SlotUsed(uint8_t slot);  // slot has a stored preset on disk
 static constexpr size_t kNameLen = 16;
 const char *SlotName(uint8_t slot);              // "" when unnamed
 void SetSlotName(uint8_t slot, const char *name);  // persists immediately
+// Names an import batch cached (ImportSlot reads each container's manifest
+// name into RAM, not flash) -- one write for the whole batch. Process() also
+// calls this, so a caller that forgets only defers the write one loop pass.
+void FlushSlotNames();
 bool LastWasSave();
 bool Busy();
 
@@ -174,6 +178,7 @@ inline bool SlotUsed(uint8_t) { return false; }
 static constexpr size_t kNameLen = 16;
 inline const char *SlotName(uint8_t) { return ""; }
 inline void SetSlotName(uint8_t, const char *) {}
+inline void FlushSlotNames() {}
 inline bool LastWasSave() { return false; }
 inline bool Busy() { return false; }
 enum ExportResult : uint8_t {

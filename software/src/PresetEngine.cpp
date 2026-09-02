@@ -123,6 +123,15 @@ static constexpr uint8_t kScratchBank = 255;    // reserved: recall staging
 static constexpr uint16_t kManifestKey = 8 << 8;    // == PRESETBUS_KEY
 static constexpr uint16_t kSchemaKey  = kManifestKey | 0;
 static constexpr uint16_t kFlagsKey   = kManifestKey | 1;
+// The slot's name, 16 bytes packed little-endian into two values, so it
+// travels inside the container: a preset exported to the card and imported
+// on another module (or after a reflash) arrives with the name it was given.
+// The local store (PBNAMES.BIN) stays authoritative for local recalls; an
+// import copies the container's name over it. Containers written before
+// these keys existed carry neither, and an import leaves their local name
+// alone -- absent is "unknown", not "unnamed".
+static constexpr uint16_t kNameKey0   = kManifestKey | 2;
+static constexpr uint16_t kNameKey1   = kManifestKey | 3;
 static constexpr uint64_t kSchemaVersion = 1;
 // Where firmware before the EEPROM record (below) kept the current slot: a
 // key in GLOBALS.CFG. Read once at boot to migrate; never written again. The
@@ -307,6 +316,7 @@ static FS &quad_fs() { return SDcard_Ready ? (FS &)SD : (FS &)PhzConfig::myfs; }
 // Removable media the export/import path uses. Null when no card is seated.
 static FS *card_fs() { return SDcard_Ready ? (FS *)&SD : nullptr; }
 static void load_names();  // defined with the name store below
+static void pack_name(uint8_t slot, uint64_t out[2]);
 
 FLASHMEM static void slot_name(char *buf, uint8_t slot, char kind, const char *ext) {
   // PB_NN_K.EXT
@@ -913,6 +923,12 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   BuildGlobalSettingsValues();
   PhzConfig::setValue(kSchemaKey, kSchemaVersion);
   PhzConfig::setValue(kFlagsKey, flags);
+  {
+    uint64_t nm[2];
+    pack_name(slot, nm);
+    PhzConfig::setValue(kNameKey0, nm[0]);
+    PhzConfig::setValue(kNameKey1, nm[1]);
+  }
   bool ok = false;
   {
     const size_t n = PhzConfig::serialize(sec_buf + sec_used,
@@ -1364,6 +1380,9 @@ FLASHMEM void Process() {
   }
   if (cur_slot_dirty_ms && millis() - cur_slot_dirty_ms > 3000)
     persist_cur_slot();
+  // Names an import left in the cache. The console's batch flushes itself;
+  // this is the net under any caller that does not.
+  FlushSlotNames();
 }
 
 uint8_t RecallReplacing() { return recall_replacing; }
@@ -1402,19 +1421,75 @@ const char *SlotName(uint8_t slot) {
   return (slot < kNumSlots) ? name_cache[slot] : "";
 }
 
-FLASHMEM void SetSlotName(uint8_t slot, const char *name) {
-  if (slot >= kNumSlots) return;
+// The 16 name bytes as two config values (manifest kNameKey0/1), and back.
+// Little-endian byte order is fixed by hand rather than by memcpy so the
+// container reads the same on any host that parses it.
+static void pack_name(uint8_t slot, uint64_t out[2]) {
+  out[0] = out[1] = 0;
+  for (size_t i = 0; i < kNameLen; ++i)
+    out[i / 8] |= (uint64_t)(uint8_t)name_cache[slot][i] << (8 * (i % 8));
+}
+
+static void unpack_name(const uint64_t in[2], char *out /* kNameLen + 1 */) {
+  for (size_t i = 0; i < kNameLen; ++i)
+    out[i] = (char)(uint8_t)(in[i / 8] >> (8 * (i % 8)));
+  out[kNameLen] = 0;
+}
+
+// Whole store to flash in one write. A LittleFS write is a block erase with
+// interrupts off, so callers that touch many names (a 30-slot import) set
+// the cache and flush ONCE; the panel's single rename flushes immediately.
+static bool names_dirty = false;
+
+FLASHMEM static void names_flush() {
+  File f = preset_fs().open("PBNAMES.BIN", FILE_WRITE_BEGIN);
+  if (!f) return;
+  for (int i = 0; i < kNumSlots; ++i)
+    f.write((const uint8_t *)name_cache[i], kNameLen);
+  f.close();
+  names_dirty = false;
+}
+
+// Cache only; the caller decides when the store is written.
+static void name_set_cached(uint8_t slot, const char *name) {
   memset(name_cache[slot], 0, sizeof(name_cache[slot]));
   strncpy(name_cache[slot], name, kNameLen);
   // trim trailing spaces so "unnamed" stays honest
   for (int i = (int)strlen(name_cache[slot]) - 1;
        i >= 0 && name_cache[slot][i] == ' '; --i)
     name_cache[slot][i] = 0;
-  File f = preset_fs().open("PBNAMES.BIN", FILE_WRITE_BEGIN);
-  if (!f) return;
-  for (int i = 0; i < kNumSlots; ++i)
-    f.write((const uint8_t *)name_cache[i], kNameLen);
+  names_dirty = true;
+}
+
+FLASHMEM void SetSlotName(uint8_t slot, const char *name) {
+  if (slot >= kNumSlots) return;
+  name_set_cached(slot, name);
+  names_flush();
+}
+
+// An imported container's name, if it carries one, into the cache. Reads the
+// G section into the staging buffer and peeks the manifest there -- never
+// through the config map, which belongs to the running app at import time.
+FLASHMEM static void name_from_container(uint8_t slot) {
+  File f;
+  SectionEntry sec[kMaxSections];
+  int n = 0;
+  if (!container_open(slot, f, sec, n)) return;
+  const SectionEntry *g = find_section(sec, n, 'G');
+  const bool have = g && section_to_mem(f, *g, sec_buf, kSecBufBytes);
   f.close();
+  if (!have) return;
+  uint64_t nm[2];
+  if (!PhzConfig::peek(sec_buf, g->length, kNameKey0, nm[0]) ||
+      !PhzConfig::peek(sec_buf, g->length, kNameKey1, nm[1]))
+    return;   // pre-name container: keep whatever the local store says
+  char name[kNameLen + 1];
+  unpack_name(nm, name);
+  if (strcmp(name, name_cache[slot]) != 0) name_set_cached(slot, name);
+}
+
+FLASHMEM void FlushSlotNames() {
+  if (names_dirty) names_flush();
 }
 
 FLASHMEM bool SlotUsed(uint8_t slot) {
@@ -1637,6 +1712,9 @@ FLASHMEM ExportResult ImportSlot(uint8_t slot) {
     if (!preset_fs().rename(kImpTmp, name)) return EXPORT_FAILED;
   }
   remove_legacy_slot(slot);   // an imported container supersedes them
+  // The name rides in the container's manifest; cache it here and let the
+  // caller's batch (or Process) write the store once, not per slot.
+  name_from_container(slot);
   serial_printf("PresetEngine: imported slot %d from card\n", slot);
   return EXPORT_OK;
 }

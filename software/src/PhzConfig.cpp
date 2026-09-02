@@ -323,6 +323,29 @@ FLASHMEM bool deserialize(const uint8_t *buf, size_t len) {
   return any;
 }
 
+// Same walk as chunk_from_mem's "PZ" pass, minus the store: a lookup, not a
+// load. The checksum is not verified here -- the caller has already proven
+// the section (container_verify / recall_stage_head), and a peek that
+// touched nothing but still failed a whole image for one flipped bit would
+// only take a name away from a preset that recalls fine.
+FLASHMEM bool peek(const uint8_t *buf, size_t len, KEY key, VALUE &value) {
+  if (len < HEADER_SIZE || buf[0] != 'P' || buf[1] != 'Z') return false;
+  const size_t count = (size_t)buf[2] | (size_t)buf[3] << 8;
+  const size_t body = count * (sizeof(KEY) + sizeof(VALUE));
+  if (HEADER_SIZE + body > len) return false;
+  const uint8_t *p = buf + HEADER_SIZE;
+  for (size_t i = 0; i < count; ++i) {
+    KEY k;
+    memcpy(&k, p, sizeof(k));
+    if (k == key) {
+      memcpy(&value, p + sizeof(k), sizeof(value));
+      return true;
+    }
+    p += sizeof(KEY) + sizeof(VALUE);
+  }
+  return false;
+}
+
 bool save_config(const char* filename, FS &fs)
 {
     SERIAL_PRINTLN("\nSaving Config: %s\n", filename);

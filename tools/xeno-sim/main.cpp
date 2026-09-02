@@ -125,6 +125,7 @@ const char *kLegend =
     "{ } < > the same, x10            1-4 pulse TR1-TR4 (225e last/next jacks)\n"
     "~1-~4 a zero-width spike on TR1-TR4, seen only by the edge latch\n"
     "export / import: the console's E and J, every slot to/from the card\n"
+    "nameN=text names slot N (the panel's rename); names lists named slots\n"
     "n note-on -> USB host port 0     N note-on -> 200e bus MIDI\n"
     "w advance 1 simulated second     t toggle fast/real scan pacing   q quit\n"
     "chords need held buttons: a terminal cannot report a key being HELD, so\n"
@@ -246,7 +247,28 @@ bool ApplyKey(const std::string &k) {
       SimLog("%s slot %d: %s", imp ? "import" : "export", i,
              (unsigned)r < 7 ? verdict[r] : "?");
     }
+    OC::PresetEngine::FlushSlotNames();   // as the console's J does
     Advance(5);
+    return true;
+  }
+  // The panel's rename, minus the panel: `name3=Drone` names slot 3 (the
+  // store is written at once, as SetSlotName does for a real rename);
+  // `names` logs every named slot so a check can prove which survived an
+  // export/import round trip.
+  if (k.size() > 5 && k.compare(0, 4, "name") == 0 && k.find('=') != std::string::npos) {
+    const size_t eq = k.find('=');
+    const int slot = atoi(k.substr(4, eq - 4).c_str());
+    const std::string nm = k.substr(eq + 1);
+    SimSessionRecord(k);
+    OC::PresetEngine::SetSlotName((uint8_t)slot, nm.c_str());
+    SimLog("slot %d named \"%s\"", slot, OC::PresetEngine::SlotName((uint8_t)slot));
+    return true;
+  }
+  if (k == "names") {
+    for (uint8_t i = 0; i < OC::PresetEngine::kNumSlots; ++i) {
+      const char *nm = OC::PresetEngine::SlotName(i);
+      if (*nm) SimLog("name slot %d: \"%s\"", i, nm);
+    }
     return true;
   }
   if (k == "t") {

@@ -59,6 +59,12 @@ namespace PhzConfig {
   size_t serialize(uint8_t *buf, size_t cap,
                    bool (*pred)(KEY) = nullptr, KEY (*remap)(KEY) = nullptr);
   bool deserialize(const uint8_t *buf, size_t len);
+  // One config value out of a serialized image WITHOUT touching the map.
+  // For readers that run while some app owns the map (a slot import peeking
+  // at the container's manifest) and must leave it exactly as they found it.
+  // Scans the "PZ" chunk only; false when the image is malformed or the key
+  // is absent.
+  bool peek(const uint8_t *buf, size_t len, KEY key, VALUE &value);
 
   // True when the map differs from the file it was last loaded from or saved
   // to. save_config skips the write when it is false and the target is that
@@ -97,6 +103,7 @@ namespace PhzConfig {
 
   inline size_t serialize(uint8_t *, size_t, bool (*)(KEY) = nullptr, KEY (*)(KEY) = nullptr) { return 0; }
   inline bool deserialize(const uint8_t *, size_t) { return false; }
+  inline bool peek(const uint8_t *, size_t, KEY, VALUE &) { return false; }
   inline bool unsaved_changes() { return false; }
 
   inline void setValue(KEY, VALUE) {}
