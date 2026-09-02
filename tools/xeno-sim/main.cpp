@@ -547,6 +547,8 @@ void Usage() {
       "  --real-timing        pin the virtual clock to wall-clock, so a scan\n"
       "                       takes the ~60s it takes on the module\n"
       "  --bus-off            simulate PresetBus::Enabled() == false\n"
+      "  --case-off           bus enabled, but no module answers a QUERY\n"
+      "                       (module on USB with the case unplugged)\n"
       "  --id-voltage V       the hardware-ID divider the firmware reads at\n"
       "                       boot to pick its pin map (default 0.10)\n"
       "  --reset-settings     boot the first-run/EEPROM-reset path, and\n"
@@ -703,6 +705,7 @@ int main(int argc, char **argv) {
     else if (a == "--app" && has_next) { boot_app = argv[++i]; opts.push_back(a + " " + boot_app); }
     else if (a == "--real-timing") { cfg.real_timing = true; opts.push_back(a); }
     else if (a == "--bus-off") { cfg.bus_enabled = false; opts.push_back(a); }
+    else if (a == "--case-off") { cfg.case_off = true; opts.push_back(a); }
     else if (a == "--reset-settings") { reset_settings = true; opts.push_back(a); }
     else if (a == "--sd-card") { card_present = true; opts.push_back(a); }
     else if (a == "--reset-cancel") { reset_settings = reset_cancel = true; opts.push_back(a); }
@@ -741,6 +744,7 @@ int main(int argc, char **argv) {
       else if (o == "--reset-cancel") reset_settings = reset_cancel = true;
       else if (o == "--write-fault-once") write_fault_once = true;
       else if (o == "--bus-off") cfg.bus_enabled = false;
+      else if (o == "--case-off") cfg.case_off = true;
       else if (o == "--real-timing") cfg.real_timing = true;
       else if (o == "--reset-settings") reset_settings = true;
       else if (o.rfind("--id-voltage ", 0) == 0) id_voltage = strtof(o.c_str() + 13, nullptr);

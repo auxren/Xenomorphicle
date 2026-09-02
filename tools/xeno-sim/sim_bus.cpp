@@ -336,9 +336,13 @@ void SimBusInit(const SimBusConfig &cfg) {
   if (g_synthetic)
     SimLog("SYNTHETIC BANKS IN USE -- these bytes are invented, not captured.");
 
-  g_modules.push_back({0x20, "210", {}});
-  g_modules.push_back({0x28, "259 A", b259});
-  g_modules.push_back({0x5C, "251 A", b251});
+  if (cfg.case_off) {
+    SimLog("--case-off: the bus is up but nobody answers a QUERY.");
+  } else {
+    g_modules.push_back({0x20, "210", {}});
+    g_modules.push_back({0x28, "259 A", b259});
+    g_modules.push_back({0x5C, "251 A", b251});
+  }
 
   Bus200eMasterInit(&kOps);
 }

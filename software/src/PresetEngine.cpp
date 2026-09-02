@@ -756,6 +756,10 @@ FLASHMEM static bool container_verify(FS &fs, const char *name) {
 // Captain image compared unequal on every recall, and nothing on the
 // console said whether the content differed or only the record order
 // (PhzConfig serialized in unordered_map order; it now sorts by key).
+// Reading the offset: the chunk header is [sig 2][count 2][xor of values
+// 8], so "+4" means the xor differs -- real content, since xor does not
+// care about order -- while a first difference at +12 or later under an
+// equal header would be order alone. The bench pair turned out to be +4.
 // kSectionSame when identical; kSectionNoFile when there is nothing to
 // compare against; otherwise the first differing offset, with a length
 // mismatch counted as differing at the shorter length.

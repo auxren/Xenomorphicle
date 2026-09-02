@@ -28,6 +28,9 @@ struct SimBusConfig {
   std::string capture_251e;
   std::string capture_259e;
   bool bus_enabled = true;    // false exercises the "preset bus disabled" screen
+  bool case_off = false;      // bus enabled but no module answers: the module
+                              // on USB with the case unplugged, or the scan
+                              // run before the case has powered up
   bool real_timing = false;   // see SimBusSetRealTiming()
 };
 

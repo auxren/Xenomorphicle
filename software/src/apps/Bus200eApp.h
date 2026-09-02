@@ -301,6 +301,11 @@ private:
   int list_top_ = 0;           // scroll offset into the responder list
   bool landed_ = false;        // first RESUME after power-up has chosen a screen
   uint8_t found_[Bus200eAppNS::kFoundBytes] = {0};
+  // What found_ held when the current scan started, so a scan that hears
+  // NOBODY can hand it back instead of replacing it. See KeepRememberedIfEmpty.
+  uint8_t remembered_[Bus200eAppNS::kFoundBytes] = {0};
+  int remembered_count_ = 0;
+  void KeepRememberedIfEmpty();
 
   // single-address probe (works for off-table addresses too, unlike the scan)
   uint8_t probe_addr_ = 0;
@@ -553,7 +558,11 @@ void AppBus200e::StartScan() {
   last_refusal_ = Buchla200eCheckRead(rc);
   if (last_refusal_ != BUCHLA200E_READ_OK) return;
 #endif
-  for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i) found_[i] = 0;
+  for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i) {
+    remembered_[i] = found_[i];
+    found_[i] = 0;
+  }
+  remembered_count_ = found_count_;
   found_count_ = 0;
   list_top_ = 0;
   scan_index_ = 0;
@@ -571,12 +580,38 @@ void AppBus200e::StartScan() {
 
 FLASHMEM __attribute__((noinline))
 void AppBus200e::StopScan() {
-  // Leave found_/found_count_ intact: an aborted scan keeps what it found.
+  // Leave found_/found_count_ intact: an aborted scan keeps what it found --
+  // unless that is nothing, in which case the set it started from is better.
   scan_state_ = Bus200eAppNS::SCAN_IDLE;
 #ifdef PRESET_BUS
   OC::PresetBus::MasterQueryReset();
   OC::PresetBus::MasterQuerySetQuiet(false);
 #endif
+  KeepRememberedIfEmpty();
+}
+
+// A scan that heard nobody must not replace a set that named somebody.
+//
+// The remembered set is the answer to a 49-second question and it is only
+// wrong when the case physically changes. A scan that finds nothing is far
+// more often the bench than the case: this module runs from USB on a desk,
+// and one encL press with the bus unplugged (or the case off) used to sweep
+// the table, find nobody, and -- via ConsumeScanDirty -- persist an all-zero
+// set over the good one in GLOBALS.CFG. The next real session then opened
+// on the scan page with no responders and had to spend the 49 s again. That
+// is the "scan set lost" the bench kept seeing.
+//
+// Keeping a stale set costs nothing: a module that is no longer there simply
+// does not answer when targeted, and the next scan that DOES find modules
+// replaces the set as before. Only the empty result is refused.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::KeepRememberedIfEmpty() {
+  if (found_count_ != 0 || remembered_count_ == 0) return;
+  for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i) found_[i] = remembered_[i];
+  found_count_ = remembered_count_;
+  found_dirty_ = false;   // nothing new to write; the file already holds this
+  serial_printf("200e: scan found nobody; keeping the %d remembered\n",
+                found_count_);
 }
 
 FLASHMEM __attribute__((noinline))
@@ -686,6 +721,7 @@ void AppBus200e::PumpScan() {
     // ConsumeScanDirty() below writes it at a quiescent moment instead.
     found_dirty_ = true;
     serial_printf("200e: scan complete, %d modules found\n", found_count_);
+    KeepRememberedIfEmpty();   // an empty result never replaces a real one
     return;
   }
 
@@ -693,6 +729,7 @@ void AppBus200e::PumpScan() {
   if (!e) {
     scan_state_ = Bus200eAppNS::SCAN_IDLE;
     OC::PresetBus::MasterQuerySetQuiet(false);
+    KeepRememberedIfEmpty();
     return;
   }
   if (OC::PresetBus::MasterQuery(e->addr) == 0) {

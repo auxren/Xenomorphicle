@@ -1052,6 +1052,33 @@ $SIM --app "200e Modules" --state-in "$IMG/base" --keys "step2000" --dump-fb 2>/
   && ok "...and boots to the scan screen, the only sensible landing for it" \
   || bad "an unscanned module did not boot to the scan screen"
 
+# A scan that hears nobody must not replace a good set. The bench module runs
+# on USB with the case unplugged, and a stray encL on the list ran a scan that
+# found 0 responders and persisted that -- the credible mechanism behind the
+# "my modules are gone" reports. --case-off is that bus: enabled, silent.
+cp "$IMG/scan" "$IMG/rescan"
+$SIM --case-off --app "200e Modules" --state "$IMG/rescan" \
+     --keys "step2000,l,step300,$SCAN" > "$TMP/rescan.log" 2>&1
+grep -q 'scan found nobody; keeping the 3 remembered' "$TMP/rescan.log" \
+  && ok "a scan that hears nobody says so and keeps the remembered set" \
+  || bad "the empty scan did not report keeping the set: $(grep -i 'scan' "$TMP/rescan.log" | tail -2 | tr '\n' '/')"
+# Judged by the landing screen, not by "B:probe" after an encL: a module whose
+# set was lost boots to the scan screen, where that same encL starts a scan
+# that finds the three responders again and reports 3 -- a false pass.
+$SIM --app "200e Modules" --state-in "$IMG/rescan" --keys "step2000" --dump-fb 2>/dev/null \
+  | python3 fbtext.py - > "$TMP/land"
+grep -q '251 A @5C' "$TMP/land" && grep -q 'Slot' "$TMP/land" \
+  && ok "...and the remembered set is still there after the next power cycle" \
+  || bad "an empty scan replaced the remembered set: $(head -3 "$TMP/land" | tr '\n' '/')"
+# The control: an empty scan on a module that never scanned still finds 0 --
+# "keep the remembered set" must not invent one.
+found_empty_virgin=$($SIM --case-off --app "200e Modules" --state-in "$IMG/base" \
+                          --keys "$SCAN" --dump-fb 2>/dev/null \
+                     | python3 fbtext.py - | grep -o 'B:probe [0-9]*' | head -1)
+[ "$found_empty_virgin" = "B:probe 0" ] \
+  && ok "...while a module with nothing remembered still reports nothing" \
+  || bad "an empty scan on an unscanned module reported '$found_empty_virgin'"
+
 # The sledgehammer itself, and the sharpest evidence of it. OC::SaveAppData()
 # calls SaveGlobalSettings(), which rewrites 000.SCL-003.SCL on the card -- so
 # an 11-byte scan result, on a module with a card seated, wrote four scale
