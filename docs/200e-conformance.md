@@ -57,6 +57,7 @@ field use demands it.
 | 2 | WPM deaf while mastering | Quiet-gate + LPI2C hardware arbitration + bounded retries; broadcasts never assumed universally heard (local dispatch is explicit) | bus200e preemption tests; soak stats |
 | 3 | ACKing 0x50 under a live WPM | Triple gate: enable refused if `wpm_present`; probe suspended while serving (no self-ACK flap); enable-time self-test reverts on any address-match anomaly | Live: `k` → `card serve REFUSED - WPM owns 0x50` |
 | 4 | Tests touching the real bus | All protocol logic host-tested (88+41 checks, CI-gated); live-bus actions are explicit console commands; the soak exercises only normal operations | CI `ci.yml`; soak design |
+| 5 | Our own flash writes under a 251e bank transfer | While the 200e app has a BACKUP/RESTORE open the 251e is the I2C master writing into / reading out of our card slave, and every LittleFS erase here masks interrupts. A bus RECALL/SAVE landing then (70-150 ms blocked) could leave a 251e that stops waiting holding half a bank, or read as a false BAD on the verify pass. `PresetEngine::Process` holds the request until `PresetBus::MasterTransferring()` drops (45 s cap, sized from a measured 10.8 s real BACKUP), and the card-image flush and the slot/app EEPROM record wait the same way | xeno-sim selfcheck "a bus RECALL waits for a 200e bank transfer"; live 2026-09-02: `jr` + WPM recall → `request deferred` at 1.8 s, ran at 8.2 s after DONE, read intact |
 
 ## Robustness added beyond the spec
 
@@ -67,5 +68,5 @@ field use demands it.
   wedged module reboots into boot-recall instead of holding the bus hostage.
 - ISR flag-ordering and TDF-stall fixes from adversarial review (round 3).
 
-*Last updated 2026-08-19; regenerate against `docs/upstream-prs.md` when the
+*Last updated 2026-09-02; regenerate against `docs/upstream-prs.md` when the
 PR packages move.*
