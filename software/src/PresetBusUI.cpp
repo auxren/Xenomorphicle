@@ -454,7 +454,7 @@ void Task() {
     // fires from the LONG_PRESS event in HandleEvent, so the entry chord could
     // and did commit a store on its own (r-down, l-down, hold: "STORED 1").
     if (store_context && ui.read_deliberate(CONTROL_BUTTON_L)) {
-      if (!hold_start_ms) hold_start_ms = millis() | 1;
+      if (!hold_start_ms) hold_start_ms = PresetEngine::StampMs();
     } else {
       hold_start_ms = 0;
     }
@@ -465,7 +465,7 @@ void Task() {
     // a bus-wide recall must not fall out of a rename gesture.
     if (!edit_mode && ui.read_deliberate(CONTROL_BUTTON_R)) {
       if (!recall_hold_ms) {
-        recall_hold_ms = millis() | 1;
+        recall_hold_ms = PresetEngine::StampMs();
         recall_fired = false;
       } else if (!recall_fired &&
                  (millis() - recall_hold_ms) >= kRecallHoldMs) {

@@ -922,7 +922,7 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   last_slot = slot;
   last_was_save = true;
   last_save_ok = ok && ok2;
-  cur_slot_dirty_ms = millis() | 1;
+  cur_slot_dirty_ms = StampMs();
   op_count++;
   busy = false;
   HS::PokePopup(HS::MESSAGE_POPUP, (ok && ok2) ? "Bus save OK" : "Bus save ERR");
@@ -1056,7 +1056,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   const uint32_t t_start = millis();
   WallClock wall;
   wall.start();
-  uint32_t ph[4] = { 0 };   // validate, files, apply, resume
+  uint32_t ph[5] = { 0 };   // validate, suspend, files, apply, resume
 
   // 1. validate everything before touching live state
   bool from_container = false;
@@ -1087,17 +1087,41 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
     return recall_refused(slot, "OLD PRESET");
   }
 
-  // 2. freeze the app world
+  // 2. suspend the outgoing app, ISR still live, exactly as the app menu
+  // and SwitchToApp do. Suspend is where an app drops transient state and
+  // persists what it owns, and a recall used to skip it: the 200e app kept
+  // a scan running (its quiet flag latched, so the console's 'q' printed
+  // nothing afterwards) and kept a write/snapshot confirm ARMED -- recall
+  // away from that prompt, recall back, and the first encR press would
+  // have shipped a whole-bank write into a 251e. Captain's modal Clock
+  // Router and unsaved edits, and Quadrants'/Scenery's auto-save, were
+  // skipped the same way. Only after validation, deliberately: an empty
+  // slot is the common case in a case where other modules own most slots,
+  // and it must not cost the running app a Suspend/Resume round trip (for
+  // Quadrants that is an audio-graph rebuild).
+  app_switcher.current_app()->DispatchAppEvent(APP_EVENT_SUSPEND);
+  // Those handlers persist through the shared PhzConfig map (bank file,
+  // SCENERY.DAT, CAPTAIN.DAT), so the slot's G section staged in step 1 may
+  // be gone by now. Stage it again: RAM plus one container open, ~1 ms.
+  if (recall_stage_head(slot, from_container) != STAGE_OK) {
+    PhzConfig::load_config();
+    app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
+    HS::PokePopup(HS::MESSAGE_POPUP, "Bad preset");
+    return recall_refused(slot, "BAD PRESET");
+  }
+  ph[1] = wall.lap_ms();
+
+  // 3. freeze the app world
   CORE::app_isr_enabled = false;
   CORE::app_loop_enabled = false;
   delay(1);
 
-  // 3. stage the file-backed stores (same multi-write LittleFS chain as
+  // 4. stage the file-backed stores (same multi-write LittleFS chain as
   // SaveSlot's step 4 -- see the watchdog note at the top of this file)
   recall_stage_files(slot, from_container, flags);
-  ph[1] = wall.lap_ms();
+  ph[2] = wall.lap_ms();
 
-  // 4. apply global settings (map still holds PB_NN_G.CFG) + app chunks
+  // 5. apply global settings (map still holds PB_NN_G.CFG) + app chunks
   RestoreGlobalSettingsFromConfig(0);
   Scales::Validate();
   Chords::Validate();
@@ -1105,9 +1129,9 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
     HS::user_turing_machines[i].Validate();
   ApplyAppData(capture);
   watchdog_feed();
-  ph[2] = wall.lap_ms();
+  ph[3] = wall.lap_ms();
 
-  // 5. switch to the slot's app (missing app: stay put, partial recall)
+  // 6. switch to the slot's app (missing app: stay put, partial recall)
   const size_t idx = ResolveAppIndexByID(slot_app_id);
 
   FreqMeasure.end();
@@ -1119,26 +1143,27 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   AudioInterrupts();
   watchdog_feed();
 
-  // 6. run
+  // 7. run
   CORE::app_isr_enabled = true;
   CORE::app_loop_enabled = true;
   ::MENU_REDRAW = 1;
-  ph[3] = wall.lap_ms();
+  ph[4] = wall.lap_ms();
 
   last_slot = slot;
   last_was_save = false;
   last_recall_err = nullptr;
-  cur_slot_dirty_ms = millis() | 1;
+  cur_slot_dirty_ms = StampMs();
   op_count++;
   busy = false;
   HS::PokePopup(HS::MESSAGE_POPUP, "Bus recall OK");
   serial_printf("PresetEngine: recall slot %d done (app %04x)\n", slot, slot_app_id);
   serial_printf("PresetEngine: recall took %lums wall (millis saw %lums): "
-                "validate %lu files %lu apply %lu resume %lu\n",
+                "validate %lu suspend %lu files %lu apply %lu resume %lu\n",
                 (unsigned long)wall.total_ms(),
                 (unsigned long)(millis() - t_start),
                 (unsigned long)ph[0], (unsigned long)ph[1],
-                (unsigned long)ph[2], (unsigned long)ph[3]);
+                (unsigned long)ph[2], (unsigned long)ph[3],
+                (unsigned long)ph[4]);
   return true;
 }
 
@@ -1274,6 +1299,8 @@ FLASHMEM int ConsumeQuadrantsRecallHint() {
   quad_recall_hint = -1;
   return h;
 }
+
+uint32_t StampMs() { const uint32_t t = millis(); return t ? t : 1; }
 
 int8_t LastSlot() { return last_slot; }
 uint32_t OpCount() { return op_count; }

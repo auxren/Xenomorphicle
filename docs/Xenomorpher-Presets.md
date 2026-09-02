@@ -117,18 +117,40 @@ but it is why saving is not something to do from a hot path.
 
 ### How long a recall takes
 
-**About 3 ms.** A recall validates the container, moves bytes, and switches
-the app; it writes nothing, so it never erases and never compacts. The only
-write it causes is deferred: three seconds after the last recall the current
-slot number is persisted so the next boot lands on it. That record lives in
-the emulated EEPROM, not in a file — four bytes at the top of the EEPROM map
-(`EEPROM_PRESETBUS_START`), written as one 2-byte flash program and skipped
-when unchanged. It used to be a key in `GLOBALS.CFG`, which made every
-preset change cost a 64 KB erase with interrupts off three seconds later,
-while the performer was playing the sound they had just recalled. Modules
-upgraded from that firmware migrate the key into the record on first boot.
+**About 3–5 ms when nothing on flash needs to change**, which is the steady
+state: a recall validates the container, suspends the outgoing app, moves
+bytes, and switches to the slot's app. The `G` and `A` sections are applied
+straight from RAM. The three file-backed sections are compared against the
+live file before anything is written, and a section that already matches —
+the slot you saved from, or the slot you recalled a moment ago — is skipped.
+Measured on hardware: Captain → Quadrants **11 ms** the first time (the bank
+section written to the SD card) and Quadrants → Captain **5 ms**; recalling
+the same slot again costs the compare only.
 
-The 3 ms depends on the directory log being short, and here is the trap. A
+When a section does differ, the write costs what a write costs. The bank
+goes where Quadrants reads it: the **SD card when one is fitted**, a few
+milliseconds; internal flash otherwise. `SCENERY.DAT` and `CAPTAIN.DAT`
+always live on internal flash, so a slot whose Scenery or Captain section
+differs from the live file costs **one 64 KB block erase, 250–295 ms with
+interrupts off** — the same price as a save, and for the same reason. The
+outgoing app's own suspend can add one more: Quadrants and Scenery honour
+their auto-save on the way out (as they do for the app menu and the
+screensaver), and Captain stores edits it has not yet settled. Recalling
+between slots that share Scenery and Captain sections — the common case,
+where the slots differ in the app or its bank — never touches internal
+flash at all.
+
+The only other write is deferred: three seconds after the last recall the
+current slot number is persisted so the next boot lands on it. That record
+lives in the emulated EEPROM, not in a file — four bytes at the top of the
+EEPROM map (`EEPROM_PRESETBUS_START`), written as one 2-byte flash program
+and skipped when unchanged. It used to be a key in `GLOBALS.CFG`, which
+made every preset change cost a 64 KB erase with interrupts off three
+seconds later, while the performer was playing the sound they had just
+recalled. Modules upgraded from that firmware migrate the key into the
+record on first boot.
+
+The steady-state figure depends on the directory log being short, and here is the trap. A
 littlefs `open()` walks the directory log from the start, CRC-checking every
 commit, so its cost is linear in log fill: measured at **4.5 ms per open
 with the log at 60 KB**, which put a five-file recall at 25–30 ms, against

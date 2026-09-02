@@ -61,6 +61,14 @@ uint32_t RequestsDropped();   // queue-full refusals since boot
 bool SaveSlot(uint8_t slot);
 bool RecallSlot(uint8_t slot);
 
+// millis() as a "0 = idle" timer stamp, for the deferred-persist and the
+// overlay's hold timers. NOT `millis() | 1`: that rounds an even reading UP
+// by one, so a check in the same millisecond -- the next loop pass, at
+// ~300 kHz -- sees now - stamp wrap to 0xFFFFFFFF, and a 3 s deferral or a
+// 250 ms hold has "elapsed" at once. A tap of encR in the overlay fired a
+// bus-wide RECALL about half the time that way.
+uint32_t StampMs();
+
 // Quadrants recall interplay: after a recall, Resume() consumes this hint
 // (>= 0 = load this bank number fresh from disk, preset 0) exactly once.
 int ConsumeQuadrantsRecallHint();
