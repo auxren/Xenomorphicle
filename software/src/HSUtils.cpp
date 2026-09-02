@@ -705,6 +705,10 @@ namespace HS {
     PokePopup(CLOCK_POPUP);
   }
 
+#ifndef NO_HEMISPHERE
+  // Defined by Hemisphere.h; a NO_HEMISPHERE build has no applet registry,
+  // and FLASHMEM (externally_visible under LTO) keeps this function alive,
+  // so it cannot lean on dead-stripping the way it used to.
   bool applet_is_hidden(const int& index);
   const char * get_applet_name(const int index);
   const uint8_t * get_applet_icon(const int index);
@@ -729,6 +733,7 @@ namespace HS {
       }
     }
   }
+#endif
 } // namespace HS
 
 //////////////// Hemisphere-like graphics methods for easy porting
