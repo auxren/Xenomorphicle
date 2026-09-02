@@ -425,10 +425,12 @@ static uint32_t card_file_crc = 0;
 // Dirty means "a slave write landed", not "the bytes changed": a 251e BACKUP
 // writes the bank in whether or not it differs from the last one, and most
 // reads at the panel are re-reads of a module nobody touched. Rewriting the
-// file then costs 131 ms (measured 2026-09-02, 64 KB through XenoFS's 4 KB
-// sectors) with interrupts off for most of it -- an audio dropout 3 s after
-// every Read, for a file that already holds these bytes. A CRC of the image
-// is ~1 ms with interrupts on, so compare first and write only on a change.
+// file then costs 1.1 s (2026-09-02: 1088 ms, 64 KB through XenoFS's 4 KB
+// sectors; millis() saw 131 ms of it, the rest passed with interrupts off --
+// see WallClock in PresetEngine.cpp) during which audio, USB, the display
+// and the bus slave all stall, 3 s after every Read, for a file that already
+// holds these bytes. A CRC of the image is a few ms with interrupts on, so
+// compare first and write only on a change.
 FLASHMEM static void card_image_flush(const char *why) {
   if (!card_image || !BusCardDirty()) return;
   const uint32_t crc = Buchla200eCrc32(card_image, BUSCARD_SIZE);
@@ -437,7 +439,10 @@ FLASHMEM static void card_image_flush(const char *why) {
     Serial.printf("PresetBus: card image unchanged, not rewritten (%s)\n", why);
     return;
   }
-  const uint32_t t0 = millis();
+  // DWT cycles, not millis(): systick is masked with everything else while
+  // the flash programs, so millis() under-reports exactly the costly part.
+  // One lap is fine here -- the counter wraps at ~7 s and a flush is ~1 s.
+  const uint32_t c0 = ARM_DWT_CYCCNT;
   File f = PhzConfig::myfs.open(kCardFile, FILE_WRITE_BEGIN);
   bool ok = false;
   if (f) {
@@ -446,10 +451,9 @@ FLASHMEM static void card_image_flush(const char *why) {
   }
   if (ok) BusCardClearDirty();
   card_file_crc = ok ? crc : 0;
-  // The wall time is the cost: LittleFS_Program erases and programs with
-  // interrupts off, so audio, USB and the bus slave all stall for most of it.
-  Serial.printf("PresetBus: card image %s in %lu ms (%s)\n",
-                ok ? "saved" : "SAVE FAILED", (unsigned long)(millis() - t0), why);
+  Serial.printf("PresetBus: card image %s in %lu ms wall (%s)\n",
+                ok ? "saved" : "SAVE FAILED",
+                (unsigned long)((ARM_DWT_CYCCNT - c0) / (F_CPU_ACTUAL / 1000)), why);
 }
 
 // Parameterized enable: `card_lo` selects which candidate address to claim
