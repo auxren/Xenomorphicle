@@ -50,10 +50,20 @@ is 150–250 ms, so treat that gesture with respect. The overlay ignores the
 chord that opened it until you release, so entering the overlay can never roll
 straight into a recall.
 
+The slot number shown is **where the case is**, not what this module last
+loaded. A recall from the 225e or the WPM moves the digit whether or not the
+overlay is open, and whether or not this module had anything in that slot:
+a recall into a slot this module never saved is refused here (`EMPTY SLOT`)
+but still moved every other module, and the overlay follows them. A rename in
+progress stays bound to the slot it was opened on, whatever moves underneath.
+
 ## Trigger inputs
 
 Assign `NEXT` and `LAST` to a trigger input from the overlay's cursor, and a
-clock pulse steps through presets. The assignment persists.
+clock pulse steps through presets, with or without the overlay open. The
+assignment persists. Stepping is bus-wide, like the RECALL hold, and steps
+past slots this module has empty — the rest of the case does not skip them,
+so neither does the count.
 
 ## Where presets live
 
