@@ -205,5 +205,13 @@ void SimInputSetTrigger(int index, bool high) {
   const bool flexio = ADC33131D_Uses_FlexIO;
   const uint8_t active = flexio ? HIGH : LOW;
   const uint8_t idle = flexio ? LOW : HIGH;
-  SetPin(pins[index], high ? active : idle);
+  const uint8_t pin = pins[index];
+  // The GPIO block latches the active-going edge in its ISR flag register,
+  // independent of whether anyone is looking; DigitalInputs::Scan() reads
+  // and clears it on the next core tick. Model that here so the driver's
+  // edge path is live in the sim -- the preset-bus NEXT/LAST triggers step
+  // on those latched edges, not on a pin level someone happened to sample.
+  if (high && digitalRead(pin) != active)
+    SimGpioPort()->ISR |= digitalPinToBitMask(pin);
+  SetPin(pin, high ? active : idle);
 }

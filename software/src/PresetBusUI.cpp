@@ -68,9 +68,6 @@ static uint32_t pending_opcount = 0;
 static char banner[14] = "";
 static uint32_t banner_until_ms = 0;
 
-// trigger edge detection (runs whether or not the overlay is open)
-static bool trig_prev[4] = {false, false, false, false};
-
 bool Active() { return active; }
 
 FLASHMEM void Init() {
@@ -458,13 +455,16 @@ void Task() {
   }
 
   // 225e last/next pulse inputs: rising edge cycles + recalls bus-wide.
-  // Levels are sampled EVERY pass (assigned or not) so enabling an
-  // assignment while a line sits high can never fire a spurious recall.
+  // Edges come from the driver's latch, not from comparing pin levels
+  // between loop passes: a pulse narrower than one pass -- and every pulse
+  // that lands during a 250 ms flash write, when loop() is not running at
+  // all -- was invisible to a level sample and simply dropped, while the
+  // rest of the case stepped. The latch is drained EVERY pass (assigned or
+  // not) so enabling an assignment can never fire a spurious recall on an
+  // edge that happened before it.
+  const uint32_t edges = DigitalInputs::take_latched_edges();
   for (uint8_t t = 0; t < 4; ++t) {
-    const bool level = DigitalInputs::read_immediate((DigitalInput)t);
-    const bool rising = level && !trig_prev[t];
-    trig_prev[t] = level;
-    if (!rising) continue;
+    if (!(edges & DIGITAL_INPUT_MASK(t))) continue;
     if (next_trig == t + 1) {
       sel = (sel + 1) % 30;
       sel_stored = -1;

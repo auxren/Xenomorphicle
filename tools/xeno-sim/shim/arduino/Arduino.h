@@ -152,9 +152,10 @@ static inline int digitalRead(uint8_t p) {
 static inline int digitalReadFast(uint8_t p) { return digitalRead(p); }
 
 // GPIO port block. The digital-input driver reaches for the edge-detect
-// registers directly; here every pin's "port" is one shared dummy block, so
-// its ISR-driven edge path is inert and DigitalInputs::read_immediate (which
-// uses digitalReadFast) is the path that actually works.
+// registers directly; here every pin's "port" is one shared block, which
+// works because the four trigger pins have distinct bit positions in it.
+// SimInputSetTrigger sets the ISR flag on an active-going edge, the way the
+// silicon does, so DigitalInputs::Scan() sees real edges in the sim.
 typedef struct {
   volatile uint32_t DR, GDIR, PSR, ICR1, ICR2, IMR, ISR, EDGE_SEL;
 } IMXRT_GPIO_t;

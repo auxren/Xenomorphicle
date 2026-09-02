@@ -123,6 +123,7 @@ const char *kLegend =
     "a/b/x/y buttons A B X Y   z clock button (CONTROL_BUTTON_M)\n"
     "l/r encoder pushes (encL/encR)   [ ] encL turn -/+   , . encR turn -/+\n"
     "{ } < > the same, x10            1-4 pulse TR1-TR4 (225e last/next jacks)\n"
+    "~1-~4 a zero-width spike on TR1-TR4, seen only by the edge latch\n"
     "n note-on -> USB host port 0     N note-on -> 200e bus MIDI\n"
     "w advance 1 simulated second     t toggle fast/real scan pacing   q quit\n"
     "chords need held buttons: a terminal cannot report a key being HELD, so\n"
@@ -199,6 +200,18 @@ bool ApplyKey(const std::string &k) {
     SimInputSetTrigger(idx, false);
     Advance(5);
     SimLog("TR%d pulsed", idx + 1);
+    return true;
+  }
+  // The same jack, with a pulse no loop pass could ever sample: high and
+  // low again before any time passes. Only the GPIO block's edge latch sees
+  // it -- which is the point. A 225e steps on every pulse; so must this.
+  if (k.size() == 2 && k[0] == '~' && k[1] >= '1' && k[1] <= '4') {
+    const int idx = k[1] - '1';
+    SimSessionRecord(std::string("spike ") + k[1]);
+    SimInputSetTrigger(idx, true);
+    SimInputSetTrigger(idx, false);
+    Advance(5);
+    SimLog("TR%d spiked", idx + 1);
     return true;
   }
 

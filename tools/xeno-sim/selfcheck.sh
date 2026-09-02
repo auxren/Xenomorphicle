@@ -118,6 +118,21 @@ $SIM --keys "$STORED,$NEXT_TR1,a,step300,1,step1500,1,step1500" > "$TMP/p2" 2>&1
 grep -q 'recall slot 2' "$TMP/p2" \
   && ok "the same with the overlay closed" \
   || bad "with the overlay closed, two NEXT pulses did not reach slot 3"
+# A pulse no loop pass could sample (~1: high and low again with no time
+# passing). The trigger path used to compare pin levels between loop
+# passes, so a narrow pulse -- or any pulse landing during a 250 ms flash
+# write, when loop() is not running -- was dropped while the rest of the
+# case stepped. The GPIO edge latch sees it; the overlay must step on it.
+$SIM --keys "$STORED,$NEXT_TR1,~1,step1500,~1,step1500" > "$TMP/p2s" 2>&1
+grep -q 'recall slot 2' "$TMP/p2s" \
+  && ok "two zero-width NEXT spikes step just like two pulses" \
+  || bad "a NEXT pulse too narrow for loop() to sample was dropped"
+# ...and an edge latched BEFORE the assignment existed must not fire once
+# it does: the latch is drained every pass, assigned or not.
+$SIM --keys "$STORED,~1,step200,$NEXT_TR1,step1500" > "$TMP/p2e" 2>&1
+grep -q 'recall slot' "$TMP/p2e" \
+  && bad "a spike from before the NEXT assignment fired a recall after it" \
+  || ok "an edge from before the assignment does not fire once assigned"
 
 # A rename is bound to the slot it was opened on. A pulse mid-edit moves the
 # selection (it is a performance event; it cannot wait for a menu), and the

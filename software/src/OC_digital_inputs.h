@@ -107,6 +107,20 @@ public:
     return raised_mask_;
   }
 
+  // @return mask of all pins clocked since the LAST CALL, however long ago.
+  // For loop-context consumers (the preset-bus NEXT/LAST triggers): the
+  // GPIO edge flag latches in hardware even with interrupts off, Scan()
+  // folds it in on the next tick, and it stays here until taken -- so a
+  // pulse that lands during a flash write, or between two loop passes, is
+  // stepped on and not lost. rising_edges() is the per-tick view for apps.
+  static inline uint32_t take_latched_edges() {
+    noInterrupts();
+    const uint32_t m = latched_edges_;
+    latched_edges_ = 0;
+    interrupts();
+    return m;
+  }
+
   template <DigitalInput input> static inline bool read_immediate() {
     return read_immediate(input);
   }
@@ -128,6 +142,7 @@ public:
 private:
   static uint32_t rising_edges_;
   static uint32_t raised_mask_;
+  static uint32_t latched_edges_;
   static IMXRT_GPIO_t *port[DIGITAL_INPUT_LAST];
   static uint32_t bitmask[DIGITAL_INPUT_LAST];
 };
