@@ -37,6 +37,7 @@ SIM="deadline 60 $SIM"
 
 # The gesture that opens the preset overlay: both encoder buttons, held.
 ENTER='l-down,step20,r-down,step80,l-up,r-up,step200'
+MENU='a-down,step60,r-down,step60,r-up,step60,a-up,step200'   # A + encR: the app menu
 
 echo "the PhzConfig codec (the real PhzConfig.cpp against the RAM volume)"
 if $SIM --test-phzconfig > "$TMP/phz" 2>&1; then
@@ -218,6 +219,33 @@ $SIM --full-log --keys "$ENTER,$NEXT_TR1,r-down,step200,1,step400,r-up,step1500"
   && ok "NEXT pulse mid-RECALL-hold: the pulse recalls 1, the hold is dropped" \
   || bad "NEXT pulse mid-RECALL-hold: recalls went $(grep -o 'recall slot [0-9]*$' "$TMP/wf5" | tr '\n' '|'), wanted exactly one 'recall slot 1'"
 
+# The module-wide chords keep working inside the overlay. A/Z + encR is the
+# app menu everywhere else; the overlay used to swallow every R event, so the
+# chord did nothing visible -- and the R it left held reached the RECALL
+# threshold and recalled bus-wide. Now: overlay closes, menu opens, no recall.
+$SIM --full-log --keys "$ENTER,$NEXT_TR1,$MENU,step600" > "$TMP/wf6" 2>&1
+grep -q 'recall slot' "$TMP/wf6" \
+  && bad "A+encR inside the overlay recalled: $(grep -o 'recall slot [0-9]*$' "$TMP/wf6" | tr '\n' '|')"
+# The footer's first word is the UI mode: the app switcher is a blocking
+# loop the frame buffer never shows from here, so ask the runtime instead.
+if grep -q '^  menu ' "$TMP/wf6"; then
+  ok "A+encR inside the overlay closes it and opens the app menu, recalling nothing"
+elif grep -q '^  preset ' "$TMP/wf6"; then
+  bad "A+encR inside the overlay left it open"
+else
+  bad "A+encR inside the overlay did not reach the app menu: $(grep -E '^  (app|saver) ' "$TMP/wf6" | head -1)"
+fi
+# Both encoder buttons, the chord that opens the overlay, closes it again --
+# and nothing fires from it. It used to run both hold bars: RECALL fired at
+# 250 ms and its completion cancelled STORE, so the panel said STORE OFF.
+$SIM --full-log --keys "$ENTER,$NEXT_TR1,l-down,step20,r-down,step700,l-up,r-up,step2000" > "$TMP/wf7" 2>&1
+grep -q 'recall slot\|save slot' "$TMP/wf7" \
+  && bad "encL+encR inside the overlay fired an op: $(grep -o '\(recall\|save\) slot [0-9]*' "$TMP/wf7" | tr '\n' '|')"
+$SIM --keys "$ENTER,$NEXT_TR1,l-down,step20,r-down,step700,l-up,r-up,step300" --dump-fb 2>/dev/null \
+  | python3 fbtext.py - | grep -q 'P R E S E T' \
+  && bad "encL+encR inside the overlay left it open" \
+  || ok "encL+encR inside the overlay closes it, firing nothing"
+
 # A rename is bound to the slot it was opened on. A pulse mid-edit moves the
 # selection (it is a performance event; it cannot wait for a menu), and the
 # name typed for slot 1 must still land on slot 1 -- it used to commit to
@@ -282,7 +310,6 @@ $SIM --keys "z-down,step60,z-up,step60" 2>&1 | grep -q 'held=\[\]' \
 # "<button>-inN" (schedule a tap N ms ahead, return immediately).
 echo "blocking firmware loops still see time pass"
 
-MENU='a-down,step60,r-down,step60,r-up,step60,a-up,step200'
 
 # encL LONG press in the app switcher = debug stats; a short press cancels.
 $SIM --keys "$MENU,r-in900,l-down,step1400,l-up,step200" 2>&1 \
@@ -1256,9 +1283,17 @@ age_row "$W251_READ,>,step105000" "a 3-digit age on a 2-digit slot"
 # The generic half, which is the part worth keeping: no screen anywhere may
 # have a character running off the right edge. Cheap enough to sweep, and it
 # costs nothing to add a screen to the list.
+#
+# Two detectors, because each is blind where the other sees. edgecheck.py
+# reads the pixels; the renderer's own count (`clipped:` on stderr under
+# --dump-fb) sees a glyph that left NO pixels in the edge columns -- "hold
+# .25s" on the preset overlay lost "25s" past x=127 with the '2' cut at a
+# blank glyph column, and the pixel check passed it for weeks.
 sweep() {  # name, then simulator args
   name=$1; shift
-  $SIM "$@" --dump-fb 2>/dev/null > "$TMP/sweep.hex"
+  $SIM "$@" --dump-fb 2>"$TMP/sweep.err" > "$TMP/sweep.hex"
+  grep -q '^clipped:' "$TMP/sweep.err" \
+    && { bad "$name draws text past the screen edge: $(grep '^clipped:' "$TMP/sweep.err")"; return; }
   python3 edgecheck.py "$TMP/sweep.hex" >"$TMP/edge.txt" 2>&1 \
     || { bad "$name has a character clipped at the right edge: $(cat "$TMP/edge.txt")"; return; }
   printf '%s ' "$name"

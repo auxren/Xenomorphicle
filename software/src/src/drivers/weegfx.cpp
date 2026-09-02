@@ -159,8 +159,20 @@ inline void blit(uint8_t *dst, coord_t y, coord_t w, coord_t h, const uint8_t *s
   }
 }
 
+#ifdef XENO_SIM
+// Host simulator only (tools/xeno-sim): how many glyphs the frame being
+// drawn, and the last complete frame, pushed past a screen edge. The
+// selfcheck sweeps every screen against this. Pixels cannot answer it: a
+// glyph whose first column is blank clips invisibly, which is how "hold .25s"
+// lost its "25s" off the right edge of the preset overlay unnoticed.
+uint32_t weegfx_sim_clipped = 0, weegfx_sim_clipped_last_frame = 0;
+#endif
+
 void Graphics::Begin(uint8_t *frame, CLEAR_FRAME clear_frame)
 {
+#ifdef XENO_SIM
+  weegfx_sim_clipped = 0;
+#endif
   frame_ = frame;
   if (clear_frame) memset(frame_, 0, kFrameSize);
 
@@ -169,6 +181,9 @@ void Graphics::Begin(uint8_t *frame, CLEAR_FRAME clear_frame)
 
 void Graphics::End()
 {
+#ifdef XENO_SIM
+  weegfx_sim_clipped_last_frame = weegfx_sim_clipped;
+#endif
   frame_ = NULL;
 }
 
@@ -430,6 +445,9 @@ void Graphics::blit_char(char c, coord_t x, coord_t y)
   if (!c) c = '0';
   if (c <= 32 || c > 127) return;
 
+#ifdef XENO_SIM
+  if (x < 0 || x + kFixedFontW > kWidth) ++weegfx_sim_clipped;
+#endif
   coord_t w = kFixedFontW;
   coord_t h = kFixedFontH;
   font_glyph data = get_char_glyph(c);

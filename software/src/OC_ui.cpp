@@ -190,8 +190,10 @@ UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
 
     MENU_REDRAW = 1;
 
-    // 200e preset-bus overlay: it owns all input while open, and holding
-    // BOTH encoder buttons opens it (unused gesture; menu is A/Z + R)
+    // 200e preset-bus overlay: it owns all input while open -- except the
+    // module-wide chords (A/Z + encoder), which it closes for and hands back
+    // so they land below as usual. Holding BOTH encoder buttons opens it
+    // (unused gesture; menu is A/Z + R) and, inside, closes it again.
     if (OC::PresetBusUI::Active()) {
       if (OC::PresetBusUI::HandleEvent(event)) continue;
     }

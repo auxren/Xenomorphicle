@@ -171,6 +171,33 @@ FLASHMEM __attribute__((noinline)) bool HandleEvent(const UI::Event &event) {
   if (!active) return false;
   if (sel_stored < 0) sel_stored = PresetEngine::SlotUsed(sel) ? 1 : 0;
 
+  // ---- chords: the two that mean something everywhere else keep meaning
+  // it here, and neither may leave a hold running behind it ----
+  if (event.type == UI::EVENT_BUTTON_DOWN &&
+      (event.control == CONTROL_BUTTON_L || event.control == CONTROL_BUTTON_R)) {
+    // A/Z + encR is the app menu and A/Z + encL the IO settings, module-wide.
+    // Every R event used to be swallowed below, so the menu chord did nothing
+    // visible -- and the R it left held reached the 250 ms RECALL threshold
+    // in Task() and recalled bus-wide, from a gesture that meant "menu". The
+    // overlay closes and the event goes on to the global hotkeys untouched,
+    // which claim the chord themselves (OC_ui.cpp).
+    if (event.mask & (CONTROL_BUTTON_A | CONTROL_BUTTON_Z)) {
+      Exit();
+      return false;
+    }
+    // Both encoder buttons is the chord that opened this screen; held again
+    // inside it, it closes it. It used to mean nothing here, so both hold
+    // bars ran, RECALL fired at 250 ms, and that op's completion cancelled
+    // the STORE hold: two bars, a bus-wide recall, then STORE OFF. Claimed on
+    // the way out like on the way in, so the release cannot leak.
+    if ((event.mask & (CONTROL_BUTTON_L | CONTROL_BUTTON_R))
+            == (CONTROL_BUTTON_L | CONTROL_BUTTON_R)) {
+      Exit();
+      ui.IgnoreUntilRelease(CONTROL_BUTTON_L | CONTROL_BUTTON_R);
+      return true;
+    }
+  }
+
   // ---- EDIT mode: the grammar recurses, one char cell is the focus ----
   if (edit_mode) {
     if (event.control == CONTROL_ENCODER_L) {
@@ -306,16 +333,17 @@ FLASHMEM void Draw() {
 
   // edge legends: contextual (turns are unlabeled, presses are labeled)
   //
-  // The holds state their DURATION. They are not the same length -- STORE is
-  // 500 ms and RECALL is 250 ms -- and both used to read simply "hold", which
-  // hid an asymmetry that runs the wrong way: RECALL changes the live state of
-  // every 200e module in the case, STORE only writes a local slot, and the
-  // bus-wide one was the easier of the two to trigger. A firm ordinary button
-  // press is 150-250 ms, so that threshold sat right at the edge of an
-  // accident. Saying the number is the cheapest honest fix; whether the two
-  // should also be swapped is a separate question for the owner.
-  const char *l_top = "STORE", *l_hint = "hold .5s";
-  const char *r_top = "RECALL", *r_hint = "hold .25s";
+  // The hint row has SIX columns a side: x=7..43 up to the LCD window and
+  // x=91..127 to the screen edge. The hints briefly stated their durations
+  // ("hold .5s" / "hold .25s") to make the STORE/RECALL asymmetry visible --
+  // and at 8 and 9 columns they did not fit: the "5s" was drawn INSIDE the
+  // LCD window over the tens digit, and the "25s" ran off the right edge,
+  // leaving "hold ." on both sides (Oren's photo: "strange glitch in the
+  // overlay"). The edge check could not see it -- the '2' clipped at a blank
+  // glyph column -- so the simulator now counts clipped glyphs directly. The
+  // durations are shown by the bars themselves: each fills at its own rate.
+  const char *l_top = "STORE", *l_hint = "hold";
+  const char *r_top = "RECALL", *r_hint = "hold";
   if (edit_mode) {
     l_top = "DONE"; l_hint = "click";
     r_top = "CHAR"; r_hint = "turn";

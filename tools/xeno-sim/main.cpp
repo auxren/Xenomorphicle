@@ -32,6 +32,9 @@
 #include "OC_ui.h"
 #include "PresetBusUI.h"
 #include "PresetEngine.h"
+
+// weegfx.cpp keeps this for the simulator (see its XENO_SIM block).
+namespace weegfx { extern uint32_t weegfx_sim_clipped_last_frame; }
 #include "src/drivers/display.h"
 
 #include "sim_bus.h"
@@ -352,6 +355,13 @@ void PrintScreen(bool with_chrome) {
 // this when an unmapped console key asks for a capture, so a device capture
 // and a simulator capture are directly comparable -- see fbdiff.py.
 void PrintFrameBufferHex() {
+  // Reported on stderr, beside the hex on stdout, so selfcheck's screen sweep
+  // can fail a screen whose text never reached the framebuffer. A glyph cut
+  // at a blank column leaves no pixel evidence, so the count comes from the
+  // renderer, not from the dump.
+  if (weegfx::weegfx_sim_clipped_last_frame)
+    fprintf(stderr, "clipped: %u glyph(s) drawn past a screen edge in the last frame\n",
+            (unsigned)weegfx::weegfx_sim_clipped_last_frame);
   // --snap-at wins when it fired: the whole point of a deferred capture is
   // that the frame you want is NOT the one on screen at exit. If the capture
   // never fired, fall through to the live frame rather than printing a blank
