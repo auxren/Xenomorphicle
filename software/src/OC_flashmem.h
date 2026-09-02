@@ -7,9 +7,12 @@
 // applet headers were landing in ITCM anyway, and only out-of-class
 // definitions stayed in flash. Reproduced with a 12-line test (a virtual
 // defined in-class vs out-of-class, same attribute: .text vs .flashmem).
-// Adding `used` keeps the section through LTO; the cost is that an
-// unreferenced FLASHMEM function is now emitted into flash instead of
-// discarded, which is flash we have and ITCM we do not.
+// `externally_visible` keeps the section through LTO: the function is no
+// longer a candidate for the whole-program privatisation that loses the
+// attribute, and unlike `used` it does not force dead functions to be
+// emitted (`used` grew every image by ~1.8 KB and made T41_MTP link
+// HS::DrawAppletList into a NO_HEMISPHERE build). `retain`, `noipa`,
+// -flto-partition=none/one and -fno-ipa-icf were tried and do not help.
 #pragma once
 #include <avr/pgmspace.h>
 #undef FLASHMEM
