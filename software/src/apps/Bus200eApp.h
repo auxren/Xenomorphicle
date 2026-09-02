@@ -461,6 +461,20 @@ private:
     bits[i >> 3] |= (uint8_t)(1u << (i & 7));
   }
 
+  // The target as a person names it. Every status line used to say the bare
+  // address -- "reading 5C ..." -- which means nothing at the panel: the
+  // module is a 251e, and that is what the case says on its front. The
+  // address stays on the home title beside the model, where it earns its
+  // place (two 259es differ only by it); it is the FALLBACK here, "@5C",
+  // for an address the table does not know.
+  const char *TargetName() const {
+    const char *model = Buchla200eModelForAddress(target_);
+    if (model) return model;
+    static char buf[4];
+    snprintf(buf, sizeof(buf), "@%02X", target_);
+    return buf;
+  }
+
   void StartScan();
   void ConsumeScanDirty();
   void LoadScanSet();
@@ -1553,13 +1567,15 @@ void AppBus200e::DrawReadState() const {
 
   switch (stale_ok ? Bus200eAppNS::WRITE_NONE : write_state_) {
     case Bus200eAppNS::WRITE_ACTIVE:
-      graphics.printf("WRITING %02X ...", target_);
+      graphics.printf("WRITING %s ...", TargetName());
       graphics.invertRect(0, 45, 128, 10);
       return;
     case Bus200eAppNS::WRITE_VERIFYING:
       // The bytes went out; this is the read-back. Named as its own phase so
       // "done sending" is never mistaken on screen for "confirmed stored".
-      graphics.printf("VERIFYING %02X ...", target_);
+      // "VERIFY", not "VERIFYING": the longest model name (285 FS A) plus
+      // the dots has to fit 21 columns.
+      graphics.printf("VERIFY %s ...", TargetName());
       graphics.invertRect(0, 45, 128, 10);
       return;
     case Bus200eAppNS::WRITE_OK:
@@ -1595,7 +1611,7 @@ void AppBus200e::DrawReadState() const {
 
   switch (read_state_) {
     case Bus200eAppNS::READ_ACTIVE:
-      graphics.printf("reading %02X ...", target_);
+      graphics.printf("reading %s ...", TargetName());
       break;
     case Bus200eAppNS::READ_OK:
       if (edited_) {
@@ -1651,8 +1667,13 @@ void AppBus200e::DrawReadState() const {
 // expensive omission in the app.
 FLASHMEM __attribute__((noinline))
 void AppBus200e::DrawWriteConfirm() const {
+  // Model at the left, slot at the right, as the home title lays them out.
+  // "WRITE 285 FS A" is the widest the left side gets (14 columns, ends at
+  // x=84); the slot starts at 86 so the two can never run together.
   graphics.setPrintPos(0, 13);
-  graphics.printf("WRITE to %02X slot %d", target_, slot_ + 1);
+  graphics.printf("WRITE %s", TargetName());
+  graphics.setPrintPos(86, 13);
+  graphics.printf("Slot %d", slot_ + 1);
   graphics.invertRect(0, 12, 128, 10);
 
   if (write_block_ != BUCHLA200E_WRITE_OK) {
@@ -1815,7 +1836,7 @@ void AppBus200e::RefreshSnapshotFlag() {
 FLASHMEM __attribute__((noinline))
 void AppBus200e::DrawSnapConfirm() const {
   graphics.setPrintPos(0, 13);
-  graphics.printf("UNDO write to %02X", target_);
+  graphics.printf("UNDO write %s", TargetName());
   graphics.invertRect(0, 12, 128, 10);
   graphics.setPrintPos(0, 26);
   graphics.print("Puts back the bank");

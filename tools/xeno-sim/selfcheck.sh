@@ -499,7 +499,7 @@ edit_after_write=$(row_at 46 --keys "$W251,[,step50,[,step50,r,step10,r,step10,l
 # confirmation whose two steps are the same button is a one-step confirmation.
 W251_ARMED='l,step200,r,step10,r,step3000,],],r,step10,r,step10,l,step10,],],r'
 early=$(row_at 13 --keys "$W251_ARMED,step10,r,step6000")
-[ "$early" = "[inv] WRITE to 5C slot 1" ] \
+[ "$early" = "[inv] WRITE 251 A" ] \
   && ok "a confirm 10ms after arming does not commit -- the prompt is still up" \
   || bad "a confirm 10ms after arming left the confirm screen (y=13 said: '$early')"
 early_status=$(row_at 46 --keys "$W251_ARMED,step10,r,step6000")
