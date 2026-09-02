@@ -209,6 +209,14 @@ $SIM --full-log --keys "$ENTER,$NEXT_TR1,r-down,step300,wpm5,step300,1,step300,r
 [ "$(grep -o 'recall slot [0-9]*$' "$TMP/wf4" | tr '\n' '|')" = "recall slot 0|recall slot 5|recall slot 6|" ] \
   && ok "RECALL hold fired and still held: manager recalls 5, NEXT pulse recalls 6" \
   || bad "RECALL hold fired and still held: recalls went $(grep -o 'recall slot [0-9]*$' "$TMP/wf4" | tr '\n' '|'), wanted 0|5|6"
+# ...and a hold that has NOT fired yet is abandoned by a pulse. The pulse
+# steps the slot and recalls it; the hold then went on to recall the same
+# stepped slot again -- a second interrupts-off recall of the preset the case
+# is already on. One recall now, and the still-held R does not restart it.
+$SIM --full-log --keys "$ENTER,$NEXT_TR1,r-down,step200,1,step400,r-up,step1500" > "$TMP/wf5" 2>&1
+[ "$(grep -o 'recall slot [0-9]*$' "$TMP/wf5" | tr '\n' '|')" = "recall slot 1|" ] \
+  && ok "NEXT pulse mid-RECALL-hold: the pulse recalls 1, the hold is dropped" \
+  || bad "NEXT pulse mid-RECALL-hold: recalls went $(grep -o 'recall slot [0-9]*$' "$TMP/wf5" | tr '\n' '|'), wanted exactly one 'recall slot 1'"
 
 # A rename is bound to the slot it was opened on. A pulse mid-edit moves the
 # selection (it is a performance event; it cannot wait for a menu), and the

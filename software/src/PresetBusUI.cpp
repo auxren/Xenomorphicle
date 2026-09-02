@@ -445,6 +445,17 @@ FLASHMEM static void cancel_store_hold() {
   banner_until_ms = millis() + 1600;
 }
 
+// A RECALL hold that has not fired yet is abandoned, quietly: the event
+// that abandoned it has already recalled the slot the panel now shows, and
+// letting the hold fire would recall it a second time -- another ~280 ms
+// of interrupts-off flash reads, a second dropout, for nothing. The release
+// is swallowed so the bar cannot simply restart under the same finger.
+FLASHMEM static void cancel_recall_hold() {
+  recall_hold_ms = 0;
+  recall_fired = false;
+  ui.IgnoreUntilRelease(CONTROL_BUTTON_R);
+}
+
 void Task() {
   // follow externally-driven preset changes (WPM/225e recall, boot recall)
   // so trigger cycling always steps from the CURRENT preset, 225e-style
@@ -507,6 +518,10 @@ void Task() {
     // the bar resets and the release is swallowed, so the user sees it and
     // simply holds again. A STORE already sent by this hold is left alone.
     if (hold_start_ms && !store_fired) cancel_store_hold();   // holds only exist while active
+    // The same pulse also steps the slot a RECALL hold would recall: a hold
+    // 100 ms in went on to recall the stepped slot again, right after the
+    // pulse had. Not a data hazard, but a second dropout for nothing.
+    if (recall_hold_ms && !recall_fired) cancel_recall_hold();
     sel = (next_trig == t + 1) ? (sel + 1) % 30 : (sel + 29) % 30;
     sel_stored = -1;
     recall_selected();
