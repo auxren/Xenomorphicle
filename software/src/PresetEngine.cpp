@@ -1528,7 +1528,13 @@ FLASHMEM void Process() {
         break;
     }
   }
-  if (cur_slot_dirty_ms && millis() - cur_slot_dirty_ms > 3000)
+  // The EEPROM write behind this is small, but on a T4.1 EEPROM is emulated
+  // in flash and now and then a byte costs a sector erase with interrupts
+  // masked. Arriving in the 200e app and tapping Read inside 3 s puts that
+  // erase under the 251e's first bytes; the same hold as the request above,
+  // and the stamp keeps, so the record lands once the job closes.
+  if (cur_slot_dirty_ms && millis() - cur_slot_dirty_ms > 3000 &&
+      !PresetBus::MasterTransferring())
     persist_cur_record();
   // Names an import left in the cache. The console's batch flushes itself;
   // this is the net under any caller that does not.

@@ -673,6 +673,15 @@ FLASHMEM static void report_query() {
 
 // Flush the image 3s after a write burst goes quiet (a module BACKUP is a
 // stream of write transactions; don't thrash LittleFS mid-transfer).
+//
+// ...and never while a master job is open, even a quiet one. The flush is
+// a 32 KB LittleFS write, interrupts masked across each sector erase, and
+// the one window the 3 s quiet rule does not cover is the start of the NEXT
+// job: a Read tapped again 2 s after the last one lands the flush exactly
+// as the command goes out and the 251e begins writing back. Our slave would
+// clock-stretch it through the erases; whether a 251e waits that long is
+// not known, and PresetEngine::Process defers a bus RECALL for the same
+// reason. The image stays dirty and flushes once the job closes.
 static void card_task() {
   if (!card_serving) return;
   const BusCardStats *cs = BusCardGetStats();
@@ -680,7 +689,8 @@ static void card_task() {
     card_seen_writes = cs->bytes_written;
     card_flush_arm_ms = millis();
   } else if (card_flush_arm_ms && BusCardDirty()
-             && millis() - card_flush_arm_ms > 3000) {
+             && millis() - card_flush_arm_ms > 3000
+             && !MasterTransferring()) {
     card_flush_arm_ms = 0;
     card_image_flush("write burst done");
   }
