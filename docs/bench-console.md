@@ -54,7 +54,14 @@ stray typing is harmless but will spew capture bytes.
 | `y` | USB bridge status; toggles the fallback `usbMIDI` poll (leave OFF under any app that reads USB MIDI itself) |
 
 `w` and `x` together are a whole-bank write with none of the 200e app's guards
-in front of them. `x` rewrites all 30 slots of the target module.
+in front of them. `x` rewrites all 30 slots of the target module. A second `x`
+with a **different** address inside the window is a fresh arm, not a
+confirmation — it used to fire at the new address unconfirmed.
+
+Every multi-character prompt (`x`, `q`, `w`, `A`, `N`, `V`) eats the next
+keystrokes as digits, and a scripted console helper that probes with a key
+before each command will feed that probe into an open prompt. Send the digits
+in the same write as the key, and never leave a prompt armed between calls.
 
 ### Files
 | key | action |

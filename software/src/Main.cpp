@@ -901,6 +901,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
       static uint32_t unlock_shift = 0;
       static uint32_t destructive_arm_ms = 0;  // C/F double-press confirm
       static char destructive_arm_key = 0;
+      static uint8_t destructive_arm_addr = 0; // 'x': the address that was armed
       // 'm' bench trigger: master a BACKUP against a foreign module. The
       // address isn't known ahead of time (this is the empirical-discovery
       // step), so it's typed as 2 hex digits right after the key -- no
@@ -1159,9 +1160,15 @@ FLASHMEM __attribute__((noinline)) void loop() {
           restore_addr_value = (uint8_t)((restore_addr_value << 4) | v);
           if (++restore_addr_digits < 2) continue;  // wait for the 2nd digit
           restore_addr_pending = false;
-          if (millis() - destructive_arm_ms >= 3000 || destructive_arm_key != 'x') {
+          // The prompt says "the SAME 2 hex digits", and the code now means
+          // it: a second 'x' with a DIFFERENT address inside the window used
+          // to fire at that address, which had never been confirmed at all.
+          // Different address = a fresh arm, not a confirmation.
+          if (millis() - destructive_arm_ms >= 3000 || destructive_arm_key != 'x'
+              || destructive_arm_addr != restore_addr_value) {
             destructive_arm_ms = millis();
             destructive_arm_key = 'x';
+            destructive_arm_addr = restore_addr_value;
             Serial.printf("master restore: target %02X armed -- press 'x' "
                           "then the SAME 2 hex digits again within 3s to "
                           "actually push the card image to the module\n",
