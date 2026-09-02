@@ -30,6 +30,7 @@
 #include "PresetBus.h"   // GetStats(): bus-slave ISR count, for the save report
 #include "Buchla200eWriteGuard.h"  // Buchla200eCrc32, for the snapshot
 #include "HSUtils.h"
+#include "PresetOpQueue.h"
 #include "src/drivers/FreqMeasure/OC_FreqMeasure.h"
 
 extern uint_fast8_t MENU_REDRAW;  // Main.cpp
@@ -213,11 +214,9 @@ static constexpr uint32_t kSaveBlocksNeeded = 3;
 // is refused and counted rather than an older one being dropped, because the
 // older one is the one the sender has already moved on from.
 enum ReqOp : uint8_t { REQ_SAVE, REQ_RECALL, REQ_BOOT_RECALL };
-struct Request { uint8_t op; uint8_t slot; };
-static constexpr int kReqQueue = 8;
-static Request req_q[kReqQueue];
-static uint8_t req_head = 0, req_count = 0;
-static uint32_t req_dropped = 0;
+// The merge rule (a recall replaces a trailing recall, saves never merge)
+// lives in PresetOpQueue.h, shared with the transport's broadcast queue.
+static PresetOpQueue<8, REQ_RECALL> req_q;
 
 static int8_t last_slot = -1;
 // The slot the case is on, as distinct from the slot this module has loaded.
@@ -1258,7 +1257,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
 // ---- service ---------------------------------------------------------------
 
 FLASHMEM void Init() {
-  req_head = req_count = 0;
+  req_q.clear();
   quad_recall_hint = -1;
   load_names();
 
@@ -1280,27 +1279,14 @@ FLASHMEM void Init() {
 
 static bool enqueue(uint8_t op, uint8_t slot) {
   if (slot >= kNumSlots) return false;
-  // Two recalls back to back: only the second is ever heard, so the first
-  // is replaced in place. This also bounds the queue against a manager
-  // sweeping through presets. Saves are never merged -- each one is a
-  // distinct "keep this" and dropping any of them is data loss.
-  if (op == REQ_RECALL && req_count) {
-    Request &tail = req_q[(req_head + req_count - 1) % kReqQueue];
-    if (tail.op == REQ_RECALL) { tail.slot = slot; return true; }
-  }
-  if (req_count >= kReqQueue) {
-    req_dropped++;
-    serial_printf("PresetEngine: queue full, %s %d refused\n",
-                  op == REQ_SAVE ? "save" : "recall", slot);
-    return false;
-  }
-  req_q[(req_head + req_count) % kReqQueue] = { op, slot };
-  req_count++;
-  return true;
+  if (req_q.push(op, slot)) return true;
+  serial_printf("PresetEngine: queue full, %s %d refused\n",
+                op == REQ_SAVE ? "save" : "recall", slot);
+  return false;
 }
 bool RequestSave(uint8_t slot) { return enqueue(REQ_SAVE, slot); }
 bool RequestRecall(uint8_t slot) { return enqueue(REQ_RECALL, slot); }
-uint32_t RequestsDropped() { return req_dropped; }
+uint32_t RequestsDropped() { return req_q.dropped; }
 
 // persist the current slot ~3s after preset activity settles, so
 // trigger-driven preset cycling never write-hammers the record. Touches
@@ -1359,10 +1345,9 @@ FLASHMEM void Process() {
   // ONE request per pass, in arrival order. Draining the whole queue here
   // would keep loop() -- and with it the UI, USB and the bus parser that
   // feeds this queue -- starved for as long as the bus kept sending.
-  if (req_count) {
-    const Request r = req_q[req_head];
-    req_head = (req_head + 1) % kReqQueue;
-    req_count--;
+  if (!req_q.empty()) {
+    const auto r = req_q.front();
+    req_q.pop();
     switch (r.op) {
       case REQ_SAVE:
         SaveSlot(r.slot);

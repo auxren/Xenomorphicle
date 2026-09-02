@@ -16,6 +16,7 @@
 #include "OC_gpio.h"
 #include "OC_core.h"
 #include "PhzConfig.h"
+#include "PresetOpQueue.h"
 
 extern volatile uint32_t loop_counter;  // Main.cpp (global scope)
 
@@ -259,55 +260,45 @@ static void drain_ring() {
 }
 
 // ---- commander mode: bus-wide preset commands -------------------------------
-// A short queue with the engine's own rule (PresetEngine::enqueue): a recall
-// replaces a trailing recall -- only the last one is ever heard -- but a
-// save is never merged or replaced, because each one is a distinct "keep
-// this" and losing any of them is data loss. This used to be one last-wins
-// cell, and a NEXT pulse landing while a STORE was still waiting for the
-// bus quietly replaced the save; the panel then announced "STORED" for an
-// op that never went out. The queue is filled from loop context only.
-static const uint8_t kBcastQueue = 4;
-static int16_t bcast_q[kBcastQueue];  // (cmd << 8) | slot, cmd 01/02
-static uint8_t bcast_head = 0, bcast_count = 0;
+// A short queue with the engine's own rule -- PresetOpQueue.h, the one
+// header both use: a recall replaces a trailing recall (only the last one
+// is ever heard), a save is never merged or replaced, because each one is
+// a distinct "keep this" and losing any of them is data loss. This used to
+// be one last-wins cell, and a NEXT pulse landing while a STORE was still
+// waiting for the bus quietly replaced the save; the panel then announced
+// "STORED" for an op that never went out. Ops are the wire command bytes.
+// The queue is filled from loop context only.
+static const uint8_t kCmdRecall = 0x01, kCmdSave = 0x02;
+static PresetOpQueue<4, kCmdRecall> bcast_q;
 static uint8_t bcast_tries = 0;
 static uint32_t bcast_tx = 0, bcast_drop = 0;
 
 FLASHMEM static void bcast_enqueue(uint8_t cmd, uint8_t slot) {
   if (slot >= 30) return;
-  const int16_t entry = (int16_t)((cmd << 8) | slot);
-  if (cmd == 0x01 && bcast_count) {
-    int16_t &tail = bcast_q[(bcast_head + bcast_count - 1) % kBcastQueue];
-    if ((tail >> 8) == 0x01) { tail = entry; return; }
-  }
-  if (bcast_count >= kBcastQueue) {
-    bcast_drop++;
-    Serial.printf("PresetBus: broadcast queue full, %s %d refused\n",
-                  cmd == 0x02 ? "SAVE" : "RECALL", slot);
-    return;
-  }
-  bcast_q[(bcast_head + bcast_count) % kBcastQueue] = entry;
-  bcast_count++;
+  if (bcast_q.push(cmd, slot)) return;
+  bcast_drop++;
+  Serial.printf("PresetBus: broadcast queue full, %s %d refused\n",
+                cmd == kCmdSave ? "SAVE" : "RECALL", slot);
 }
 
-FLASHMEM void BroadcastSave(uint8_t slot) { bcast_enqueue(0x02, slot); }
-FLASHMEM void BroadcastRecall(uint8_t slot) { bcast_enqueue(0x01, slot); }
+FLASHMEM void BroadcastSave(uint8_t slot) { bcast_enqueue(kCmdSave, slot); }
+FLASHMEM void BroadcastRecall(uint8_t slot) { bcast_enqueue(kCmdRecall, slot); }
 
 FLASHMEM static void bcast_dequeue() {
-  bcast_head = (bcast_head + 1) % kBcastQueue;
-  bcast_count--;
+  bcast_q.pop();
   bcast_tries = 0;
 }
 
 FLASHMEM static void pump_broadcast() {
-  if (!bcast_count) return;
-  const int16_t cmd = bcast_q[bcast_head];
+  if (bcast_q.empty()) return;
+  const auto cmd = bcast_q.front();
   if (!tx_gate_open()) return;
 
   // same long/PRIMO frame a preset manager sends. The slave stays ENABLED
   // during TX: if we lose arbitration the winner's frame (maybe the WPM's
   // one-shot recall) must still be heard; on success the parser drops our
   // own echo via Bus200eSuppressFrame.
-  uint8_t f[5] = { 0x04, 0x00, 0x22, uint8_t(cmd >> 8), uint8_t(cmd & 0x1F) };
+  uint8_t f[5] = { 0x04, 0x00, 0x22, cmd.op, uint8_t(cmd.slot & 0x1F) };
 
   Wire.beginTransmission(0);
   Wire.write(f, sizeof(f));
@@ -325,13 +316,12 @@ FLASHMEM static void pump_broadcast() {
     // written into slot 3. Whether the ring can hold a whole frame that
     // fast is not something to depend on; the enqueue is instant, so the
     // suppression window is as fresh at the drain as it was.
-    if ((cmd >> 8) == 0x02) PresetEngine::RequestSave(cmd & 0x1F);
-    else PresetEngine::RequestRecall(cmd & 0x1F);
+    if (cmd.op == kCmdSave) PresetEngine::RequestSave(cmd.slot);
+    else PresetEngine::RequestRecall(cmd.slot);
     Bus200eSuppressFrame(f, sizeof(f));
     drain_ring();  // consume our own self-echo while suppression is fresh
     if (verbose) Serial.printf("PresetBus: broadcast %s %d\n",
-                               (cmd >> 8) == 0x02 ? "SAVE" : "RECALL",
-                               cmd & 0x1F);
+                               cmd.op == kCmdSave ? "SAVE" : "RECALL", cmd.slot);
   } else if (++bcast_tries >= 50) {  // persistent contention: give up loudly
     bcast_dequeue();
     bcast_drop++;
@@ -1020,7 +1010,7 @@ FLASHMEM void DebugDump() {
                     cs->bytes_written, cs->bytes_read);
     }
     Serial.printf("bcast: tx=%lu drop=%lu queued=%u\n",
-                  bcast_tx, bcast_drop, bcast_count);
+                  bcast_tx, bcast_drop, bcast_q.size());
   }
   Serial.printf("isr=%lu starts=%lu stops=%lu bytes=%lu ring_ovf=%lu\n",
                 stats.isr_count, stats.starts, stats.stops, stats.bytes,
