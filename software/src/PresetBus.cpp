@@ -283,6 +283,7 @@ FLASHMEM static void bcast_enqueue(uint8_t cmd, uint8_t slot) {
 
 FLASHMEM void BroadcastSave(uint8_t slot) { bcast_enqueue(kCmdSave, slot); }
 FLASHMEM void BroadcastRecall(uint8_t slot) { bcast_enqueue(kCmdRecall, slot); }
+bool BroadcastQueued() { return !bcast_q.empty(); }
 
 FLASHMEM static void bcast_dequeue() {
   bcast_q.pop();

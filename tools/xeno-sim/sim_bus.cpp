@@ -475,6 +475,7 @@ void MasterReset() { Bus200eMasterReset(); }
 // PresetBus.cpp:177-178 and :300-301 dispatch it.
 void BroadcastSave(uint8_t slot) { PresetEngine::RequestSave(slot); }
 void BroadcastRecall(uint8_t slot) { PresetEngine::RequestRecall(slot); }
+bool BroadcastQueued() { return false; }   // the shim never waits for a wire
 
 // No preset manager on the simulated bus, so the overlay's WPM dot stays
 // hollow. Inventing one would change what STORE means -- with a WPM present

@@ -62,10 +62,14 @@ uint8_t ModuleAddress();
 // ---- bus-wide preset commands (commander mode) ----
 // Broadcast the same general-call SAVE/RECALL frames a preset manager sends
 // ([04][00][22][02/01][n]); every module on the bus acts, and the local
-// PresetEngine is dispatched too (our own TX is invisible to our slave).
-// Last-wins pending command, mastered from Task() behind the quiet gate.
+// PresetEngine is dispatched too (our slave hears only the self-echo, which
+// is suppressed). Queued (PresetOpQueue.h: a recall replaces a trailing
+// recall, saves never merge), mastered from Task() behind the quiet gate.
 void BroadcastSave(uint8_t slot);
 void BroadcastRecall(uint8_t slot);
+// true while a broadcast is still waiting for the wire: nothing has been
+// dispatched to the engine yet, so a completion watch should not be timing
+bool BroadcastQueued();
 
 // WPM / preset-manager presence: probed as a master ACK test on address
 // 0x50 every few seconds when the bus is quiet. Hot plug/unplug is normal.
@@ -203,6 +207,7 @@ inline void QueueMidiTx(uint8_t, uint8_t, uint8_t, uint8_t) {}
 inline bool ReadMidiRx(uint8_t &, uint8_t &, uint8_t &) { return false; }
 inline void BroadcastSave(uint8_t) {}
 inline void BroadcastRecall(uint8_t) {}
+inline bool BroadcastQueued() { return false; }
 inline bool WpmPresent() { return false; }
 inline int CardServeEnable(bool) { return -1; }
 inline bool CardServing() { return false; }

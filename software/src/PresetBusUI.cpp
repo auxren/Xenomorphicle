@@ -580,6 +580,14 @@ void Task() {
         banner_until_ms = millis() + 1600;
         pending_slot = -1;
         sel_stored = -1;
+      } else if (PresetBus::BroadcastQueued()) {
+        // still waiting for a quiet wire: nothing has reached the engine,
+        // so the 4 s runs from the moment the frame goes out, not from the
+        // press. A busy bus used to earn "STORE FAILED" for a save that then
+        // went out and completed a moment later. A broadcast the transport
+        // gives up on (50 tries) leaves the queue without a dispatch, and
+        // the timeout below is then the true verdict.
+        pending_start_ms = millis();
       } else if (millis() - pending_start_ms > 4000) {
         snprintf(banner, sizeof(banner),
                  pending_was_save ? "STORE FAILED" : "RECALL FAILED");
