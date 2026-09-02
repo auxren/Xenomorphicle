@@ -40,7 +40,7 @@ void CaptainPollMidi();   // CaptainMIDI.h (global scope)
 OC_APP_CLASS(AppTuner, TWOCCS("TU"), "Tuner", "Strobe tuner"),
   public HSApplication {
 public:
-  OC_APP_INTERFACE_DECLARE(AppTuner, 4);
+  OC_APP_INTERFACE_DECLARE(AppTuner, 5);  // a4_hz u16 + manual + note + midi_out
 
   // HSApplication: the tuner keeps Captain's MIDI->CV mapping alive so you
   // can play the note you are tuning instead of only tuning a drone.

@@ -294,7 +294,12 @@ FLASHMEM void BuildAppData(AppData &out) {
       chunk->id = app->id();
       chunk->length = storage_size;
 
-      util::StreamBufferWriter stream_buffer{chunk + 1, chunk->length};
+      // The payload starts after the header; chunk->length counts the header
+      // too. Sized as chunk->length this writer let a Save spill up to 4 bytes
+      // over the end of its chunk undetected (the Tuner wrote 5 into a 4-byte
+      // allowance for years: the next chunk's header overwrote the last byte
+      // and the reader below handed the header back on restore).
+      util::StreamBufferWriter stream_buffer{chunk + 1, chunk->length - sizeof(AppChunkHeader)};
       auto result = app->Save(stream_buffer);
       if (stream_buffer.overflow()) {
         APPS_SERIAL_PRINTLN("* %s (%02x) : Save overflowed, result=%u, skipping app...", 
@@ -353,7 +358,7 @@ FLASHMEM void ApplyAppData(const AppData &in) {
       continue;
     }
 
-    util::StreamBufferReader stream_buffer{chunk + 1, chunk->length};
+    util::StreamBufferReader stream_buffer{chunk + 1, chunk->length - sizeof(AppChunkHeader)};
     auto result = app->Restore(stream_buffer);
     if (stream_buffer.underflow()) {
       APPS_SERIAL_PRINTLN("* %s (%02x): Restore underflow, result=%u, re-init",
