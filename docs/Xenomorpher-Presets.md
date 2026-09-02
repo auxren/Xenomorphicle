@@ -132,13 +132,22 @@ goes where Quadrants reads it: the **SD card when one is fitted**, a few
 milliseconds; internal flash otherwise. `SCENERY.DAT` and `CAPTAIN.DAT`
 always live on internal flash, so a slot whose Scenery or Captain section
 differs from the live file costs **one 64 KB block erase, 250–295 ms with
-interrupts off** — the same price as a save, and for the same reason. The
-outgoing app's own suspend can add one more: Quadrants and Scenery honour
-their auto-save on the way out (as they do for the app menu and the
-screensaver), and Captain stores edits it has not yet settled. Recalling
-between slots that share Scenery and Captain sections — the common case,
-where the slots differ in the app or its bank — never touches internal
-flash at all.
+interrupts off** — the same price as a save, and for the same reason.
+Measured on hardware, a Captain section that differs cost **523 ms**: the
+file rewrite itself plus a LittleFS metadata compaction, two erases.
+
+The outgoing app's own suspend adds nothing. Quadrants and Scenery honour
+their auto-save on the way out of the app menu and into the screensaver,
+and Captain stores edits it has not yet settled; but on a recall the
+engine tells the outgoing app which file the slot is about to replace
+(`PresetEngine::RecallReplacing()`), and the app skips a save whose bytes
+would be overwritten a few milliseconds later. Those unsaved edits are
+gone — that is what a recall means on a 200e — and the erase they used to
+buy (250 ms of frozen audio on every cross-app recall with edits pending)
+is gone with them. Measured: a SysEx edit to Captain followed at once by a
+bus recall shows `suspend 0` and no `Saving Config`. Recalling between
+slots that share Scenery and Captain sections — the common case, where the
+slots differ in the app or its bank — never touches internal flash at all.
 
 The only other write is deferred: three seconds after the last recall the
 current slot number is persisted so the next boot lands on it. That record
