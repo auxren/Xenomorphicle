@@ -134,6 +134,45 @@ grep -q 'recall slot' "$TMP/p2e" \
   && bad "a spike from before the NEXT assignment fired a recall after it" \
   || ok "an edge from before the assignment does not fire once assigned"
 
+# A pulse DURING a STORE hold. The pulse is a performance event and wins: it
+# steps the case. But it moves `sel` under the user's hand, so a STORE that
+# fires after it writes the slot the case just stepped TO -- a NEXT pulse
+# 470 ms into the hold stored slot 2 when the panel had said 1. The hold is
+# cancelled instead (bar resets, "STORE OFF", release swallowed) and nothing
+# is written. --full-log: the recall's lines would scroll the save's off the
+# four-line window, and "no save" is exactly what this check asserts.
+echo "a pulse mid-hold cancels the STORE, never redirects it"
+$SIM --full-log --keys "$ENTER,$NEXT_TR1,l-down,step470,~1,step2000,l-up,step500" > "$TMP/pc1" 2>&1
+if grep -q 'save slot' "$TMP/pc1"; then
+  bad "a NEXT pulse 470ms into the hold let the STORE fire ($(grep -o 'save slot [0-9]*' "$TMP/pc1" | head -1))"
+elif ! grep -q 'recall slot 1' "$TMP/pc1"; then
+  bad "the pulse that cancelled the STORE did not step the case"
+else
+  ok "pulse before the long-press: case steps, STORE cancelled, nothing written"
+fi
+$SIM --keys "$ENTER,$NEXT_TR1,l-down,step470,~1,step200" --dump-fb 2>/dev/null \
+  | python3 fbtext.py - | grep -q 'STORE OFF' \
+  && ok "and the panel says STORE OFF" \
+  || bad "the cancelled STORE left no word on the panel"
+# The pulse landing AFTER the STORE has fired is the other half: the save is
+# already on its way to the bus and must not be lost. The transport used to
+# hold one last-wins command, so a pulse's RECALL replaced a SAVE still
+# waiting for a busy bus -- and the panel announced "STORED" for an op that
+# never went out. It is a queue now. This is a CONTROL, not a regression
+# check: the simulated bus is always quiet, so the SAVE goes out in the pass
+# before the pulse is seen and the old code passes it too. It pins the
+# order and that the STORE, once fired, is not what the cancel above eats.
+$SIM --full-log --keys "$ENTER,$NEXT_TR1,l-down,step510,~1,step2000,l-up,step500" > "$TMP/pc2" 2>&1
+if ! grep -q 'save slot 0 ok' "$TMP/pc2"; then
+  bad "a NEXT pulse right after the STORE fired lost the save"
+elif ! grep -q 'recall slot 1' "$TMP/pc2"; then
+  bad "the pulse after the STORE did not step the case"
+elif [ "$(grep -o 'save slot 0 ok\|recall slot 1$' "$TMP/pc2" | head -2 | tr '\n' '|')" != "save slot 0 ok|recall slot 1|" ]; then
+  bad "the STORE and the pulse's RECALL went out in the wrong order"
+else
+  ok "pulse after the long-press: STORE goes out, then the RECALL"
+fi
+
 # A rename is bound to the slot it was opened on. A pulse mid-edit moves the
 # selection (it is a performance event; it cannot wait for a menu), and the
 # name typed for slot 1 must still land on slot 1 -- it used to commit to

@@ -402,6 +402,7 @@ toggle pacing) and the session controls live in visually distinct cards marked
 | `--write-fault WHAT` | make the simulated modules mishandle a RESTORE: `none` (default), `ignore`, `drop-tail`, `flip-first`, `flip-last`, `short-readback` — see *the write path* |
 | `--write-fault-once` | apply that fault to the **first** restore only, so the recovery write after it goes out to a module that behaves |
 | `--no-log` | omit the status/log lines under the frame |
+| `--full-log` | every retained log line under the frame (default: the last 4), for checks that grep for something printed early in a script |
 | `--stdio` | line protocol on stdin/stdout, for the browser front end |
 
 ### Keys

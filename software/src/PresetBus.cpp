@@ -259,21 +259,48 @@ static void drain_ring() {
 }
 
 // ---- commander mode: bus-wide preset commands -------------------------------
-// One pending command, last wins (matches the engine's own request model).
-static volatile int16_t pending_bcast = -1;  // (cmd << 8) | slot, cmd 01/02
+// A short queue with the engine's own rule (PresetEngine::enqueue): a recall
+// replaces a trailing recall -- only the last one is ever heard -- but a
+// save is never merged or replaced, because each one is a distinct "keep
+// this" and losing any of them is data loss. This used to be one last-wins
+// cell, and a NEXT pulse landing while a STORE was still waiting for the
+// bus quietly replaced the save; the panel then announced "STORED" for an
+// op that never went out. The queue is filled from loop context only.
+static const uint8_t kBcastQueue = 4;
+static int16_t bcast_q[kBcastQueue];  // (cmd << 8) | slot, cmd 01/02
+static uint8_t bcast_head = 0, bcast_count = 0;
 static uint8_t bcast_tries = 0;
 static uint32_t bcast_tx = 0, bcast_drop = 0;
 
-FLASHMEM void BroadcastSave(uint8_t slot) {
-  if (slot < 30) pending_bcast = (0x02 << 8) | slot;
+FLASHMEM static void bcast_enqueue(uint8_t cmd, uint8_t slot) {
+  if (slot >= 30) return;
+  const int16_t entry = (int16_t)((cmd << 8) | slot);
+  if (cmd == 0x01 && bcast_count) {
+    int16_t &tail = bcast_q[(bcast_head + bcast_count - 1) % kBcastQueue];
+    if ((tail >> 8) == 0x01) { tail = entry; return; }
+  }
+  if (bcast_count >= kBcastQueue) {
+    bcast_drop++;
+    Serial.printf("PresetBus: broadcast queue full, %s %d refused\n",
+                  cmd == 0x02 ? "SAVE" : "RECALL", slot);
+    return;
+  }
+  bcast_q[(bcast_head + bcast_count) % kBcastQueue] = entry;
+  bcast_count++;
 }
-FLASHMEM void BroadcastRecall(uint8_t slot) {
-  if (slot < 30) pending_bcast = (0x01 << 8) | slot;
+
+FLASHMEM void BroadcastSave(uint8_t slot) { bcast_enqueue(0x02, slot); }
+FLASHMEM void BroadcastRecall(uint8_t slot) { bcast_enqueue(0x01, slot); }
+
+FLASHMEM static void bcast_dequeue() {
+  bcast_head = (bcast_head + 1) % kBcastQueue;
+  bcast_count--;
+  bcast_tries = 0;
 }
 
 FLASHMEM static void pump_broadcast() {
-  const int16_t cmd = pending_bcast;
-  if (cmd < 0) return;
+  if (!bcast_count) return;
+  const int16_t cmd = bcast_q[bcast_head];
   if (!tx_gate_open()) return;
 
   // same long/PRIMO frame a preset manager sends. The slave stays ENABLED
@@ -291,8 +318,7 @@ FLASHMEM static void pump_broadcast() {
   }
 
   if (err == 0) {
-    pending_bcast = -1;
-    bcast_tries = 0;
+    bcast_dequeue();
     bcast_tx++;
     // our slave never hears our own TX (the self-echo above was just
     // suppressed and dropped): dispatch locally so this module saves/
@@ -303,8 +329,7 @@ FLASHMEM static void pump_broadcast() {
                                (cmd >> 8) == 0x02 ? "SAVE" : "RECALL",
                                cmd & 0x1F);
   } else if (++bcast_tries >= 50) {  // persistent contention: give up loudly
-    pending_bcast = -1;
-    bcast_tries = 0;
+    bcast_dequeue();
     bcast_drop++;
     Serial.printf("PresetBus: broadcast dropped (err %d)\n", err);
   }
@@ -990,8 +1015,8 @@ FLASHMEM void DebugDump() {
                     cs->txns_write, cs->txns_read,
                     cs->bytes_written, cs->bytes_read);
     }
-    Serial.printf("bcast: tx=%lu drop=%lu pending=%d\n",
-                  bcast_tx, bcast_drop, pending_bcast);
+    Serial.printf("bcast: tx=%lu drop=%lu queued=%u\n",
+                  bcast_tx, bcast_drop, bcast_count);
   }
   Serial.printf("isr=%lu starts=%lu stops=%lu bytes=%lu ring_ovf=%lu\n",
                 stats.isr_count, stats.starts, stats.stops, stats.bytes,

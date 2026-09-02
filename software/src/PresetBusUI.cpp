@@ -58,6 +58,7 @@ static const uint32_t kStoreHoldMs = OC::Ui::kLongPressTicks;
 static const uint32_t kRecallHoldMs = OC::Ui::kLongPressTicks / 2;
 static uint32_t recall_hold_ms = 0;       // 0 = not holding
 static bool recall_fired = false;         // one shot per hold
+static bool store_fired = false;          // this hold's STORE has gone out
 // Set on Enter(): the opening chord holds both encoders, so a hold that was
 // already in progress when the overlay appeared must not count. Cleared once
 // the button in question has actually been let go.
@@ -131,6 +132,13 @@ FLASHMEM void Exit() {
   hold_start_ms = 0;
   recall_hold_ms = 0;
   recall_fired = false;
+  store_fired = false;
+  // Same for the completion watch: it only runs while the overlay is open,
+  // and the bus-follow above is gated on it. A STORE fired and the overlay
+  // closed before the engine finished left pending_slot set, and with it
+  // every WPM/225e recall un-followed until the overlay was next opened.
+  pending_slot = -1;
+  banner_until_ms = 0;
   edit_mode = false;
   persist_assignments();
 }
@@ -235,6 +243,7 @@ FLASHMEM __attribute__((noinline)) bool HandleEvent(const UI::Event &event) {
   if (event.control == CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_LONG_PRESS) {
     if (cursor == 1 && sel_stored == 1) return true;  // STORE legend hidden here
     PresetBus::BroadcastSave(sel);
+    store_fired = true;
     sel_stored = -1;
     pending_slot = sel;
     pending_was_save = true;
@@ -465,15 +474,25 @@ void Task() {
   const uint32_t edges = DigitalInputs::take_latched_edges();
   for (uint8_t t = 0; t < 4; ++t) {
     if (!(edges & DIGITAL_INPUT_MASK(t))) continue;
-    if (next_trig == t + 1) {
-      sel = (sel + 1) % 30;
-      sel_stored = -1;
-      recall_selected();
-    } else if (last_trig == t + 1) {
-      sel = (sel + 29) % 30;
-      sel_stored = -1;
-      recall_selected();
+    if (next_trig != t + 1 && last_trig != t + 1) continue;
+    // The pulse wins over a STORE hold in progress, and the hold is
+    // cancelled rather than left to fire: a pulse is a performance event
+    // that cannot wait for a button, but it moves `sel` under the user's
+    // hand, and a STORE that fires after it writes the slot the case just
+    // stepped TO -- not the one that was showing when the hold began. That
+    // was reproducible: a NEXT pulse 480 ms into the hold stored slot 2
+    // when the panel had said 1. A cancelled write is the safe outcome;
+    // the bar resets and the release is swallowed, so the user sees it and
+    // simply holds again. A STORE already sent by this hold is left alone.
+    if (hold_start_ms && !store_fired) {   // holds only exist while active
+      hold_start_ms = 0;
+      ui.IgnoreUntilRelease(CONTROL_BUTTON_L);
+      snprintf(banner, sizeof(banner), "STORE OFF");
+      banner_until_ms = millis() + 1600;
     }
+    sel = (next_trig == t + 1) ? (sel + 1) % 30 : (sel + 29) % 30;
+    sel_stored = -1;
+    recall_selected();
   }
 
   if (active) {
@@ -488,6 +507,7 @@ void Task() {
       if (!hold_start_ms) hold_start_ms = PresetEngine::StampMs();
     } else {
       hold_start_ms = 0;
+      store_fired = false;
     }
 
     // RECALL: same idea, half the hold, and it fires the moment the
@@ -514,7 +534,14 @@ void Task() {
 
     // completion watch: the engine bumps OpCount when the op finishes
     if (pending_slot >= 0) {
-      if (PresetEngine::OpCount() != pending_opcount) {
+      if (PresetEngine::OpCount() != pending_opcount &&
+          (PresetEngine::LastWasSave() != pending_was_save ||
+           PresetEngine::BusSlot() != pending_slot)) {
+        // some OTHER op finished first (the engine queues, so a bus recall
+        // that was already in line lands before our STORE): not ours, keep
+        // waiting rather than announce "STORED" on its behalf
+        pending_opcount = PresetEngine::OpCount();
+      } else if (PresetEngine::OpCount() != pending_opcount) {
         const uint8_t shown = (uint8_t)pending_slot + 1;
         if (pending_was_save) {
           snprintf(banner, sizeof(banner),

@@ -310,13 +310,20 @@ const uint8_t *VisibleFrame() {
   return buf;
 }
 
+// --full-log: every retained log line under the frame, not the last four.
+// A check that greps the --keys output for a line the firmware printed
+// EARLY in the script (a save that a later recall then scrolled off) sees
+// nothing with the four-line window, and reads that as the save not having
+// happened.
+static bool g_full_log = false;
+
 void PrintScreen(bool with_chrome) {
   fputs(SimRenderFrame(VisibleFrame(), Caption()).c_str(), stdout);
   if (!with_chrome) return;
   printf("  %s\n", SimRuntimeStatusLine().c_str());
   printf("  %s\n", SimBusStatusLine().c_str());
   const auto &log = SimLogLines();
-  const size_t from = log.size() > 4 ? log.size() - 4 : 0;
+  const size_t from = (g_full_log || log.size() <= 4) ? 0 : log.size() - 4;
   for (size_t i = from; i < log.size(); ++i) printf("  %s\n", log[i].c_str());
 }
 
@@ -539,6 +546,7 @@ void Usage() {
       "  --capture-251e PATH  251e bank hex dump (default: bench capture)\n"
       "  --capture-259e PATH  259e bank hex dump (default: bench capture)\n"
       "  --no-log             omit the status/log lines under the frame\n"
+      "  --full-log           every retained log line under the frame, not 4\n"
       "  --write-fault WHAT   make the simulated modules mishandle a RESTORE,\n"
       "                       to exercise the firmware's post-write read-back:\n"
       "                       none | ignore | drop-tail | flip-first |\n"
@@ -679,6 +687,7 @@ int main(int argc, char **argv) {
       opts.push_back(a + " " + argv[i]);
     }
     else if (a == "--no-log") show_log = false;
+    else if (a == "--full-log") g_full_log = true;
     else if (a == "--capture-251e" && has_next) { cfg.capture_251e = argv[++i]; opts.push_back(a + " " + cfg.capture_251e); }
     else if (a == "--capture-259e" && has_next) { cfg.capture_259e = argv[++i]; opts.push_back(a + " " + cfg.capture_259e); }
     else if (a == "--write-fault" && has_next) {
