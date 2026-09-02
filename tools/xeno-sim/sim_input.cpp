@@ -198,5 +198,12 @@ void SimInputScheduleTap(uint16_t control, uint32_t at_ms, uint32_t dur_ms) {
 void SimInputSetTrigger(int index, bool high) {
   const uint8_t pins[4] = {TR1, TR2, TR3, TR4};
   if (index < 0 || index > 3) return;
-  SetPin(pins[index], high ? HIGH : LOW);
+  // "high" is the jack's state, not the pin's: the reference board reads its
+  // triggers active-LOW (see OC_digital_inputs.h), so on that hardware a
+  // pulse is a dip. Writing HIGH/LOW literally left the pin parked at the
+  // ACTIVE level after every pulse, and fired the edge on the release.
+  const bool flexio = ADC33131D_Uses_FlexIO;
+  const uint8_t active = flexio ? HIGH : LOW;
+  const uint8_t idle = flexio ? LOW : HIGH;
+  SetPin(pins[index], high ? active : idle);
 }

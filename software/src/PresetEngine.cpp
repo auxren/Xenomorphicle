@@ -211,6 +211,12 @@ static uint8_t req_head = 0, req_count = 0;
 static uint32_t req_dropped = 0;
 
 static int8_t last_slot = -1;
+// The slot the case is on, as distinct from the slot this module has loaded.
+// Set the moment a save or recall is attempted, refused or not: when the bus
+// says RECALL 7 and slot 7 is empty here, nothing is loaded and last_slot
+// stays put -- but every other module in the case is now on 7, and the next
+// NEXT pulse has to step to 8, not to last_slot + 1. -1 = none yet.
+static int8_t bus_slot = -1;
 static bool last_was_save = false;
 static uint32_t cur_slot_dirty_ms = 0;   // 0 = clean
 // What the EEPROM record holds, mirrored so persist_cur_slot can skip the
@@ -739,6 +745,7 @@ FLASHMEM static PhzConfig::KEY bank_remap(PhzConfig::KEY k) {
 FLASHMEM bool SaveSlot(uint8_t slot) {
   if (slot >= kNumSlots) return false;
   busy = true;
+  bus_slot = (int8_t)slot;
   serial_printf("PresetEngine: save slot %d\n", slot);
 
   // Free-space guard. UNCONDITIONAL now: presets always land on internal
@@ -1045,7 +1052,8 @@ FLASHMEM static void recall_stage_files(uint8_t slot, bool from_container,
 // completion watch reports the reason at once instead of timing out into a
 // generic failure, and the serial log gets a closing line instead of a
 // dangling "recall slot N". last_slot is deliberately untouched -- nothing
-// was recalled, so "the current preset" has not changed.
+// was recalled, so what this module has loaded has not changed. bus_slot
+// was already moved by RecallSlot: the case is on the refused slot now.
 FLASHMEM static bool recall_refused(uint8_t slot, const char *why) {
   last_recall_err = why;
   last_was_save = false;
@@ -1058,6 +1066,7 @@ FLASHMEM static bool recall_refused(uint8_t slot, const char *why) {
 FLASHMEM bool RecallSlot(uint8_t slot) {
   if (slot >= kNumSlots) return false;
   busy = true;
+  bus_slot = (int8_t)slot;
   serial_printf("PresetEngine: recall slot %d\n", slot);
   const uint32_t t_start = millis();
   WallClock wall;
@@ -1321,6 +1330,7 @@ FLASHMEM int ConsumeQuadrantsRecallHint() {
 uint32_t StampMs() { const uint32_t t = millis(); return t ? t : 1; }
 
 int8_t LastSlot() { return last_slot; }
+int8_t BusSlot() { return bus_slot; }
 uint32_t OpCount() { return op_count; }
 bool LastSaveOk() { return last_save_ok; }
 const char *LastRecallError() { return last_recall_err; }

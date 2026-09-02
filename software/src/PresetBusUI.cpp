@@ -31,6 +31,11 @@ static int8_t cursor = 0;        // 0 preset, 1 name, 2 next-trig, 3 last-trig
 static bool edit_mode = false;
 static int8_t edit_pos = 0;
 static char edit_buf[PresetEngine::kNameLen + 1];
+// The slot a rename was opened on. `sel` is not it: a NEXT/LAST pulse or a
+// bus recall can move sel while the name is being typed (both are
+// performance events and cannot wait for a menu), and the name must land on
+// the slot the performer was looking at when they clicked EDIT.
+static uint8_t edit_slot = 0;
 // cycling order: space adjacent to A and (via wrap) to '+'
 static const char kCharset[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-./&+";
 static constexpr int kCharsetLen = sizeof(kCharset) - 1;
@@ -73,7 +78,7 @@ FLASHMEM void Init() {
   if (PhzConfig::getValue(kNextTrigKey, v) && v <= 4) next_trig = (uint8_t)v;
   v = 0;
   if (PhzConfig::getValue(kLastTrigKey, v) && v <= 4) last_trig = (uint8_t)v;
-  const int last = PresetEngine::LastSlot();
+  const int last = PresetEngine::BusSlot();
   if (last >= 0) sel = (uint8_t)last;
 }
 
@@ -89,7 +94,7 @@ FLASHMEM static void persist_assignments() {
 }
 
 FLASHMEM void Enter() {
-  const int last = PresetEngine::LastSlot();
+  const int last = PresetEngine::BusSlot();
   if (last >= 0) sel = (uint8_t)last;
   cursor = 0;
   edit_mode = false;
@@ -146,7 +151,7 @@ FLASHMEM static void commit_name() {
   memcpy(out, edit_buf, sizeof(out));
   for (int i = PresetEngine::kNameLen - 1; i >= 0 && out[i] == ' '; --i)
     out[i] = 0;
-  PresetEngine::SetSlotName(sel, out);
+  PresetEngine::SetSlotName(edit_slot, out);
 }
 
 // noinline so FLASHMEM sticks (free-function LTO rule -- same treatment as
@@ -221,6 +226,7 @@ FLASHMEM __attribute__((noinline)) bool HandleEvent(const UI::Event &event) {
       for (int i = 0; n[i] && i < (int)PresetEngine::kNameLen; ++i)
         edit_buf[i] = n[i];
       edit_pos = 0;
+      edit_slot = sel;
       edit_mode = true;
     }
     return true;
@@ -286,7 +292,9 @@ FLASHMEM void Draw() {
   // LCD window (v2: shorter; the status word moved to the name row)
   graphics.drawFrame(43, 13, 42, 28);
   if (sel_stored < 0) sel_stored = PresetEngine::SlotUsed(sel) ? 1 : 0;
-  const uint8_t shown = sel + 1;                // 01-30, zero-padded
+  // 01-30, zero-padded. A rename shows the slot it will land on, which is
+  // not sel once a pulse or a bus recall has moved on underneath the edit.
+  const uint8_t shown = (edit_mode ? edit_slot : sel) + 1;
   draw_7seg(50, 16, shown / 10);
   draw_7seg(66, 16, shown % 10);
 
@@ -425,18 +433,24 @@ void Task() {
   // follow externally-driven preset changes (WPM/225e recall, boot recall)
   // so trigger cycling always steps from the CURRENT preset, 225e-style
   //
-  // Not while the panel is mid-gesture. A rename commits to `sel` when DONE
-  // is clicked, so a WPM recall landing during the edit would move the name
-  // onto whichever slot was just recalled; and a STORE or RECALL hold is a
-  // statement about the slot that was showing when the button went down --
-  // following the bus mid-hold would store the freshly-recalled state into
-  // the bus's slot instead of the one under the cursor. The op count is
-  // left unconsumed, so the catch-up happens the moment the gesture ends.
+  // Not mid-hold. A STORE or RECALL hold is a statement about the slot that
+  // was showing when the button went down -- following the bus mid-hold
+  // would store the freshly-recalled state into the bus's slot instead of
+  // the one under the cursor. The op count is left unconsumed, so the
+  // catch-up happens the moment the button lifts. A rename needs no gate:
+  // it is bound to edit_slot, not sel, and the digit shows edit_slot while
+  // it runs.
   static uint32_t seen_opcount = 0;
-  const bool mid_gesture = edit_mode || hold_start_ms || recall_hold_ms;
+  const bool mid_gesture = hold_start_ms || recall_hold_ms;
   if (pending_slot < 0 && !mid_gesture && PresetEngine::OpCount() != seen_opcount) {
     seen_opcount = PresetEngine::OpCount();
-    const int last = PresetEngine::LastSlot();
+    // BusSlot, not LastSlot: a recall the engine refused (EMPTY SLOT) still
+    // moved every other module in the case. Following LastSlot snapped sel
+    // back to the slot still loaded here, so a NEXT pulse into an empty slot
+    // bounced -- 0 -> 1, refused, back to 0, and the next pulse tried 1
+    // again. The panel could never step past an empty slot, while the case
+    // had already gone on without it.
+    const int last = PresetEngine::BusSlot();
     if (last >= 0 && (uint8_t)last != sel) {
       sel = (uint8_t)last;
       sel_stored = -1;

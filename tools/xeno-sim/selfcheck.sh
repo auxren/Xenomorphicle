@@ -91,6 +91,38 @@ $SIM --keys "l-down,step20,r-down,step80,l-up,r-up,step201,r-down,step150,r-up,s
 recall_ran "$TMP/h5" && bad "a 150ms tap on the other millisecond parity fired a recall" \
                      || ok "a 150ms tap does nothing on either millisecond parity"
 
+# The 225e pulse jacks against what the engine REFUSES. Slot 1 is stored by
+# the hold above; slots 2 and 3 are empty, so every recall below is refused
+# (EMPTY SLOT) -- and refused is the case that matters. The bus RECALL has
+# already gone out, the rest of the case is on that slot, and the panel has
+# to be on it too. The overlay used to follow LastSlot (the slot still
+# LOADED here) after every finished op, so a NEXT pulse into an empty slot
+# bounced straight back: 1 -> 2, refused, back to 1, and the next pulse
+# tried 2 again. Two pulses must reach slot 3.
+echo "preset overlay follows the case, not the loaded slot"
+STORED="$ENTER,l-down,step600,l-up,step3000"          # slot 1 stored, overlay open
+NEXT_TR1="encl+,encl+,encr+,step50"                    # cursor to NEXT, assign TR1
+$SIM --keys "$STORED,$NEXT_TR1,1,step1500,1,step1500" > "$TMP/p1" 2>&1
+grep -q 'recall slot 2' "$TMP/p1" \
+  && ok "two NEXT pulses from slot 1 reach slot 3 (bus slot 2), empty or not" \
+  || bad "two NEXT pulses did not reach slot 3 -- the panel bounced off the empty slot"
+# The same with the overlay closed: cycling runs whether or not it is open.
+$SIM --keys "$STORED,$NEXT_TR1,a,step300,1,step1500,1,step1500" > "$TMP/p2" 2>&1
+grep -q 'recall slot 2' "$TMP/p2" \
+  && ok "the same with the overlay closed" \
+  || bad "with the overlay closed, two NEXT pulses did not reach slot 3"
+
+# A rename is bound to the slot it was opened on. A pulse mid-edit moves the
+# selection (it is a performance event; it cannot wait for a menu), and the
+# name typed for slot 1 must still land on slot 1 -- it used to commit to
+# whatever `sel` had become by the time DONE was clicked.
+RENAME="encl-,l,step100,encr+,encl+,encr+,step50"      # cursor to name, EDIT, type
+$SIM --keys "$STORED,$NEXT_TR1,$RENAME,1,step1500,l,step100,encl-,encr-,step50" \
+     --dump-fb 2>/dev/null | python3 fbtext.py - | grep '^y=44' > "$TMP/p3"
+grep -q 'AB$' "$TMP/p3" \
+  && ok "a rename interrupted by a NEXT pulse still lands on the slot it was opened on" \
+  || bad "a rename interrupted by a NEXT pulse landed elsewhere (slot 1 row: $(cat "$TMP/p3"))"
+
 echo "screens are reachable"
 reaches() {  # name, keys, expected screen word
   $SIM --keys "$2" 2>&1 | grep -q "^  $3 " \

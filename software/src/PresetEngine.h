@@ -94,7 +94,9 @@ enum RecallReplaces : uint8_t {
 uint8_t RecallReplacing();
 
 // status for UI / debug
-int8_t LastSlot();            // -1 = none yet
+int8_t LastSlot();            // slot this module has LOADED; -1 = none yet
+int8_t BusSlot();             // slot the CASE is on: last save/recall
+                              // attempted, refused or not; -1 = none yet
 uint32_t OpCount();           // bumps when a save/recall finishes
 bool LastSaveOk();            // result of the most recent save
 const char *LastRecallError();  // why the last recall refused; nullptr = ok
@@ -163,6 +165,7 @@ enum RecallReplaces : uint8_t {
 };
 inline uint8_t RecallReplacing() { return 0; }
 inline int8_t LastSlot() { return -1; }
+inline int8_t BusSlot() { return -1; }
 inline uint32_t OpCount() { return 0; }
 inline bool LastSaveOk() { return false; }
 inline const char *LastRecallError() { return nullptr; }
