@@ -7,6 +7,7 @@
 
 #include <LittleFS.h>
 
+#include "Buchla200eWriteGuard.h"
 #include "Bus200eMaster.h"
 #include "MidiTxRing.h"
 #include "PresetBus.h"
@@ -417,8 +418,26 @@ FLASHMEM static void slave_reconfig(bool serve, uint8_t addr7 = BUS200E_CARD_BAS
   LPI2C1_SCR = LPI2C_SCR_SEN | LPI2C_SCR_FILTEN;
 }
 
+// CRC-32 of what PBCARD.BIN holds, as of the last load or successful flush.
+// 0 = unknown (never loaded, or the last flush failed): always write.
+static uint32_t card_file_crc = 0;
+
+// Dirty means "a slave write landed", not "the bytes changed": a 251e BACKUP
+// writes the bank in whether or not it differs from the last one, and most
+// reads at the panel are re-reads of a module nobody touched. Rewriting the
+// file then costs 131 ms (measured 2026-09-02, 64 KB through XenoFS's 4 KB
+// sectors) with interrupts off for most of it -- an audio dropout 3 s after
+// every Read, for a file that already holds these bytes. A CRC of the image
+// is ~1 ms with interrupts on, so compare first and write only on a change.
 FLASHMEM static void card_image_flush(const char *why) {
   if (!card_image || !BusCardDirty()) return;
+  const uint32_t crc = Buchla200eCrc32(card_image, BUSCARD_SIZE);
+  if (card_file_crc && crc == card_file_crc) {
+    BusCardClearDirty();
+    Serial.printf("PresetBus: card image unchanged, not rewritten (%s)\n", why);
+    return;
+  }
+  const uint32_t t0 = millis();
   File f = PhzConfig::myfs.open(kCardFile, FILE_WRITE_BEGIN);
   bool ok = false;
   if (f) {
@@ -426,8 +445,11 @@ FLASHMEM static void card_image_flush(const char *why) {
     f.close();
   }
   if (ok) BusCardClearDirty();
-  Serial.printf("PresetBus: card image %s (%s)\n",
-                ok ? "saved" : "SAVE FAILED", why);
+  card_file_crc = ok ? crc : 0;
+  // The wall time is the cost: LittleFS_Program erases and programs with
+  // interrupts off, so audio, USB and the bus slave all stall for most of it.
+  Serial.printf("PresetBus: card image %s in %lu ms (%s)\n",
+                ok ? "saved" : "SAVE FAILED", (unsigned long)(millis() - t0), why);
 }
 
 // Parameterized enable: `card_lo` selects which candidate address to claim
@@ -473,10 +495,14 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   }
   memset(card_image, 0xFF, BUSCARD_SIZE);  // blank card = erased EEPROM
   File f = PhzConfig::myfs.open(kCardFile, FILE_READ);
+  size_t got = 0;
   if (f) {
-    f.read(card_image, BUSCARD_SIZE);
+    got = f.read(card_image, BUSCARD_SIZE);
     f.close();
   }
+  // Only a whole file is known to match the image; a short or missing one
+  // leaves the CRC unknown so the first flush always writes.
+  card_file_crc = (got == BUSCARD_SIZE) ? Buchla200eCrc32(card_image, BUSCARD_SIZE) : 0;
   BusCardInit(card_image, BUSCARD_SIZE);
   card_seen_writes = 0;
   card_flush_arm_ms = 0;
@@ -505,7 +531,8 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
                   addr7, at_card, at_other);
     return -4;
   }
-  Serial.printf("PresetBus: serving %02X (32K card image)\n", addr7);
+  Serial.printf("PresetBus: serving %02X (%luK card image)\n", addr7,
+                (unsigned long)(BUSCARD_SIZE / 1024));
   return 0;
 }
 
