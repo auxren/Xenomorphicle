@@ -126,6 +126,7 @@ const char *kLegend =
     "~1-~4 a zero-width spike on TR1-TR4, seen only by the edge latch\n"
     "export / import: the console's E and J, every slot to/from the card\n"
     "nameN=text names slot N (the panel's rename); names lists named slots\n"
+    "wpmN / wpmsaveN a preset manager's RECALL / SAVE of slot N off the wire\n"
     "n note-on -> USB host port 0     N note-on -> 200e bus MIDI\n"
     "w advance 1 simulated second     t toggle fast/real scan pacing   q quit\n"
     "chords need held buttons: a terminal cannot report a key being HELD, so\n"
@@ -262,6 +263,25 @@ bool ApplyKey(const std::string &k) {
     SimSessionRecord(k);
     OC::PresetEngine::SetSlotName((uint8_t)slot, nm.c_str());
     SimLog("slot %d named \"%s\"", slot, OC::PresetEngine::SlotName((uint8_t)slot));
+    return true;
+  }
+  // A preset manager's RECALL/SAVE arriving over the wire: `wpm5` is the
+  // WPM (or a 225e) recalling slot 5 bus-wide, `wpmsave5` its SAVE. Exactly
+  // what the transport's parser callback does with a parsed frame -- the
+  // engine request, nothing else -- so the overlay's bus-follow and the
+  // "not mid-hold" gate on it are driveable from a script.
+  if (k.size() > 3 && k.compare(0, 3, "wpm") == 0) {
+    const bool save = k.compare(0, 7, "wpmsave") == 0;
+    const size_t digits = save ? 7 : 3;
+    if (k.size() <= digits ||
+        k.find_first_not_of("0123456789", digits) != std::string::npos)
+      return true;
+    const int slot = atoi(k.c_str() + digits);
+    if (slot < 0 || slot >= (int)OC::PresetEngine::kNumSlots) return true;
+    SimSessionRecord(k);
+    SimLog("bus: manager %s %d", save ? "SAVE" : "RECALL", slot);
+    if (save) OC::PresetEngine::RequestSave((uint8_t)slot);
+    else OC::PresetEngine::RequestRecall((uint8_t)slot);
     return true;
   }
   if (k == "names") {

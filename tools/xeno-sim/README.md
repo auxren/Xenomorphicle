@@ -420,6 +420,7 @@ toggle pacing) and the session controls live in visually distinct cards marked
 | `export` `import` | the bench console's `E` and `J`: every slot to / from the card |
 | `name3=Drone` | names slot 3, as the panel's rename does (store written at once) |
 | `names` | logs every named slot |
+| `wpm5` `wpmsave5` | a preset manager's RECALL / SAVE of slot 5 arriving off the wire (handed to the engine as the bus service would) |
 | `n` | note-on into `usbHostMIDI[0]` — the port the k-board lives on |
 | `N` | note-on into the 200e bus MIDI RX ring |
 | `w` | advance one simulated second |

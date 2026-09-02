@@ -435,18 +435,38 @@ FLASHMEM void Draw() {
   }
 }
 
+// A STORE hold that has not fired yet is abandoned: the bar resets and the
+// release is swallowed, so the user sees it and simply holds again. A STORE
+// already sent by this hold is left alone (callers check store_fired).
+FLASHMEM static void cancel_store_hold() {
+  hold_start_ms = 0;
+  ui.IgnoreUntilRelease(CONTROL_BUTTON_L);
+  snprintf(banner, sizeof(banner), "STORE OFF");
+  banner_until_ms = millis() + 1600;
+}
+
 void Task() {
   // follow externally-driven preset changes (WPM/225e recall, boot recall)
   // so trigger cycling always steps from the CURRENT preset, 225e-style
   //
-  // Not mid-hold. A STORE or RECALL hold is a statement about the slot that
-  // was showing when the button went down -- following the bus mid-hold
-  // would store the freshly-recalled state into the bus's slot instead of
-  // the one under the cursor. The op count is left unconsumed, so the
+  // A preset op that lands from the bus during an un-fired STORE hold
+  // cancels the hold, for the same reason a pulse does (below): the engine
+  // has already applied the recall -- the case moved, so it must -- and the
+  // state under the user's hand is no longer the one they held STORE over.
+  // Letting the hold fire wrote preset 5's freshly-recalled state into the
+  // slot under the cursor (0), and the mid-hold gate that used to keep `sel`
+  // from following only made the write land on the wrong slot instead of
+  // the right one. Nothing is written; the panel then follows.
+  //
+  // A RECALL hold keeps its gate: it is a statement about the slot that was
+  // showing when the button went down, and following the bus mid-hold would
+  // recall the bus's slot instead. The op count is left unconsumed, so the
   // catch-up happens the moment the button lifts. A rename needs no gate:
   // it is bound to edit_slot, not sel, and the digit shows edit_slot while
   // it runs.
   static uint32_t seen_opcount = 0;
+  if (PresetEngine::OpCount() != seen_opcount && pending_slot < 0 && hold_start_ms && !store_fired)
+    cancel_store_hold();
   const bool mid_gesture = hold_start_ms || recall_hold_ms;
   if (pending_slot < 0 && !mid_gesture && PresetEngine::OpCount() != seen_opcount) {
     seen_opcount = PresetEngine::OpCount();
@@ -484,12 +504,7 @@ void Task() {
     // when the panel had said 1. A cancelled write is the safe outcome;
     // the bar resets and the release is swallowed, so the user sees it and
     // simply holds again. A STORE already sent by this hold is left alone.
-    if (hold_start_ms && !store_fired) {   // holds only exist while active
-      hold_start_ms = 0;
-      ui.IgnoreUntilRelease(CONTROL_BUTTON_L);
-      snprintf(banner, sizeof(banner), "STORE OFF");
-      banner_until_ms = millis() + 1600;
-    }
+    if (hold_start_ms && !store_fired) cancel_store_hold();   // holds only exist while active
     sel = (next_trig == t + 1) ? (sel + 1) % 30 : (sel + 29) % 30;
     sel_stored = -1;
     recall_selected();

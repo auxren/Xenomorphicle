@@ -159,9 +159,10 @@ $SIM --keys "$ENTER,$NEXT_TR1,l-down,step470,~1,step200" --dump-fb 2>/dev/null \
 # hold one last-wins command, so a pulse's RECALL replaced a SAVE still
 # waiting for a busy bus -- and the panel announced "STORED" for an op that
 # never went out. It is a queue now. This is a CONTROL, not a regression
-# check: the simulated bus is always quiet, so the SAVE goes out in the pass
-# before the pulse is seen and the old code passes it too. It pins the
-# order and that the STORE, once fired, is not what the cancel above eats.
+# check: the simulator's bus shim (sim_bus.cpp) hands a broadcast straight
+# to the engine, so the transport's queue is not under test here. It pins
+# the engine-side order and that a STORE, once fired, is not what the
+# cancel above eats.
 $SIM --full-log --keys "$ENTER,$NEXT_TR1,l-down,step510,~1,step2000,l-up,step500" > "$TMP/pc2" 2>&1
 if ! grep -q 'save slot 0 ok' "$TMP/pc2"; then
   bad "a NEXT pulse right after the STORE fired lost the save"
@@ -172,6 +173,33 @@ elif [ "$(grep -o 'save slot 0 ok\|recall slot 1$' "$TMP/pc2" | head -2 | tr '\n
 else
   ok "pulse after the long-press: STORE goes out, then the RECALL"
 fi
+
+# The panel follows the bus: a preset manager's RECALL (wpmN) moves `sel` so
+# that trigger cycling steps from the CURRENT preset, whether the overlay is
+# open or closed. And a manager's op landing during an un-fired STORE hold
+# cancels the hold exactly as a pulse does: the engine has already applied
+# the recall, so a STORE that fired afterwards wrote preset 5's state into
+# slot 0. Nothing is written, "STORE OFF", the panel follows to 5, and a
+# second hold stores where the panel now points.
+echo "the overlay follows a preset manager's recall"
+$SIM --full-log --keys "$STORED,$NEXT_TR1,wpm5,step500,1,step1500" > "$TMP/wf1" 2>&1
+[ "$(grep -o 'recall slot [0-9]*$' "$TMP/wf1" | tr '\n' '|')" = "recall slot 5|recall slot 6|" ] \
+  && ok "overlay open: manager recalls 5, NEXT pulse recalls 6" \
+  || bad "overlay open: after a manager recall of 5 the NEXT pulse went to $(grep -o 'recall slot [0-9]*$' "$TMP/wf1" | tail -1)"
+$SIM --full-log --keys "$STORED,$NEXT_TR1,a,step300,wpm5,step500,1,step1500" > "$TMP/wf2" 2>&1
+[ "$(grep -o 'recall slot [0-9]*$' "$TMP/wf2" | tr '\n' '|')" = "recall slot 5|recall slot 6|" ] \
+  && ok "overlay closed: manager recalls 5, NEXT pulse recalls 6" \
+  || bad "overlay closed: after a manager recall of 5 the NEXT pulse went to $(grep -o 'recall slot [0-9]*$' "$TMP/wf2" | tail -1)"
+$SIM --full-log --keys "$ENTER,$NEXT_TR1,l-down,step200,wpm5,step400,l-up,step500,l-down,step600,l-up,step2000" > "$TMP/wf3" 2>&1
+if [ "$(grep -o 'save slot [0-9]* ok' "$TMP/wf3" | tr '\n' '|')" != "save slot 5 ok|" ]; then
+  bad "a manager recall mid-hold: saves were '$(grep -o 'save slot [0-9]* ok' "$TMP/wf3" | tr '\n' '|')', wanted only 'save slot 5 ok' from the second hold"
+else
+  ok "manager recall mid-hold: STORE cancelled, panel follows, the next hold stores 5"
+fi
+$SIM --keys "$ENTER,$NEXT_TR1,l-down,step200,wpm5,step200" --dump-fb 2>/dev/null \
+  | python3 fbtext.py - | grep -q 'STORE OFF' \
+  && ok "and the panel says STORE OFF" \
+  || bad "the STORE cancelled by a manager recall left no word on the panel"
 
 # A rename is bound to the slot it was opened on. A pulse mid-edit moves the
 # selection (it is a performance event; it cannot wait for a menu), and the
