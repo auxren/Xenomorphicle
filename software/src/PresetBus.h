@@ -76,7 +76,7 @@ bool BroadcastQueued();
 bool WpmPresent();
 
 // ---- 0x50 card serving ----
-// Serve the storage-card address (32K image, PBCARD.BIN) so 200e modules on
+// Serve the storage-card address (64K image, PBCARD.BIN) so 200e modules on
 // a WPM-less bus can BACKUP/RESTORE against us. HARD-GATED: refused while a
 // WPM is present, self-tested at enable, never persisted (off every boot).
 // Returns 0 on success; <0 = refused (WPM present / no memory / self-test).
@@ -93,16 +93,17 @@ bool CardServing();
 // live WPM already holds 0x50 (0x50's own WPM-presence gate is unchanged --
 // still refused outright, never contested), then hands off to
 // Bus200eMaster (see Bus200eMaster.h) to send the BACKUP/RESTORE frame and
-// watch the resulting card traffic. UNRESOLVED DESIGN QUESTION: this reuses
-// the SAME card image/file (PBCARD.BIN) as ordinary WPM-less card serving,
-// so a foreign-module
-// capture will overwrite whatever local-backup image was there. The USB
-// bridge in front of this (Bus200eBridge.{h,cpp}) has since taken the
-// narrowest available position rather than resolve it: it writes browser
-// bytes into the in-RAM image but deliberately never marks it dirty, so a
-// pushed dump is staged for the RESTORE and never flushed over the user's
-// PBCARD.BIN. Giving foreign dumps their own image/file is still the real
-// fix, and is still open.
+// watch the resulting card traffic. It reuses the SAME in-RAM card image as
+// ordinary WPM-less card serving, but not the file: a burst that lands while
+// one of these jobs is open is kept in RAM only and never flushed to
+// PBCARD.BIN (card_task / card_image_flush in PresetBus.cpp), so a capture
+// we command cannot overwrite the local-backup image a module wrote into us
+// on its own -- and does not pay the 1.1 s interrupts-off LittleFS rewrite
+// after every Read. Nothing reads a captured bank back from the file: the
+// 200e app snapshots to its own files (PresetEngine::SnapshotBank), DumpCard
+// and the USB bridge (Bus200eBridge.{h,cpp}) work from MasterCardImage(),
+// and the bridge likewise stages browser bytes into RAM without marking the
+// image dirty.
 //
 // MasterBackup: returns 0 if accepted, <0 (negated Bus200eMasterError) if
 // refused outright (a job is already running, or the card claim failed --

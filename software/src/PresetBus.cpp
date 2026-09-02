@@ -388,6 +388,10 @@ FLASHMEM static void probe_wpm() {
 static uint8_t *card_image = nullptr;
 static uint32_t card_flush_arm_ms = 0;
 static uint32_t card_seen_writes = 0;
+// The write burst now dirtying the image arrived while one of OUR master
+// jobs was open -- it is a bank we asked a module for, not a module backing
+// itself up to us. See card_task() for why that decides whether it persists.
+static bool card_burst_ours = false;
 static constexpr const char *kCardFile = "PBCARD.BIN";
 // The card_lo that produced card_addr7 (card_addr7 == BUS200E_CARD_BASE |
 // card_addr_lo), so MasterBackup()/MasterRestore() can hand Bus200eMaster
@@ -433,6 +437,19 @@ static uint32_t card_file_crc = 0;
 // compare first and write only on a change.
 FLASHMEM static void card_image_flush(const char *why) {
   if (!card_image || !BusCardDirty()) return;
+  if (card_burst_ours) {
+    // A capture we commanded (the 200e app's Read, the console's m, the USB
+    // bridge's verify pass). Every reader of it works from RAM --
+    // MasterCardImage(), DumpCard, the bridge, the app's snapshots have their
+    // own files -- and nothing looks for it in PBCARD.BIN after a reboot.
+    // Writing it there cost a 1.1 s interrupts-off stall after every Read
+    // AND overwrote whatever a WPM-less bus had backed up into us: the open
+    // design question in PresetBus.h, answered by not writing.
+    BusCardClearDirty();
+    card_burst_ours = false;
+    Serial.printf("PresetBus: card image kept in RAM, PBCARD.BIN untouched (%s)\n", why);
+    return;
+  }
   const uint32_t crc = Buchla200eCrc32(card_image, BUSCARD_SIZE);
   if (card_file_crc && crc == card_file_crc) {
     BusCardClearDirty();
@@ -510,6 +527,7 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   BusCardInit(card_image, BUSCARD_SIZE);
   card_seen_writes = 0;
   card_flush_arm_ms = 0;
+  card_burst_ours = false;
   card_addr7 = addr7;
   card_addr_lo = card_lo & 0x7F;
   slave_reconfig(true, addr7);
@@ -713,12 +731,21 @@ FLASHMEM static void report_query() {
 // clock-stretch it through the erases; whether a 251e waits that long is
 // not known, and PresetEngine::Process defers a bus RECALL for the same
 // reason. The image stays dirty and flushes once the job closes.
+//
+// Whose bytes these are decides what happens then. A module backing itself
+// up into us on a WPM-less bus (CardServeEnable, the console's k) is the
+// card's whole purpose and must survive a power cycle, so that burst is
+// written to PBCARD.BIN. A burst that lands while one of our own master
+// jobs is open is a bank WE asked for, kept in RAM only -- see
+// card_image_flush(). Sticky across the burst: one observation inside the
+// job is enough, since nothing else can be writing to us while it runs.
 static void card_task() {
   if (!card_serving) return;
   const BusCardStats *cs = BusCardGetStats();
   if (cs->bytes_written != card_seen_writes) {
     card_seen_writes = cs->bytes_written;
     card_flush_arm_ms = millis();
+    if (MasterTransferring()) card_burst_ours = true;
   } else if (card_flush_arm_ms && BusCardDirty()
              && millis() - card_flush_arm_ms > 3000
              && !MasterTransferring()) {
