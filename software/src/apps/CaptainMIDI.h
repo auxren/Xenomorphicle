@@ -324,16 +324,35 @@ public:
         // with the slot's copy: that erase bought nothing but 250 ms of
         // frozen audio. The edits are gone either way -- that is what a
         // 200e recall means -- so no bytes are lost that were not already.
-        const bool replaced = OC::PresetEngine::RecallReplacing() & OC::PresetEngine::REPLACES_CAPTAIN;
+        const uint8_t recall = OC::PresetEngine::RecallReplacing();
+        const bool replaced = recall & OC::PresetEngine::REPLACES_CAPTAIN;
         if (!replaced && (dirty || LiveChecksum() != saved_checksum)) StoreData();
+#else
+        const uint8_t recall = OC::PresetEngine::RecallReplacing();
+        const bool replaced = false;
 #endif
 #if defined(ARDUINO_TEENSY41)
         // T41 only: device profiles need the USB host ports
         if (profiles_dirty) PersistProfiles();  // debounce dies with DoLoop
 #endif
+        if (replaced) {
+            // The slot's CAPTAIN.DAT is about to replace the live one, so a
+            // SET the host is still waiting on has been undone: an ACK sent
+            // at the next Resume would vouch for an edit that no longer
+            // exists. Drop it, and any frame the ISR staged since DoLoop
+            // last ran, so the host's timeout tells it the truth.
+            syx_pending = 0;
+            syx_rx_len = 0;
+        }
         // dump-to-host on suspend is the Orin workflow contract, but only
-        // when a host is actually configured to hear it
-        if (usb_configuration) OnSendSysEx();
+        // when a host is actually configured to hear it. Send it here:
+        // this runs in loop context, and DoLoop -- where a queued PEND_DUMP
+        // would have gone out -- does not run again until Resume, which
+        // turned "dump on suspend" into an unsolicited stale dump on every
+        // resume. Not on a bus recall, which is a performance gesture and
+        // must not wait on the host draining a multi-packet SysEx.
+        if (usb_configuration && !(recall & OC::PresetEngine::RECALL_SUSPEND))
+            SendDump(active_setup);
     }
 
     // the class-0 SysEx globals as one word, byte order = parameter order
@@ -1464,6 +1483,7 @@ public:
     uint32_t poll_last_us = 0;
     uint32_t poll_gap_max_us = 0;
     uint32_t echo_count = 0;
+    uint32_t dump_count = 0;   // SendDump calls (suspend hook, [DUMP], GET_DUMP)
 
     void HandleSysEx(const uint8_t *sx, unsigned len) {
         // Universal Device Inquiry: F0 7E <dev> 06 01 F7
@@ -2016,9 +2036,10 @@ FLASHMEM void CaptainMidiHealth() {
         Serial.println("captain: not initialized");
         return;
     }
-    Serial.printf("captain: poll_gap_max=%luus echoes=%lu\n",
+    Serial.printf("captain: poll_gap_max=%luus echoes=%lu dumps=%lu\n",
                   (unsigned long)g_captain_instance->poll_gap_max_us,
-                  (unsigned long)g_captain_instance->echo_count);
+                  (unsigned long)g_captain_instance->echo_count,
+                  (unsigned long)g_captain_instance->dump_count);
     g_captain_instance->poll_gap_max_us = 0;
 }
 
@@ -2141,6 +2162,7 @@ FLASHMEM void AppCaptainMIDI::StoreData() {
 #endif  // __IMXRT1062__
 
 FLASHMEM void AppCaptainMIDI::SendDump(uint8_t s) {
+    ++dump_count;
     if (s == active_setup) PackSetup(s); // canonicalize live edits
     constexpr int kRecBytes =
         (2 + kGlobalParamCount) + MIDIMAP_MAX * (2 + kInParamCount)

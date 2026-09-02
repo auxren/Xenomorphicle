@@ -82,10 +82,14 @@ int ConsumeQuadrantsRecallHint();
 // slot's copy a millisecond later: one 64 KB erase with interrupts off,
 // 250-295 ms of frozen audio and MIDI, for bytes nobody will ever read.
 // The app-menu Suspend, where that save is the whole point, sees 0.
+// RECALL_SUSPEND is set for every recall Suspend whatever the slot carries:
+// for work that belongs to the menu gesture and not to a performance
+// event, such as Captain's dump-to-host, which must not wait on USB.
 enum RecallReplaces : uint8_t {
   REPLACES_BANK    = 1 << 0,   // BANK_255.DAT on quad_fs()
   REPLACES_SCENERY = 1 << 1,   // SCENERY.DAT
   REPLACES_CAPTAIN = 1 << 2,   // CAPTAIN.DAT (never at the boot recall)
+  RECALL_SUSPEND   = 1 << 7,   // this Suspend is a recall, not the app menu
 };
 uint8_t RecallReplacing();
 
@@ -155,6 +159,7 @@ inline bool RecallSlot(uint8_t) { return false; }
 inline int ConsumeQuadrantsRecallHint() { return -1; }
 enum RecallReplaces : uint8_t {
   REPLACES_BANK = 1 << 0, REPLACES_SCENERY = 1 << 1, REPLACES_CAPTAIN = 1 << 2,
+  RECALL_SUSPEND = 1 << 7,
 };
 inline uint8_t RecallReplacing() { return 0; }
 inline int8_t LastSlot() { return -1; }

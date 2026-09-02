@@ -1113,6 +1113,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   // Captain exception: only the stores the slot carries, per its manifest.
   recall_replacing = (uint8_t)(flags & (CONTENT_BANK | CONTENT_SCENERY | CONTENT_CAPTAIN));
   if (skip_captain_restore) recall_replacing &= (uint8_t)~CONTENT_CAPTAIN;
+  recall_replacing |= RECALL_SUSPEND;
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_SUSPEND);
   recall_replacing = 0;
   // Those handlers persist through the shared PhzConfig map (bank file,
