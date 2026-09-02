@@ -38,17 +38,24 @@ Xenomorpher — known open
 
 ## Boot and storage budgets
 
-* **App-data EEPROM budget is unverified on real T4.1 hardware.** A
-  compile-time `static_assert` in `apps/_config.h` sums every app's declared
-  chunk against `EEPROM_APPDATA_BINARY_SIZE`, so for the *declared* budget the
-  runtime overflow ought to be unreachable — but nobody has measured actual
-  `out.used` on the module. If it ever is reached, `BuildAppData` (`OC_apps.cpp`)
-  `continue`s past the app that did not fit, and the loop starts at
-  `random(num_apps)`, so **the app that gets silently dropped is different on
-  every save** — and so is the byte order of the whole stream, including the
-  copy captured into every preset. The only report is an `APPS_SERIAL_PRINTLN`,
-  which is compiled out of `T41` and `T41_audio`; nothing is drawn on the OLED
-  and no flag is stored. Worth a bench measurement and a visible failure.
+* **App-data EEPROM budget: measured 2026-09-02, 608 of 3900 bytes (~16%).**
+  A compile-time `static_assert` in `apps/_config.h` sums every app's
+  declared chunk against `EEPROM_APPDATA_BINARY_SIZE` (3900 on T4.1,
+  `OC_config.h`), so for the *declared* budget the runtime overflow ought to
+  be unreachable -- but that only bounds the ceiling, not the actual
+  `out.used`. Measured on the bench module (T41_console, which shares
+  T41_audio's exact `ENABLE_APP_*` set) via a local preset save: `App data
+  restored: 608, expected 608` -- comfortable headroom today (~3.3 KB), and
+  not a live risk at this app count. If it ever IS reached, `BuildAppData`
+  (`OC_apps.cpp`) `continue`s past the app that did not fit, and the loop
+  starts at `random(num_apps)`, so **the app that gets silently dropped is
+  different on every save** -- and so is the byte order of the whole
+  stream, including the copy captured into every preset. The only report is
+  an `APPS_SERIAL_PRINTLN`, which is compiled out of `T41` and `T41_audio`;
+  nothing is drawn on the OLED and no flag is stored. The margin makes this
+  low-urgency now, but the failure mode (silent, different app every time,
+  invisible on a beta tester's non-debug build) is still worth a visible
+  guard before the app count grows.
 * **The boot factory-erase gesture differs between builds, and one of the two
   collides with the app-switcher chord.** `Ui::Splashscreen` selects on
   `#if defined(NORTHERNLIGHT) && !defined(IO_10V)`: A + encR on the `nlm*`

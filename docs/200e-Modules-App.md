@@ -9,6 +9,10 @@ This app reads and writes the preset banks of **other manufacturers' modules**
 over the Buchla 200e preset bus. That is unusual enough to state plainly before
 anything else, because it shapes every design decision in the app.
 
+Beta-testing this on the `preset-bus` branch? See the [Beta Guide](Xenomorpher-Beta-Guide)
+for setup and, importantly, what's still unverified — writing to another
+module is the newer half of this app.
+
 ## The thing to understand first
 
 The 200e preset bus has **no command that writes one preset**. The only

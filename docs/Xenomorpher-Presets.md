@@ -10,6 +10,9 @@ recalled from the front panel or by the case's preset manager. They are the
 Xenomorpher behaving like a native 200e module: when a 225e sends a bus-wide
 RECALL, this module changes with everything else.
 
+Beta-testing this on the `preset-bus` branch? See the [Beta Guide](Xenomorpher-Beta-Guide)
+first for how to get the firmware on and what's still unverified.
+
 Not to be confused with the thirty preset slots *inside* a 251e, which the
 [200e Modules app](200e-Modules-App) reads and writes. Different thirty.
 
