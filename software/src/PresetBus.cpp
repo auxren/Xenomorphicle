@@ -724,7 +724,7 @@ FLASHMEM static void report_query() {
 // stream of write transactions; don't thrash LittleFS mid-transfer).
 //
 // ...and never while a master job is open, even a quiet one. The flush is
-// a 32 KB LittleFS write, interrupts masked across each sector erase, and
+// a 64 KB LittleFS write (1.1 s, interrupts masked across each sector erase), and
 // the one window the 3 s quiet rule does not cover is the start of the NEXT
 // job: a Read tapped again 2 s after the last one lands the flush exactly
 // as the command goes out and the 251e begins writing back. Our slave would
