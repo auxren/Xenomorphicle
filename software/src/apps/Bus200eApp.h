@@ -299,6 +299,7 @@ private:
   int scan_index_ = 0;         // index into the module table
   int found_count_ = 0;
   int list_top_ = 0;           // scroll offset into the responder list
+  bool landed_ = false;        // first RESUME after power-up has chosen a screen
   uint8_t found_[Bus200eAppNS::kFoundBytes] = {0};
 
   // single-address probe (works for off-table addresses too, unlike the scan)
@@ -2400,6 +2401,11 @@ FLASHMEM void AppBus200e::LoadScanSet() {
   // SUCCEED on Quadrants data and hand back a garbage address.
   PhzConfig::load_config();
 
+  // Claimed before the early returns: a set that is not there yet (or was
+  // built in this session) must not make a LATER background RESUME "first".
+  const bool first_resume = !landed_;
+  landed_ = true;
+
   uint64_t bits = 0, meta = 0;
   if (!PhzConfig::getValue(Bus200eAppNS::kScanSetKey, bits)) return;
   if (!PhzConfig::getValue(Bus200eAppNS::kScanMetaKey, meta)) return;
@@ -2422,6 +2428,22 @@ FLASHMEM void AppBus200e::LoadScanSet() {
   list_top_ = 0;
   if (count)
     serial_printf("200e: %d modules remembered; no scan needed\n", count);
+
+  // Land on the module we were working on, not on the scan. The scan list is
+  // the landing page only for a setup that has never been scanned; once a set
+  // is remembered and the app-data target is in it, the home screen is where
+  // the user left off. Once per power-up: RESUME is dispatched from many
+  // places (see above), and a preset recall settling in the background must
+  // not pull the user off the screen they are on.
+  if (first_resume && count && screen_ == Bus200eAppNS::SCR_MODULE_SELECT
+      && scan_state_ == Bus200eAppNS::SCAN_IDLE) {
+    for (int i = 0; i < n; ++i) {
+      if (Buchla200eModuleAt(i)->addr != target_ || !IsFound(found_, i)) continue;
+      RefreshSnapshotFlag();
+      screen_ = Bus200eAppNS::SCR_MODULE_HOME;
+      break;
+    }
+  }
 #endif
 }
 

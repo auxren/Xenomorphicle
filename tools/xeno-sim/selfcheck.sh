@@ -1020,12 +1020,23 @@ $SIM --app "200e Modules" --state "$IMG/scan" --keys "$SCAN" >/dev/null 2>&1
 # The property, phrased so it cannot be satisfied by re-scanning: read the
 # module list on a fresh boot WITHOUT scanning. "B:probe N" counts what the app
 # believes it found, so N>0 with no scan in the script is memory, not a scan.
+# The boot lands on the module's home screen (next check), so step back to the
+# list with encL first.
 found_after_cycle=$($SIM --app "200e Modules" --state-in "$IMG/scan" \
-                         --keys "step2000" --dump-fb 2>/dev/null \
+                         --keys "step2000,l,step300" --dump-fb 2>/dev/null \
                     | python3 fbtext.py - | grep -o 'B:probe [0-9]*' | head -1)
 [ "$found_after_cycle" = "B:probe 3" ] \
   && ok "the scan set survives a power cycle without re-scanning" \
   || bad "the scan set did not survive a power cycle (said: '$found_after_cycle')"
+
+# Where a scanned setup lands: on the module it was working on, not on the
+# scan list. It used to boot to the list every time, so a module that had
+# been set up once still greeted the user with "encL:scan" on every power-up.
+$SIM --app "200e Modules" --state-in "$IMG/scan" --keys "step2000" --dump-fb 2>/dev/null \
+  | python3 fbtext.py - > "$TMP/land"
+grep -q '251 A @5C' "$TMP/land" && grep -q 'Slot' "$TMP/land" \
+  && ok "a scanned setup boots to the remembered module's home screen" \
+  || bad "a scanned setup did not boot to the module's home: $(head -3 "$TMP/land" | tr '\n' '/')"
 
 # The control: the same screen on a module that never scanned. Without this the
 # check above would pass against an app that hard-codes three responders.
@@ -1035,6 +1046,11 @@ found_virgin=$($SIM --app "200e Modules" --state-in "$IMG/base" \
 [ "$found_virgin" = "B:probe 0" ] \
   && ok "...and a module that never scanned still reports nothing found" \
   || bad "an unscanned module already claims responders (said: '$found_virgin')"
+# ...and lands on the address/scan screen, since there is nothing to land on.
+$SIM --app "200e Modules" --state-in "$IMG/base" --keys "step2000" --dump-fb 2>/dev/null \
+  | python3 fbtext.py - | grep -q '^y=15 .*Addr' \
+  && ok "...and boots to the scan screen, the only sensible landing for it" \
+  || bad "an unscanned module did not boot to the scan screen"
 
 # The sledgehammer itself, and the sharpest evidence of it. OC::SaveAppData()
 # calls SaveGlobalSettings(), which rewrites 000.SCL-003.SCL on the card -- so
