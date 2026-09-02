@@ -1430,9 +1430,17 @@ void AppBus200e::DrawModuleSelect() const {
   graphics.printf("Addr %02X", addr_);
   graphics.invertRect(28, 14, 14, 10);   // the encoder target has focus
   graphics.setPrintPos(48, 15);
-  // "probably": address is a convention, not a proof -- clones squat it.
-  if (model) graphics.printf("?%s", model);
-  else       graphics.print("?unknown");
+  // The model is what the address means BY CONVENTION (header): a clone
+  // squatting 0x28 lists as a 259 A. This used to be said with a '?' in
+  // front of every name, here and on each responder row -- which, being on
+  // every row, distinguished nothing and read as "unknown" / display fault
+  // (Oren, at the bench: "there are ? in front of the module names"). A
+  // worded hedge does not fit either: 13 columns remain after "Addr 5C" and
+  // "285 FS A" alone is 8. So the name is plain and the address printed
+  // beside it is the disclosure -- "5C 251 A" says exactly what is known,
+  // which is also how Studio H's own manager presents it. Only an address
+  // the table has no name for says so.
+  graphics.print(model ? model : "unknown");
 
   graphics.setPrintPos(0, 26);
   if (scan_state_ != Bus200eAppNS::SCAN_IDLE) {
@@ -1463,7 +1471,7 @@ void AppBus200e::DrawModuleSelect() const {
     if (!e) break;
     const int y = 36 + row * 9;
     graphics.setPrintPos(4, y);
-    graphics.printf("%02X ?%s", e->addr, e->name);
+    graphics.printf("%02X %s", e->addr, e->name);
     if (e->addr == addr_) graphics.drawRect(0, y + 2, 3, 3);
   }
 }
@@ -1691,17 +1699,17 @@ void AppBus200e::DrawModuleHome() const {
   using namespace Bus200eAppNS;
   const char *model = Buchla200eModelForAddress(target_);
 
-  // Line 1: what we are talking to, and which preset. "?" because the
-  // address only implies the model by convention -- clones squat addresses.
+  // Line 1: what we are talking to, and which preset. The model is the
+  // address->table lookup (header); the address is printed beside it, which
+  // is the honest statement -- "259e @30" says exactly what is known.
   //
-  // This used to be "~", which is NOT IN THE FONT: gfx_font_6x8.h holds 92
-  // glyphs from 0x20, ending at '{' (0x7B), so '~' (0x7E) indexed three
-  // positions past the end of the table and drew whatever bytes followed. The
-  // hedge rendered as a 6x8 noise block that reads as display corruption, and
-  // the screen then asserted the model as fact. '?' is in the font and is
-  // already this firmware's unknown-marker ("?%d", "Z= ???").
+  // History of the hedge glyph, so it is not re-added: it was "~", which is
+  // NOT IN THE FONT (gfx_font_6x8.h holds 92 glyphs from 0x20 to '{', so
+  // '~' indexed past the table and drew a noise block); then '?', which is
+  // in the font but, on every screen, read as "unknown". See
+  // DrawModuleSelect for why no glyph at all is the right amount of hedge.
   graphics.setPrintPos(0, 13);
-  graphics.printf("?%s @%02X", model ? model : "?", target_);
+  graphics.printf("%s @%02X", model ? model : "?", target_);
   graphics.setPrintPos(80, 13);
   graphics.printf("Slot %d", slot_ + 1);          // 1-indexed for humans
 
