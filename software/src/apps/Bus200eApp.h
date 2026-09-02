@@ -305,6 +305,7 @@ private:
   // NOBODY can hand it back instead of replacing it. See KeepRememberedIfEmpty.
   uint8_t remembered_[Bus200eAppNS::kFoundBytes] = {0};
   int remembered_count_ = 0;
+  bool scan_kept_ = false;     // the last scan heard nobody; showing the old set
   void KeepRememberedIfEmpty();
 
   // single-address probe (works for off-table addresses too, unlike the scan)
@@ -564,6 +565,7 @@ void AppBus200e::StartScan() {
   }
   remembered_count_ = found_count_;
   found_count_ = 0;
+  scan_kept_ = false;
   list_top_ = 0;
   scan_index_ = 0;
   scan_state_ = Bus200eAppNS::SCAN_NEXT;
@@ -610,6 +612,7 @@ void AppBus200e::KeepRememberedIfEmpty() {
   for (int i = 0; i < Bus200eAppNS::kFoundBytes; ++i) found_[i] = remembered_[i];
   found_count_ = remembered_count_;
   found_dirty_ = false;   // nothing new to write; the file already holds this
+  scan_kept_ = true;      // and say so on the status line, not only here
   serial_printf("200e: scan found nobody; keeping the %d remembered\n",
                 found_count_);
 }
@@ -637,6 +640,7 @@ void AppBus200e::StartProbe() {
     probe_addr_ = addr_;
     probe_result_ = -1;
     probe_active_ = true;
+    scan_kept_ = false;
     probe_ms_ = millis();
   } else {
     // Refused by the query FSM itself. Previously this left no trace at all.
@@ -1503,6 +1507,10 @@ void AppBus200e::DrawModuleSelect() const {
   } else if (probe_result_ >= 0) {
     graphics.printf("Probe %02X %s", probe_addr_,
                     probe_result_ ? "answered" : "silent");
+  } else if (scan_kept_) {
+    // Otherwise the list below looks exactly as it did before the scan and
+    // the press appears to have done nothing.
+    graphics.printf("Scan: silent, kept %d", found_count_);
   } else {
     graphics.printf("encL:scan B:probe %d", found_count_);
   }

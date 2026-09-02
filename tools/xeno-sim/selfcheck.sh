@@ -1062,6 +1062,15 @@ $SIM --case-off --app "200e Modules" --state "$IMG/rescan" \
 grep -q 'scan found nobody; keeping the 3 remembered' "$TMP/rescan.log" \
   && ok "a scan that hears nobody says so and keeps the remembered set" \
   || bad "the empty scan did not report keeping the set: $(grep -i 'scan' "$TMP/rescan.log" | tail -2 | tr '\n' '/')"
+# ...and on the screen, or the press looks like it did nothing: the list is
+# exactly what it was before the scan. (--dump-fb mutes the log, hence the
+# second run.)
+$SIM --case-off --app "200e Modules" --state-in "$IMG/scan" \
+     --keys "step2000,l,step300,$SCAN" --dump-fb 2>/dev/null \
+  | python3 fbtext.py - > "$TMP/kept"
+grep -q 'Scan: silent, kept 3' "$TMP/kept" \
+  && ok "...and the status line says the list is the kept one" \
+  || bad "the kept set is not announced on screen: $(sed -n 2,3p "$TMP/kept" | tr '\n' '/')"
 # Judged by the landing screen, not by "B:probe" after an encL: a module whose
 # set was lost boots to the scan screen, where that same encL starts a scan
 # that finds the three responders again and reports 3 -- a false pass.
