@@ -601,7 +601,7 @@ FLASHMEM void setup() {
   HS::LoadClockRouting();  // GLOBALS.CFG is still the loaded map here
   // restores the last bus preset on any T4.1 (bench units included);
   // no bus traffic is emitted, so non-bus hardware is unaffected
-  OC::PresetEngine::BootRecall();  // gated on I2C_Expansion inside
+  OC::PresetEngine::BootRecall();
 
   // Welcome splash
   OC::ui.Splashscreen(firstrun, 1);

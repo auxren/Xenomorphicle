@@ -177,6 +177,12 @@ static uint32_t req_dropped = 0;
 static int8_t last_slot = -1;
 static bool last_was_save = false;
 static uint32_t cur_slot_dirty_ms = 0;   // 0 = clean
+// What GLOBALS.CFG holds under kCurSlotKey, mirrored so persist_cur_slot can
+// tell "already there" from "needs a write" without reloading the file. This
+// engine is the key's only writer (recall applies globals to RAM, never back
+// to GLOBALS.CFG), so the mirror cannot go stale behind our back. -1 = unknown
+// or absent, which forces the read-compare-write path once.
+static int8_t persisted_slot = -1;
 static uint32_t op_count = 0;            // completed save/recall operations
 static bool last_save_ok = false;
 // Why the most recent recall refused, or nullptr if it succeeded. A recall
@@ -1158,13 +1164,22 @@ uint32_t RequestsDropped() { return req_dropped; }
 FLASHMEM static void persist_cur_slot() {
   cur_slot_dirty_ms = 0;
   if (last_slot < 0) return;
+  // Recalling the slot that is already persisted (the common case: a bus
+  // save, or the manager re-sending the current preset) must cost nothing.
+  // Before the mirror existed this reloaded GLOBALS.CFG and RESUMEd the app
+  // every time just to discover that, and for Quadrants a RESUME is a bank
+  // reload -- 3s after every preset op, for no state change at all.
+  if (persisted_slot == last_slot) return;
   PhzConfig::load_config();
   uint64_t v = 0;
   PhzConfig::getValue(kCurSlotKey, v);
-  const bool changed = (int64_t)v != last_slot;
-  if (changed) {
+  if ((int64_t)v != last_slot) {
     PhzConfig::setValue(kCurSlotKey, (uint64_t)last_slot);
-    PhzConfig::save_config();
+    if (PhzConfig::save_config()) persisted_slot = last_slot;
+    serial_printf("PresetEngine: current slot %d persisted%s\n", last_slot,
+                  persisted_slot == last_slot ? "" : " FAILED");
+  } else {
+    persisted_slot = last_slot;
   }
   // CRITICAL: hand the shared map back to the active app. Quadrants
   // assumes bank-map residency; leaving GLOBALS loaded here would make
@@ -1177,6 +1192,7 @@ FLASHMEM void BootRecall() {
   uint64_t v = 0;
   PhzConfig::load_config();
   if (!PhzConfig::getValue(kCurSlotKey, v) || v >= kNumSlots) return;
+  persisted_slot = (int8_t)v;   // seed the mirror from the one read boot does
   if (!SlotUsed((uint8_t)v)) return;
   serial_printf("PresetEngine: boot recall slot %d\n", (int)v);
   // Local only -- no bus broadcast at power-up. Queued as its own op so the
