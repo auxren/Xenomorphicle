@@ -126,9 +126,40 @@ def read_lines(buf, glyphs):
                     x = cx
                 else:
                     x += 1
-    # A glyph run found at y is also "found" at y+-0 in the other polarity only
-    # by coincidence; keep both, but sort so reading order is reading order.
-    return sorted(out)
+    return resolve_overlaps(buf, out)
+
+
+def resolve_overlaps(buf, runs):
+    """Drop runs that are only a re-reading of another run's pixels.
+
+    Glyphs with one row of ink ('-' at row 3, '_' at row 6) match the same
+    pixels from two different top rows: "end:--" printed at y=22 was also
+    reported as "__" at y=19. Between two runs that share lit pixels the
+    longer one is the text and the shorter one the coincidence, so accept
+    runs longest-first and refuse any whose ink is already spoken for.
+    """
+    def ink(y, x, text):
+        px = set()
+        for i, ch in enumerate(text):
+            if ch == " ":
+                continue
+            for cx in range(x + i * FONT_W, x + i * FONT_W + FONT_W):
+                for cy in range(y, y + FONT_H):
+                    if pixel(buf, cx, cy):
+                        px.add((cx, cy))
+        return px
+
+    claimed = set()
+    kept = []
+    for y, x, inv, text in sorted(
+            runs, key=lambda r: -len(r[3].replace(" ", ""))):
+        px = ink(y, x, text)
+        if px & claimed:
+            continue
+        claimed |= px
+        kept.append((y, x, inv, text))
+    # sort so reading order is reading order
+    return sorted(kept)
 
 
 def main():
