@@ -64,21 +64,12 @@ Xenomorpher — known open
 
 ## 200e app
 
-* **The write-confirm screen says `29 re-sent - no undo`, and an undo now
-  exists.** `CommitWrite` snapshots the bank to internal flash before the first
-  byte is modified, and a `BAD` verdict offers `encR:UNDO  encL:keep`. The
-  confirm copy, the comment above it in `apps/Bus200eApp.h`, and the header
-  comment in `Buchla200eWriteGuard.h` all still state that the instrument keeps
-  no copy. Under-claiming, but still a comment that contradicts the code below
-  it.
 * **Arm and confirm are the same button on one of the two routes.** From the
   module home, A arms and encR commits. Reached through the action row's *Save*
   entry, encR arms *and* encR commits, with only the 350 ms dead window between
   them.
 * `apps/Bus200eApp.h`'s encL handler says "see the note in the module-select
   handler"; there is no such note. A comment survived a code move.
-* Edit / Gen / Rec are deliberate stubs in the action row. The row's shape is
-  settled; the behaviour behind three of its five entries is not.
 
 ## UI
 

@@ -97,9 +97,7 @@ enum GenParam : uint8_t {
 static constexpr int kGenMaxLength = 32;
 static constexpr int kGenMinLength = 2;
 
-// Home-screen action row. READ and SAVE are implemented; Edit/Gen/Rec are
-// deliberate stubs so the row's shape (and the muscle memory) is settled
-// before the phases that fill them in.
+// Home-screen action row.
 enum HomeAction : uint8_t {
   ACT_READ = 0,
   ACT_EDIT,
@@ -1893,8 +1891,8 @@ void AppBus200e::DrawModule251e() const {
     return;
   }
 
-  // Action row. Read and Save are wired; Edit/Gen/Rec are stubs.
-  // 4px gaps, not 6: five entries at 6px spill to 132px on a 128px screen.
+  // Action row. 4px gaps, not 6: five entries at 6px spill to 132px on a
+  // 128px screen.
   int x = 0;
   for (int i = 0; i < ACT_COUNT; ++i) {
     graphics.setPrintPos(x, 56);
