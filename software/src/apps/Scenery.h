@@ -661,14 +661,13 @@ void AppScenery::GetIOConfig(OC::IOConfig &ioconfig) const
   ioconfig.cv[2].set("Slew");
   ioconfig.cv[3].set("RndScn4");
 
-  ioconfig.outputs[0].set("Out A", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[1].set("Out B", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[2].set("Out C", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[3].set("Out D", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[4].set("Out E", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[5].set("Out F", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[6].set("Out G", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[7].set("Out H", OUTPUT_MODE_PITCH);
+  // outputs[] is DAC_CHANNEL_COUNT long: eight literal sets on a
+  // four-channel build wrote past IOConfig.
+  static const char *const names[] = {
+    "Out A", "Out B", "Out C", "Out D", "Out E", "Out F", "Out G", "Out H",
+  };
+  static_assert(DAC_CHANNEL_COUNT <= 8, "extend the name table");
+  for (int i = 0; i < DAC_CHANNEL_COUNT; ++i) ioconfig.outputs[i].set(names[i], OUTPUT_MODE_PITCH);
 }
 
 FLASHMEM

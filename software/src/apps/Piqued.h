@@ -1299,14 +1299,11 @@ void AppQuadEnvelopeGenerator::DrawDebugInfo() const {
 
 void AppQuadEnvelopeGenerator::GetIOConfig(OC::IOConfig &ioconfig) const
 {
-  ioconfig.outputs[0].set("CH1", OC::OUTPUT_MODE_UNI);
-  ioconfig.outputs[1].set("CH2", OC::OUTPUT_MODE_UNI);
-  ioconfig.outputs[2].set("CH3", OC::OUTPUT_MODE_UNI);
-  ioconfig.outputs[3].set("CH4", OC::OUTPUT_MODE_UNI);
-  ioconfig.outputs[4].set("CH5", OC::OUTPUT_MODE_UNI);
-  ioconfig.outputs[5].set("CH6", OC::OUTPUT_MODE_UNI);
-  ioconfig.outputs[6].set("CH7", OC::OUTPUT_MODE_UNI);
-  ioconfig.outputs[7].set("CH8", OC::OUTPUT_MODE_UNI);
+  // outputs[] is DAC_CHANNEL_COUNT long: eight literal sets on a
+  // four-channel build wrote past IOConfig.
+  static const char *const names[] = {"CH1", "CH2", "CH3", "CH4", "CH5", "CH6", "CH7", "CH8"};
+  static_assert(DAC_CHANNEL_COUNT <= 8, "extend the name table");
+  for (int i = 0; i < DAC_CHANNEL_COUNT; ++i) ioconfig.outputs[i].set(names[i], OC::OUTPUT_MODE_UNI);
 }
 
 } // namespace OC
