@@ -122,6 +122,14 @@ FLASHMEM void Enter() {
 
 FLASHMEM void Exit() {
   active = false;
+  // The hold timers are cleared by the `if (active)` block in Task(), which
+  // stops running here. Leaving the overlay with a button still down would
+  // otherwise freeze one at non-zero, and a stale hold blocks the follow of
+  // bus recalls (above) for as long as the overlay stays closed.
+  hold_start_ms = 0;
+  recall_hold_ms = 0;
+  recall_fired = false;
+  edit_mode = false;
   persist_assignments();
 }
 
@@ -416,8 +424,17 @@ FLASHMEM void Draw() {
 void Task() {
   // follow externally-driven preset changes (WPM/225e recall, boot recall)
   // so trigger cycling always steps from the CURRENT preset, 225e-style
+  //
+  // Not while the panel is mid-gesture. A rename commits to `sel` when DONE
+  // is clicked, so a WPM recall landing during the edit would move the name
+  // onto whichever slot was just recalled; and a STORE or RECALL hold is a
+  // statement about the slot that was showing when the button went down --
+  // following the bus mid-hold would store the freshly-recalled state into
+  // the bus's slot instead of the one under the cursor. The op count is
+  // left unconsumed, so the catch-up happens the moment the gesture ends.
   static uint32_t seen_opcount = 0;
-  if (pending_slot < 0 && PresetEngine::OpCount() != seen_opcount) {
+  const bool mid_gesture = edit_mode || hold_start_ms || recall_hold_ms;
+  if (pending_slot < 0 && !mid_gesture && PresetEngine::OpCount() != seen_opcount) {
     seen_opcount = PresetEngine::OpCount();
     const int last = PresetEngine::LastSlot();
     if (last >= 0 && (uint8_t)last != sel) {
