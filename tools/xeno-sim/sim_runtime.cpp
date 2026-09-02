@@ -310,6 +310,14 @@ void SimRuntimeTickMs() {
   while ((int32_t)(until - SimNowUs()) > 0)
     BackgroundUs(OC_CORE_TIMER_RATE);
   SimBusTask();        // the fake modules on the other end of the wire
+  // TWO passes of loop() in the same millisecond, deliberately. Hardware
+  // runs loop() a few hundred times per millisecond, so a timer stamped in
+  // one pass is re-checked in the same millisecond by the next -- and a
+  // stamp of `millis() | 1` (an even reading rounded UP) makes `now - stamp`
+  // wrap to 0xFFFFFFFF on that re-check. One pass per millisecond let the
+  // 150 ms-tap check below pass against exactly that bug; the second pass
+  // is what makes the simulated clock honest about it.
+  LoopPass();
   LoopPass();
 }
 

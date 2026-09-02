@@ -81,6 +81,16 @@ $SIM --keys "$ENTER,r-down,step150,r-up,step2000" > "$TMP/h4" 2>&1
 recall_ran "$TMP/h4" && bad "a 150ms tap fired a recall" \
                      || ok "a 150ms tap does nothing"
 
+# The same tap one millisecond later. The hold timer used to be stamped
+# `millis() | 1`, which rounds an even reading UP; the next loop pass in the
+# same millisecond then saw now - stamp wrap to 0xFFFFFFFF and the 250 ms
+# hold was "over" -- a plain tap fired a bus-wide RECALL whenever the press
+# landed on an even millisecond. The simulated clock is deterministic, so
+# the check above only ever tried one parity; this one tries the other.
+$SIM --keys "l-down,step20,r-down,step80,l-up,r-up,step201,r-down,step150,r-up,step2000" > "$TMP/h5" 2>&1
+recall_ran "$TMP/h5" && bad "a 150ms tap on the other millisecond parity fired a recall" \
+                     || ok "a 150ms tap does nothing on either millisecond parity"
+
 echo "screens are reachable"
 reaches() {  # name, keys, expected screen word
   $SIM --keys "$2" 2>&1 | grep -q "^  $3 " \

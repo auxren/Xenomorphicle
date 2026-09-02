@@ -33,7 +33,10 @@
 void SimRuntimeBoot(bool reset_settings, bool answer_cancel = false);
 
 // One simulated millisecond: 17 core ISR passes (16.6 kHz), one UI poll
-// (1 kHz), then one pass of loop(). Returns after advancing the clock by 1 ms.
+// (1 kHz), then TWO passes of loop() -- hardware runs loop() hundreds of times
+// per millisecond, and a timer stamped in one pass and re-checked in the same
+// millisecond by the next is a bug class the simulator must be able to see
+// (see SimRuntimeTickMs). Returns after advancing the clock by 1 ms.
 void SimRuntimeTickMs();
 
 // Advance n simulated milliseconds.
