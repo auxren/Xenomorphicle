@@ -668,6 +668,23 @@ FLASHMEM static bool section_to_mem(File &f, const SectionEntry &e,
   return sum16(buf, e.length) == e.checksum;
 }
 
+// Checksum a section in place, without a buffer. Reads only, off
+// memory-mapped flash, so a few KB costs well under a millisecond -- cheap
+// enough to run on every recall, for every section the container carries.
+FLASHMEM static bool section_sum_ok(File &f, const SectionEntry &e) {
+  if (!f.seek(e.offset)) return false;
+  uint8_t buf[128];
+  uint32_t left = e.length;
+  uint16_t sum = 0;
+  while (left) {
+    const uint32_t want = left < sizeof(buf) ? left : sizeof(buf);
+    if (f.read(buf, want) != (int)want) return false;
+    sum += sum16(buf, want);
+    left -= want;
+  }
+  return sum == e.checksum;
+}
+
 // True when `dest` already holds exactly the section's bytes. Reads only,
 // which on memory-mapped flash costs nothing next to the block erase the
 // rewrite would take -- a recall that changes nothing about Captain's setup
@@ -976,6 +993,17 @@ FLASHMEM static RecallStage recall_stage_head(uint8_t slot, bool &from_container
     const SectionEntry *g = find_section(sec, n, 'G');
     bool ok = a && g && f.seek(a->offset) && read_appdata_stream(f);
     if (ok) ok = section_to_mem(f, *g, sec_buf, kSecBufBytes);
+    // The file-backed sections too, HERE, before anything live is touched.
+    // They used to be checked only as section_to_file streamed them out in
+    // step 4, with the app world already frozen and the outgoing app's
+    // files already being replaced: a bad C section then failed quietly,
+    // the previous slot's CAPTAIN.DAT stayed in place, and the recall
+    // reported "done" with one section belonging to another preset. A
+    // preset is applied whole or refused whole.
+    for (int i = 0; ok && i < n; ++i) {
+      if (sec[i].kind == 'A' || sec[i].kind == 'G') continue;
+      ok = section_sum_ok(f, sec[i]);
+    }
     f.close();
     // The container exists, so a failure here is corruption, not emptiness.
     if (!ok) return STAGE_BAD;

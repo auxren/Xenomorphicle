@@ -545,6 +545,22 @@ $SIM --state-in "$IMG/bad2" --keys "$ENTER,r-down,step300,r-up,step3000,b,step50
   && ok "the refused recall leaves an app drawing" \
   || bad "nothing drawn after the refused recall"
 
+# The file-backed sections (B/S/C) used to be checksummed only as they were
+# streamed out to their live files in step 4 -- after validation, with the
+# app world frozen -- and a failure there was silent: the recall reported
+# "done" with the previous slot's file still in place. Scenery gives the sim
+# a slot with an S section to damage. Control first, again.
+$SIM --app Scenery --state-out "$IMG/goodS" --keys "$ENTER,l-down,step600,l-up,step4000" >/dev/null 2>&1
+$SIM --app Scenery --state-in "$IMG/goodS" --keys "$ENTER,r-down,step300,r-up,step3000" 2>&1 \
+  | grep -q 'recall slot 0 done' \
+  && ok "the undamaged Scenery slot recalls (control)" \
+  || bad "the undamaged Scenery slot did not recall"
+python3 corrupt_slot.py "$IMG/goodS" "$IMG/badS" 0 S
+$SIM --app Scenery --state-in "$IMG/badS" --keys "$ENTER,r-down,step300,r-up,step3000" 2>&1 \
+  | grep -q 'refused (BAD PRESET)' \
+  && ok "a flipped bit in a file-backed (S) section is refused before anything is applied" \
+  || bad "a damaged S section was recalled as done"
+
 echo "the pre-write bank snapshot"
 
 # Before this existed the write path could DETECT that it had damaged a preset
