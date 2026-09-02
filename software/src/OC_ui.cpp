@@ -163,6 +163,16 @@ void FASTRUN Ui::Poll() {
   button_state_ = button_state;
 }
 
+FLASHMEM void Ui::Inject(UI::EventType type, uint16_t control, int16_t value) {
+  // Only the DOWN of a tap carries its button in the mask, as the raw pin
+  // would; by the PRESS the pin is high again. No chord is ever synthesized:
+  // the both-encoder and A/Z gestures open screens that run their own loops.
+  const uint16_t mask = (type == UI::EVENT_BUTTON_DOWN) ? control : 0;
+  noInterrupts();
+  PushEvent(type, control, value, mask);
+  interrupts();
+}
+
 // Loop context only, and only ever from Main.cpp's loop() -- which is itself
 // FLASHMEM. The ISR half of the UI is Ui::Poll() above (it fills the event
 // queue); this is the half that DRAINS it, so it does nothing at all unless a

@@ -83,6 +83,15 @@ public:
   bool AppSettings(bool drawmenu);
   UiMode DispatchEvents(const RuntimeSlot &appslot);
 
+  // Bench: queue a synthetic panel event from the console, exactly as
+  // Poll() would queue the physical one, so it lands wherever a real press
+  // would -- app, overlay or menu. Poll() runs from the 1 kHz UI timer ISR
+  // and is the queue's only other producer, so the push is bracketed
+  // against it; the consumer (DispatchEvents) is loop context like the
+  // console and cannot interleave. Callers send a tap as DOWN then PRESS,
+  // the way the panel reports one.
+  void Inject(UI::EventType type, uint16_t control, int16_t value);
+
   void Poll();
   void Poke();
   void preempt_screensaver(bool v);

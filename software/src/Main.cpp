@@ -297,6 +297,54 @@ extern unsigned long _ebss;
 static constexpr uint32_t kStackPaint = 0xA5C3A5C3u;
 static uint32_t *stack_paint_lo = nullptr;
 static uint32_t *stack_paint_hi = nullptr;
+// 'j' + one character: press the panel from the console. Lowercase taps a
+// button (DOWN then PRESS, as the panel reports one); uppercase holds it
+// (DOWN, LONG_PRESS, LONG_RELEASE); the bracket and sign keys turn an
+// encoder one detent. The event goes through the queue the physical panel
+// fills, so it lands wherever a real press would. The scan was the case in
+// point: the only thing that starts one is encL on the module list, which
+// had no remote form, so the scan path could not be exercised from a
+// headless bench at all.
+#if defined(__IMXRT1062__)
+FLASHMEM static void ConsolePress(char which) {
+  uint16_t button = 0;
+  int16_t detent = 0;
+  uint16_t encoder = 0;
+  switch (which) {
+    case 'l': case 'L': button = OC::CONTROL_BUTTON_L; break;
+    case 'r': case 'R': button = OC::CONTROL_BUTTON_R; break;
+    case 'a': case 'A': button = OC::CONTROL_BUTTON_A; break;
+    case 'b': case 'B': button = OC::CONTROL_BUTTON_B; break;
+    case 'z': case 'Z': button = OC::CONTROL_BUTTON_Z; break;
+    case 'x': case 'X': button = OC::CONTROL_BUTTON_X; break;
+    case 'y': case 'Y': button = OC::CONTROL_BUTTON_Y; break;
+    case '[': encoder = OC::CONTROL_ENCODER_L; detent = -1; break;
+    case ']': encoder = OC::CONTROL_ENCODER_L; detent = +1; break;
+    case '-': encoder = OC::CONTROL_ENCODER_R; detent = -1; break;
+    case '+': case '=': encoder = OC::CONTROL_ENCODER_R; detent = +1; break;
+    default:
+      Serial.println("press: cancelled (l r a b z x y tap, capitals hold, "
+                     "[ ] encL, - + encR)");
+      return;
+  }
+  if (encoder) {
+    OC::ui.Inject(UI::EVENT_ENCODER, encoder, detent);
+    Serial.printf("press: enc%c %+d\n",
+                  encoder == OC::CONTROL_ENCODER_L ? 'L' : 'R', detent);
+    return;
+  }
+  const bool hold = (which >= 'A' && which <= 'Z');
+  OC::ui.Inject(UI::EVENT_BUTTON_DOWN, button, 0);
+  if (hold) {
+    OC::ui.Inject(UI::EVENT_BUTTON_LONG_PRESS, button, 0);
+    OC::ui.Inject(UI::EVENT_BUTTON_LONG_RELEASE, button, 0);
+  } else {
+    OC::ui.Inject(UI::EVENT_BUTTON_PRESS, button, 0);
+  }
+  Serial.printf("press: %c %s\n", which, hold ? "held" : "tapped");
+}
+#endif
+
 FLASHMEM static void stack_paint() {
   uint32_t sp;
   asm volatile("mov %0, sp" : "=r"(sp));
@@ -948,6 +996,11 @@ FLASHMEM __attribute__((noinline)) void loop() {
       static bool app_switch_pending = false;
       static uint8_t app_switch_digits = 0;
       static uint8_t app_switch_value = 0;
+#if defined(__IMXRT1062__)
+      // 'j' bench trigger: one more character names the control to press.
+      // See ConsolePress().
+      static bool press_pending = false;
+#endif
       static bool recall_slot_pending = false;
       static uint8_t recall_slot_digits = 0;
       static uint8_t recall_slot_value = 0;
@@ -1005,6 +1058,13 @@ FLASHMEM __attribute__((noinline)) void loop() {
 #endif
           continue;
         }
+#if defined(__IMXRT1062__)
+        if (press_pending) {
+          press_pending = false;
+          ConsolePress((char)cmd);
+          continue;
+        }
+#endif
         if (app_switch_pending) {
           if (cmd < '0' || cmd > '9') {
             Serial.println("app switch: cancelled (not a decimal digit)");
@@ -1197,6 +1257,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.println("-- system --");
 #if defined(__IMXRT1062__)
             Serial.println("t selftest   a activate Captain MIDI   A switch app by index (lists them)");
+            Serial.println("j<key> press the panel: l r a b z x y tap, capitals hold, [ ] encL, - + encR");
 #endif
             Serial.printf("I app ISR [%s]   D display [%s]   L app loop [%s]\n",
                           OC::CORE::app_isr_enabled ? "on" : "OFF",
@@ -1424,6 +1485,10 @@ FLASHMEM __attribute__((noinline)) void loop() {
           case 't': SelfTest(); break;  // one-shot system health report
           case 'K': ButtonWatch(); break;  // name the physical buttons
           case 'a': OC::SwitchToDefaultApp(); break;  // remote: activate Captain
+          case 'j':  // press the panel: one more character names the control
+            Serial.println("press: l r a b z x y tap, capitals hold, [ ] encL, - + encR");
+            press_pending = true;
+            break;
           case 'A':  // switch to any app by container index (2 decimal digits)
             Serial.println("app switch: type 2 decimal digits for the index");
             OC::ListApps();
