@@ -195,7 +195,14 @@ void AudioConnection_F32::connect(void) {
     while (p->next_dest) p = p->next_dest;
     p->next_dest = this;
   }
+  // Mirrors the stock int16 AudioConnection::connect() (framework-arduinoteensy
+  // cores/teensy4/AudioStream.cpp): track how many connections currently
+  // reference each endpoint, not just whether one ever existed, so
+  // disconnect() below can tell whether `active` should actually drop back
+  // to false again.
+  src->numConnections++;
   src->active = true;
+  dst->numConnections++;
   dst->active = true;
   isConnected = true;
   __enable_irq();
@@ -233,6 +240,19 @@ void AudioConnection_F32::disconnect(void) {
     AudioStream_F32::release(dst->inputQueue_f32[dest_index]);
     dst->inputQueue_f32[dest_index] = NULL;
   }
+  // Xenomorphicle fix: the stock int16 AudioConnection::disconnect() this
+  // codebase's framework already widens (see connect()'s comment above)
+  // clears `active` once an endpoint's last connection is gone; this F32
+  // sibling never did, so an AudioStream_F32 that Acquire()/Release()s a
+  // resource around its active lifetime (AudioTweightyF32 is the first)
+  // kept getting update() called by the audio ISR after a logical "stop" --
+  // `active` had latched true permanently on first connect. Guard against
+  // underflow: numConnections is a uint8_t and connect()/disconnect() should
+  // always balance, but never let a mismatched pair wrap it negative.
+  if (src->numConnections > 0) src->numConnections--;
+  if (src->numConnections == 0) src->active = false;
+  if (dst->numConnections > 0) dst->numConnections--;
+  if (dst->numConnections == 0) dst->active = false;
   isConnected = false;
   __enable_irq();
 }

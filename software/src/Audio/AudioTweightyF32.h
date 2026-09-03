@@ -59,6 +59,8 @@ public:
       buffer_l_(external_psram_size ? kBufferSamples : kBufferSamples / 32),
       buffer_r_(external_psram_size ? kBufferSamples : kBufferSamples / 32) {
     delay_secs_.fill(OnePole(Interpolated(0.0f, AUDIO_BLOCK_SAMPLES), 0.0002f));
+    tap_mix_.fill(Interpolated(1.0f, AUDIO_BLOCK_SAMPLES / kChunkSize));
+    tap_feedback_.fill(Interpolated(1.0f, AUDIO_BLOCK_SAMPLES / kChunkSize));
     min_delay_secs_ = (kChunkSize + 2) / AUDIO_SAMPLE_RATE_EXACT;
     const size_t samples = external_psram_size ? kBufferSamples : kBufferSamples / 32;
     max_delay_secs_ = (samples - 1) / AUDIO_SAMPLE_RATE_EXACT;
@@ -144,6 +146,28 @@ public:
     }
   }
 
+  // 288r precedent: each tap's own POT8-16 slider feeds only that tap's own
+  // output jack, never a shared per-tap-count-normalized bus scalar -- see
+  // TweightyApp.h's class comment for the hardware citation. tap_gain (the
+  // EQUAL_POWER_EQUAL_MIX[tap_count_] scaling below) still applies on top,
+  // same as before, so adding taps doesn't silently deepen the mix.
+  void SetTapMix(int tap, float level) {
+    if (tap < 0 || tap >= static_cast<int>(kTaps)) return;
+    CONSTRAIN(level, 0.0f, 1.0f);
+    tap_mix_[tap] = level;
+  }
+
+  // Not a 288r feature -- Tweighty's own extension, decoupled from
+  // SetTapMix() so a tap can feed the recirculation path at a different
+  // level than it feeds the output bus (silent taps can still drive the
+  // loop, audible taps can stay out of it). Defaults to 1.0 so an
+  // untouched tap reproduces the old uniform-gain feedback math exactly.
+  void SetTapFeedback(int tap, float level) {
+    if (tap < 0 || tap >= static_cast<int>(kTaps)) return;
+    CONSTRAIN(level, 0.0f, 1.0f);
+    tap_feedback_[tap] = level;
+  }
+
   void SetFeedback(float fb) {
     CONSTRAIN(fb, 0.0f, 1.0f);
     feedback_ = fb;
@@ -204,6 +228,19 @@ public:
     // ~loop_window_secs_, briefly re-admitting live input into what should
     // be a frozen loop. Comparing against the write gate's own last-known
     // mode (not just consuming the shared edge) tells the two events apart.
+    // Denormal guard, same pattern as AudioEffectModalResonator::update()
+    // (Audio/AudioEffectModalResonator.h): in RECIRC with 0 < feedback < 1
+    // and a quiet captured window, buffer_l_/buffer_r_'s content decays
+    // geometrically toward (not through) zero every pass and will cross
+    // into float32 denormal range before it reaches exact zero. Cortex-M7
+    // handles denormals in software microcode, not hardware, so without
+    // this a quiet decaying tail is a real CPU-time/glitch risk, not just a
+    // correctness nicety. FZ+DN (FPSCR bits 24,25) is restored before this
+    // function returns so it never leaks into any other stream's update().
+    uint32_t fpscr_save;
+    __asm__ volatile("vmrs %0, fpscr" : "=r"(fpscr_save));
+    __asm__ volatile("vmsr fpscr, %0" :: "r"(fpscr_save | 0x03000000u));
+
     const bool edge = transport_consume_resync_edge(transport_);
     const bool want_write = transport_should_write(transport_);
     if (edge && want_write != write_gate_last_mode_) {
@@ -215,7 +252,8 @@ public:
 
     float tap_l[kChunkSize], tap_r[kChunkSize];
     float tmp_l[kChunkSize], tmp_r[kChunkSize];
-    float mix_l[kChunkSize], mix_r[kChunkSize];
+    float out_mix_l[kChunkSize], out_mix_r[kChunkSize];
+    float fb_mix_l[kChunkSize], fb_mix_r[kChunkSize];
     float write_l[kChunkSize], write_r[kChunkSize];
     float gated_l[kChunkSize], gated_r[kChunkSize];
 
@@ -224,6 +262,17 @@ public:
     EqualPowerFade(dry_gain, wet_gain, wet_dry_.ReadNext());
     const float tap_gain = EQUAL_POWER_EQUAL_MIX[tap_count_];
 
+    // tap_gain folds into both: it's the tap-count normalization keeping
+    // total loop gain roughly invariant as tap_count_ changes, and applying
+    // it to only one of mix/feedback would make adding taps a hidden
+    // feedback-depth boost.
+    float tap_mix_gain[kTaps];
+    float tap_fb_gain[kTaps];
+    for (size_t tap = 0; tap < tap_count_; tap++) {
+      tap_mix_gain[tap] = tap_mix_[tap].ReadNext() * tap_gain;
+      tap_fb_gain[tap] = tap_feedback_[tap].ReadNext() * tap_gain;
+    }
+
     float peak = 0.0f;
 
     for (uint_fast16_t chunk_start = 0; chunk_start < AUDIO_BLOCK_SAMPLES;
@@ -231,15 +280,23 @@ public:
       auto *chin_l = in_l->data + chunk_start;
       auto *chin_r = in_r->data + chunk_start;
 
-      std::fill(mix_l, mix_l + kChunkSize, 0.0f);
-      std::fill(mix_r, mix_r + kChunkSize, 0.0f);
+      std::fill(out_mix_l, out_mix_l + kChunkSize, 0.0f);
+      std::fill(out_mix_r, out_mix_r + kChunkSize, 0.0f);
+      std::fill(fb_mix_l, fb_mix_l + kChunkSize, 0.0f);
+      std::fill(fb_mix_r, fb_mix_r + kChunkSize, 0.0f);
 
       for (size_t tap = 0; tap < tap_count_; tap++) {
         ReadTapChunk(tap, tap_l, tap_r, tmp_l, tmp_r);
-        arm_scale_f32(tap_l, tap_gain, tap_l, kChunkSize);
-        arm_scale_f32(tap_r, tap_gain, tap_r, kChunkSize);
-        arm_add_f32(mix_l, tap_l, mix_l, kChunkSize);
-        arm_add_f32(mix_r, tap_r, mix_r, kChunkSize);
+
+        arm_scale_f32(tap_l, tap_mix_gain[tap], tmp_l, kChunkSize);
+        arm_scale_f32(tap_r, tap_mix_gain[tap], tmp_r, kChunkSize);
+        arm_add_f32(out_mix_l, tmp_l, out_mix_l, kChunkSize);
+        arm_add_f32(out_mix_r, tmp_r, out_mix_r, kChunkSize);
+
+        arm_scale_f32(tap_l, tap_fb_gain[tap], tmp_l, kChunkSize);
+        arm_scale_f32(tap_r, tap_fb_gain[tap], tmp_r, kChunkSize);
+        arm_add_f32(fb_mix_l, tmp_l, fb_mix_l, kChunkSize);
+        arm_add_f32(fb_mix_r, tmp_r, fb_mix_r, kChunkSize);
       }
 
       // Write gate: how much of this chunk's live input reaches the buffer,
@@ -257,8 +314,8 @@ public:
 
       arm_scale_f32(chin_l, wg, gated_l, kChunkSize);
       arm_scale_f32(chin_r, wg, gated_r, kChunkSize);
-      arm_scale_f32(mix_l, fb, write_l, kChunkSize);
-      arm_scale_f32(mix_r, fb, write_r, kChunkSize);
+      arm_scale_f32(fb_mix_l, fb, write_l, kChunkSize);
+      arm_scale_f32(fb_mix_r, fb, write_r, kChunkSize);
       arm_add_f32(write_l, gated_l, write_l, kChunkSize);
       arm_add_f32(write_r, gated_r, write_r, kChunkSize);
 
@@ -269,8 +326,8 @@ public:
       auto *chout_r = out_r->data + chunk_start;
       arm_scale_f32(chin_l, dry_gain, chout_l, kChunkSize);
       arm_scale_f32(chin_r, dry_gain, chout_r, kChunkSize);
-      arm_scale_f32(mix_l, wet_gain, tmp_l, kChunkSize);
-      arm_scale_f32(mix_r, wet_gain, tmp_r, kChunkSize);
+      arm_scale_f32(out_mix_l, wet_gain, tmp_l, kChunkSize);
+      arm_scale_f32(out_mix_r, wet_gain, tmp_r, kChunkSize);
       arm_add_f32(chout_l, tmp_l, chout_l, kChunkSize);
       arm_add_f32(chout_r, tmp_r, chout_r, kChunkSize);
 
@@ -297,6 +354,8 @@ public:
         transport_signal_loop_wrap(transport_);
       }
     }
+
+    __asm__ volatile("vmsr fpscr, %0" :: "r"(fpscr_save));
 
     AudioStream_F32::release(in_l);
     AudioStream_F32::release(in_r);
@@ -330,6 +389,8 @@ private:
 
   std::array<CrossfadeTarget, kTaps> target_delay_;
   std::array<OnePole<Interpolated>, kTaps> delay_secs_;
+  std::array<Interpolated, kTaps> tap_mix_;
+  std::array<Interpolated, kTaps> tap_feedback_;
 
   ExtAudioBuffer<float> buffer_l_;
   ExtAudioBuffer<float> buffer_r_;

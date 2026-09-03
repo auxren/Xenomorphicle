@@ -25,10 +25,18 @@
 // hardware, see Bus200eApp.h's header for why):
 //   A = WRITE<->RECIRC toggle (same edge Digital-In-1 drives)
 //   B = envelope output on/off (DAC ch 1)
-//   encR push = enter/leave the edit screen   encL push = back to home
+//   encR push = cycle HOME -> EDIT -> MIXER -> HOME   encL push = back to home
 //   SCR_EDIT: encL turn = field select   encR turn = adjust, direct-commit
 //             (no confirm gate -- unlike a 200e bank write, every edit here
 //             is instantly reversible, so there is nothing to arm)
+//   SCR_MIXER: 288r-precedent per-tap output-mix sliders (one per tap, see
+//             the class-comment citation on SetTapMix() in
+//             AudioTweightyF32.h). encL turn = select tap, encR turn =
+//             adjust that tap's MIX -- OR, held X + encR turn, that tap's
+//             own FEEDBACK send instead (Tweighty's own extension, not a
+//             288r feature -- see SetTapFeedback()'s comment). X is read
+//             live via OC::ui.read_immediate(), not as a press event, so
+//             the hold-and-turn gesture works the same tick it starts.
 //
 // AUDIO WIRING: the engine is F32-native: OC::AudioIO's int16 in/out streams
 // bridge to it through AudioConvertI16toF32Multi<2>/AudioConvertF32toI16Multi
@@ -56,6 +64,7 @@ namespace TweightyAppNS {
 enum Screen : uint8_t {
   SCR_HOME = 0,
   SCR_EDIT,
+  SCR_MIXER,
 };
 
 // SCR_EDIT's field cursor.
@@ -83,10 +92,11 @@ OC_APP_CLASS(AppTweighty, TWOCCS("TW"), "Tweighty", "Delay Loop"),
   public HSApplication {
 public:
   // transport_state_ u8, tap_count_ u8, time_centis_ u16, feedback_ u8,
-  // wet_dry_ u8, env_out_ u8 = 7 bytes. The tap phase ring is NOT persisted
+  // wet_dry_ u8, env_out_ u8 = 7 bytes, then tap_mix_byte_[8] + tap_feedback_
+  // byte_[8] = 16 more, for 23 total. The tap phase ring is NOT persisted
   // here -- it is re-derived from TweightyTapPhaseDefault() on restore, so
-  // there is no eighth field carrying it.
-  OC_APP_INTERFACE_DECLARE(AppTweighty, 7);
+  // there is no field carrying it.
+  OC_APP_INTERFACE_DECLARE(AppTweighty, 23);
 
   void Start() final {}
   void Resume() final {}
@@ -126,6 +136,8 @@ public:
       const float secs =
           TweightyTapTargetSecs(base_secs, phase_table_.phase[i], time_mult);
       engine_.SetTapTargetSecs(i, secs);
+      engine_.SetTapMix(i, (float)tap_mix_byte_[i] / 255.0f);
+      engine_.SetTapFeedback(i, (float)tap_feedback_byte_[i] / 255.0f);
     }
 
     if (env_out_)
@@ -133,6 +145,16 @@ public:
   }
 
   void View() const final { DrawMenu(); }
+
+  // Bench diagnostic (2026-09-03 silence investigation) -- read-only, no
+  // side effects, safe to leave in. Reports what Controller()/BackgroundPump()
+  // cannot: whether ActivateOnce() has ever actually run and the engine
+  // considers itself ready, independent of anything drawn on screen.
+  void DebugAudioState(bool &acquired, bool &engine_ready, float &meter) const {
+    acquired = engine_acquired_;
+    engine_ready = engine_.IsReady();
+    meter = engine_.meter_level_;
+  }
 
   // Called unconditionally from Main.cpp's loop() via
   // OC::TweightyBackgroundPump(), every pass, regardless of which app is
@@ -174,6 +196,8 @@ public:
     for (int i = 0; i < kTweightyTapCount; ++i) {
       const float secs = TweightyTapTargetSecs(base_secs, phase_table_.phase[i], 1.0f);
       engine_.SetTapTargetSecs(i, secs);
+      engine_.SetTapMix(i, (float)tap_mix_byte_[i] / 255.0f);
+      engine_.SetTapFeedback(i, (float)tap_feedback_byte_[i] / 255.0f);
     }
   }
 
@@ -197,6 +221,7 @@ private:
   uint8_t screen_ = TweightyAppNS::SCR_HOME;
   uint8_t edit_cursor_ = TweightyAppNS::EDIT_TIME;
   bool prev_digital_toggle_ = false;
+  uint8_t selected_tap_ = 0;  // SCR_MIXER's tap cursor; ephemeral like edit_cursor_, not persisted
 
   // Owned here, not by the engine -- it lives with the settings it is
   // reasoned about alongside, and Controller() pushes it through the
@@ -204,19 +229,24 @@ private:
   // comment on OC_APP_INTERFACE_DECLARE above.
   TweightyTapPhaseTable phase_table_;
 
-  // --- persisted (7 bytes total) ------------------------------------------
+  // --- persisted (23 bytes total) -----------------------------------------
   uint16_t time_centis_ = TweightyAppNS::kDefaultTimeCentis;
   uint8_t tap_count_ = kTweightyTapCount;
   uint8_t feedback_byte_ = 77;    // ~30%
   uint8_t wetdry_byte_ = 128;     // 50%
   bool env_out_ = false;
+  uint8_t tap_mix_byte_[kTweightyTapCount];
+  uint8_t tap_feedback_byte_[kTweightyTapCount];
 
   void WireAudio();
   void ActivateOnce();
   void DrawHome() const;
   void DrawEdit() const;
+  void DrawMixer() const;
   void AdjustEditParam(int delta);
   static void DrawBar(int x, int y, int w, float frac);
+  static void DrawVBar(int x, int y, int w, int h, float frac);
+  static void DrawFeedbackStrip(int x, int y, int w, int h, float frac);
 };
 
 // ---------------------------------------------------------------------------
@@ -235,11 +265,16 @@ FLASHMEM void AppTweighty::Init() {
   screen_ = SCR_HOME;
   edit_cursor_ = EDIT_TIME;
   prev_digital_toggle_ = false;
+  selected_tap_ = 0;
   time_centis_ = kDefaultTimeCentis;
   tap_count_ = kTweightyTapCount;
   feedback_byte_ = 77;
   wetdry_byte_ = 128;
   env_out_ = false;
+  for (int i = 0; i < kTweightyTapCount; ++i) {
+    tap_mix_byte_[i] = 255;
+    tap_feedback_byte_[i] = 255;  // matches old uniform-gain math bit-for-bit
+  }
   TweightyTapPhaseDefault(phase_table_);
 }
 
@@ -253,6 +288,10 @@ FLASHMEM size_t AppTweighty::SaveAppData(util::StreamBufferWriter &stream_buffer
   stream_buffer.Write<uint8_t>(feedback_byte_);
   stream_buffer.Write<uint8_t>(wetdry_byte_);
   stream_buffer.Write<uint8_t>(env_out_ ? 1 : 0);
+  for (int i = 0; i < kTweightyTapCount; ++i)
+    stream_buffer.Write<uint8_t>(tap_mix_byte_[i]);
+  for (int i = 0; i < kTweightyTapCount; ++i)
+    stream_buffer.Write<uint8_t>(tap_feedback_byte_[i]);
   return stream_buffer.overflow() ? 0 : stream_buffer.written();
 }
 
@@ -264,6 +303,10 @@ FLASHMEM size_t AppTweighty::RestoreAppData(util::StreamBufferReader &stream_buf
   const uint8_t fb = stream_buffer.Read<uint8_t>();
   const uint8_t wd = stream_buffer.Read<uint8_t>();
   const uint8_t env = stream_buffer.Read<uint8_t>();
+  uint8_t mix[kTweightyTapCount];
+  uint8_t fdbk[kTweightyTapCount];
+  for (int i = 0; i < kTweightyTapCount; ++i) mix[i] = stream_buffer.Read<uint8_t>();
+  for (int i = 0; i < kTweightyTapCount; ++i) fdbk[i] = stream_buffer.Read<uint8_t>();
 
   tap_count_ = (taps >= 1 && taps <= kTweightyTapCount)
                    ? taps : (uint8_t)kTweightyTapCount;
@@ -277,6 +320,13 @@ FLASHMEM size_t AppTweighty::RestoreAppData(util::StreamBufferReader &stream_buf
   engine_.SetTapCount(tap_count_);
   engine_.SetFeedback((float)feedback_byte_ / 255.0f);
   engine_.SetWetDry((float)wetdry_byte_ / 255.0f);
+
+  for (int i = 0; i < kTweightyTapCount; ++i) {
+    tap_mix_byte_[i] = mix[i];
+    tap_feedback_byte_[i] = fdbk[i];
+    engine_.SetTapMix(i, (float)tap_mix_byte_[i] / 255.0f);
+    engine_.SetTapFeedback(i, (float)tap_feedback_byte_[i] / 255.0f);
+  }
 
   // The engine boots into WRITE (its own default); only flip it if the saved
   // state disagrees. RequestTransportToggle() only mutates the plain
@@ -305,8 +355,19 @@ FLASHMEM void AppTweighty::WireAudio() {
   conn_f32_in_r_ = new AudioConnection_F32(in_adapter_, 1, engine_, 1);
   conn_f32_out_l_ = new AudioConnection_F32(engine_, 0, out_adapter_, 0);
   conn_f32_out_r_ = new AudioConnection_F32(engine_, 1, out_adapter_, 1);
-  conn_out_l_ = new AudioConnection(out_adapter_, 0, OC::AudioIO::OutputStream(), 0);
-  conn_out_r_ = new AudioConnection(out_adapter_, 1, OC::AudioIO::OutputStream(), 1);
+  // output_route (AudioIO.cpp) is a summing point, not a plain relay --
+  // Quadrants' own chain-tail is unconditionally wired to source slot 0
+  // (dest_index == channel) at boot, so Tweighty has to land on a distinct
+  // slot of its own rather than sharing index 0/1, or one of the two would
+  // silently win each audio block and the other's audio would never reach
+  // the codec (see AudioIO.cpp's output_route comment for the full story --
+  // this is the fix for Tweighty's total-silence-on-hardware bug).
+  conn_out_l_ = new AudioConnection(
+      out_adapter_, 0, OC::AudioIO::OutputStream(),
+      OC::AudioIO::kOutputRouteTweightySlot * OC::AudioIO::kOutputRouteChannels + 0);
+  conn_out_r_ = new AudioConnection(
+      out_adapter_, 1, OC::AudioIO::OutputStream(),
+      OC::AudioIO::kOutputRouteTweightySlot * OC::AudioIO::kOutputRouteChannels + 1);
   if (conn_in_l_) conn_in_l_->disconnect();
   if (conn_in_r_) conn_in_r_->disconnect();
   if (conn_f32_in_l_) conn_f32_in_l_->disconnect();
@@ -419,8 +480,9 @@ FLASHMEM void AppTweighty::HandleButtonEvent(const UI::Event &event) {
     case OC::CONTROL_BUTTON_DOWN:   // B = envelope output on/off
       env_out_ = !env_out_;
       break;
-    case OC::CONTROL_BUTTON_R:      // encR = enter the edit screen / leave it
-      screen_ = (screen_ == SCR_HOME) ? SCR_EDIT : SCR_HOME;
+    case OC::CONTROL_BUTTON_R:      // encR = cycle HOME -> EDIT -> MIXER -> HOME
+      screen_ = (screen_ == SCR_HOME) ? SCR_EDIT
+              : (screen_ == SCR_EDIT) ? SCR_MIXER : SCR_HOME;
       break;
     case OC::CONTROL_BUTTON_L:      // encL = back to home
       screen_ = SCR_HOME;
@@ -431,13 +493,30 @@ FLASHMEM void AppTweighty::HandleButtonEvent(const UI::Event &event) {
 
 FLASHMEM void AppTweighty::HandleEncoderEvent(const UI::Event &event) {
   using namespace TweightyAppNS;
-  if (screen_ != SCR_EDIT) return;
-  if (event.control == OC::CONTROL_ENCODER_L) {
-    int c = (int)edit_cursor_ + event.value;
-    CONSTRAIN(c, 0, EDIT_COUNT - 1);
-    edit_cursor_ = (uint8_t)c;
-  } else if (event.control == OC::CONTROL_ENCODER_R) {
-    AdjustEditParam(event.value);
+  if (screen_ == SCR_EDIT) {
+    if (event.control == OC::CONTROL_ENCODER_L) {
+      int c = (int)edit_cursor_ + event.value;
+      CONSTRAIN(c, 0, EDIT_COUNT - 1);
+      edit_cursor_ = (uint8_t)c;
+    } else if (event.control == OC::CONTROL_ENCODER_R) {
+      AdjustEditParam(event.value);
+    }
+  } else if (screen_ == SCR_MIXER) {
+    if (event.control == OC::CONTROL_ENCODER_L) {
+      int t = (int)selected_tap_ + event.value;
+      CONSTRAIN(t, 0, kTweightyTapCount - 1);
+      selected_tap_ = (uint8_t)t;
+    } else if (event.control == OC::CONTROL_ENCODER_R) {
+      // X held redirects encR to that tap's FEEDBACK send instead of MIX --
+      // see the class-comment gesture description. encL always means "which
+      // tap," full stop.
+      const bool fdbk_mode = OC::ui.read_immediate(OC::CONTROL_BUTTON_X);
+      uint8_t &target = fdbk_mode ? tap_feedback_byte_[selected_tap_]
+                                   : tap_mix_byte_[selected_tap_];
+      int v = (int)target + event.value * 4;   // same step AdjustEditParam uses
+      CONSTRAIN(v, 0, 255);
+      target = (uint8_t)v;
+    }
   }
 }
 
@@ -568,11 +647,71 @@ FLASHMEM void AppTweighty::DrawEdit() const {
   }
 }
 
+// SCR_MIXER: one column per tap, 288r-precedent independent per-tap output
+// level (see SetTapMix()'s citation in AudioTweightyF32.h) instead of the
+// single tap-count-normalized scalar every tap used to share. The selected
+// tap's own FEEDBACK send (Tweighty's own extension -- see SetTapFeedback())
+// shows as a slim strip beside its MIX fader, visible only for that one tap
+// so the screen never has to show two competing bar heights per column at
+// once. 8 columns * 16px = the full 128px width -- deliberately NOT 8 tall
+// vertical faders crammed side by side with no gap (see this file's
+// launch-comment on the SCR_HOME WRITE/RECIRC box that looked fine in a
+// mockup and wrong on the real 1-bit panel): each column gets a 4px gap on
+// both sides of its 8px-wide fader, so adjacent taps stay visually
+// separable at native pixel scale.
+FLASHMEM void AppTweighty::DrawMixer() const {
+  using namespace TweightyAppNS;
+  gfxFooter("A:toggle B:env X:fdbk");
+
+  const bool fdbk_mode = OC::ui.read_immediate(OC::CONTROL_BUTTON_X);
+  const uint8_t val = fdbk_mode ? tap_feedback_byte_[selected_tap_]
+                                 : tap_mix_byte_[selected_tap_];
+  char buf[16];
+  snprintf(buf, sizeof(buf), "TAP%d %s %d%%", selected_tap_ + 1,
+           fdbk_mode ? "FDBK" : "MIX", (val * 100) / 255);
+  graphics.setPrintPos(4, 12);
+  graphics.print(buf);
+
+  // Same glyph/geometry as DrawHome()'s transport box -- one shape language
+  // for "the live thing" everywhere in this app, not a new one per screen.
+  if (engine_.transport_state_ == XP_WRITE) graphics.drawRect(118, 12, 8, 8);
+  else graphics.drawFrame(118, 12, 8, 8);
+
+  for (int i = 0; i < kTweightyTapCount; ++i) {
+    const int x = i * 16;
+    DrawVBar(x + 4, 21, 8, 28, (float)tap_mix_byte_[i] / 255.0f);
+    if (i == selected_tap_ && tap_feedback_byte_[i] > 0)
+      DrawFeedbackStrip(x + 13, 21, 3, 28, (float)tap_feedback_byte_[i] / 255.0f);
+    if (i == selected_tap_) graphics.invertRect(x, 21, 16, 28);
+  }
+}
+
+// Bottom-anchored fill, unlike DrawBar()'s left-anchored horizontal one --
+// a vertical fader reads as "level" only if it fills from the floor up.
+FLASHMEM void AppTweighty::DrawVBar(int x, int y, int w, int h, float frac) {
+  graphics.drawFrame(x, y, w, h);
+  if (frac < 0.0f) frac = 0.0f;
+  else if (frac > 1.0f) frac = 1.0f;
+  const int fillh = (int)((h - 2) * frac + 0.5f);
+  if (fillh > 0) graphics.drawRect(x + 1, y + 1 + (h - 2 - fillh), w - 2, fillh);
+}
+
+// Unframed, unlike DrawVBar(): at 3px wide a frame would leave no fill
+// pixels at all, and this only ever appears beside an already-framed MIX
+// fader, so the pairing itself reads as "this column has two controls."
+FLASHMEM void AppTweighty::DrawFeedbackStrip(int x, int y, int w, int h, float frac) {
+  if (frac < 0.0f) frac = 0.0f;
+  else if (frac > 1.0f) frac = 1.0f;
+  const int fillh = (int)(h * frac + 0.5f);
+  if (fillh > 0) graphics.drawRect(x, y + (h - fillh), w, fillh);
+}
+
 FLASHMEM void AppTweighty::DrawMenu() const {
   gfxHeader("T W E I G H T Y");
   using namespace TweightyAppNS;
   switch (screen_) {
     case SCR_EDIT: DrawEdit(); return;
+    case SCR_MIXER: DrawMixer(); return;
     default: DrawHome(); return;
   }
 }

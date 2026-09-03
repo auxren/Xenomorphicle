@@ -29,7 +29,32 @@ namespace OC {
 
     AudioOutputI2S2_F32* output_stream = nullptr;
     AudioConvert_I16toF32* conv_out[2] = {nullptr, nullptr};
-    AudioPassthrough<2> output_route;
+    // A summing point, not a plain relay: Quadrants' audio-applet
+    // chain-tail (AudioAppletSubapp.h::ConnectMonoToNext/ConnectStereoToNext)
+    // is unconditionally wired to this at boot (AppBase::Init() runs for
+    // every app in app_container regardless of which is current), and
+    // Tweighty's background engine output (apps/TweightyApp.h::WireAudio())
+    // is wired to it the first time Tweighty is ever opened and then stays
+    // connected for the rest of the session -- both by design, so both can
+    // be genuinely live at once. AudioPassthrough<2> (Audio/AudioPassthrough.h)
+    // is a pure per-channel relay: two sources sharing one destination
+    // channel there means whichever source's update() the audio ISR
+    // happens to run last for a given block silently wins, and the other's
+    // audio never reaches the codec -- this was the root cause of Tweighty
+    // producing confirmed-live DSP (CPU/pool usage rose) but total silence
+    // on the jacks on its first hardware bench test (see TODO.md's Tweighty
+    // section). AudioSummingRoute (Audio/AudioMixer.h) actually sums the two
+    // sources' q15 audio in float and re-quantizes, same approach as the
+    // AudioMixer<N> already used below for the 16-bit USB monitor mix.
+    //
+    // Gain staging: both sources sum at unity, matching usbmix's existing
+    // precedent below. A naive unity-gain sum of two simultaneously
+    // full-scale sources can clip -- arm_float_to_q15's saturation makes
+    // that a clean clip rather than a wraparound, but it is not solved here;
+    // Tweighty's own wet/dry and per-tap mix controls give the player some
+    // headroom control, and Quadrants' applet chain has its own gain
+    // structure, but nothing currently normalizes the *sum* of the two.
+    AudioSummingRoute<kOutputRouteChannels, kOutputRouteSources> output_route;
 
 #ifdef AUDIO_INTERFACE
 #if AUDIO_SUBSLOT_SIZE == 3

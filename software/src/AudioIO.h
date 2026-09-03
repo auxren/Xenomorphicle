@@ -11,6 +11,21 @@ namespace OC {
     // F32 I2S drivers, and F32-native applets draw from this. The Delay
     // applet alone can hold ~10 blocks per channel in flight (8 taps + I/O).
     const int F32_AUDIO_MEMORY = 80;
+
+    // OutputStream()'s destination is a summing point (AudioSummingRoute,
+    // Audio/AudioMixer.h), not a plain relay: Quadrants' own audio-applet
+    // chain-tail (AudioAppletSubapp.h) and Tweighty's background engine
+    // output (apps/TweightyApp.h) are BOTH always connected to it at once
+    // once either has ever been active this session, and both need to be
+    // audible simultaneously -- see AudioIO.cpp's output_route comment.
+    // Source-major input layout: source `s`'s channel `c` is at index
+    // `s * kOutputRouteChannels + c`. Quadrants' chain-tail predates this
+    // and keeps targeting index == channel unchanged (source slot 0);
+    // Tweighty claims kOutputRouteTweightySlot explicitly.
+    constexpr uint8_t kOutputRouteChannels = 2;
+    constexpr uint8_t kOutputRouteSources = 2;
+    constexpr uint8_t kOutputRouteTweightySlot = 1;
+
     AudioStream& InputStream(int interface = 0);
     AudioStream& OutputStream();
     void Init();
