@@ -31,15 +31,16 @@ CXXFLAGS ?= -std=c++17 -Wall -Werror -O1 -g
 CXXFLAGS += -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter \
             -Wno-deprecated-declarations -Wno-missing-braces \
             -Wno-unused-but-set-variable -Wno-format \
-            -Wno-unused-private-field
-INCLUDES  = -I. -Ishim/arduino -I$(BUILD) -I$(SHADOW) -I$(SHADOW)/src/extern
+            -Wno-unused-private-field -Wno-inconsistent-missing-override
+INCLUDES  = -I. -Ishim/arduino -I$(BUILD) -I$(SHADOW) -I$(SHADOW)/src/extern \
+            -I$(SHADOW)/extern/f32
 
 # What T41_console builds with, minus the parts that only mean something on the
 # chip. NO_HEMISPHERE is the one real difference and it is a configuration the
 # firmware supports (T41_MTP builds with it): see README.md for what it costs.
 FWFLAGS = -DARDUINO_TEENSY41 -D__IMXRT1062__ -DPRESET_BUS -DNO_HEMISPHERE \
           -DENABLE_APP_BUS200E \
-          -DENABLE_APP_PONG -DENABLE_APP_SCENES -DXENO_SIM
+          -DENABLE_APP_PONG -DENABLE_APP_SCENES -DENABLE_APP_TWEIGHTY -DXENO_SIM
 
 # Compiled from the mirror, so each of these is the real file unless shim/src/
 # replaces it (OC_ADC.cpp, OC_core.cpp, the SH1106 driver, OC_FreqMeasure.cpp).
@@ -86,7 +87,10 @@ FW_SRCS = \
   src/util/util_misc.cpp \
   src/util/util_settings.cpp \
   src/extern/bjorklund.cpp \
-  src/extern/braids_quantizer.cpp
+  src/extern/braids_quantizer.cpp \
+  TweightyTapPhase.cpp \
+  TweightyTransport.cpp \
+  extern/f32/AudioStream_F32.cpp
 
 # The mirror has to exist before make can match its pattern rules against it,
 # so it is built while the Makefile is read rather than as a target. It is only

@@ -27,6 +27,9 @@ extern uint_fast8_t MENU_REDRAW;
 #ifdef ENABLE_APP_BUS200E
 #include "Bus200eApp.h"
 #endif
+#ifdef ENABLE_APP_TWEIGHTY
+#include "TweightyApp.h"
+#endif
 #include "Backup.h"
 #include "SETTINGS.h"
 
@@ -42,6 +45,9 @@ static AppContainer<void
 #endif
 #ifdef ENABLE_APP_PONG
   , AppPong
+#endif
+#ifdef ENABLE_APP_TWEIGHTY
+  , AppTweighty
 #endif
   , AppBackup
 > app_container;

@@ -168,6 +168,7 @@ private:
   void DrawHome() const;
   void DrawEdit() const;
   void AdjustEditParam(int delta);
+  static void DrawBar(int x, int y, int w, float frac);
 };
 
 // ---------------------------------------------------------------------------
@@ -398,71 +399,131 @@ FLASHMEM void AppTweighty::HandleEncoderEvent(const UI::Event &event) {
   }
 }
 
-FLASHMEM void AppTweighty::DrawHome() const {
-  graphics.setPrintPos(0, 15);
-  graphics.print(engine_.transport_state_ == XP_WRITE ? "WRITE" : "RECIRC");
-  if (engine_.crossfade_active_) {
-    graphics.setPrintPos(46, 15);
-    graphics.print("XFADE");   // worded, not a bare glyph -- see design system
-  }
-
-  graphics.setPrintPos(0, 26);
-  graphics.printf("Time %d.%02ds", time_centis_ / 100, time_centis_ % 100);
-  graphics.setPrintPos(70, 26);
-  graphics.print(env_out_ ? "ENV ON" : "ENV OFF");
-
-  graphics.setPrintPos(0, 36);
-  graphics.printf("FB %d%%", (feedback_byte_ * 100) / 255);
-  graphics.setPrintPos(64, 36);
-  graphics.printf("Mix %d%%", (wetdry_byte_ * 100) / 255);
-
-  // Tap ring: one box per tap, filled while it is one of the active
-  // tap_count_ taps, empty otherwise -- the closest this screen gets to a
-  // scope without owning one.
-  const uint8_t mask = engine_.active_tap_mask_;
-  for (int i = 0; i < kTweightyTapCount; ++i) {
-    const int x = 4 + i * 15;
-    if (mask & (1 << i)) graphics.drawRect(x, 48, 8, 8);
-    else graphics.drawFrame(x, 48, 8, 8);
-  }
-
-  graphics.setPrintPos(0, 56);
-  graphics.print("A:toggle B:env encR:edit");
+// Shared bar widget -- track (drawFrame) + fill (drawRect, 1px inset),
+// used for every meter on both screens (Home's Time bar, Edit's four field
+// bars and its live output meter) so the eye learns one meter grammar
+// instead of five. frac is clamped here so every caller can pass a raw
+// ratio without its own bounds check.
+FLASHMEM void AppTweighty::DrawBar(int x, int y, int w, float frac) {
+  graphics.drawFrame(x, y, w, 8);
+  if (frac < 0.0f) frac = 0.0f;
+  else if (frac > 1.0f) frac = 1.0f;
+  const int fillw = (int)((w - 2) * frac + 0.5f);
+  if (fillw > 0) graphics.drawRect(x + 1, y + 1, fillw, 6);
 }
 
+// SCR_HOME is the glance screen: what state is the module in, is the loop
+// about to overflow its buffer (Time, the one panel value CV0 can make
+// diverge from what's shown -- see Controller()), which taps are live.
+// Feedback/Mix have no CV input (see GetIOConfig()) and are dialed in once,
+// not re-read reflexively, so they live on SCR_EDIT only -- see that
+// function's header comment for the full split rationale.
+FLASHMEM void AppTweighty::DrawHome() const {
+  const char *word = engine_.transport_state_ == XP_WRITE ? "WRITE" : "RECIRC";
+  const int word_len = (int)strlen(word);
+  graphics.setPrintPos((128 - word_len * 6) / 2, 12);
+  graphics.print(word);
+
+  // Filled = WRITE (the actively-capturing, "live" state) so this band
+  // agrees with the tap ring below it, where filled has always meant
+  // active/present -- one shape language for "the live thing" everywhere
+  // in this app, not two shapes that mean opposite things on one screen.
+  if (engine_.transport_state_ == XP_WRITE) graphics.drawRect(4, 21, 120, 9);
+  else graphics.drawFrame(4, 21, 120, 9);
+
+  graphics.drawHLine(0, 31, 128);
+
+  graphics.setPrintPos(4, 34);
+  graphics.print("Time");
+  DrawBar(34, 34, 54,
+          (float)(time_centis_ - TweightyAppNS::kMinTimeCentis) /
+              (float)(TweightyAppNS::kMaxTimeCentis - TweightyAppNS::kMinTimeCentis));
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d.%02ds", time_centis_ / 100, time_centis_ % 100);
+  graphics.setPrintPos(127, 34);
+  graphics.print_right(buf);
+
+  graphics.setPrintPos(4, 43);
+  graphics.print(env_out_ ? "ENV ON" : "ENV OFF");
+
+  // Tap ring: derived straight from tap_count_ (active_tap_mask_ is always
+  // the low tap_count_ bits), so this is a density readout, not independent
+  // state -- shape, not a number, because "how thick is this patch" is a
+  // one-glance question a count would make you do arithmetic to answer.
+  const uint8_t mask = engine_.active_tap_mask_;
+  for (int i = 0; i < kTweightyTapCount; ++i) {
+    const int x = 62 + i * 8;
+    if (mask & (1 << i)) graphics.drawRect(x, 44, 6, 6);
+    else graphics.drawFrame(x, 44, 6, 6);
+  }
+
+  gfxFooter("A:toggle B:env R:edit");
+}
+
+// SCR_EDIT is the complete programming surface: all four fields visible and
+// legible at once (not just the selected one), each with a bar so "where am
+// I in the range" is a glance instead of arithmetic against a spec you have
+// to remember. A/B (transport toggle, envelope-out) already work from this
+// screen -- HandleButtonEvent's CONTROL_BUTTON_UP/DOWN cases aren't gated on
+// screen_ -- the baseline just never told you so; the status row and footer
+// below fix that. The live output meter answers "watching the effect of
+// each change" without leaving this screen. XFADE is cut from both screens
+// (see DrawHome's absence of it too): the crossfade resolves in ~46ms, well
+// under a glance's fixation time, so it can never be caught meaningfully.
+//
+// gfxFooter() is called FIRST, before the field rows: it clears+redraws
+// y=54-63, which would erase the last cursor band's invertRect (it spans
+// y=47-55) if drawn after.
 FLASHMEM void AppTweighty::DrawEdit() const {
   using namespace TweightyAppNS;
+  gfxFooter("A:toggle B:env L:back");
+
+  graphics.setPrintPos(4, 12);
+  graphics.print(engine_.transport_state_ == XP_WRITE ? "WRITE" : "RECIRC");
+  graphics.setPrintPos(46, 12);
+  graphics.print(env_out_ ? "ENV ON" : "ENV OFF");
+  DrawBar(94, 12, 32, engine_.meter_level_);
+
   static const char *const kLabels[EDIT_COUNT] = {
-    "Time", "Taps", "Feedback", "Mix"
+    "Time", "Taps", "Fdbk", "Mix"
   };
+  char buf[8];
   for (int i = 0; i < EDIT_COUNT; ++i) {
-    const int y = 22 + i * 10;
+    const int y = 21 + i * 9;
     graphics.setPrintPos(4, y);
     graphics.print(kLabels[i]);
-    graphics.setPrintPos(76, y);
+    graphics.setPrintPos(127, y);
     switch (i) {
       case EDIT_TIME:
-        graphics.printf("%d.%02ds", time_centis_ / 100, time_centis_ % 100);
+        DrawBar(34, y, 54,
+                (float)(time_centis_ - kMinTimeCentis) /
+                    (float)(kMaxTimeCentis - kMinTimeCentis));
+        snprintf(buf, sizeof(buf), "%d.%02ds", time_centis_ / 100, time_centis_ % 100);
+        graphics.print_right(buf);
         break;
       case EDIT_TAPS:
-        graphics.print((int)tap_count_);
+        DrawBar(34, y, 54, (float)(tap_count_ - 1) / (float)(kTweightyTapCount - 1));
+        snprintf(buf, sizeof(buf), "%d", (int)tap_count_);
+        graphics.print_right(buf);
         break;
       case EDIT_FEEDBACK:
-        graphics.printf("%d%%", (feedback_byte_ * 100) / 255);
+        DrawBar(34, y, 54, (float)feedback_byte_ / 255.0f);
+        snprintf(buf, sizeof(buf), "%d%%", (feedback_byte_ * 100) / 255);
+        graphics.print_right(buf);
         break;
       case EDIT_WETDRY:
-        graphics.printf("%d%%", (wetdry_byte_ * 100) / 255);
+        DrawBar(34, y, 54, (float)wetdry_byte_ / 255.0f);
+        snprintf(buf, sizeof(buf), "%d%%", (wetdry_byte_ * 100) / 255);
+        graphics.print_right(buf);
         break;
       default: break;
     }
-    if (i == edit_cursor_) graphics.invertRect(0, y - 8, 128, 9);
+    if (i == edit_cursor_) graphics.invertRect(0, 20 + i * 9, 128, 9);
   }
-  graphics.setPrintPos(0, 56);
-  graphics.print("encL:back");
 }
 
 FLASHMEM void AppTweighty::DrawMenu() const {
-  gfxHeader("Tweighty");
+  gfxHeader("T W E I G H T Y");
   using namespace TweightyAppNS;
   switch (screen_) {
     case SCR_EDIT: DrawEdit(); return;

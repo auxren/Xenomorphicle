@@ -246,7 +246,7 @@ success.
 ## Apps
 
 `app_container` is the real one, and the app switcher lists exactly what is in
-it. This build carries five apps:
+it. This build carries six apps:
 
 | app | what the shims cost it |
 |---|---|
@@ -254,6 +254,7 @@ it. This build carries five apps:
 | **200e Modules** | The most faithful app here: the bus master FSM, the codecs, the write guard and the bank data are real (see *the simulated bus*). Writes go nowhere. |
 | **Scenery** | Scene state and the UI are real; the CV that would drive a scene is a fixed value, so nothing modulates. |
 | **Pong 2.0** | Plays. Its pace comes from the loop rather than an audio-rate ISR, so speed is not representative. |
+| **Tweighty** | The UI, the persisted settings, and `AudioTweightyF32::Acquire()`/`Release()`/`IsReady()` are real — app-switching into and out of Tweighty genuinely allocates and frees the engine's delay buffer (via `SetActive()`, control-rate, exactly as on target), and `RequestTransportToggle()`/the WRITE↔RECIRC state shown on screen is the real transport state machine. What is **not** real: any actual audio. `AudioTweightyF32::update()` — the DSP itself, and every field the home screen reads off it (`transport_state_`, `meter_level_`, `crossfade_active_`, `active_tap_mask_`) as an audio-ISR-hot mirror — never runs here, because **this simulator has no audio-rate callback at all** (see *the shims*, `arduino/Audio.h`), so those fields just sit at their static default values. The stock int16 `AudioStream`/`AudioConnection` pair Tweighty derives its F32 engine from is not part of `software/src` at all (it ships in the `framework-arduinoteensy` git dependency, not vendored in this repo) — `shim/arduino/AudioStream.h` is this build's stand-in for it, written from scratch rather than mirrored. `AUDIO_INTERFACE` is never defined in this build, so `WireAudio()`/`SetActive()`'s actual `AudioConnection`/`AudioConnection_F32` wiring (the `#ifdef AUDIO_INTERFACE` blocks in `TweightyApp.h`) never runs either — only the `Acquire()`/`Release()` bracket around it does. |
 | **Back It Up!** | Runs against the RAM-backed file system, so a "backup" is written to a file that dies with the process. |
 
 ### Apps that are **not** simulated, and why
@@ -314,6 +315,26 @@ real sources, so it costs nothing in recompilation.
 `Wire`, a RAM-backed `EEPROM`, a RAM-backed `FS`/`SD`/`LittleFS`, the MIDI
 ports, `Audio.h`, and stand-ins for the handful of i.MXRT registers the
 firmware writes from headers that are otherwise real.
+
+Tweighty (see *Apps*, above) needed this widened for the first time: `Audio.h`
+previously stubbed the *whole* Teensy Audio library away, because nothing
+before it used any of it. `AudioStream.h` is the new piece — a from-scratch
+stand-in for the stock int16 `AudioStream`/`AudioConnection` pair, which is
+not part of `software/src` at all (it ships in the `framework-arduinoteensy`
+git dependency the real build pulls in, not vendored here), so there was
+nothing real to mirror through the shadow tree the way the table above does.
+It exists only so `software/src/extern/f32/AudioStream_F32.{h,cpp}` — real
+firmware, compiled unmodified through the shadow — has a base class to derive
+from and links; nothing in it ever runs, because this simulator has no
+audio-rate callback at all. `arm_math.h` grew `arm_scale_f32`/`arm_add_f32`/
+`arm_mult_f32`, portable C++ standing in for the CMSIS-DSP calls
+`AudioTweightyF32::update()` makes (also dead code here, for the same
+reason — same as `dsputils.h`'s `EqualPowerFade` and `AudioParam.h`'s
+`OnePole`/`Interpolated`, both real firmware headers that needed no shimming
+at all: portable C++ already, with no hardware dependency). `imxrt.h` and
+`smalloc.h` are two one-line forwards for real firmware `#include`s that
+resolve to nothing this build's compile set actually uses a symbol from — see
+each file's own header comment.
 
 `sim_stubs.cpp` holds the last few symbols that live in files the simulator
 cannot compile (`Main.cpp`, `HemisphereApplet.cpp`, `applets/_config.h`).
