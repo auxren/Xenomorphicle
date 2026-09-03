@@ -463,15 +463,19 @@ FLASHMEM void AppTweighty::DrawBar(int x, int y, int w, float frac) {
 FLASHMEM void AppTweighty::DrawHome() const {
   const char *word = engine_.transport_state_ == XP_WRITE ? "WRITE" : "RECIRC";
   const int word_len = (int)strlen(word);
-  graphics.setPrintPos((128 - word_len * 6) / 2, 12);
+  const int word_x = (128 - word_len * 6) / 2;
+  graphics.setPrintPos(word_x, 12);
   graphics.print(word);
 
-  // Filled = WRITE (the actively-capturing, "live" state) so this band
+  // Filled = WRITE (the actively-capturing, "live" state) so this box
   // agrees with the tap ring below it, where filled has always meant
   // active/present -- one shape language for "the live thing" everywhere
   // in this app, not two shapes that mean opposite things on one screen.
-  if (engine_.transport_state_ == XP_WRITE) graphics.drawRect(4, 21, 120, 9);
-  else graphics.drawFrame(4, 21, 120, 9);
+  // Sized like the tap-ring boxes on purpose: a full-width filled band here
+  // read as an oversized, out-of-proportion block on the real 1-bit panel
+  // (confirmed on hardware) even though it looked fine in a mockup.
+  if (engine_.transport_state_ == XP_WRITE) graphics.drawRect(word_x - 12, 12, 8, 8);
+  else graphics.drawFrame(word_x - 12, 12, 8, 8);
 
   graphics.drawHLine(0, 31, 128);
 
