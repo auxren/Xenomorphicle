@@ -125,28 +125,185 @@ static constexpr int kChordHintMaxChars = 21;
 
 static constexpr int kChordHintRowH = 9;   // 8px glyph + 1px leading
 
-// What A+B and a bare Z do in the apps that bind them. An app missing from
-// this table gets no such row at all: A+B genuinely means three different
-// things, and a generic label would be wrong in most apps that have one.
+// What A+B and a bare Z do in the apps that bind them, plus -- for every app,
+// not just those two -- a `tip` naming its single most useful or least
+// guessable control. a_plus_b/z_alone stay null where an app genuinely binds
+// nothing there; a generic label would be wrong in most apps that have one.
+//
+// `tip` is the answer to "I forgot what this app's buttons do": one control,
+// not a manual page. It is looked up by every app via find_gloss(), so an app
+// with no chord of its own still gets a real, accurate row instead of the
+// bare global list.
 struct ChordGloss {
   uint16_t app_id;
   const char *a_plus_b;  // null: this app does not bind A+B
   const char *z_alone;   // null: this app does not bind Z
+  const char *tip;       // null: nothing to add beyond a_plus_b/z_alone
 };
 
+// Row budget, not decoration: DrawChordHint's `rows[5]` is sized for the
+// worst case (both A-branch optional rows, or both Z-branch optional rows)
+// and DrawChordCard's height is derived from row_count, so a 6th row would
+// push card_h past the 64px panel. `tip` therefore only ever takes the slot
+// its own branch's specific row (a_plus_b for HOLD A, z_alone for HOLD Z)
+// would otherwise leave empty -- see DrawChordHint. An app with both
+// a_plus_b and z_alone set (the three clock apps below) already fills both
+// slots with real content, so it has no room for `tip` and does not need it.
+// Every entry is guarded by the same #ifdef its app is registered under in
+// _config.h's app_container, so the table never claims content for an app a
+// given build doesn't have. (TWOCCS() alone can't cause a build break either
+// way -- it just packs two chars into a uint16_t, no app class involved --
+// but an entry surviving into a build that never compiled its app would
+// still be a lie sitting in flash, matched against an app_id that binary
+// can never hand DrawChordHint. Not compiled in, not in the table.)
 static const ChordGloss kChordGloss[] = {
-  // Quadrants (Quadrants.h:615 / :1873), Hemisphere (Hemisphere.h:980 / :1714)
-  // and Calibr8or (Calibr8or.h:568 / :919) all open the clock-setup overlay on
-  // A+B and toggle the internal clock on Z.
-  { TWOCCS("QS"), "Clock Setup",  "Clock Run" },
-  { TWOCCS("HS"), "Clock Setup",  "Clock Run" },
-  { TWOCCS("C8"), "Clock Setup",  "Clock Run" },
-  // CaptainMIDI.h:2318 -- A+B opens the clock router. Captain binds no Z.
-  { TWOCCS("MI"), "Clock Router", nullptr },
-  // SETTINGS.h:548 -- A+B flips the screen 180 degrees. Setup/About binds no Z.
-  { TWOCCS("SE"), "Flip Screen",  nullptr },
-  // Scenery.h:713 -- Z jumps to a random scene. Scenery binds no A+B.
-  { TWOCCS("SX"), nullptr,        "Random Scene" },
+  // Quadrants (Quadrants.h:615 / :1873) and Hemisphere (Hemisphere.h:980 /
+  // :1714) are the same two-encoder-plus-four-button UI on two different
+  // pin maps -- _config.h picks exactly one per build via ARDUINO_TEENSY41 --
+  // and Calibr8or (Calibr8or.h:568 / :919) makes the same two gestures do the
+  // same thing. All three open the clock-setup overlay on A+B and toggle the
+  // internal clock on Z.
+#ifndef NO_HEMISPHERE
+#ifdef ARDUINO_TEENSY41
+  { TWOCCS("QS"), "Clock Setup",  "Clock Run",  nullptr },
+#else
+  { TWOCCS("HS"), "Clock Setup",  "Clock Run",  nullptr },
+#endif
+#endif
+#ifdef ENABLE_APP_CALIBR8OR
+  { TWOCCS("C8"), "Clock Setup",  "Clock Run",  nullptr },
+#endif
+#ifdef ENABLE_APP_MIDI
+  // CaptainMIDI.h:2370-2403 -- A+B opens the clock router; L-long is Panic()
+  // (MIDI all-notes-off), the one control here worth surfacing on its own.
+  { TWOCCS("MI"), "Clock Router", nullptr,      "L-hold: MIDI Panic" },
+#endif
+  // SETTINGS.h:548 flips the screen 180 on A+B; SETTINGS.h:574-579 toggles
+  // pixel invert on a solo UP press -- a different, still-useful control.
+  // AppSettings has no #ifdef in _config.h -- it is always in the container.
+  { TWOCCS("SE"), "Flip Screen",  nullptr,      "Up: Invert Pixels" },
+#ifdef ENABLE_APP_SCENES
+  // Scenery.h:717-718 -- Z jumps to a random scene (ZapButton); X/Y
+  // (Scenery.h:719-722) step to the previous/next saved scene.
+  { TWOCCS("SX"), nullptr,        "Random Scene", "X/Y: Change Scene" },
+#endif
+
+  // Everything below binds neither A+B nor a bare Z, so both fields stay
+  // null and `tip` is the whole entry.
+#ifdef ENABLE_APP_DARKEST_TIMELINE
+  // TheDarkestTimeline.h:346-352 -- Up/Down arm the CV/Probability tracks
+  // for recording.
+  { TWOCCS("D2"), nullptr, nullptr, "Up/Dn: Arm Rec Trk" },
+#endif
+#ifdef ENABLE_APP_ENIGMA
+  // Enigma.h:172-178 -- L cycles LIBRARY -> ASSIGN -> SONG -> PLAY mode.
+  { TWOCCS("EN"), nullptr, nullptr, "L: Change Mode" },
+#endif
+#ifdef ENABLE_APP_NEURAL_NETWORK
+  // NeuralNetwork.h:215-229 -- Up/Down pick which of the 4 saved setups
+  // (1-4) is loaded.
+  { TWOCCS("NN"), nullptr, nullptr, "Up/Dn: Setup 1-4" },
+#endif
+#ifdef ENABLE_APP_ASR
+  // ASR.h:952-954 -- Down (HandleLowerButton) freezes the sample & hold.
+  { TWOCCS("AS"), nullptr, nullptr, "Down: Freeze S&H" },
+#endif
+#ifdef ENABLE_APP_H1200
+  // H1200.h:1022-1029 -- A/B step the octave; L-long resets to defaults.
+  { TWOCCS("HA"), nullptr, nullptr, "A/B: Octave" },
+#endif
+#ifdef ENABLE_APP_AUTOMATONNETZ
+  // Automatonnetz.h:736-737 -- L toggles editing the selected cell vs the
+  // whole grid.
+  { TWOCCS("AT"), nullptr, nullptr, "L: Edit Cell/Grid" },
+#endif
+#ifdef ENABLE_APP_QUANTERMAIN
+  // QQ.h:1484-1494 -- holding L copies the selected channel's scale/root to
+  // the other 3 channels.
+  { TWOCCS("QQ"), nullptr, nullptr, "L-hold: Copy Scale" },
+#endif
+#ifdef ENABLE_APP_METAQ
+  // DQ.h:1393-1407 -- same pattern: holding L copies scale/root across both
+  // channels.
+  { TWOCCS("DQ"), nullptr, nullptr, "L-hold: Copy Scale" },
+#endif
+#ifdef ENABLE_APP_POLYLFO
+  // Quadraturia.h:501-506 -- L toggles the left encoder between editing the
+  // coarse and fine frequency.
+  { TWOCCS("PL"), nullptr, nullptr, "L: Coarse/Fine Freq" },
+#endif
+#ifdef ENABLE_APP_LORENZ
+  // Lorenz.h:334-336 -- L switches which of the 2 generators is selected.
+  { TWOCCS("LR"), nullptr, nullptr, "L: Switch Generator" },
+#endif
+#ifdef ENABLE_APP_PIQUED
+  // Piqued.h:1142-1151 -- L switches between editing segment values and
+  // channel settings.
+  { TWOCCS("EG"), nullptr, nullptr, "L: Segments/Settings" },
+#endif
+#ifdef ENABLE_APP_SEQUINS
+  // Sequins.h:2374-2377 -- L re-syncs both sequencer channels back to step 1.
+  { TWOCCS("SQ"), nullptr, nullptr, "L: Sync Channels" },
+#endif
+#ifdef ENABLE_APP_BBGEN
+  // BBGEN.h:353-358 -- A/B (HandleTowerButton/HandleTopButton) adjust the
+  // selected ball's gravity.
+  { TWOCCS("BB"), nullptr, nullptr, "A/B: Adjust Gravity" },
+#endif
+#ifdef ENABLE_APP_BYTEBEATGEN
+  // Viznutcracker.h:518-526 -- A/B step the bytebeat equation +/-1.
+  { TWOCCS("BY"), nullptr, nullptr, "A/B: Cycle Equation" },
+#endif
+#ifdef ENABLE_APP_CHORDS
+  // Chords.h:1321-1328 -- L commits the left-encoder scale selection.
+  { TWOCCS("CQ"), nullptr, nullptr, "L: Confirm Scale" },
+#endif
+#ifdef ENABLE_APP_REFERENCES
+  // References.h:836-839 -- R on the Autotune row opens the autotuner.
+  { TWOCCS("RF"), nullptr, nullptr, "R: Open Autotuner" },
+#endif
+#ifdef ENABLE_APP_PONG
+  // PongGame.h:478-484 -- L/R toggle each paddle between encoder and analog
+  // (CV) input.
+  { TWOCCS("PO"), nullptr, nullptr, "L/R: Analog/Digital" },
+#endif
+#ifdef ENABLE_APP_TUNER
+  // TunerApp.h:314-318 -- R locks the strobe to the currently displayed note.
+  { TWOCCS("TU"), nullptr, nullptr, "R: Lock Strobe" },
+#endif
+#ifdef ENABLE_APP_BUS200E
+  // Bus200eApp.h:2721-2726 -- L from the module-home screen opens the module
+  // picker (SCR_MODULE_SELECT).
+  { TWOCCS("2E"), nullptr, nullptr, "L: Pick Module" },
+#endif
+#ifdef ENABLE_APP_TWEIGHTY
+  // TweightyApp.h:476-478 -- A toggles the delay engine's transport, from
+  // either screen.
+  { TWOCCS("TW"), nullptr, nullptr, "A: Transport Toggle" },
+#endif
+#ifdef ENABLE_APP_SCOPE
+  // ScopeApp.h:337-339 -- A freezes/unfreezes the live trace.
+  { TWOCCS("SP"), nullptr, nullptr, "A: Freeze Trace" },
+#endif
+#ifdef ENABLE_APP_SAMPLER
+  // SamplerApp.h:387-389 -- A manually previews/triggers the selected slot.
+  { TWOCCS("SM"), nullptr, nullptr, "A: Preview Slot" },
+#endif
+#ifdef ENABLE_APP_USBDRIVE
+  // UsbDriveApp.h:254-255 -- holding B on the USB Drive item arms it.
+  { TWOCCS("UD"), nullptr, nullptr, "B-hold: USB Drive" },
+#endif
+  // ScaleEditor.h:138-144 -- Up/Down switch which scale is being edited.
+  // AppScaleEditor has no #ifdef in _config.h -- always in the container.
+  { TWOCCS("SC"), nullptr, nullptr, "Up/Dn: Switch Scale" },
+#ifndef NO_HEMISPHERE
+  // WaveformEditor.h:164-174 -- Up/Down switch which waveform is being
+  // edited.
+  { TWOCCS("WA"), nullptr, nullptr, "Up/Dn: Switch Wave" },
+#endif
+  // Backup.h:112-123 -- L arms Restore (then B commits), R sends the backup.
+  // AppBackup has no #ifdef in _config.h -- always in the container.
+  { TWOCCS("BU"), nullptr, nullptr, "L: Restore R: Send" },
 };
 
 static const ChordGloss *find_gloss(uint16_t app_id)
@@ -245,7 +402,11 @@ FLASHMEM static void DrawChordHint(uint16_t app_id, bool io_settings_allowed)
     // always appears -- the test is here so the card stays honest the moment
     // one does, not because it is filtering anything now.
     if (io_settings_allowed) rows[n++] = { "A+encL: I/O Cfg", nullptr };
+    // This slot is A+B's row when the app binds one; otherwise it is the
+    // app's general tip, so every app gets a useful row here rather than
+    // just the apps that happen to bind A+B -- see the ChordGloss comment.
     if (gloss && gloss->a_plus_b) rows[n++] = { "A+B: ", gloss->a_plus_b };
+    else if (gloss && gloss->tip) rows[n++] = { gloss->tip, nullptr };
     rows[n++] = { "encL+encR: Presets", nullptr };
     if (z_button_present()) rows[n++] = { "Z+A: Screensaver", nullptr };
     DrawChordCard("HOLD A", rows, n);
@@ -255,8 +416,11 @@ FLASHMEM static void DrawChordHint(uint16_t app_id, bool io_settings_allowed)
     rows[n++] = { "Z+A: Screensaver", nullptr };
     // Z is the one row here that can fire on RELEASE (Quadrants.h:1873 toggles
     // the clock on either release), so naming what it does is not decoration:
-    // it is the difference between letting go and being surprised.
+    // it is the difference between letting go and being surprised. Same
+    // either/or as the A-branch above: bare-Z meaning if the app binds one,
+    // else the app's general tip.
     if (gloss && gloss->z_alone) rows[n++] = { "Z: ", gloss->z_alone };
+    else if (gloss && gloss->tip) rows[n++] = { gloss->tip, nullptr };
     rows[n++] = { "encL+encR: Presets", nullptr };
     DrawChordCard("HOLD Z", rows, n);
   }
