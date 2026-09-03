@@ -51,6 +51,9 @@ namespace menu = OC::menu;
 #ifdef ENABLE_APP_TWEIGHTY
 #include "TweightyApp.h"
 #endif
+#ifdef ENABLE_APP_SCOPE
+#include "ScopeApp.h"
+#endif
 #include "Backup.h"
 #include "SETTINGS.h"
 
@@ -151,6 +154,9 @@ static DMAMEM AppContainer<void // this space intentionally left blank
 #endif
 #ifdef ENABLE_APP_TWEIGHTY
   , AppTweighty
+#endif
+#ifdef ENABLE_APP_SCOPE
+  , AppScope
 #endif
   , AppScaleEditor
 #ifndef NO_HEMISPHERE
