@@ -28,6 +28,11 @@ The Xenomorpher now talks natively to a Buchla 200e case's preset bus:
 * **The [200e Modules App](200e-Modules-App)**, to read another module's
   program bank over the bus (251e sequences, 259e programs) into the
   Xenomorpher, edit it, and write it back.
+* **Tweighty**, a new full-screen 8-tap WRITE/RECIRC delay/looper (design
+  lifted from the Buchla-format 288r Time Domain Processor, reimplemented
+  natively rather than ported) that keeps running through the audio ISR
+  even when a different app has the front panel. Very new — see
+  "What's still rough" below before relying on it for anything.
 
 The full protocol-level writeup — what's implemented, what's tested, and
 the specific hazards this design defends against — is in
@@ -96,6 +101,12 @@ console needed. Include that exact string in any bug report.
   built-in pause between them so a fumbled double-press can't complete a
   write by accident) — it can feel like the first press did nothing. That's
   expected; the screen tells you what it's waiting for.
+* **Tweighty is brand new and its audio path has not yet been confirmed
+  working on real hardware.** It builds, runs, and its screens render
+  correctly, but a live bench test (real signal into IN L, monitoring OUT L)
+  produced no audible output at all — under active investigation. Don't
+  rely on it for anything yet; this note will be removed once it's
+  confirmed working end to end on a real module.
 
 ## Safety notes
 

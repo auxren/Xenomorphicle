@@ -80,6 +80,20 @@ Xenomorpher — known open
 
 ## Tweighty (the 288r-derived delay/looper app)
 
+* **No audio output on real hardware, first bench test (2026-09-03).**
+  Signal patched into IN L, monitored on OUT L, transport in WRITE, engine
+  confirmed live (audio f32 pool grew from the idle baseline, CPU usage
+  rose to ~21%/38.6% max, screens render and respond to panel input) --
+  but total silence, not just missing wet/delayed repeats, which should
+  rule out a tap-read-specific bug and point at the base signal path (the
+  dry-passthrough alone should be audible at the default 50/50 wet/dry).
+  `OC::AudioIO::Init()` confirmed called unconditionally from `Main.cpp`
+  regardless of build env, so codec init isn't gated out. Root cause not
+  yet found -- this is the first time this engine's audio path has run on
+  real silicon at all (host tests and xeno-sim only ever exercised the
+  pure-logic pieces and the UI; xeno-sim's own audio stand-ins are
+  compile-only stubs, per its README). Investigate before trusting any of
+  this app's audio behavior.
 * **`AudioConnection_F32::disconnect()` never resets the stream's `active`
   flag**, unlike the stock int16 `AudioConnection::disconnect()` this codebase
   deliberately widened for the same case. Any F32 `AudioStream_F32` that does

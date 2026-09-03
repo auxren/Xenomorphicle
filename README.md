@@ -1,87 +1,120 @@
-[![PlatformIO CI](https://github.com/djphazer/O_C-Phazerville/actions/workflows/firmware.yml/badge.svg)](https://github.com/djphazer/O_C-Phazerville/actions/workflows/firmware.yml) [![GitHub Release](https://img.shields.io/github/v/release/djphazer/O_C-Phazerville)](https://github.com/djphazer/O_C-Phazerville/releases/latest)
+[![CI](https://github.com/auxren/Xenomorphicle/actions/workflows/ci.yml/badge.svg)](https://github.com/auxren/Xenomorphicle/actions/workflows/ci.yml)
 
-Phazerville Suite - an active o_C firmware fork
+Xenomorphicle - an active o_C>Phazerville Suite firmware fork
 ===
-[![SynthDad is pretty cool ;P](http://img.youtube.com/vi/kT94mBjvVQI/0.jpg)](http://www.youtube.com/watch?v=kT94mBjvVQI "Ornament and Crime Teensy 4.1 with Phazerville. What's New and Improved?")
 
-<details><summary>More Videos...</summary>
-
-  [![Firmware Update v1.10](http://img.youtube.com/vi/UvlA5_C1aig/0.jpg)](http://www.youtube.com/watch?v=UvlA5_C1aig "Phazerville Suite v1.10 - O_C Firmware Update")
-  [![SynthDad's v1.7 update](http://img.youtube.com/vi/bziSog_xscA/0.jpg)](http://www.youtube.com/watch?v=bziSog_xscA "Ornament and Crime Phazerville 1.7: What's new in this big release!")
-  [![SynthDad's video overview](http://img.youtube.com/vi/XRGlAmz3AKM/0.jpg)](http://www.youtube.com/watch?v=XRGlAmz3AKM "Phazerville; newest firmware for Ornament and Crime. Tutorial and patch ideas")
-  [![Pigeons, Polyrhythms, Music & Math](http://img.youtube.com/vi/J1OH-oomvMA/0.jpg)](http://www.youtube.com/watch?v=J1OH-oomvMA "Pigeons & Polyrhythms / Music & Math")
-  [![DualTM & O_C T4.1 Hardware](http://img.youtube.com/vi/51cchuLNIDU/0.jpg)](http://www.youtube.com/watch?v=51cchuLNIDU "Next-gen O_C T4.1 Hardware + DualTM applet")
-</details>
 
 ## About this fork
 
-This repository is a fork of Phazerville Suite aimed at **Northern Light Modular
-Buchla 4U** builds — the _Xenomorpher_ — and its distinguishing feature is the
-**200e preset bus**: the module talks I²C to the other modules in a Buchla 200e
-case, follows and drives bus clock and bus MIDI, coexists with a Buchla preset
-manager on the same wire, and can read and rewrite another module's preset bank.
-Everything upstream still builds and works; this is additive.
+This repository started as a fork of Phazerville Suite and has grown into its
+own firmware for one specific instrument: a **Northern Light Modular Buchla
+4U** module — the _Xenomorpher_ — living inside a real Buchla 200e case. It's
+no longer aiming to stay a general-purpose, upstream-compatible fork; the
+goal is making this particular Teensy 4.1 module a first-class citizen of
+that specific system, and using the same hardware to explore what a modern
+DSP-capable module can add to a vintage-format instrument that neither the
+format's original design nor the stock O_C firmware anticipated. Where the
+Xenomorpher's needs and upstream Phazerville's diverge, the Xenomorpher
+wins.
+
+Two pieces of work, at different levels of maturity:
+
+* **The 200e preset bus** is the mature, hardware-verified half. The module
+  talks I²C to the other modules in the case, follows and drives bus clock and
+  bus MIDI, coexists with a Buchla preset manager on the same wire without ever
+  auto-claiming a resource the manager owns, and can read and rewrite another
+  module's preset bank — with a pre-write snapshot and verified read-back
+  before any of those 30 slots on someone else's module get touched. This is
+  the part that's been run against real 251e/259e modules on the bench, not
+  just built.
+* **Tweighty** (`software/src/apps/TweightyApp.h`) is the newer, more
+  experimental half — an original 8-tap WRITE/RECIRC delay/looper, design-led
+  by the Buchla-format 288r Time Domain Processor but reimplemented rather than
+  ported, built to keep processing audio in the background even while a
+  different app has the front panel. It's real, self-contained new
+  instrument functionality this hardware didn't have before, not a bus
+  feature — and, as of this writing, its output audio path has a known,
+  unresolved routing conflict (see [TODO.md](TODO.md)'s Tweighty section)
+  that hasn't reached a fix yet. Screens and controls are done and verified on
+  real hardware; the sound isn't reliably reaching the jacks yet.
+
+Both halves share the same standard: host-tested pure logic where the logic
+can be isolated from hardware, every claim about ISR safety or memory budget
+checked against the actual linked ELF rather than the source alone, and
+nothing declared working until it's been run on the physical module — a
+mockup or a simulator render has caught real bugs in this project, but it has
+also missed real bugs that only showed up once someone looked at the actual
+device.
 
 Where to start:
 
 * **Build environments** — `software/platformio.ini`. `T41_audio` is the slot-0
-  image the module actually runs, and it carries `-DPRESET_BUS` and the 200e app;
-  `T41` links to slot 1 and **will not boot on its own**. `software/flash.sh`
-  builds locally and then flashes over ssh to a bench rig, refusing any image not
-  linked for slot 0 and verifying by USB enumeration afterwards. The `nlm*`
-  environments add `-DNORTHERNLIGHT`, which among other things changes the
-  factory-erase gesture at the splash screen.
+  image the module actually runs, and it carries `-DPRESET_BUS` and the 200e
+  app; `T41` links to slot 1 and **will not boot on its own**.
+  `software/flash.sh` builds locally and then flashes over ssh to a bench rig,
+  refusing any image not linked for slot 0 and verifying by USB enumeration
+  afterwards. The `nlm*` environments target the older, T3.2/T40-based NLM 4U
+  hardware line (a separate product from the Xenomorpher) and add
+  `-DNORTHERNLIGHT`, which among other things changes the factory-erase
+  gesture at the splash screen.
 * **The bus** — `-DPRESET_BUS` turns it on; `-DENABLE_APP_BUS200E` adds the
   _200e Modules_ app on top of it. See
   [200e conformance](docs/200e-conformance.md) for how coexistence with a
   Buchla preset manager is guaranteed, and
   [252e clock sync](docs/252e-clock-sync.md).
+* **Tweighty** — `-DENABLE_APP_TWEIGHTY` (on by default in `T41_audio`).
+  Read the class-header comment in `TweightyApp.h` for the control model; see
+  [TODO.md](TODO.md) for its current known issues before relying on it.
+* **Audio path** — the codec (`PCM1754` DAC / `PCM1808` ADC on the O.R.N.8
+  shield) runs float32 end to end through `AudioIO.cpp`, on 32-bit I2S
+  frames that carry the converters' full 24-bit resolution; the
+  Hemisphere/Quadrants applet bus is still int16 and bridges at that
+  boundary until applets are ported to F32. `T41_audio` also builds with
+  `-DAUDIO_SUBSLOT_SIZE=3`, so the module enumerates to the host as a
+  class-compliant USB Audio Class 2 device at 24-bit/48kHz, 4 channels each
+  way (ch1/2 = engine bus, ch3/4 = codec monitor) — no vendor driver needed
+  on macOS, Windows, or Linux — alongside USB MIDI in the same composite
+  device. That 24-bit USB bridge is compile-verified but hasn't completed
+  its full on-hardware A/B pass yet; see
+  [the bench checklist](docs/bench-float32-checklist.md).
 * **State and presets** — [Saving State](docs/Saving-State.md), including the
   30 preset-bus slots and why they live on internal flash.
+* **Trying this before it merges** — [Xenomorpher Beta Guide](docs/Xenomorpher-Beta-Guide.md):
+  what's solid, what's rough, how to get the firmware on, how to report back.
 * **Bench work** — [console cheat sheet](docs/bench-console.md) and
   [flashing notes](docs/bench-flashing.md). Both are written for a headless rig
   where the Teensy's PROGRAM button is unreachable.
 * **Interface review** — `design/ui-review/`, a design canvas of findings and
   proposals for the whole-instrument navigation and the 200e app. Every item is
   marked shipped or open.
-* **A host simulator** — `tools/xeno-sim/` runs the real firmware's screens on a
-  desktop, no module required. See its own README.
-* **Known open work** — [TODO.md](TODO.md), Xenomorpher section.
+* **A host simulator** — `tools/xeno-sim/` runs the real firmware's screens
+  (including Tweighty's, and — a first for this simulator — its audio-DSP
+  engine's compilation, though not its actual sound) on a desktop, no module
+  required. See its own README.
+* **Known open work** — [TODO.md](TODO.md), Xenomorpher and Tweighty sections.
 
-Everything below this point is the upstream Phazerville README.
+What follows is inherited from upstream Phazerville — background and
+attribution, not a design constraint this fork still tracks.
 
 ***
 
-Watch some **video overviews** (above) or check the [**project website**](https://firmware.phazerville.com) for more info, including commercial product links.
-
-[Download a firmware **Release**](https://github.com/djphazer/O_C-Phazerville/releases) or [Request a **Custom Build**](https://github.com/djphazer/O_C-Phazerville/discussions/38) (for Teensy 3.2).
-
-Grab Paul's [**Screen Capture**](https://github.com/PaulStoffregen/Phazerville-Screen-Capture) program to view the screen on a PC via USB.
+Grab Paul's [**Screen Capture**](https://github.com/PaulStoffregen/Phazerville-Screen-Capture) program to view the module's screen on a PC via USB — handy on the bench without a monitor cable in the way.
 
 ## Hardware Info
-There are two distinct _microcontrollers_ aka MCU's (and each has variants) and also two distinct hardware _shields_, and there's some overlap.
 
-### Shields:
-* **o_C** - based on the original "ornament & crime" hardware design by **mxmxmx**
-  - 4ch ADC / 4ch DAC
-  - DAC and OLED share a SPI bus
-  - 8HP uO_c by jakplugg - https://github.com/jakplugg/uO_c
-  - original 14HP panels & gerbers are in the `hardware` directory
-* **O.R.N.8** aka "O_C T4.1" - https://github.com/PaulStoffregen/O_C_T41
-  - 8ch ADC / 8ch DAC / 2ch Audio In + 2ch Audio Out
-  - SPI0 dedicated for DAC
-  - SPI1 dedicated for OLED
-  - Serial MIDI In + Out / USB Host MIDI
-  - designed by Paul, derived from original
+The Xenomorpher is a Teensy 4.1 on the **O.R.N.8** shield (aka "O_C T4.1",
+https://github.com/PaulStoffregen/O_C_T41 — designed by Paul, derived from
+mxmxmx's original o_C): 8ch ADC / 8ch DAC (`DAC8568` on a dedicated SPI0;
+OLED on a dedicated SPI1, no shared bus), 2ch audio in + 2ch audio out
+through the `PCM1808`/`PCM1754` I2S codec pair, serial MIDI in/out, and USB
+host MIDI. That's the only shield/MCU combination this fork's `T41_audio`
+build targets or is tested against.
 
-### MCUs:
-* Teensy 3.2 - compatible with O_C
-* Teensy 4.0 - compatible with O_C
-* Teensy 4.1 - compatible with O_C or ORN8
-
-Thus, the 4.x series are pin-compatible drop-in replacements for the old existing O_C hardware. They bring increased CPU, RAM, and Flash capacity, while working with the existing limitations of the design (sharing a SPI bus). Although the 4.1 can technically work with O_C (using the T40 firmware), the form factor of the 4.0 is more fitting, especially on the 8HP model.
-
-The T41 firmware builds primarily target the new O.R.N.8 hardware shield, with new features that take advantage of it (lots of Audio DSP stuff), but many CV and MIDI features will still show up in the T40 builds for old hardware. T32 support is deprecated, but will remain available for Custom Builds, receiving occasional Applet updates.
+Upstream Phazerville also supports the original 4ch **o_C** shield (Teensy
+3.2/4.0, DAC and OLED sharing one SPI bus) and older Teensy generations —
+see `platformio.ini`'s `T32`/`T40`/`nlm*` environments if you're building for
+that hardware instead; none of it is exercised by anything in this fork's
+own work.
 
 ## Stolen Ornaments
 
@@ -94,29 +127,23 @@ I think the beauty of this module is the fact that it's relatively easy to modif
 
 ## How To Hack It
 
-### Option 1: Platform IO
-This firmware fork is primarily built using Platform IO, a Python-based build toolchain, available as either a [standalone CLI](https://docs.platformio.org/en/latest/core/installation/methods/installer-script.html) or a [full-featured IDE](https://platformio.org/install/ide), as well as a plugin for VSCode and other existing IDEs. Follow one of those links to get that set up first.
-
-The PlatformIO project for the source code lives within the `software/` directory. From there, you can Build the desired configuration and Upload via USB to your module. In the terminal, I type:
+This fork is built with [PlatformIO](https://docs.platformio.org/en/latest/core/installation/methods/installer-script.html)
+(standalone CLI, [full IDE](https://platformio.org/install/ide), or a
+VSCode/other-IDE plugin) — the project lives in `software/`. For the
+Xenomorpher, build and upload with:
 ```
 pio run -e T41_audio -t upload
 ```
-Or, for older Teensy 3.2 modules:
-```
-pio run -e T32 -t upload
-```
-Or use `T40` for Teensy 4.0. Have a look inside `platformio.ini` for alternative build environment configurations and app flags.
+or use `software/flash.sh` to build and flash a bench rig over ssh (see the
+[bench flashing notes](docs/bench-flashing.md)). Customize apps and other
+flags inside `software/src/OC_options.h`, or per-environment in
+`platformio.ini`.
+
+`platformio.ini` also carries `T32`/`T40`/`nlm*` environments and an
+Arduino-IDE path (`software/src/src.ino`) for hardware outside this fork's
+scope — not exercised by anything here.
 
 _**Pro-tip**_: If you decide to fork the project, and enable GitHub Actions on your own repo, GitHub will build the files for you... ;)
-
-### Option 2: Arduino IDE
-Instead of Platform IO, you can use the latest version of the Arduino IDE + Teensyduino extension. The newer 2.x series should work, no need to install an old version.
-
-Simply open the `software/src/src.ino` file. In the Tools menu, select the appropriate Teensy Board for your hardware; use the "Optimize -> Smallest Code" and "USB Type -> MIDI" options.
-
-Customize Apps and other flags inside `software/src/OC_options.h`. You can also disable individual applets in `software/src/hemisphere_config.h`.
-
-For Teensy 4.1, you'll need a copy of my forked playback library in your local sketchbook folder. Inside the `Arduino/libararies` directory: `git clone https://github.com/djphazer/teensy-variable-playback.git`
 
 ## Credits
 
