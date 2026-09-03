@@ -81,11 +81,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # antihem and nlm_hoc_midi are here because a change that built clean
-        # on all four T4x targets still broke both of them (96d33a89): they are
-        # the reduced builds, so they are the ones that notice a new call into
-        # code fenced behind __IMXRT1062__ or a full app set.
-        env: [T41, T41_audio, T41_audio_dbg, T40, T41_console, antihem, nlm_hoc_midi]
+        # T40/antihem/nlm_hoc_midi (T3.2/T4.0/older-NLM reduced builds) dropped
+        # from CI: this fork only targets Xenomorpher (T4.1/O.R.N.8) hardware
+        # from here on. They previously caught breaks from a call fenced behind
+        # __IMXRT1062__ or a full app set (96d33a89) -- watch for that class of
+        # bug manually if touching code shared with those configs.
+        env: [T41, T41_audio, T41_audio_dbg, T41_console]
     steps:
       - uses: actions/checkout@v4
         with:
