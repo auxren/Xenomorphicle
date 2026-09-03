@@ -64,21 +64,27 @@ public:
     max_delay_secs_ = (samples - 1) / AUDIO_SAMPLE_RATE_EXACT;
   }
 
-  // Acquire()/Release() are called from Controller()-driven app-switch
-  // (TweightyApp::SetActive(), control-rate) while update() runs from the
-  // audio ISR (software_isr(), via AudioStream's per-block dispatch) on
-  // whatever streams are currently AudioConnection_F32-"active" -- and that
-  // codebase-wide library never resets `active` on disconnect() (only stock
-  // int16 AudioConnection does), so update() can keep firing on this stream
-  // after SetActive(false) believes it has stopped. ready_ is the actual
-  // safety gate update() trusts, independent of that: Release() clears it
-  // FIRST, before freeing anything, so an update() that starts after this
-  // point sees ready_==false and returns before touching a soon-freed
-  // pointer; Acquire() sets it LAST, after every allocation is complete, so
-  // update() never sees a partially-built engine. The caller (SetActive())
-  // additionally brackets this in AudioNoInterrupts()/AudioInterrupts() to
-  // close the narrower window where update() is already mid-flight -- ready_
-  // alone only orders visibility, it doesn't preempt an in-progress call.
+  // Acquire() is called once per session, from TweightyApp::ActivateOnce()
+  // on Tweighty's first RESUME (control-rate); nothing in the app's ordinary
+  // lifecycle calls Release() any more -- the engine stays connected and
+  // processing for the rest of the session regardless of which app is
+  // current (see ActivateOnce()'s comment). Release() stays defined and
+  // correct anyway, as the hook a future explicit "close the looper" action
+  // would call. update() runs from the audio ISR (software_isr(), via
+  // AudioStream's per-block dispatch) on whatever streams are currently
+  // AudioConnection_F32-"active" -- and that codebase-wide library never
+  // resets `active` on disconnect() (only stock int16 AudioConnection does),
+  // so update() can keep firing on this stream after a caller believes a
+  // disconnect+Release() has stopped it. ready_ is the actual safety gate
+  // update() trusts, independent of that: Release() clears it FIRST, before
+  // freeing anything, so an update() that starts after this point sees
+  // ready_==false and returns before touching a soon-freed pointer;
+  // Acquire() sets it LAST, after every allocation is complete, so update()
+  // never sees a partially-built engine. Whichever caller ever brackets a
+  // connect/disconnect against this (ActivateOnce() today) additionally
+  // wraps it in AudioNoInterrupts()/AudioInterrupts() to close the narrower
+  // window where update() is already mid-flight -- ready_ alone only orders
+  // visibility, it doesn't preempt an in-progress call.
   void Acquire() {
     buffer_l_.Acquire();
     buffer_r_.Acquire();

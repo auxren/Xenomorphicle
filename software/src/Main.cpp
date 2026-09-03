@@ -906,6 +906,8 @@ FLASHMEM __attribute__((noinline)) void loop() {
     // Take care of queued tasks
     OC::CORE::FlushTasks();
     OC::PresetEngine::Process();
+    OC::TweightyBackgroundPump();   // after Process(): picks up a
+                                     // just-applied RECALL in the same pass
     OC::PresetBus::Task();
     OC::PresetBusUI::Task();
     OC::Bus200eBridgeUsb::Task();

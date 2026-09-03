@@ -33,10 +33,15 @@
 // AUDIO WIRING: the engine is F32-native: OC::AudioIO's int16 in/out streams
 // bridge to it through AudioConvertI16toF32Multi<2>/AudioConvertF32toI16Multi
 // <2> (the same edge adapters HemisphereAudioAppletF32 uses for every F32
-// audio applet). Connections are built once, lazily, and only ever
-// connect()ed while this app is on screen -- mirrors TunerApp.h's WireAudio/
-// SetActive pattern, widened here to a full duplex path since this app
-// writes audio out, not just analyzes it.
+// audio applet). Connections are built once, lazily, on this app's first
+// RESUME, and stay connect()ed for the rest of the session regardless of
+// which app is current afterward -- see ActivateOnce()/HandleAppEvent below,
+// and OC::TweightyBackgroundPump() (OC_apps.cpp) for what keeps the engine's
+// live parameters in sync while this app is backgrounded. Mirrors Quadrants'
+// Suspend()/Resume() never tearing down its own always-on audio_applet graph
+// (Quadrants.h), reached here at first-use instead of at boot since this
+// engine's PSRAM buffer (~4MB) should only be paid for by users who actually
+// open the looper.
 // ---------------------------------------------------------------------------
 
 #include "../Audio/AudioTweightyF32.h"
@@ -129,6 +134,49 @@ public:
 
   void View() const final { DrawMenu(); }
 
+  // Called unconditionally from Main.cpp's loop() via
+  // OC::TweightyBackgroundPump(), every pass, regardless of which app is
+  // current -- so this is in-class (NOT FLASHMEM) for the same reason
+  // Controller() above is: see the file-tail comment. Syncs engine_'s live
+  // parameters to this app's own persisted fields (which RestoreAppData()
+  // can rewrite at any time, including while Tweighty is not on screen).
+  //
+  // Deliberately does NOT touch In()/Clock()/Out() or HS::frame: those are
+  // valid only for the CURRENT app -- HS::frame is one global instance,
+  // refreshed only by BaseController() for whichever app
+  // app_switcher.Process() is dispatching to this tick (see HSApplication.h
+  // and HSIOFrame.h). Reading/writing it here would silently act on (or
+  // clobber) the FOREGROUND app's panel state, not Tweighty's -- specifically
+  // CV0 time-modulation, the Digital-In-1 transport toggle, and env_out_'s
+  // Out(0,...) all stay Controller()-only, current-app-only, unchanged.
+  //
+  // engine_acquired_ guards this not for ISR safety (SetTapCount/SetFeedback/
+  // SetWetDry/SetTargetTimeSeconds/SetTapTargetSecs all touch only plain
+  // scalars, never buffer pointers -- harmless pre-Acquire(), exactly like
+  // RestoreAppData() already calls three of them unconditionally at boot)
+  // but as a cheap early-out: no reason to do this work before the user has
+  // ever opened Tweighty this session.
+  void BackgroundPump() {
+    using namespace TweightyAppNS;
+    if (!engine_acquired_) return;
+
+    engine_.SetTapCount(tap_count_);
+    engine_.SetFeedback((float)feedback_byte_ / 255.0f);
+    engine_.SetWetDry((float)wetdry_byte_ / 255.0f);
+
+    // Unmodulated base time only -- no CV0 multiplier (see the class
+    // comment above). This is what lets a background RestoreAppData() (bus
+    // preset recall) reach the engine's RECIRC wrap detector and tap
+    // targets instead of leaving them stale until the user manually
+    // switches back.
+    const float base_secs = (float)time_centis_ * 0.01f;
+    engine_.SetTargetTimeSeconds(base_secs);
+    for (int i = 0; i < kTweightyTapCount; ++i) {
+      const float secs = TweightyTapTargetSecs(base_secs, phase_table_.phase[i], 1.0f);
+      engine_.SetTapTargetSecs(i, secs);
+    }
+  }
+
 private:
   // --- audio graph -----------------------------------------------------
   AudioTweightyF32 engine_;
@@ -164,7 +212,7 @@ private:
   bool env_out_ = false;
 
   void WireAudio();
-  void SetActive(bool on);
+  void ActivateOnce();
   void DrawHome() const;
   void DrawEdit() const;
   void AdjustEditParam(int delta);
@@ -175,8 +223,11 @@ private:
 // Everything below is out-of-class and FLASHMEM. LTO silently drops FLASHMEM
 // from in-class (implicitly-inline) definitions, which is how this repo has
 // repeatedly tipped a 32KB ITCM bank boundary -- see Bus200eApp.h's tail
-// comment. Controller() above and AudioTweightyF32's own methods are the
-// only exceptions, both audio/ISR-hot by design.
+// comment. Controller() and BackgroundPump() above, and AudioTweightyF32's
+// own methods, are the only exceptions -- ISR-hot or unconditional-tick-hot
+// by design (BackgroundPump() runs from Main.cpp's loop() every pass
+// regardless of the current app, same as Controller() runs from the audio
+// ISR every pass regardless of who last touched the panel).
 // ---------------------------------------------------------------------------
 
 FLASHMEM void AppTweighty::Init() {
@@ -238,10 +289,13 @@ FLASHMEM size_t AppTweighty::RestoreAppData(util::StreamBufferReader &stream_buf
 }
 
 // The audio graph is global and always running, so the taps into it are
-// built once and connected only while this app is on screen -- an idle
-// engine would otherwise cost a PSRAM buffer and CPU in every other app.
-// Mirrors TunerApp.h's WireAudio(), widened to the full duplex path this app
-// needs (Tuner only ever taps the input for analysis).
+// built once, lazily, on this app's first RESUME (not at boot -- an idle,
+// never-opened Tweighty would otherwise cost a PSRAM buffer in every other
+// app too). Once built and connected they stay connected for the rest of
+// the session; see ActivateOnce()'s comment for why nothing here tears them
+// back down on an ordinary app-switch. Mirrors TunerApp.h's WireAudio(),
+// widened to the full duplex path this app needs (Tuner only ever taps the
+// input for analysis).
 FLASHMEM void AppTweighty::WireAudio() {
   if (audio_wired_) return;
 #ifdef AUDIO_INTERFACE
@@ -265,69 +319,57 @@ FLASHMEM void AppTweighty::WireAudio() {
   audio_wired_ = true;
 }
 
-// Resume/suspend: connect the graph and take the PSRAM buffer, or give both
-// back. Acquire()/Release() bracket every activation (not just the first),
-// so an idle Tweighty app holds no PSRAM for other apps to contend with.
+// Runs exactly once per session, on Tweighty's first RESUME: connects the
+// audio graph and takes engine_'s PSRAM buffer, and never releases either
+// again on an ordinary app-switch -- Tweighty stays connected and processing
+// via the audio ISR for the rest of the session regardless of which app is
+// current, matching Quadrants' Suspend()/Resume() (Quadrants.h) never
+// tearing down its own audio graph either. A future explicit "close the
+// looper" menu action, if this ever needs one, is the only thing that
+// should call engine_.Release() -- see AudioTweightyF32.h's Release() for
+// why it stays defined and correct as that hook even though nothing here
+// calls it now.
 //
-// AudioNoInterrupts()/AudioInterrupts() bracket every connect/disconnect and
-// Acquire()/Release() here (matches AudioAppletSubapp.h's own convention for
-// exactly this hazard) because AudioConnection_F32::disconnect() -- unlike
-// the stock int16 AudioConnection this codebase widened -- never resets the
-// stream's `active` flag, so update() keeps being called from the audio ISR
-// on this engine even after the disconnect calls below return. Without the
-// bracket, the ISR could run engine_.update() concurrently with
-// engine_.Release() freeing the crossfade tables out from under it -- a
-// reachable use-after-free, not a theoretical one: any ordinary app-switch
-// away from Tweighty while a crossfade is mid-flight (up to ~46ms after any
-// tap edit or transport toggle) would hit it. engine_'s own ready_ flag
-// (see AudioTweightyF32::Acquire/Release) is the second half of the fix --
-// it protects update() calls that land outside this bracket too, since nothing
-// in this codebase can currently fix the disconnect()-never-resets-active
-// gap without touching the shared F32 library (tracked in TODO.md).
-FLASHMEM void AppTweighty::SetActive(bool on) {
+// AudioNoInterrupts()/AudioInterrupts() still bracket Acquire()+connect():
+// ready_ is set LAST inside Acquire() (see AudioTweightyF32::Acquire's own
+// comment) so update() never sees a partially-built engine, and the
+// interrupt bracket closes the narrower window where update() could already
+// be mid-flight against a stream that was just connect()ed. This no longer
+// needs to guard a disconnect()/Release() race (see the old comment removed
+// from here, and AudioTweightyF32.h's Acquire/Release comment) because
+// nothing in this lifecycle calls either anymore.
+FLASHMEM void AppTweighty::ActivateOnce() {
   WireAudio();
   AudioNoInterrupts();
-  if (on) {
-    engine_.Acquire();
-    engine_acquired_ = true;
+  engine_.Acquire();
+  engine_acquired_ = true;
 #ifdef AUDIO_INTERFACE
-    if (conn_in_l_) conn_in_l_->connect();
-    if (conn_in_r_) conn_in_r_->connect();
-    // AudioConnection_F32's no-arg connect() is protected (unlike the int16
-    // AudioConnection this codebase widened for exactly this pooled-cable
-    // use) -- only the 4-arg form is public, so reconnect names the same
-    // endpoints WireAudio() built the pointer with.
-    if (conn_f32_in_l_) conn_f32_in_l_->connect(in_adapter_, 0, engine_, 0);
-    if (conn_f32_in_r_) conn_f32_in_r_->connect(in_adapter_, 1, engine_, 1);
-    if (conn_f32_out_l_) conn_f32_out_l_->connect(engine_, 0, out_adapter_, 0);
-    if (conn_f32_out_r_) conn_f32_out_r_->connect(engine_, 1, out_adapter_, 1);
-    if (conn_out_l_) conn_out_l_->connect();
-    if (conn_out_r_) conn_out_r_->connect();
+  if (conn_in_l_) conn_in_l_->connect();
+  if (conn_in_r_) conn_in_r_->connect();
+  // AudioConnection_F32's no-arg connect() is protected (unlike the int16
+  // AudioConnection this codebase widened for exactly this pooled-cable
+  // use) -- only the 4-arg form is public, so reconnect names the same
+  // endpoints WireAudio() built the pointer with.
+  if (conn_f32_in_l_) conn_f32_in_l_->connect(in_adapter_, 0, engine_, 0);
+  if (conn_f32_in_r_) conn_f32_in_r_->connect(in_adapter_, 1, engine_, 1);
+  if (conn_f32_out_l_) conn_f32_out_l_->connect(engine_, 0, out_adapter_, 0);
+  if (conn_f32_out_r_) conn_f32_out_r_->connect(engine_, 1, out_adapter_, 1);
+  if (conn_out_l_) conn_out_l_->connect();
+  if (conn_out_r_) conn_out_r_->connect();
 #endif
-  } else {
-#ifdef AUDIO_INTERFACE
-    if (conn_in_l_) conn_in_l_->disconnect();
-    if (conn_in_r_) conn_in_r_->disconnect();
-    if (conn_f32_in_l_) conn_f32_in_l_->disconnect();
-    if (conn_f32_in_r_) conn_f32_in_r_->disconnect();
-    if (conn_f32_out_l_) conn_f32_out_l_->disconnect();
-    if (conn_f32_out_r_) conn_f32_out_r_->disconnect();
-    if (conn_out_l_) conn_out_l_->disconnect();
-    if (conn_out_r_) conn_out_r_->disconnect();
-#endif
-    if (engine_acquired_) {
-      engine_.Release();
-      engine_acquired_ = false;
-    }
-  }
   AudioInterrupts();
 }
 
 FLASHMEM void AppTweighty::HandleAppEvent(OC::AppEvent event) {
   switch (event) {
-    case OC::APP_EVENT_RESUME: SetActive(true); break;
-    case OC::APP_EVENT_SUSPEND:
-    case OC::APP_EVENT_SCREENSAVER_ON: SetActive(false); break;
+    case OC::APP_EVENT_RESUME:
+      if (!engine_acquired_) ActivateOnce();
+      break;
+    // SUSPEND / SCREENSAVER_ON: deliberately no-op. The audio graph and
+    // engine_'s PSRAM buffer stay connected and live so Tweighty keeps
+    // processing audio while backgrounded -- see OC::TweightyBackgroundPump()
+    // (OC_apps.cpp) and BackgroundPump() above for what keeps the engine's
+    // live parameters in sync while this app isn't current.
     default: break;
   }
 }

@@ -56,6 +56,14 @@ void RestoreGlobalSettingsFromConfig(uint8_t scala_loaded_mask = 0);
 size_t ResolveAppIndexByID(uint16_t app_id);
 #endif
 
+// Runs every loop() pass regardless of which app is current -- keeps
+// AppTweighty's always-connected audio engine's live control-rate
+// parameters (feedback, mix, tap-count, loop time) synced to whatever
+// RestoreAppData() last wrote, even while Tweighty is backgrounded. No-op
+// when ENABLE_APP_TWEIGHTY isn't compiled in. See TweightyApp.h's
+// BackgroundPump() for exactly what this does (and does not) touch.
+void TweightyBackgroundPump();
+
 enum AppEvent {
   APP_EVENT_SUSPEND,
   APP_EVENT_RESUME,

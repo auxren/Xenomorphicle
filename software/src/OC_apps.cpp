@@ -377,6 +377,28 @@ FLASHMEM void ApplyAppData(const AppData &in) {
   APPS_SERIAL_PRINTLN("App data restored: %u, expected %u", restored_bytes, in.used);
 }
 
+#ifdef ENABLE_APP_TWEIGHTY
+// Not FLASHMEM: called every loop() pass, unconditionally (see the
+// declaration in OC_apps.h). FindAppByID() is a linear scan, so the pointer
+// is resolved once and cached rather than repeated every pass.
+//
+// Skipped while Tweighty IS the current app: Controller() already drives
+// engine_ every pass in that case, at 16.666kHz from CORE_timer_ISR, with
+// CV0-modulated tap targets. BackgroundPump() pushes unmodulated targets
+// (see its own comment) -- running both at once is two unsynchronized
+// writers racing the same non-atomic CrossfadeTarget/Interpolated state,
+// perpetually retriggering the crossfade between the two answers instead of
+// ever settling. Found on review before this ever ran on hardware.
+void TweightyBackgroundPump() {
+  static AppTweighty *tweighty =
+      static_cast<AppTweighty *>(app_container.FindAppByID(AppTweighty::kAppId));
+  if (tweighty && app_switcher.current_app() != static_cast<AppBase *>(tweighty))
+    tweighty->BackgroundPump();
+}
+#else
+void TweightyBackgroundPump() { }
+#endif
+
 FLASHMEM
 static void RestoreAppData() {
   APPS_SERIAL_PRINTLN("Restore from page_index %d", app_data_storage.page_index());
