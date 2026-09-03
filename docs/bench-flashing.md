@@ -7,7 +7,7 @@ Xenomorphicle session; any session on this machine can follow it.
 
 | what | where |
 |---|---|
-| Xeno console (CDC) | `/dev/ttyACM0` — verify via `/dev/serial/by-id/usb-Teensyduino_Phazerville_*` |
+| Xeno console (CDC) | `/dev/ttyACM0` — verify via `/dev/serial/by-id/usb-Teensyduino_Xenomorpher_*` |
 | ESP32 (unrelated) | `/dev/ttyACM1` — do not touch |
 | running firmware | USB `16c0:048a` |
 | bootloader | USB `16c0:0478` (HalfKay) |

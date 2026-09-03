@@ -200,7 +200,7 @@ refuse any image that is not linked for slot 0; `scp` it across and stage a
 rollback it will not overwrite; SIGTERM the host-side player (`ember.py`, whose
 shutdown path drives all six continuous outputs to zero, so a reboot with CVs
 patched into a live Buchla is not a transient into someone's speakers); flash;
-and verify by enumeration — USB ID plus a `Phazerville` ALSA card, retried for
+and verify by enumeration — USB ID plus a `Xenomorpher` ALSA card, retried for
 30 s. Note it quiets the *host*, not the firmware: nothing stops the running
 app on the module itself.
 

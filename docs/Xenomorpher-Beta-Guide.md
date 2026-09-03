@@ -96,17 +96,20 @@ console needed. Include that exact string in any bug report.
   default, but moving a preset to another module via SD card currently
   requires developer tooling. If you need that specific workflow before
   it's wired into the UI, ask.
-* On the 200e Modules App's write-confirm screen, arming and confirming a
-  write share one button on one of its two entry points (there's a
-  built-in pause between them so a fumbled double-press can't complete a
-  write by accident) — it can feel like the first press did nothing. That's
-  expected; the screen tells you what it's waiting for.
-* **Tweighty is brand new and its audio path has not yet been confirmed
-  working on real hardware.** It builds, runs, and its screens render
-  correctly, but a live bench test (real signal into IN L, monitoring OUT L)
-  produced no audible output at all — under active investigation. Don't
-  rely on it for anything yet; this note will be removed once it's
-  confirmed working end to end on a real module.
+* **Fixed:** the 200e Modules App's write-confirm screen used to let one of
+  its two entry points arm *and* confirm a write from the same button
+  (encR); A is now the sole arm path on every route in, matching the other
+  entry point. Not yet exercised on real hardware — see
+  [the RESTORE bench checklist](bench-restore-checklist) before relying on
+  it.
+* **Tweighty's total-silence bug is fixed and bench-verified via signal-path
+  measurement, not yet confirmed by ear.** The root cause — `output_route`
+  was a plain per-channel passthrough, not a real summing mixer, so only
+  whichever app's audio ISR ran last for a block reached the codec — is
+  fixed on real hardware: a 20 s USB-audio capture on 2026-09-03 measured
+  ~0.83 input/output correlation with no clipping or dropouts. Nobody has
+  yet listened to it through speakers/headphones to confirm it sounds
+  right, so still treat it as unproven for anything you'd perform with.
 
 ## Safety notes
 
