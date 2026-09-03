@@ -778,7 +778,15 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
     static uint32_t last_lc = 0, last_ms = 0;
     const uint32_t lc = loop_counter, ms = millis();
     if (last_ms && ms != last_ms)
-      Serial.printf("loop rate ~%lu Hz\n", (lc - last_lc) * 1000 / (ms - last_ms));
+      // loop() has been observed north of 300 kHz between UI/audio work; at
+      // that rate any gap over ~12-40s between two 't' presses overflowed
+      // this in 32-bit arithmetic ((lc-last_lc)*1000 wrapping uint32_t) and
+      // printed a silently-wrong number -- confirmed on the bench 2026-09-03
+      // (a 92s gap read ~29802 Hz where the true rate, from an adjacent
+      // ~3s-gap reading, was ~357928 Hz; the wrapped math matches exactly).
+      // 64-bit intermediate math avoids it regardless of interval length.
+      Serial.printf("loop rate ~%lu Hz\n",
+                    (unsigned long)((uint64_t)(lc - last_lc) * 1000 / (ms - last_ms)));
     last_lc = lc; last_ms = ms;
     const uint32_t t0 = OC::CORE::ticks;
     delay(5);
