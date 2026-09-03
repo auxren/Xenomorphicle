@@ -14,17 +14,19 @@ namespace OC {
 
     // OutputStream()'s destination is a summing point (AudioSummingRoute,
     // Audio/AudioMixer.h), not a plain relay: Quadrants' own audio-applet
-    // chain-tail (AudioAppletSubapp.h) and Tweighty's background engine
-    // output (apps/TweightyApp.h) are BOTH always connected to it at once
-    // once either has ever been active this session, and both need to be
-    // audible simultaneously -- see AudioIO.cpp's output_route comment.
+    // chain-tail (AudioAppletSubapp.h), Tweighty's background engine output
+    // (apps/TweightyApp.h), and Sampler's 8-voice mix (apps/SamplerApp.h)
+    // are ALL wired to it (Quadrants and Sampler permanently at Init(),
+    // Tweighty lazily on its own first RESUME) and all need to be audible
+    // simultaneously -- see AudioIO.cpp's output_route comment.
     // Source-major input layout: source `s`'s channel `c` is at index
     // `s * kOutputRouteChannels + c`. Quadrants' chain-tail predates this
     // and keeps targeting index == channel unchanged (source slot 0);
-    // Tweighty claims kOutputRouteTweightySlot explicitly.
+    // Tweighty and Sampler each claim their own slot explicitly.
     constexpr uint8_t kOutputRouteChannels = 2;
-    constexpr uint8_t kOutputRouteSources = 2;
+    constexpr uint8_t kOutputRouteSources = 3;
     constexpr uint8_t kOutputRouteTweightySlot = 1;
+    constexpr uint8_t kOutputRouteSamplerSlot = 2;
 
     AudioStream& InputStream(int interface = 0);
     AudioStream& OutputStream();
