@@ -168,6 +168,32 @@ ExportResult ExportSlot(uint8_t slot);   // internal -> card
 ExportResult ImportSlot(uint8_t slot);   // card -> internal
 int CardSlotCount();                     // containers on the card; -1 = no card
 
+// ---- legacy recovery -------------------------------------------------------
+// Presets saved to SD by a build where preset_fs() used to BE the card (see
+// the header comment above) are orphaned: nothing reads them, because
+// ImportSlot only understands the current one-container format and the
+// engine's own legacy multi-file reader (recall_stage_head, PresetEngine.cpp)
+// only ever looks at internal flash. This is the recovery path: find a
+// PB_NN_G.CFG + PB_NN_A.BIN (+ optional _B/_S/_C) set on the card, repackage
+// it as a proper PB_NN.PBS container on internal flash, exactly as if it had
+// arrived through ImportSlot -- without ever touching a slot that already
+// holds something.
+enum RecoverResult : uint8_t {
+  RECOVER_OK = 0,
+  RECOVER_NO_CARD,    // no card seated
+  RECOVER_EMPTY,      // no legacy G+A set on the card for this slot
+  RECOVER_BAD_SLOT,   // slot >= kNumSlots
+  RECOVER_OCCUPIED,   // slot already holds a preset (container or legacy on
+                       // internal flash); left alone on purpose, not recovered
+  RECOVER_BAD_FILE,   // a legacy set was found but is damaged/incomplete
+  RECOVER_FAILED,     // the container did not land
+};
+RecoverResult RecoverLegacyFromCard(uint8_t slot);
+// Sweeps every slot. Returns the number actually recovered; -1 = no card
+// seated (mirrors CardSlotCount()'s convention), so a caller can tell "no
+// card" from "card present, nothing legacy to find" from "recovered N".
+int RecoverAllLegacyFromCard();
+
 #else  // non-T4.1 builds: inert stubs
 
 static constexpr int kNumSlots = 30;
@@ -207,6 +233,12 @@ enum ExportResult : uint8_t {
 inline ExportResult ExportSlot(uint8_t) { return EXPORT_NO_CARD; }
 inline ExportResult ImportSlot(uint8_t) { return EXPORT_NO_CARD; }
 inline int CardSlotCount() { return -1; }
+enum RecoverResult : uint8_t {
+  RECOVER_OK = 0, RECOVER_NO_CARD, RECOVER_EMPTY, RECOVER_BAD_SLOT,
+  RECOVER_OCCUPIED, RECOVER_BAD_FILE, RECOVER_FAILED,
+};
+inline RecoverResult RecoverLegacyFromCard(uint8_t) { return RECOVER_NO_CARD; }
+inline int RecoverAllLegacyFromCard() { return -1; }
 inline bool SnapshotBank(uint8_t, const uint8_t *, uint32_t, uint32_t) { return false; }
 inline bool SnapshotInfo(uint8_t *, uint32_t *) { return false; }
 inline bool LoadSnapshot(uint8_t, uint8_t *, uint32_t, uint32_t *) { return false; }

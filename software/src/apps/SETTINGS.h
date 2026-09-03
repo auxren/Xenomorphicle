@@ -55,7 +55,18 @@ public:
   // the screen while encR still reset, i.e. a stray nudge in a rack left the
   // factory reset unlabelled. It is a held gesture now (encL long-press), and
   // it latches nothing.
-  enum PendingAction : uint8_t { PENDING_NONE, PENDING_RESET, PENDING_REFLASH };
+  // RETURN TO NORMAL MODE only exists in the T41_MTP build (-DUSB_MTPDISK):
+  // it is the only way back from USB Drive mode (see UsbDriveApp.h) that
+  // does not need a host reflash, since bootchoice is sticky across power
+  // cycles and T41_MTP has none of Main.cpp's MULTIBOOT dispatcher code to
+  // read it back down to 0 on its own. Gated out of every other build so the
+  // gesture, the confirm screen and the reboot it triggers simply do not
+  // exist where they would be pointless (there is no slot to return FROM).
+  enum PendingAction : uint8_t { PENDING_NONE, PENDING_RESET, PENDING_REFLASH
+#if defined(USB_MTPDISK)
+    , PENDING_RETURN_NORMAL
+#endif
+  };
   PendingAction pending_ = PENDING_NONE;
   uint32_t armed_ms_ = 0;    // millis() the confirm screen appeared
   bool b_down_solo_ = false; // B went down alone, after this screen appeared
@@ -530,6 +541,19 @@ public:
         if (event.control == OC::CONTROL_BUTTON_R && event.type == UI::EVENT_BUTTON_PRESS)
           Arm(PENDING_RESET);
 
+#if defined(USB_MTPDISK)
+        // B is unbound everywhere else on this screen in the T41_MTP build
+        // (no factory-reset row uses it, no bus address either -- PRESET_BUS
+        // is not even set for this build), so a bare press does nothing at
+        // all here and only the HELD gesture -- mirroring encL's
+        // long-press-arms-Reflash -- reaches the confirm screen. That
+        // asymmetry (short press: nothing: long press: arm) is deliberate,
+        // same reasoning as encL's: nobody leaves this build by accident.
+        if (event.control == OC::CONTROL_BUTTON_B &&
+            event.type == UI::EVENT_BUTTON_LONG_PRESS)
+          Arm(PENDING_RETURN_NORMAL);
+#endif
+
         // The 200e module address moves only while X is held -- see the note on
         // bus_addr_edit. A bare turn is ignored on purpose: this encoder does
         // nothing else here, so every stray nudge used to land on the module's
@@ -758,7 +782,35 @@ public:
       Disarm();
       if (go == PENDING_RESET) FactoryReset();
       else if (go == PENDING_REFLASH) Reflash();
+#if defined(USB_MTPDISK)
+      else if (go == PENDING_RETURN_NORMAL) ReturnToNormalMode();
+#endif
     }
+
+#if defined(USB_MTPDISK)
+    // The other half of UsbDriveApp.h's EnterUsbDriveMode(): set bootchoice
+    // back to 0 (T41_audio, the normal image), persist it the same way
+    // set_bootchoice() is always persisted (OC::calibration_save(), the same
+    // call BootMenu() makes after its own set_bootchoice() in Main.cpp), then
+    // reboot. The reboot goes through the ordinary Teensy restart path, which
+    // re-enters at the true flash base -- slot0/T41_audio -- not back into
+    // this image, so there is no jump_to_alt() to call here: T41_MTP has none
+    // of that code (no -DMULTIBOOT), and does not need it for this direction.
+    void ReturnToNormalMode() {
+      OC::calibration_data.set_bootchoice(0);
+      OC::calibration_save();   // blocks, draws "Calibration saved to EEPROM!"
+      uint32_t start = millis();
+      while(millis() < start + SETTINGS_SAVE_TIMEOUT_MS) {
+        GRAPHICS_BEGIN_FRAME(true);
+        gfxPos(5, 10);
+        graphics.print("Returning to normal");
+        gfxPos(5, 19);
+        graphics.print("mode...");
+        GRAPHICS_END_FRAME();
+      }
+      _reboot_Teensyduino_();
+    }
+#endif
 
     void Reflash() {
       uint32_t start = millis();
@@ -813,13 +865,32 @@ public:
 // drawn -- they exist only to state, in words, what B is about to do.
 FLASHMEM void AppSettings::DrawConfirm() const {
   const bool reset = (pending_ == PENDING_RESET);
+#if defined(USB_MTPDISK)
+  const bool return_normal = (pending_ == PENDING_RETURN_NORMAL);
+#endif
 
   graphics.setPrintPos(0, 13);
+#if defined(USB_MTPDISK)
+  graphics.print(return_normal ? "RETURN TO NORMAL"
+                : reset        ? "FACTORY RESET"
+                               : "REFLASH: BOOTLOADER");
+#else
   graphics.print(reset ? "FACTORY RESET" : "REFLASH: BOOTLOADER");
+#endif
   graphics.invertRect(0, 12, 128, 10);   // inversion is the only emphasis here
 
   graphics.setPrintPos(0, 26);
+#if defined(USB_MTPDISK)
+  if (return_normal) {
+    graphics.print("Reboots into the");
+    graphics.setPrintPos(0, 36);
+    graphics.print("normal (audio+MIDI)");
+    graphics.setPrintPos(0, 46);
+    graphics.print("firmware image.");
+  } else if (reset) {
+#else
   if (reset) {
+#endif
     // What AppSwitcher::Init(true) actually does: InitDefaults() on every
     // app, global_settings back to defaults, the user Turing machines
     // zeroed, EEPROM erased from EEPROM_GLOBALSETTINGS_START up, plus
@@ -856,7 +927,11 @@ FLASHMEM void AppSettings::DrawConfirm() const {
   graphics.setPrintPos(0, 56);
   graphics.print("encL:no");
   graphics.setPrintPos(78, 56);
+#if defined(USB_MTPDISK)
+  graphics.print(return_normal ? "B:GO" : reset ? "B:ERASE" : "B:BOOT");
+#else
   graphics.print(reset ? "B:ERASE" : "B:BOOT");
+#endif
 }
 
 FLASHMEM void AppSettings::View() const {
@@ -920,7 +995,18 @@ FLASHMEM void AppSettings::View() const {
         graphics.setPrintPos(100, 45);
         gfxPrint(OC::PresetBus::WpmPresent() ? "WPM" : "wpm");
       } else {
+#if defined(USB_MTPDISK)
+        // This build has no other way back to normal (audio+MIDI) mode --
+        // bootchoice is sticky across a power cycle, and this image has none
+        // of Main.cpp's MULTIBOOT dispatcher to reset it on its own -- so the
+        // one row this screen would otherwise spend on the project URL goes
+        // to the exit gesture instead. Deliberately always-on, not tucked
+        // behind a hold: see the "err on the side of obvious" reasoning in
+        // UsbDriveApp.h.
+        gfxPrint(10, 45, "hold B: normal mode");
+#else
         gfxPrint(10, 45, "github.com/djphazer");
+#endif
       }
       // 21 columns exactly, and it states its bindings rather than relying on
       // the unwritten "left label = left encoder" convention the bracketed

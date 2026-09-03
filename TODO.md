@@ -11,20 +11,25 @@ Xenomorpher — known open
 
 ## Storage and presets
 
-* **`ExportSlot` / `ImportSlot` have no caller.** Preset containers now live on
-  internal flash unconditionally (`PresetEngine.cpp`, `preset_fs()`), and
-  SD is meant to become an explicit Export/Import. The engine functions and
-  their `ExportResult` codes exist; nothing in `PresetBusUI`, the apps or the
-  serial console calls them. **Until a UI lands, there is no way for a user to
-  move a preset to or from a card at all.** Do not describe Export/Import as a
-  feature until it has an entry point.
-* **Presets written to SD by an older build are orphaned.** `preset_fs()` is
-  now always `myfs`, which fixes the disappearing-slots bug (a preset saved
-  with no card became invisible the moment a card was seated, and vice versa) —
-  but nothing reads the old SD copies. Container-format ones could be recovered
-  through `ImportSlot`; legacy multi-file ones (`PB_NN_G.CFG` + friends) on SD
-  are unreachable by any code path. Needs a decision: recover, or document as
-  lost.
+* **`ExportSlot` / `ImportSlot` still have no direct caller.** Preset
+  containers live on internal flash unconditionally (`PresetEngine.cpp`,
+  `preset_fs()`); nothing in `PresetBusUI`, the apps or the serial console
+  calls `ExportSlot`/`ImportSlot` themselves, so neither function's
+  name-patching or verify-after-copy discipline is available from the front
+  panel. There IS now a way to move a container to or from a card at all,
+  though: `UsbDriveApp.h`'s USB Drive mode reboots into the T41_MTP slot,
+  which exposes both `Internal_LFS` and `SD_Card` as MTP drives — a user can
+  drag a `PB_NN.PBS` file between them directly. That is a raw file copy, not
+  `ExportSlot`/`ImportSlot`'s verified round trip (no destination checksum
+  re-check, no name-manifest patch), so it is a workaround, not the feature
+  this bullet describes. A dedicated Export/Import entry point is still open.
+* **Resolved.** Presets written to SD by an older build (`preset_fs()` used to
+  sometimes BE the card) are no longer orphaned. `PresetEngine::
+  RecoverLegacyFromCard()`/`RecoverAllLegacyFromCard()` find a legacy
+  `PB_NN_G.CFG`+`PB_NN_A.BIN` (+ optional `_B`/`_S`/`_C`) set on the card and
+  repackage it as a current-format `PB_NN.PBS` container on internal flash,
+  without ever touching a slot `SlotUsed()` already calls occupied. Reachable
+  from the front panel via `UsbDriveApp.h`'s "Recover Legacy (SD)" action.
 * **Resolved.** The two items below, both flagged the same morning this
   section was written, were fixed that same day by `af116a93` (which remounted
   `PhzConfig::myfs` in 4 KB LittleFS blocks) and are recorded here so they are

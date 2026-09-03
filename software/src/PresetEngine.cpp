@@ -420,10 +420,15 @@ FLASHMEM static bool read_appdata_stream(File &f) {
   return ok;
 }
 
-FLASHMEM static bool read_appdata_file(uint8_t slot) {
+// `fs` defaults to preset_fs() so every existing call site (the legacy
+// internal-flash recall fallback below) is unchanged; RecoverLegacyFromCard
+// is the one caller that passes card_fs() explicitly, to validate a legacy
+// PB_NN_A.BIN sitting on the card the same way this already validates one on
+// internal flash -- same fourcc/version/checksum bar, same `capture` result.
+FLASHMEM static bool read_appdata_file(uint8_t slot, FS &fs = preset_fs()) {
   char name[12];
   slot_name(name, slot, 'A', "BIN");
-  File f = preset_fs().open(name);
+  File f = fs.open(name);
   if (!f) return false;
   const bool ok = read_appdata_stream(f);
   f.close();
@@ -1963,6 +1968,143 @@ FLASHMEM int CardSlotCount() {
     if (f && f.size() >= (int)kPayloadStart) ++n;
     if (f) f.close();
   }
+  return n;
+}
+
+// ---- legacy recovery -------------------------------------------------------
+//
+// Presets a firmware from before the container format saved to SD -- back
+// when preset_fs() sometimes WAS the card -- are five files per slot,
+// PB_NN_G.CFG/_A.BIN/_B.DAT/_S.DAT/_C.DAT, sitting on the card with nothing
+// to read them: ImportSlot only understands PB_NN.PBS, and the engine's own
+// legacy reader (recall_stage_head, above) only ever looks at preset_fs().
+// This builds the container recall_stage_head would have needed, straight
+// from the card's copies, and lands it on internal flash as if ImportSlot
+// had succeeded.
+//
+// G is deliberately NOT read through PhzConfig::load_config()/getValue(),
+// the way recall_stage_head's legacy branch reads it. That function owns the
+// one shared live config map every app's Suspend/Resume also reads and
+// writes; calling it here, outside a suspended-app recall, would silently
+// swap out whatever the running app currently has loaded -- for a background
+// "recover everything on the card" sweep that runs from an ordinary menu
+// press, not a recall. Instead G travels exactly like Scenery or Captain's
+// files already do at save time (cw_plan_file, below): an opaque, checksummed
+// byte range. The header comment on the slot container says a 'G' section
+// "is exactly what save_config() would have written" -- a legacy PB_NN_G.CFG
+// *is* one of those, byte for byte, so no repacking is needed. Correctness of
+// its contents (schema version, the manifest) is exactly as unverified here
+// as it is for a card import via ImportSlot, which also only checks the
+// container's shape, not the G payload's meaning -- the real check happens
+// once, in RecallSlot, whatever the container's origin.
+//
+// A DOES go through the existing legacy validator (read_appdata_file, now
+// FS&-parameterized): it is cheap, it is already exactly the right check
+// (fourcc/version/checksum on the AppData stream), and reusing it here is
+// what pulls the payload into `capture` so cw_plan_appdata can build the
+// section the same way SaveSlot does.
+//
+// SAFETY: never overwrites a slot that already holds anything recallable.
+// SlotUsed() is the same bar the rest of this file uses for "is there a
+// preset here" (container OR legacy-on-internal-flash); recovery only ever
+// fills a slot SlotUsed() calls empty. This does mean a slot holding a
+// CORRUPT local container is left alone rather than repaired from a possibly
+// -good card copy -- deliberately: which of two damaged-looking things wins
+// is a decision for a human with ExportSlot/ImportSlot, not a sweep that runs
+// off one menu press. Nothing on the card is ever deleted or modified: a
+// recovered slot's source files stay right where they were, as a second copy
+// -- unlike remove_legacy_slot(), which retires INTERNAL flash legacy files
+// once a save/import supersedes them (that is a block-reclaiming decision;
+// the card was never block-starved the same way, and destroying someone's
+// only remaining backup on a recovery pass would be exactly the loss this
+// whole feature exists to prevent).
+FLASHMEM RecoverResult RecoverLegacyFromCard(uint8_t slot) {
+  if (slot >= kNumSlots) return RECOVER_BAD_SLOT;
+  FS *card = card_fs();
+  if (!card) return RECOVER_NO_CARD;
+  if (SlotUsed(slot)) return RECOVER_OCCUPIED;
+
+  char gname[12], aname[12], bname[12], sname[12], cname[12];
+  slot_name(gname, slot, 'G', "CFG");
+  slot_name(aname, slot, 'A', "BIN");
+  slot_name(bname, slot, 'B', "DAT");
+  slot_name(sname, slot, 'S', "DAT");
+  slot_name(cname, slot, 'C', "DAT");
+
+  // Presence first, cheap and read-only: G and A are the floor a slot cannot
+  // recall without (recall_stage_head refuses STAGE_EMPTY on a missing A;
+  // load_config on a missing G). Nothing legacy-shaped here at all is not a
+  // failure, it is "the card has nothing for this slot" -- RECOVER_EMPTY,
+  // the same answer ImportSlot gives an absent PB_NN.PBS.
+  {
+    File g = card->open(gname, FILE_READ);
+    const bool g_have = (bool)g;
+    if (g) g.close();
+    File a = card->open(aname, FILE_READ);
+    const bool a_have = (bool)a;
+    if (a) a.close();
+    if (!g_have || !a_have) return RECOVER_EMPTY;
+  }
+
+  // A validates through the real AppData-stream check; a failure here means
+  // something IS on the card under this name but is not a legacy set worth
+  // trusting -- report it, don't silently package garbage into a container
+  // that would only fail later, at recall, with no card left to explain why.
+  if (!read_appdata_file(slot, *card)) return RECOVER_BAD_FILE;
+
+  ContainerWriter w;
+  cw_begin(w);
+  const bool g_ok = cw_plan_file(w, 'G', *card, gname);
+  const bool a_ok = cw_plan_appdata(w);   // from `capture`, populated above
+  if (!g_ok || !a_ok || !w.ok) return RECOVER_BAD_FILE;
+  // B/S/C are optional per-content, exactly as the flags bitmask/
+  // recall_stage_files already treat them -- cw_plan_file no-ops on an
+  // absent source without failing the whole plan. A PRESENT-but-short one
+  // does fail it: a preset is built whole or refused whole, same rule as
+  // every other container path in this file.
+  cw_plan_file(w, 'B', *card, bname);
+  cw_plan_file(w, 'S', *card, sname);
+  cw_plan_file(w, 'C', *card, cname);
+  if (!w.ok) return RECOVER_BAD_FILE;
+
+  static const char *const kRecTmp = "PB_REC.TMP";
+  char final_name[12];
+  container_name(final_name, slot);
+  if (!cw_commit(w, kRecTmp, final_name)) return RECOVER_FAILED;
+
+  // Same bar SaveSlot holds its own fresh container to before trusting it
+  // enough to retire anything: re-open and parse the directory. There is
+  // nothing to retire here (the source lives on the card, untouched), but an
+  // unreadable PB_NN.PBS is worse than no container at all -- SlotUsed()
+  // would then call the slot occupied and no future import/recovery would
+  // ever touch it again.
+  {
+    File v;
+    SectionEntry vsec[kMaxSections];
+    int vn = 0;
+    if (!container_open(slot, v, vsec, vn)) {
+      preset_fs().remove(final_name);
+      return RECOVER_FAILED;
+    }
+    v.close();
+  }
+  name_from_container(slot);   // pick up a name if this era's G carries one
+  serial_printf("PresetEngine: recovered legacy slot %d from card\n", slot);
+  return RECOVER_OK;
+}
+
+FLASHMEM int RecoverAllLegacyFromCard() {
+  if (!card_fs()) return -1;
+  int n = 0;
+  for (uint8_t i = 0; i < kNumSlots; ++i) {
+    if (RecoverLegacyFromCard(i) == RECOVER_OK) ++n;
+    watchdog_feed();
+  }
+  // One flush for the whole sweep, not one per recovered slot -- the same
+  // batching reasoning as ImportSlot's own comment on name caching (a 30-slot
+  // sweep that flushed PBNAMES.BIN on every hit would pay up to 30 block
+  // erases for something one write settles).
+  FlushSlotNames();
   return n;
 }
 
