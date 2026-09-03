@@ -2621,15 +2621,21 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
         // the write and here encR commits it, so the two halves of the most
         // common navigation chord are, in order, arm and commit. A fumbled
         // chord -- releasing A a few ms early -- committed 63,120 bytes to
-        // another module with the confirm screen on screen for 51 ms. The
-        // same hole opened from the other side: encR is "activate the
-        // highlighted action" on the screen that opens this one, so two
-        // presses of one button was a completed write. A two-step
-        // confirmation whose two steps are the same button is a one-step
-        // confirmation.
+        // another module with the confirm screen on screen for 51 ms.
         //
-        // Deliberately silent: a slip inside the window should feel like
-        // nothing happened, and the user reads the screen and presses again.
+        // A second hole used to open from the other side: encR is "activate
+        // the highlighted action" on the screen that opens this one, and
+        // ACT_SAVE used to reach ArmWrite() from THAT same encR press --
+        // making two presses of one button a completed write, arm and
+        // confirm both on encR. Fixed by making the action row's Save entry
+        // arm only through A (see CONTROL_BUTTON_UP under SCR_MODULE_HOME),
+        // same as every other route into this screen: whichever door you
+        // came in, arm is A and confirm is encR, never the same button twice.
+        //
+        // The window below still guards the surviving hazard, the fumbled
+        // A+encR chord. Deliberately silent: a slip inside the window should
+        // feel like nothing happened, and the user reads the screen and
+        // presses again.
         if (millis() - armed_ms_ < Bus200eAppNS::kConfirmDeadMs) break;
         if (write_block_ == BUCHLA200E_WRITE_OK) CommitWrite();
         break;
@@ -2733,6 +2739,21 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
           last_refusal_ = BUCHLA200E_READ_WRITE_IN_FLIGHT;
           break;
         }
+        // Same reasoning, one step earlier: a write that ended BAD with a
+        // snapshot still on flash is an open safety decision, and "keep" /
+        // "UNDO" (the recovery row this screen draws in place of the
+        // ordinary actions) is the ONLY place that decision gets made --
+        // there is no other menu entry that reaches SCR_SNAP_CONFIRM.
+        // Picking a different module resets write_state_ to WRITE_NONE (see
+        // the target_ switch below), which makes the recovery row vanish
+        // and leaves PBSNAP.BIN -- ONE snapshot slot, not a history -- ready
+        // to be silently overwritten by the very next write, to any module.
+        // Leaving without an answer must not be indistinguishable from
+        // answering "keep".
+        if (write_state_ == Bus200eAppNS::WRITE_BAD && snap_here_) {
+          last_refusal_ = BUCHLA200E_READ_UNRESOLVED_WRITE;
+          break;
+        }
         screen_ = Bus200eAppNS::SCR_MODULE_SELECT;
         SyncListToAddr();
         break;
@@ -2777,8 +2798,6 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
           StartRead();               // the only action a 259e page has
         } else if (action_ == Bus200eAppNS::ACT_READ) {
           StartRead();
-        } else if (action_ == Bus200eAppNS::ACT_SAVE) {
-          ArmWrite();
         } else if (action_ == Bus200eAppNS::ACT_EDIT) {
           // edit_stage_ is deliberately NOT reset here. The core loop is
           // Edit -> home -> Save -> Edit, and forgetting the cursor meant
@@ -2791,6 +2810,16 @@ FLASHMEM void AppBus200e::HandleButtonEvent(const UI::Event &event) {
         } else if (action_ == Bus200eAppNS::ACT_REC) {
           screen_ = Bus200eAppNS::SCR_REC;
         }
+        // ACT_SAVE has no case here on purpose. Arming a whole-bank write
+        // must come from a DIFFERENT physical input than the one that
+        // confirms it (see the note above CONTROL_BUTTON_R under
+        // SCR_WRITE_CONFIRM). A is the sole arm button, unconditionally, a
+        // few lines up under CONTROL_BUTTON_UP -- so highlighting Save with
+        // encL and pressing encR here is inert; A arms it regardless of
+        // where this cursor sits, and encR only ever commits, on the confirm
+        // screen A opens. Letting encR arm too, when the cursor happened to
+        // be on Save, was exactly the one-button arm-and-confirm hole this
+        // app cannot afford.
         break;
       default: break;
     }

@@ -44,6 +44,16 @@ enum Buchla200eReadBlock : uint8_t {
   BUCHLA200E_READ_BUSY_PROBE,       // a single-address probe is in flight
   BUCHLA200E_READ_BAD_ADDR,         // address 0, or our own module address
   BUCHLA200E_READ_UNSAVED_EDIT,     // leaving this slot would discard an edit
+  // A write ended BAD and its recovery snapshot still exists, but "keep" and
+  // "UNDO" are ONLY offered on this module's home screen (recover_cursor_,
+  // gated on write_state_==WRITE_BAD): they are not a menu entry reachable
+  // any other way. Leaving here resets write_state_ the moment a different
+  // target is picked, so leaving silently is not the same as choosing
+  // "keep" -- it discards the only chance to act on the verdict, and the
+  // snapshot itself (ONE slot, not a history -- see PresetEngine.cpp) is
+  // then fair game for the very next write, to ANY module. Same reasoning
+  // as BUCHLA200E_READ_WRITE_IN_FLIGHT, one step earlier in the sequence.
+  BUCHLA200E_READ_UNRESOLVED_WRITE,
 };
 
 struct Buchla200eReadContext {

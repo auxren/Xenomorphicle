@@ -37,6 +37,7 @@ const char *Buchla200eReadBlockText(Buchla200eReadBlock b) {
     case BUCHLA200E_READ_BUSY_PROBE:       return "busy: probe";
     case BUCHLA200E_READ_BAD_ADDR:         return "addr is us / zero";
     case BUCHLA200E_READ_UNSAVED_EDIT:     return "edited: Save or Read";
+    case BUCHLA200E_READ_UNRESOLVED_WRITE: return "resolve write first";
     default:                               return "refused";
   }
 }
