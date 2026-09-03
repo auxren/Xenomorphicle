@@ -78,6 +78,30 @@ Xenomorpher — known open
 * `apps/Bus200eApp.h`'s encL handler says "see the note in the module-select
   handler"; there is no such note. A comment survived a code move.
 
+## Tweighty (the 288r-derived delay/looper app)
+
+* **`AudioConnection_F32::disconnect()` never resets the stream's `active`
+  flag**, unlike the stock int16 `AudioConnection::disconnect()` this codebase
+  deliberately widened for the same case. Any F32 `AudioStream_F32` that does
+  an `Acquire()`/`Release()`-style resource cycle around its active lifetime
+  (Tweighty's `AudioTweightyF32` is the first) keeps getting `update()` called
+  by the audio ISR after a logical "stop," `active` having latched `true`
+  permanently on first connect. `AppTweighty::SetActive()` works around this
+  for itself (an `AudioNoInterrupts()` bracket plus the engine's own `ready_`
+  gate, checked before touching anything `Release()` frees), but the root
+  cause is in `extern/f32/AudioStream_F32.cpp` and would affect the next F32
+  stream built the same way. Worth fixing at the source once a second
+  consumer needs the same pattern.
+* **Recirculating buffer content has no denormal guard.** In RECIRC with
+  `0 < feedback < 1` and a quiet captured window, the buffer's content decays
+  geometrically toward (not through) zero every pass and will cross into
+  float32 denormal range before reaching it exactly — a CPU-time/glitch risk
+  during quiet decaying tails, not a correctness bug. `AudioEffectModalResonator.h`
+  sets FPU flush-to-zero (FPSCR FZ+DN) around its own recirculating filter for
+  exactly this reason; neither `AudioTweightyF32` nor the `AudioDelayExtF32`
+  it's modeled on does. Inherited from `AudioDelayExtF32`, not introduced by
+  Tweighty — worth fixing at the shared root if it's ever audible.
+
 ## UI
 
 * **`read_deliberate()` has no callers.** The global release-first rule

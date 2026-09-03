@@ -67,6 +67,14 @@ jobs:
               ../src/Buchla251eGenerator.cpp ../src/Buchla251eRecorder.cpp \
               ../src/src/extern/bjorklund.cpp
           ./build/test_buchla251e_editgenrec
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_tweighty_transport \
+              test_tweighty_transport.cpp ../src/TweightyTransport.cpp
+          ./build/test_tweighty_transport
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_tweighty_tap_phase \
+              test_tweighty_tap_phase.cpp ../src/TweightyTapPhase.cpp
+          ./build/test_tweighty_tap_phase
 
   firmware:
     runs-on: ubuntu-latest

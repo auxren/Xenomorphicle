@@ -48,6 +48,9 @@ namespace menu = OC::menu;
 #ifdef ENABLE_APP_BUS200E
 #include "Bus200eApp.h"
 #endif
+#ifdef ENABLE_APP_TWEIGHTY
+#include "TweightyApp.h"
+#endif
 #include "Backup.h"
 #include "SETTINGS.h"
 
@@ -145,6 +148,9 @@ static DMAMEM AppContainer<void // this space intentionally left blank
 #endif
 #ifdef ENABLE_APP_BUS200E
   , AppBus200e
+#endif
+#ifdef ENABLE_APP_TWEIGHTY
+  , AppTweighty
 #endif
   , AppScaleEditor
 #ifndef NO_HEMISPHERE
