@@ -54,6 +54,12 @@ namespace menu = OC::menu;
 #ifdef ENABLE_APP_SCOPE
 #include "ScopeApp.h"
 #endif
+#ifdef ENABLE_APP_SAMPLER
+#include "SamplerApp.h"
+#endif
+#ifdef ENABLE_APP_USBDRIVE
+#include "UsbDriveApp.h"
+#endif
 #include "Backup.h"
 #include "SETTINGS.h"
 
@@ -157,6 +163,12 @@ static DMAMEM AppContainer<void // this space intentionally left blank
 #endif
 #ifdef ENABLE_APP_SCOPE
   , AppScope
+#endif
+#ifdef ENABLE_APP_SAMPLER
+  , AppSampler
+#endif
+#ifdef ENABLE_APP_USBDRIVE
+  , AppUsbDrive
 #endif
   , AppScaleEditor
 #ifndef NO_HEMISPHERE
