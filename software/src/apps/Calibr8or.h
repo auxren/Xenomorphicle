@@ -574,6 +574,12 @@ public:
             if ( dual ) {
               clock_setup = 1;
               click_tick = 0;
+              // Both UP and DOWN are still down at this instant (that's how
+              // the dual-press was recognised) -- arm the release-first
+              // guard the same way Hemisphere/Quadrants do on entry to their
+              // own dual-press Clock Setup screens, so the entry chord's
+              // releases/long-presses can't leak into it.
+              OC::ui.SetButtonIgnoreMask();
             } else {
               first_click = hemisphere;
               click_tick = OC::CORE::ticks;

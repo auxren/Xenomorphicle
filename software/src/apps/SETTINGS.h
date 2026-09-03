@@ -550,6 +550,12 @@ public:
           OC::calibration_data.toggle_flipmode();
           display::SetFlipMode(OC::calibration_data.flipscreen());
           cal_save_q = true;
+          // A and B are both still down at this instant (that's how the
+          // chord was recognised) -- arm the release-first guard the same
+          // way Hemisphere/Quadrants do on entry to their own dual-press
+          // screens, so the entry chord's releases/long-presses (e.g. the
+          // solo-UP pixel-invert toggle just below) can't leak in.
+          OC::ui.SetButtonIgnoreMask();
         }
 
         // solo UP press (not the UP+DOWN flip-screen chord above) toggles
@@ -888,7 +894,13 @@ FLASHMEM void AppSettings::View() const {
       gfxIcon(0, 35, PhzIcons::runglBook);
       gfxPrint(10, 35, OC::Strings::BUILD_TAG);
       gfxIcon(0, 45, PhzIcons::frontBack);
-      if (OC::PresetBus::Enabled()) {
+      if (OC::AppDataOverflowed()) {
+        // BuildAppData (OC_apps.cpp) had to drop an app's EEPROM chunk --
+        // takes priority over the Bus/github row below because it means
+        // presets are silently missing an app's data, which is worse than
+        // anything that row reports. See OC_apps.h/OC_apps.cpp for detail.
+        gfxPrint(10, 45, "APPDATA OVERFLOW!");
+      } else if (OC::PresetBus::Enabled()) {
         // 200e preset bus. The inverted address is THE right-encoder target
         // on this screen (inversion = focus); presence dots per the system
         // idiom; caps = active, lowercase = inactive.

@@ -270,6 +270,18 @@ static constexpr size_t totalsize = total_storage_size();
 static_assert(totalsize < OC::AppData::kAppDataSize, "EEPROM Allocation Exceeded");
 */
 
+// Set by BuildAppData's overflow path below, so it is observable somewhere
+// other than APPS_SERIAL_PRINTLN (compiled out of the production T41/
+// T41_audio builds -- see OC_apps.h). Read by Setup/About. There is no
+// corresponding "clear": the condition that caused it -- an app's declared
+// chunk plus everything ahead of it in that save's rotation exceeded
+// EEPROM_APPDATA_BINARY_SIZE -- does not go away on its own, and a save that
+// happens not to overflow this time (the rotation starts at a random app
+// each time; see below) would otherwise hide a real, still-present problem.
+static bool s_appdata_overflowed = false;
+
+bool AppDataOverflowed() { return s_appdata_overflowed; }
+
 // Serialize every app's chunk into `out` (RAM only, no storage write).
 FLASHMEM void BuildAppData(AppData &out) {
   APPS_SERIAL_PRINTLN("Build app data... (%u bytes available)", OC::AppData::kAppDataSize);
@@ -287,6 +299,7 @@ FLASHMEM void BuildAppData(AppData &out) {
     if (storage_size > sizeof(AppChunkHeader)) {
       if (data + storage_size > data_end) {
         APPS_SERIAL_PRINTLN("%s: ERROR: %u BYTES NEEDED, %u BYTES AVAILABLE OF %u BYTES TOTAL", app->name(), storage_size, data_end - data, AppData::kAppDataSize);
+        s_appdata_overflowed = true;
         continue;
       }
 
@@ -397,6 +410,20 @@ void TweightyBackgroundPump() {
 }
 #else
 void TweightyBackgroundPump() { }
+#endif
+
+#ifdef ENABLE_APP_TWEIGHTY
+FLASHMEM
+bool TweightyDebugAudioState(bool &acquired, bool &engine_ready, float &meter) {
+  AppTweighty *tweighty =
+      static_cast<AppTweighty *>(app_container.FindAppByID(AppTweighty::kAppId));
+  if (!tweighty) return false;
+  tweighty->DebugAudioState(acquired, engine_ready, meter);
+  return true;
+}
+#else
+FLASHMEM
+bool TweightyDebugAudioState(bool &, bool &, float &) { return false; }
 #endif
 
 FLASHMEM

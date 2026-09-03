@@ -292,12 +292,16 @@ UiMode Ui::Splashscreen(bool &reset_settings, uint8_t phase) {
       if (read_immediate(CONTROL_BUTTON_R))
         mode = UI_MODE_APP_SETTINGS;
 
+      // A+B (UP+DOWN), on every build. This used to be A+encR on
+      // NORTHERNLIGHT-without-IO_10V builds, but that is the exact same
+      // (button, encoder-push) chord as hold-A-press-encR for the app
+      // switcher elsewhere in the UI -- and ConfirmReset() below also answers
+      // OK on encR, so the app-switcher gesture and this factory-erase
+      // gesture could be confused for one another. A+B shares no control
+      // with either the app-switcher (A+encR) or IO-settings (A+encL) chord,
+      // so it cannot collide with them on any build.
       reset_settings =
-      #if defined(NORTHERNLIGHT) && !defined(IO_10V)
-         read_immediate(CONTROL_BUTTON_UP) && read_immediate(CONTROL_BUTTON_R);
-      #else
          read_immediate(CONTROL_BUTTON_UP) && read_immediate(CONTROL_BUTTON_DOWN);
-      #endif
 
       GRAPHICS_BEGIN_FRAME(true);
 

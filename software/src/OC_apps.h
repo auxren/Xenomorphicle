@@ -43,6 +43,13 @@ void SaveAppData();
 
 static inline void save_app_data() { SaveAppData(); }
 
+// True once BuildAppData has had to drop an app's chunk because the runtime
+// serialized size overflowed EEPROM_APPDATA_BINARY_SIZE. The only other
+// report of that (APPS_SERIAL_PRINTLN) is compiled out of the production
+// T41/T41_audio builds, so this is the sole always-available signal; Setup/
+// About surfaces it. Sticky for the session: see BuildAppData in OC_apps.cpp.
+bool AppDataOverflowed();
+
 #ifdef __IMXRT1062__
 // Preset-engine access to the whole-module state paths (PresetEngine.cpp).
 // Build/Apply operate on a caller-supplied AppData buffer (RAM only);
@@ -63,6 +70,11 @@ size_t ResolveAppIndexByID(uint16_t app_id);
 // when ENABLE_APP_TWEIGHTY isn't compiled in. See TweightyApp.h's
 // BackgroundPump() for exactly what this does (and does not) touch.
 void TweightyBackgroundPump();
+
+// Bench diagnostic (2026-09-03 silence investigation): true + the engine's
+// own state if Tweighty exists and has ever been activated this session,
+// false otherwise. No-op/false when ENABLE_APP_TWEIGHTY isn't compiled in.
+bool TweightyDebugAudioState(bool &acquired, bool &engine_ready, float &meter);
 
 enum AppEvent {
   APP_EVENT_SUSPEND,

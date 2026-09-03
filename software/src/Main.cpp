@@ -796,6 +796,13 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
                 (unsigned long)(AudioProcessorUsageMax() * 10) % 10);
   Serial.printf("audio f32 pool: %u now / %u max\n",
                 AudioStream_F32::f32_memory_used, AudioStream_F32::f32_memory_used_max);
+  {
+    bool tw_acquired = false, tw_ready = false;
+    float tw_meter = 0.0f;
+    if (OC::TweightyDebugAudioState(tw_acquired, tw_ready, tw_meter))
+      Serial.printf("tweighty: acquired=%d ready=%d meter=%d\n",
+                    tw_acquired, tw_ready, (int)(tw_meter * 1000));
+  }
 #ifdef ARDUINO_TEENSY41
   // All four must stay 0. Non-zero = the USB audio transport handed an ISR
   // callback a ring index or block pointer it had already invalidated, which
@@ -877,9 +884,39 @@ FLASHMEM __attribute__((noinline)) void loop() {
       if (UI_MODE_APP_SETTINGS == ui_mode) {
         // Only draw the App menu here...
         // Handle events and process state changes elsewhere.
+        //
+        // No AppBase::Draw() call happens on this branch, so OC_app_base.cpp's
+        // 700ms chord card (DrawChordHint) never appears here either -- and
+        // that turns out to be correct rather than a gap. The card's content
+        // is the four module-wide A/Z chords (app switcher, I/O settings,
+        // screensaver, presets); NONE of them are live in this mode. This
+        // branch calls ui.AppSettings(false) for events below, not
+        // ui.DispatchEvents() -- the function that recognises those chords in
+        // the first place (OC_ui.cpp) -- and AppSettings()'s own event switch
+        // has no case for CONTROL_BUTTON_A or _Z at all: holding A here does
+        // exactly nothing, on purpose, the same as before you opened this
+        // screen by holding it. A card listing gestures that cannot fire
+        // would teach the wrong thing. This screen also already carries its
+        // own permanent "encR:pick  encL:back" legend, so the discoverability
+        // gap the chord card exists to close (holding a button drawing
+        // nothing) does not exist here to begin with.
         ui.AppSettings(true);
 
       } else if (OC::PresetBusUI::Active()) {
+        // Same absence, different reason: PresetBusUI is not an AppBase
+        // subclass and never routes through AppBase::Draw()/DispatchEvent(),
+        // which is where the chord card's state (chord_hint_modifier/
+        // chord_hint_ticks, both file-static in OC_app_base.cpp) is armed and
+        // drawn. Unlike the app-switcher case above, the card's content WOULD
+        // be accurate here -- PresetBusUI.cpp's HandleEvent() deliberately
+        // forwards the A/Z+encoder chords instead of consuming them (see its
+        // own comment above the CONTROL_BUTTON_L/R check) -- so this is a
+        // real gap, not a deliberate omission: wiring it in would mean
+        // exposing ArmChordHint/DrawChordHint out of OC_app_base.cpp, calling
+        // the former from here (or OC_ui.cpp) on every event while the
+        // overlay is open, and giving PresetBusUI a card of its own since it
+        // has no AppBase id for the kChordGloss table to key on. Left undone
+        // for now -- TODO.md tracks it.
         OC::PresetBusUI::Draw();
       } else { // if (UI_MODE_MENU == ui_mode) {
         OC_DEBUG_RESET_CYCLES(menu_draw_count, 512, DEBUG::MENU_draw_cycles);

@@ -2370,7 +2370,15 @@ FLASHMEM void AppCaptainMIDI::HandleButtonEvent(const UI::Event &event) {
     // dual-press A+B opens the Clock Router -- see the comment above
     // ToggleClockRouter() for why this gesture, not another one.
     if (mask == (OC::CONTROL_BUTTON_A | OC::CONTROL_BUTTON_B) && mask != last_mask) {
-        if (!clock_router) ToggleClockRouter();
+        if (!clock_router) {
+            ToggleClockRouter();
+            // Same release-first guard Hemisphere/Quadrants arm on entry to
+            // their own dual-press overlays: A and B are both still down at
+            // this instant (that's how the chord was recognised), so without
+            // this their releases/long-presses would leak into the Clock
+            // Router's own button handling below.
+            OC::ui.SetButtonIgnoreMask();
+        }
         return;
     }
     if (clock_router) {
