@@ -17,9 +17,9 @@ format's original design nor the stock O_C firmware anticipated. Where the
 Xenomorpher's needs and upstream Phazerville's diverge, the Xenomorpher
 wins.
 
-Two pieces of work, at different levels of maturity:
+Three pieces of work, at different levels of maturity:
 
-* **The 200e preset bus** is the mature, hardware-verified half. The module
+* **The 200e preset bus** is the mature, hardware-verified piece. The module
   talks I²C to the other modules in the case, follows and drives bus clock and
   bus MIDI, coexists with a Buchla preset manager on the same wire without ever
   auto-claiming a resource the manager owns, and can read and rewrite another
@@ -27,24 +27,30 @@ Two pieces of work, at different levels of maturity:
   before any of those 30 slots on someone else's module get touched. This is
   the part that's been run against real 251e/259e modules on the bench, not
   just built.
-* **Tweighty** (`software/src/apps/TweightyApp.h`) is the newer, more
-  experimental half — an original 8-tap WRITE/RECIRC delay/looper, design-led
-  by the Buchla-format 288r Time Domain Processor but reimplemented rather than
-  ported, built to keep processing audio in the background even while a
-  different app has the front panel. It's real, self-contained new
-  instrument functionality this hardware didn't have before, not a bus
-  feature — and, as of this writing, its output audio path has a known,
-  unresolved routing conflict (see [TODO.md](TODO.md)'s Tweighty section)
-  that hasn't reached a fix yet. Screens and controls are done and verified on
-  real hardware; the sound isn't reliably reaching the jacks yet.
+* **Tweighty** (`software/src/apps/TweightyApp.h`) is an original 8-tap
+  WRITE/RECIRC delay/looper, design-led by the Buchla-format 288r Time Domain
+  Processor but reimplemented rather than ported, built to keep processing
+  audio in the background even while a different app has the front panel.
+  It's real, self-contained new instrument functionality this hardware didn't
+  have before, not a bus feature. Its total-silence-on-hardware bug (a
+  routing conflict with another app's audio chain — see
+  [TODO.md](TODO.md)'s Tweighty section) is fixed and bench-verified via a
+  measured input/output signal correlation, but nobody has yet confirmed by
+  ear that it sounds right.
+* **Scope** (`software/src/apps/ScopeApp.h`) is a 20-channel oscilloscope —
+  any of the 8 CV ins, 8 CV outs, or 2 audio in/2 audio out channels, shown
+  as a scrolling trace, with an optional live-trace screensaver mode. Builds
+  clean, host-tested, and confirmed not to crash across extensive on-hardware
+  interaction, but — like Tweighty — nobody has judged what's actually on
+  the screen against the real signal yet.
 
-Both halves share the same standard: host-tested pure logic where the logic
+All three share the same standard: host-tested pure logic where the logic
 can be isolated from hardware, every claim about ISR safety or memory budget
 checked against the actual linked ELF rather than the source alone, and
-nothing declared working until it's been run on the physical module — a
-mockup or a simulator render has caught real bugs in this project, but it has
-also missed real bugs that only showed up once someone looked at the actual
-device.
+nothing declared fully working until a human has looked at the physical
+module, not just a build log — a mockup or a simulator render has caught
+real bugs in this project, but it has also missed real bugs that only
+showed up once someone looked at the actual device.
 
 Where to start:
 
@@ -63,8 +69,13 @@ Where to start:
   Buchla preset manager is guaranteed, and
   [252e clock sync](docs/252e-clock-sync.md).
 * **Tweighty** — `-DENABLE_APP_TWEIGHTY` (on by default in `T41_audio`).
-  Read the class-header comment in `TweightyApp.h` for the control model; see
-  [TODO.md](TODO.md) for its current known issues before relying on it.
+  Read the class-header comment in `TweightyApp.h` for the control model; its
+  audio-silence bug is fixed and bench-verified (see [TODO.md](TODO.md)'s
+  Tweighty section), but not yet confirmed by ear.
+* **Scope** — `-DENABLE_APP_SCOPE` (on by default in `T41_audio`). A
+  20-channel oscilloscope (8 CV in, 8 CV out, 2 audio in, 2 audio out) with
+  an optional live-trace screensaver; read the class-header comment in
+  `ScopeApp.h` for the control model.
 * **Audio path** — the codec (`PCM1754` DAC / `PCM1808` ADC on the O.R.N.8
   shield) runs float32 end to end through `AudioIO.cpp`, on 32-bit I2S
   frames that carry the converters' full 24-bit resolution; the

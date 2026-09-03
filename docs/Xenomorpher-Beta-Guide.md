@@ -33,6 +33,9 @@ The Xenomorpher now talks natively to a Buchla 200e case's preset bus:
   natively rather than ported) that keeps running through the audio ISR
   even when a different app has the front panel. Very new — see
   "What's still rough" below before relying on it for anything.
+* **Scope**, a 20-channel oscilloscope — any of the 8 CV ins, 8 CV outs, or
+  stereo audio in/out, shown as a scrolling trace, with an optional
+  live-trace screensaver mode. Just as new as Tweighty — same caveat.
 
 The full protocol-level writeup — what's implemented, what's tested, and
 the specific hazards this design defends against — is in
@@ -110,6 +113,12 @@ console needed. Include that exact string in any bug report.
   ~0.83 input/output correlation with no clipping or dropouts. Nobody has
   yet listened to it through speakers/headphones to confirm it sounds
   right, so still treat it as unproven for anything you'd perform with.
+* **Scope is brand new.** It builds, boots, switches between all 20
+  channels, and its controls (freeze, gain, screensaver toggle) all
+  responded correctly across extensive on-hardware testing on
+  2026-09-03 with zero crashes — but nobody has compared what's on the
+  trace against a known real signal yet, so treat the actual waveform
+  display as unverified until someone has.
 
 ## Safety notes
 
