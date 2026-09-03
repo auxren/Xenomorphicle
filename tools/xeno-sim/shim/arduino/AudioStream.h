@@ -94,6 +94,14 @@ public:
   bool isActive() { return active; }
 protected:
   bool active;
+  // How many AudioConnections currently reference this stream, real Teensy
+  // AudioStream state (cores/teensy4/AudioStream.h) that extern/f32/
+  // AudioStream_F32.cpp's AudioConnection_F32::connect()/disconnect() now
+  // reaches through the friend declaration below to decide whether `active`
+  // should actually drop back to false again -- not just whether it was
+  // ever set. AudioConnection::connect()/disconnect() just below track it
+  // the same way, for the same reason.
+  uint8_t numConnections = 0;
   unsigned char num_inputs;
   static inline audio_block_t *allocate();
   static inline void release(audio_block_t *block);
@@ -166,7 +174,9 @@ inline void AudioConnection::connect(void) {
     while (p->next_dest) p = p->next_dest;
     p->next_dest = this;
   }
+  src->numConnections++;
   src->active = true;
+  dst->numConnections++;
   dst->active = true;
   isConnected = true;
 }
@@ -196,6 +206,10 @@ inline void AudioConnection::disconnect(void) {
     AudioStream::release(dst->inputQueue[dest_index]);
     dst->inputQueue[dest_index] = nullptr;
   }
+  if (src->numConnections > 0) src->numConnections--;
+  if (src->numConnections == 0) src->active = false;
+  if (dst->numConnections > 0) dst->numConnections--;
+  if (dst->numConnections == 0) dst->active = false;
   isConnected = false;
 }
 

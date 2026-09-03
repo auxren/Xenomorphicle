@@ -344,7 +344,7 @@ $SIM --keys "$MENU,l,step200" 2>&1 | grep -q '^  app ' \
 # ---------------------------------------------------------------------------
 echo "200e write verification"
 
-# scan -> enter 0x5C -> Read -> Gen -> apply -> back -> Save -> confirm -> settle
+# scan -> enter 0x5C -> Read -> Gen -> apply -> back -> Save (A arms) -> confirm -> settle
 #
 # Two tokens in here look like padding and are not:
 #
@@ -362,7 +362,16 @@ echo "200e write verification"
 # Both failure modes look identical from here -- an empty y=46 row -- and both
 # have already sent someone hunting for a firmware regression that was not
 # there.
-W251='l,step200,r,step10,r,step3000,],],r,step10,r,step10,l,step10,],],r,step400,r,step6000'
+#
+# Arm is `a` (button A), not a second `r`: a whole-bank write used to be
+# reachable by pressing encR twice (once on the action row's Save entry,
+# once on the confirm screen it opened) -- a two-step confirmation whose two
+# steps are the same button is a one-step confirmation. Fixed on the
+# firmware side by making A the sole arm path on every route into the
+# confirm screen; A arms regardless of where the action cursor sits, so
+# navigating onto Save with encL is no longer required to arm at all -- kept
+# here only so the sequence still visibly lands on Save before arming.
+W251='l,step200,r,step10,r,step3000,],],r,step10,r,step10,l,step10,],],a,step400,r,step6000'
 
 # Everything up to and including the Read, for checks that need a live bank
 # without a write behind it.
@@ -495,9 +504,12 @@ edit_after_write=$(row_at 46 --keys "$W251,[,step50,[,step50,r,step10,r,step10,l
 # The app switcher is "hold A, press encR". On the module home A ALONE arms the
 # write and encR commits it here, so the two halves of the most common
 # navigation chord are, in order, arm and commit -- a fumbled chord committed
-# 63,120 bytes with the confirm screen visible for 51 ms. A two-step
-# confirmation whose two steps are the same button is a one-step confirmation.
-W251_ARMED='l,step200,r,step10,r,step3000,],],r,step10,r,step10,l,step10,],],r'
+# 63,120 bytes with the confirm screen visible for 51 ms. That's the
+# surviving hazard the dead window guards against; the OTHER hazard this app
+# used to have -- encR arming AND confirming from the action row's Save entry
+# -- is closed on the firmware side (A is the sole arm path now), hence `a`
+# below rather than a second `r`.
+W251_ARMED='l,step200,r,step10,r,step3000,],],r,step10,r,step10,l,step10,],],a'
 early=$(row_at 13 --keys "$W251_ARMED,step10,r,step6000")
 [ "$early" = "[inv] WRITE 251 A" ] \
   && ok "a confirm 10ms after arming does not commit -- the prompt is still up" \
@@ -528,7 +540,7 @@ $SIM --app "200e Modules" --keys "$W251_EDIT,.,step200" --dump-fb 2>/dev/null \
   | python3 fbtext.py - | grep -q '^y=13 *x=80 *Slot 1$' \
   && ok "a refused slot turn leaves the slot where it was" \
   || bad "a refused slot turn moved the slot anyway"
-survived=$(row_at 26 --keys "$W251_EDIT,.,step200,],],r,step10")
+survived=$(row_at 26 --keys "$W251_EDIT,.,step200,],],a,step10")
 [ "$survived" = "6 bytes change" ] \
   && ok "the working buffer survives the refusal, with the edit still in it" \
   || bad "the edit did not survive a refused slot turn (Save said: '$survived')"
@@ -846,7 +858,7 @@ snap_bytes=$(snap_line --keys "$W251" | awk '{print $4}')
 # encR runs), and its cursor starts on `keep`. So: one encL detent to UNDO,
 # encR to arm, and encR again past the 350ms dead window to commit.
 UNDO_ARM='],step100,r,step400,r,step8000'
-REDO='{,r,step3000,],],r,step10,r,step10,l,step10,],],r,step400'  # re-Read, same edit, arm
+REDO='{,r,step3000,],],r,step10,r,step10,l,step10,],],a,step400'  # re-Read, same edit, arm (A)
 
 undone=$($SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
               --keys "$W251,$UNDO_ARM,$REDO" --dump-fb 2>/dev/null \
