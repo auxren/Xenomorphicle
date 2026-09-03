@@ -25,16 +25,23 @@ Xenomorpher — known open
   through `ImportSlot`; legacy multi-file ones (`PB_NN_G.CFG` + friends) on SD
   are unreachable by any code path. Needs a decision: recover, or document as
   lost.
-* **The 64-block budget is asserted in prose, not in code.**
-  `LittleFS_Program` uses 64 KB erase sectors on T4.1, so the 4 MB partition is
-  **64 blocks total** and every file costs one whole block whatever it holds.
-  30 containers + `PBNAMES.BIN` + `PBSNAP.BIN` + `GLOBALS.CFG` + `SCENERY.DAT`
-  + `CAPTAIN.DAT` (+ any `BANK_NN.DAT` that lands internally) is claimed to
-  settle "near 43". Nothing enumerates or checks that, and `kSaveBlocksNeeded`
-  reserves only 3.
-* `PresetEngine.h`'s header comment still documents the retired multi-file slot
-  layout and says slots live on SD when present. Both are false; the header is
-  the first thing a new contributor reads.
+* **Resolved.** The two items below, both flagged the same morning this
+  section was written, were fixed that same day by `af116a93` (which remounted
+  `PhzConfig::myfs` in 4 KB LittleFS blocks) and are recorded here so they are
+  not re-opened:
+  - The 64-block budget was asserted in prose, not in code. It now is:
+    `SaveSlot()` (`PresetEngine.cpp`) reads the mounted block size at runtime
+    (`PhzConfig::myfs.blockBytes()`, 4 KB on T4.1 -- 1024 blocks in the 4 MB
+    partition, not the old 64 KB/64-block geometry) and refuses a save with
+    `HS::PokePopup(HS::MESSAGE_POPUP, "Disk full !!")` -- the same popup
+    pattern used elsewhere in this file -- unless `kSaveBytesNeeded` worth of
+    blocks (container + rename-through scratch file) is actually free. There is
+    no `kSaveBlocksNeeded` any more; that fixed reservation was replaced by
+    this dynamic per-save check.
+  - `PresetEngine.h`'s header comment documented the retired multi-file slot
+    layout and said slots live on SD when present. It now describes the
+    current one-file-per-slot container format and states slots live on
+    internal flash unconditionally, card or no card.
 
 ## Boot and storage budgets
 
@@ -80,41 +87,55 @@ Xenomorpher — known open
 
 ## Tweighty (the 288r-derived delay/looper app)
 
-* **No audio output on real hardware, first bench test (2026-09-03).**
+* **No audio output on real hardware, first bench test (2026-09-03) --
+  root-caused, fix implemented, NOT yet re-verified on hardware.**
   Signal patched into IN L, monitored on OUT L, transport in WRITE, engine
   confirmed live (audio f32 pool grew from the idle baseline, CPU usage
   rose to ~21%/38.6% max, screens render and respond to panel input) --
-  but total silence, not just missing wet/delayed repeats, which should
-  rule out a tap-read-specific bug and point at the base signal path (the
-  dry-passthrough alone should be audible at the default 50/50 wet/dry).
-  `OC::AudioIO::Init()` confirmed called unconditionally from `Main.cpp`
-  regardless of build env, so codec init isn't gated out. Root cause not
-  yet found -- this is the first time this engine's audio path has run on
-  real silicon at all (host tests and xeno-sim only ever exercised the
-  pure-logic pieces and the UI; xeno-sim's own audio stand-ins are
-  compile-only stubs, per its README). Investigate before trusting any of
-  this app's audio behavior.
-* **`AudioConnection_F32::disconnect()` never resets the stream's `active`
-  flag**, unlike the stock int16 `AudioConnection::disconnect()` this codebase
-  deliberately widened for the same case. Any F32 `AudioStream_F32` that does
-  an `Acquire()`/`Release()`-style resource cycle around its active lifetime
-  (Tweighty's `AudioTweightyF32` is the first) keeps getting `update()` called
-  by the audio ISR after a logical "stop," `active` having latched `true`
-  permanently on first connect. `AppTweighty::SetActive()` works around this
-  for itself (an `AudioNoInterrupts()` bracket plus the engine's own `ready_`
-  gate, checked before touching anything `Release()` frees), but the root
-  cause is in `extern/f32/AudioStream_F32.cpp` and would affect the next F32
-  stream built the same way. Worth fixing at the source once a second
-  consumer needs the same pattern.
-* **Recirculating buffer content has no denormal guard.** In RECIRC with
-  `0 < feedback < 1` and a quiet captured window, the buffer's content decays
-  geometrically toward (not through) zero every pass and will cross into
-  float32 denormal range before reaching it exactly — a CPU-time/glitch risk
-  during quiet decaying tails, not a correctness bug. `AudioEffectModalResonator.h`
-  sets FPU flush-to-zero (FPSCR FZ+DN) around its own recirculating filter for
-  exactly this reason; neither `AudioTweightyF32` nor the `AudioDelayExtF32`
-  it's modeled on does. Inherited from `AudioDelayExtF32`, not introduced by
-  Tweighty — worth fixing at the shared root if it's ever audible.
+  but total silence, not just missing wet/delayed repeats. Root cause:
+  `OC::AudioIO::OutputStream()` (`AudioIO.cpp`) returned a reference to
+  `output_route`, an `AudioPassthrough<2>` -- a pure per-channel relay, not a
+  summing mixer. Quadrants' own audio-applet chain-tail
+  (`AudioAppletSubapp.h`'s `ConnectMonoToNext()`/`ConnectStereoToNext()`) is
+  unconditionally wired to it at boot for every app in `app_container`
+  regardless of which is current, and Tweighty's `out_adapter_` is wired to
+  the same destination the first time Tweighty is ever opened -- both by
+  design, both meant to stay live. With a plain relay, whichever source's
+  `update()` the audio ISR happened to run last for a given block silently
+  won that channel; the other source's audio never reached the codec. Fixed
+  by replacing `output_route`'s type with a new `AudioSummingRoute<NumChannels,
+  NumSources>` (`Audio/AudioMixer.h`, alongside the existing `AudioMixer<N>`
+  this reuses the q15<->float scale/add approach from) that actually sums
+  per-channel, source-major-indexed inputs; Tweighty's connections
+  (`TweightyApp.h::WireAudio()`) now claim a distinct reserved source slot
+  (`OC::AudioIO::kOutputRouteTweightySlot`) instead of colliding with
+  Quadrants' slot 0. Gain staging is NOT solved: both sources sum at unity,
+  matching the existing `usbmix` precedent in the same file, so two
+  simultaneously full-scale sources can clip (cleanly, via
+  `arm_float_to_q15`'s saturation, not wraparound) -- revisit if that proves
+  audible. No hardware access to confirm sound now actually reaches the
+  jacks; needs a real bench retest.
+* **Fixed.** `AudioConnection_F32::disconnect()` never reset the stream's
+  `active` flag, unlike the stock int16 `AudioConnection::disconnect()` this
+  codebase deliberately widened for the same case. `extern/f32/AudioStream_F32.cpp`
+  now mirrors that widening exactly: `AudioConnection_F32::connect()`/
+  `disconnect()` track a `numConnections` count per endpoint (inherited,
+  protected, already used by the stock int16 side) and only clear `active`
+  once an endpoint's last connection is actually gone. `AppTweighty::SetActive()`'s
+  own workaround (the `AudioNoInterrupts()` bracket plus the engine's `ready_`
+  gate) is left in place -- still needed to close the narrower window where
+  `update()` is already mid-flight against a stream mid-`connect()`/`disconnect()`.
+* **Fixed, for `AudioTweightyF32` only.** The recirculating buffer had no
+  denormal guard: in RECIRC with `0 < feedback < 1` and a quiet captured
+  window, the buffer's content decays geometrically toward (not through)
+  zero every pass and crosses into float32 denormal range before reaching it
+  exactly -- a CPU-time/glitch risk during quiet decaying tails.
+  `AudioTweightyF32::update()` now brackets its per-block DSP in FPU
+  flush-to-zero (FPSCR FZ+DN), same pattern and bit values as
+  `AudioEffectModalResonator::update()`. `AudioDelayExtF32`, which this
+  engine was modeled on, has the identical gap and was deliberately left
+  alone here -- it backs the separate, already-shipped Delay audio applet,
+  and fixing it wasn't exercised by this bug or this bench test.
 
 ## UI
 
