@@ -100,14 +100,14 @@ static constexpr int MAX_LENGTH = 16;
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
       DrawSelector();
       DrawIndicator();
     }
 
     //void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 4);
             return;
@@ -135,7 +135,7 @@ static constexpr int MAX_LENGTH = 16;
         }
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,16}, reg);
         Pack(data, PackLocation {16,7}, p);
@@ -147,7 +147,7 @@ static constexpr int MAX_LENGTH = 16;
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         reg = Unpack(data, PackLocation {0,16});
         p = Unpack(data, PackLocation {16,7});
         length = Unpack(data, PackLocation {23,4}) + 1;
@@ -158,7 +158,7 @@ static constexpr int MAX_LENGTH = 16;
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "p Gate";
@@ -185,7 +185,7 @@ private:
     uint8_t quant_range;  // APD
     uint8_t out_b = 0; // 2nd output mode: 0=mod; 1=trig; 2=trig-on-msb; 3=duplicate of A; 4=alternate pitch
 
-    void DrawSelector() {
+    FLASHMEM void DrawSelector() {
         gfxBitmap(1, 14, 8, LOOP_ICON);
         gfxPrint(12 + pad(10, length), 15, length);
         gfxPrint(32, 15, "p=");
@@ -228,7 +228,7 @@ private:
         }
     }
 
-    void DrawIndicator() {
+    FLASHMEM void DrawIndicator() {
         gfxLine(0, 45, 63, 45);
         gfxLine(0, 62, 63, 62);
         for (int b = 0; b < 16; b++)

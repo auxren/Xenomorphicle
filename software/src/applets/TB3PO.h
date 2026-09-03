@@ -177,7 +177,7 @@ class TB_3PO: public HemisphereApplet {
 
   void View() final;
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (cursor == TRANS_MODE) {
       transpose_in_semitones ^= 1;
     } else if (cursor == HOLD_PITCH) {
@@ -186,7 +186,7 @@ class TB_3PO: public HemisphereApplet {
       CursorToggle();
   }
 
-  void AuxButton() {
+  FLASHMEM void AuxButton() {
     if (cursor == DENSITY) {
       density_auto_enabled = !density_auto_enabled;
     }
@@ -199,7 +199,7 @@ class TB_3PO: public HemisphereApplet {
     CancelEdit();
   }
 
-  void OnEncoderMove(int direction) {
+  FLASHMEM void OnEncoderMove(int direction) {
     if (!EditMode()) { // move cursor
       MoveCursor(cursor, direction, MAX_CURSOR);
 
@@ -252,7 +252,7 @@ class TB_3PO: public HemisphereApplet {
     } //switch
   } //OnEncoderMove
 
-  uint64_t OnDataRequest() {
+  FLASHMEM uint64_t OnDataRequest() {
     uint64_t data = 0;
 
     // old scale and root settings were here:
@@ -275,7 +275,7 @@ class TB_3PO: public HemisphereApplet {
     return data;
   }
 
-  void OnDataReceive(uint64_t data) {
+  FLASHMEM void OnDataReceive(uint64_t data) {
     lock_seed = Unpack(data, PackLocation { 0, 1 });
     transpose_in_semitones = Unpack(data, PackLocation { 1, 1 });
 
@@ -302,7 +302,7 @@ class TB_3PO: public HemisphereApplet {
   }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "Regen";
@@ -612,7 +612,7 @@ private:
     scale_size = quant_scale.num_notes; // Track this scale size for octaves and display
   }
 
-  void DrawGraphics() {
+  FLASHMEM void DrawGraphics() {
     int heart_y = 15;
     int die_y = 15;
     if (rand_apply_anim > 0) {

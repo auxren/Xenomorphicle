@@ -46,16 +46,16 @@ public:
         if (--gate_countdown < -SCHMITT_FLASH_SPEED) gate_countdown = SCHMITT_FLASH_SPEED;
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
     // No controls
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (++cursor == 3) cursor = 0;
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (cursor == 1) {
             low += (64 * direction);
             low = constrain(low, 64, high - 64);
@@ -67,20 +67,20 @@ public:
         ResetCursor();
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,16}, low);
         Pack(data, PackLocation {16,16}, high);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         low = Unpack(data, PackLocation {0,16});
         high = Unpack(data, PackLocation {16,16});
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "";
     help[HELP_DIGITAL2] = "";
@@ -104,7 +104,7 @@ private:
     uint16_t low;
     uint16_t high;
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         // Draw two Schmitt Trigger symbols and inputs
         ForEachChannel(ch)
         {
@@ -132,7 +132,7 @@ private:
 
     }
 
-    void DrawSchmittTriggerAtPositionWithState(uint8_t x, uint8_t y, bool state) {
+    FLASHMEM void DrawSchmittTriggerAtPositionWithState(uint8_t x, uint8_t y, bool state) {
         gfxCircle(x, y + 7, 2); // Input point
         gfxLine(x + 2, y + 7, x + 10, y + 7); // Input line
         gfxLine(x + 10, y, x + 10, y + 14); // Base of triangle

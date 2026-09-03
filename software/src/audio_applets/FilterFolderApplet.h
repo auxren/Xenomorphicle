@@ -1,9 +1,42 @@
-#include "../src/Audio/filter_variable2.h"
+#pragma once
+
+// F32-native: the wavefolder transfer curve, the SVF multimode filter, and
+// the mode mixer all run float32 inside the applet (no int16 quantization
+// between fold, filter, and mix); the chain still sees int16 via the
+// HemisphereAudioAppletF32 edge adapters.
+
+#include "../HemisphereAudioAppletF32.h"
+#include "../extern/f32/AudioMixer_F32.h"
+#include "../Audio/effect_wavefolder_F32.h"
+#include "../Audio/filter_variable2_F32.h"
+#include "../Audio/synth_dc_F32.h"
 
 template <AudioChannels Channels>
-class FilterFolderApplet : public HemisphereAudioApplet {
+class FilterFolderApplet : public HemisphereAudioAppletF32<Channels> {
 
 public:
+  // The base class chain is dependent on Channels, so inherited names need
+  // explicit import for unqualified use.
+  using Base = HemisphereAudioAppletF32<Channels>;
+  using Base::CONFIG_SIZE;
+  using Base::LVL_MIN_DB;
+  using Base::LVL_MAX_DB;
+  using Base::PatchCableF32;
+  using Base::InputF32;
+  using Base::OutputF32;
+  using Base::CheckEditInputMapPress;
+  using Base::CursorToggle;
+  using Base::EditMode;
+  using Base::EditSelectedInputMap;
+  using Base::MoveCursor;
+  using Base::gfxIcon;
+  using Base::gfxPrint;
+  using Base::gfxPrintDb;
+  using Base::gfxPrintPitchHz;
+  using Base::gfxStartCursor;
+  using Base::gfxEndCursor;
+  using Base::gfxDisplayInputMapEditor;
+
   enum FiltFoldCursor {
     FOLD_AMT,
     FOLD_CV,
@@ -38,9 +71,9 @@ public:
 
   void Start() {
     for (int i = 0; i < Channels; i++) {
-      PatchCable(input, i, filtfolder[i].folder, 0);
+      PatchCableF32(InputF32(), i, filtfolder[i].folder, 0);
       filtfolder[i].Start(this);
-      PatchCable(filtfolder[i].mixer, 0, output, i);
+      PatchCableF32(filtfolder[i].mixer, 0, OutputF32(), i);
     }
   }
 
@@ -70,7 +103,7 @@ public:
     }
   }
 
-  void View() {
+  FLASHMEM void View() {
     const int label_x = 1;
     int label_y = 15;
 
@@ -142,7 +175,7 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(FILTER_FREQ_CV, pitch_cv),
@@ -154,7 +187,7 @@ public:
       return;
     CursorToggle();
   }
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       do {
         MoveCursor(cursor, direction, CURSOR_MAX);
@@ -199,25 +232,18 @@ public:
     }
   }
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     data[0] = PackPackables(pitch, res, fold, amplevel, filtfolder[0].modesel);
     data[1] = PackPackables(pitch_cv, res_cv, fold_cv, amp_cv);
     data[2] = PackPackables(pitch_cv2);
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     UnpackPackables(data[0], pitch, res, fold, amplevel, filtfolder[0].modesel);
     UnpackPackables(data[1], pitch_cv, res_cv, fold_cv, amp_cv);
     UnpackPackables(data[2], pitch_cv2);
     if (Channels == STEREO)
       filtfolder[1].modesel = filtfolder[0].modesel;
-  }
-
-  AudioStream* InputStream() override {
-    return &input;
-  }
-  AudioStream* OutputStream() override {
-    return &output;
   }
 
 protected:
@@ -237,10 +263,10 @@ private:
   int8_t tiltbias = 0; // dB
 
   struct FilterFolder {
-    AudioEffectWaveFolder folder;
-    AudioFilterStateVariable2 filter;
-    AudioSynthWaveformDc drive;
-    AudioMixer4 mixer;
+    AudioEffectWaveFolderF32 folder;
+    AudioFilterStateVariable2F32 filter;
+    AudioSynthWaveformDcF32 drive;
+    AudioMixer4_F32 mixer;
 
     FiltMode modesel = FILT_BYPASS;
 
@@ -258,19 +284,17 @@ private:
       }
     }
 
-    void Start(HemisphereAudioApplet* owner) {
-      owner->PatchCable(folder, 0, filter, 0);
-      owner->PatchCable(folder, 0, mixer, 0);
-      owner->PatchCable(filter, 0, mixer, 1);
-      owner->PatchCable(filter, 1, mixer, 2);
-      owner->PatchCable(filter, 2, mixer, 3);
-      owner->PatchCable(drive, 0, folder, 1);
+    void Start(HemisphereAudioAppletF32<Channels>* owner) {
+      owner->PatchCableF32(folder, 0, filter, 0);
+      owner->PatchCableF32(folder, 0, mixer, 0);
+      owner->PatchCableF32(filter, 0, mixer, 1);
+      owner->PatchCableF32(filter, 1, mixer, 2);
+      owner->PatchCableF32(filter, 2, mixer, 3);
+      owner->PatchCableF32(drive, 0, folder, 1);
     }
   };
 
-  AudioPassthrough<Channels> input;
   std::array<FilterFolder, Channels> filtfolder;
-  AudioPassthrough<Channels> output;
 
   void ChangeMode(int dir) {
     uint8_t newmode = constrain(filtfolder[0].modesel + dir, 0, FILT_MODE_COUNT - 1);

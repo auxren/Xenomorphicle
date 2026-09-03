@@ -129,13 +129,13 @@ public:
 
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
     //void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             do {
                 MoveCursor(cursor, direction, 7);
@@ -194,7 +194,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,8}, fill[0]);
         Pack(data, PackLocation {8,8}, fill[1]);
@@ -207,7 +207,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         fill[0] = Unpack(data, PackLocation {0,8});
         fill[1] = Unpack(data, PackLocation {8,8});
         x = Unpack(data, PackLocation {16,8});
@@ -221,7 +221,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "Reset";
@@ -281,7 +281,7 @@ private:
       return (cd_fade * quad_y + ab_fade * (255 - quad_y)) >> 8;
     }
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         // output selection
         char outlabel[] = { (char)('A' + io_offset), ':', '\0' };
         gfxPrint(1,15, outlabel);
@@ -356,7 +356,7 @@ private:
         }
     }
 
-    void DrawTracks(int y, int ch) {
+    FLASHMEM void DrawTracks(int y, int ch) {
         uint8_t part = (ch == 1 && mode[ch] == 3) ? mode[0] : mode[ch];
         for (int i=0; i < 32; i++) {
             int level = ReadDrumMap((step + i) % 32, part, _x, _y);

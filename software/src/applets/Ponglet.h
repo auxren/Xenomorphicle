@@ -107,12 +107,12 @@ class Ponglet : public HemisphereApplet {
       }
     }
 
-    void View() {
+    FLASHMEM void View() {
       right_bound = RIGHT;
       left_bound = LEFT;
       gfxRect(ball_x >> PRECISION, ball_y >> PRECISION, 3, 3);
     }
-    void DrawFullScreen() {
+    FLASHMEM void DrawFullScreen() {
       right_bound = FAR_RIGHT;
       left_bound = LEFT;
       graphics.drawRect(ball_x >> PRECISION, ball_y >> PRECISION, 3, 3);
@@ -120,18 +120,18 @@ class Ponglet : public HemisphereApplet {
 
     // void OnButtonPress() { CursorToggle(); };
     // void AuxButton() { CancelEdit(); }
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
       return 0;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
     }
 
   protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
       //                    "-------" <-- Label size guide
       help[HELP_DIGITAL1] = "";
       help[HELP_DIGITAL2] = "";

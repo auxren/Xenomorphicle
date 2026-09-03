@@ -36,6 +36,18 @@ SECTIONS
 
 	.text.progmem : {
 		*(.progmem*)
+		/* String literals live in flash, not DTCM. The stock script folds
+		   every .rodata* into .data (DTCM) for speed, but string text is
+		   only ever read by printf and the display -- never from an ISR --
+		   and with LTO it is a single 32 KB block. DTCM is 128 KB once
+		   ITCM code takes 12 of the 16 FlexRAM banks; .data + .bss were
+		   at 122 KB and the stack (whatever is left below _estack) had
+		   fallen to 5.6 KB, which overflowed into the MPU guard at boot.
+		   Flash is XIP through the cache; the only time it is unreadable
+		   is during a LittleFS/EEPROM erase, and those run with IRQs off.
+		   This rule must stay ahead of the .rodata* catch-all in .data:
+		   the linker takes the first match. */
+		*(.rodata.str1*)
 		. = ALIGN(4);
 	} > FLASH
 
@@ -109,6 +121,16 @@ SECTIONS
 	_teensy_model_identifier = 0x25;
 
     ASSERT((_flashimagelen) <= 0x100000, "CRITICAL: T41 boot slot overflows the 1024K limit!")
+
+	/* The stack is not sized anywhere: it is whatever DTCM is left between
+	   _ebss and _estack, and _estack itself moves in 32 KB steps with ITCM
+	   code size. It had shrunk to 5.6 KB without anyone noticing until the
+	   boot path faulted on the stack-guard MPU region. 16 KB is the floor:
+	   the deepest measured use (a preset save with the verbose console
+	   report) is about 3.5 KB, boot with audio init is more, and an
+	   interrupt can arrive on top of either. */
+	_stack_size = _estack - _ebss;
+	ASSERT(_stack_size >= 0x4000, "CRITICAL: T41 stack below 16K -- DTCM is full; move data to DMAMEM or code to FLASHMEM")
 
 	.debug_info     0 : { *(.debug_info) }
 	.debug_abbrev   0 : { *(.debug_abbrev) }

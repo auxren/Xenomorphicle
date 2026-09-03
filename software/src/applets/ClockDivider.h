@@ -70,13 +70,13 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawSelector();
     }
 
     //void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, LAST_SETTING);
             return;
@@ -88,7 +88,7 @@ public:
           div[cursor / 2] = constrain( div[cursor / 2] + direction, -CLOCKDIV_MAX, CLOCKDIV_MAX);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         for (size_t i = 0; i < 2; ++i) {
           Pack(data, PackLocation {0 + i*8,8}, div[i] + 32);
@@ -97,7 +97,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         for (size_t i = 0; i < 2; ++i) {
           div[i] = constrain((Unpack(data, PackLocation {0 + i*8,8}) - 32), -CLOCKDIV_MAX, CLOCKDIV_MAX);
           divmult[1+i*2].Set( Unpack(data, PackLocation {16 + i*8,8}) - 32 ); // constrained via Set()
@@ -105,7 +105,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "Reset";
@@ -124,7 +124,7 @@ private:
                          // Zero is mute.
     int cursor = 0; // Which output is currently being edited
 
-    void DrawSelector() {
+    FLASHMEM void DrawSelector() {
         ForEachChannel(ch)
         {
             const int y = 15 + (ch * 24);

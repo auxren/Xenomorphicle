@@ -89,31 +89,31 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         if (TUNER_ENABLED) DrawTuner();
         else DrawWarning();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         Start();
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         A4_Hz = constrain(A4_Hz + direction, 400, 500);
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,16}, A4_Hz);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         A4_Hz = Unpack(data, PackLocation {0,16});
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
       help[HELP_CV1]      = "";
       help[HELP_CV2]      = "";
       help[HELP_OUT1]     = "";
@@ -151,7 +151,7 @@ private:
     int A4_Hz; // Tuning reference
     FreqMeasureClass freq_measure;
 
-    void DrawTuner() {
+    FLASHMEM void DrawTuner() {
         float frequency_ = get_frequency() ;
         float c0_freq_ = get_C0_freq() ;
 
@@ -209,7 +209,7 @@ private:
         gfxCursor(25, 23, 36);
     }
 
-    void DrawWarning() {
+    FLASHMEM void DrawWarning() {
 #ifdef ARDUINO_TEENSY40
       if (!OC::calibration_data.flipcontrols()) {
 #else

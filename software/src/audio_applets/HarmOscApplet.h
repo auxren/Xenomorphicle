@@ -1,6 +1,16 @@
-#include "synth_waveform.h"
+// F32-native: all 16 sine partials render float32 (float sine table, no
+// int16 magnitude requantization) and are summed in float by AudioMixerF32,
+// so the normalized partial sum keeps full precision into the VCA and dry/wet
+// mix. The chain still sees int16 via the HemisphereAudioAppletF32 edge
+// adapters. Params, ranges, and UI are unchanged.
 
-class HarmOscApplet : public HemisphereAudioApplet {
+#include "../HemisphereAudioAppletF32.h"
+#include "../Audio/synth_waveform_F32.h"
+#include "../Audio/AudioMixerF32.h"
+#include "../Audio/InterpolatingStreamF32.h"
+#include "../Audio/AudioVCA_F32.h"
+
+class HarmOscApplet : public HemisphereAudioAppletF32<MONO> {
 public:
     const char* applet_name() {
         return "HarmOsc";
@@ -15,13 +25,14 @@ public:
         vca_cv.Method(INTERPOLATION_LINEAR);
         vca.rectify(true);
 
-        PatchCable(input_stream, 0, mixer, 0);
+        PatchCableF32(InputF32(), 0, mixer, 0);
         for (int i = 0; i < MAX_PARTIALS; ++i) {
-            PatchCable(partial[i], 0, harmosc, i);
+            PatchCableF32(partial[i], 0, harmosc, i);
         }
-        PatchCable(vca_cv, 0, vca, 1);
-        PatchCable(harmosc, 0, vca, 0);
-        PatchCable(vca, 0, mixer, 1);
+        PatchCableF32(vca_cv, 0, vca, 1);
+        PatchCableF32(harmosc, 0, vca, 0);
+        PatchCableF32(vca, 0, mixer, 1);
+        PatchCableF32(mixer, 0, OutputF32(), 0);
         InitWaveform(amplitudes, partial_ratios, MAX_PARTIALS);
     }
 
@@ -50,7 +61,7 @@ public:
             vca.bias(0.0f);
             vca.level(gain);
             float cv = level_cv.InF();
-            vca_cv.Push(float_to_q15(cv * cv));
+            vca_cv.Push(cv * cv);
         } else {
             vca.bias(gain);
             vca.level(0.0f);
@@ -61,7 +72,7 @@ public:
         mixer.gain(0, 1.0f - m);
     }
 
-    void View() override {
+    FLASHMEM void View() override {
         gfxIcon(4 + 00, 26, NOTE_ICON);  // pitch
         gfxIcon(4 + 16, 26, PhzIcons::speaker);  // level
         gfxIcon(4 + 32, 26, BEAKER_ICON);  // mix
@@ -163,7 +174,7 @@ public:
         gfxDisplayInputMapEditor();
     }
 
-    void OnButtonPress() override {
+    FLASHMEM void OnButtonPress() override {
         if (cursor >= PARTIAL1 && partial_param == 2) {
             if (CheckEditInputMapPress(cursor,
                 IndexedInput(cursor, amp_cv[cursor - PARTIAL1])
@@ -178,12 +189,12 @@ public:
         CursorToggle();
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
         if (cursor >= PARTIAL1)
             (partial_param + 1) > 2 ? partial_param = 0 : ++partial_param;
     }
 
-    void OnEncoderMove(int direction) override {
+    FLASHMEM void OnEncoderMove(int direction) override {
         if (!EditMode()) {
             MoveCursor(cursor, direction, PARTIAL16);
             return;
@@ -225,7 +236,7 @@ public:
         }
     }
 
-    void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
         data[0] = PackPackables(pitch, level, mix);
         data[1] = PackPackables(pitch_cv, level_cv, mix_cv);
         for (size_t i = 0; i < MAX_PARTIALS; ++i) {
@@ -257,7 +268,7 @@ public:
         // using 8 out of 32 extra blobs
     }
 
-    void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
         UnpackPackables(data[0], pitch, level, mix);
         UnpackPackables(data[1], pitch_cv, level_cv, mix_cv);
         for (size_t i = 0; i < MAX_PARTIALS; ++i) {
@@ -281,13 +292,6 @@ public:
                 partial_ratios[i * blobs + 3]
             );
         }
-    }
-
-    AudioStream* InputStream() override {
-        return &input_stream;
-    }
-    AudioStream* OutputStream() override {
-        return &mixer;
     }
 
 protected:
@@ -321,12 +325,11 @@ private:
     CVInputMap mix_cv;
     CVInputMap amp_cv[MAX_PARTIALS];
 
-    AudioPassthrough<MONO> input_stream;
-    AudioSynthWaveform partial[MAX_PARTIALS];
-    InterpolatingStream<> vca_cv;
-    AudioVCA vca;
-    AudioMixer<MAX_PARTIALS> harmosc;
-    AudioMixer<2> mixer;
+    AudioSynthWaveformF32 partial[MAX_PARTIALS];
+    InterpolatingStreamF32<> vca_cv;
+    AudioVCA_F32 vca;
+    AudioMixerF32<MAX_PARTIALS> harmosc;
+    AudioMixerF32<2> mixer;
 
     void InitWaveform(uint8_t* amp, uint16_t* rat, int n_partials) {
         for (int i = 0; i < n_partials; ++i) {  // approximate saw wave

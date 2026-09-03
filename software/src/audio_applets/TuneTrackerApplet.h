@@ -55,7 +55,7 @@ public:
       freq_available = false;
     }
   }
-  void View() override {
+  FLASHMEM void View() override {
     // GUI here
     const int label_x = 1;
 
@@ -104,7 +104,7 @@ public:
 
     gfxDisplayInputMapEditor(); // this bookends any GUI with editable CV inputs
   }
-  uint64_t OnDataRequest() override {
+  FLASHMEM uint64_t OnDataRequest() override {
     return 0;
   }
   void OnDataReceive(uint64_t data) override {}

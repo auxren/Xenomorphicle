@@ -282,7 +282,7 @@ public:
     DrawVUMetersLeft();
   }
 
-  void DrawOutputOption(int x, int y, uint8_t assign) {
+  FLASHMEM void DrawOutputOption(int x, int y, uint8_t assign) {
     if (assign < 3) {
       // LFO output
       gfxBitmap(x, y, 8, WAVEFORM_ICON);
@@ -300,7 +300,7 @@ public:
     }
   }
 
-  void DrawVUMetersRight() {
+  FLASHMEM void DrawVUMetersRight() {
     int bar;
     for (int i = 0; i < 3; ++i) {
       // Calculate bar height based on sample value (assuming bipolar -3V to +3V
@@ -312,7 +312,7 @@ public:
     }
   }
 
-  void DrawVUMetersLeft() {
+  FLASHMEM void DrawVUMetersLeft() {
     int bar;
     for (int i = 0; i < 3; ++i) {
       // Calculate bar height based on sample value (assuming bipolar -3V to +3V
@@ -344,7 +344,7 @@ public:
 
   //void OnButtonPress() { }
 
-  void OnEncoderMove(int direction) {
+  FLASHMEM void OnEncoderMove(int direction) {
     // Determine how many parameters we have based on linkage and hemisphere
     // linked && RIGHT_HEMISPHERE: 2 parameters (0 and 1)
     // otherwise: adjust for both pages (parameters 0–7)
@@ -419,7 +419,7 @@ public:
     }
   }
 
-  uint64_t OnDataRequest() {
+  FLASHMEM uint64_t OnDataRequest() {
     uint64_t data = 0;
     for (size_t i = 0; i < 3; i++) {
       // 1) freqKnob[3], 6 bits each → 18 bits total
@@ -442,7 +442,7 @@ public:
     return data;
   }
 
-  void OnDataReceive(uint64_t data) {
+  FLASHMEM void OnDataReceive(uint64_t data) {
     for (size_t i = 0; i < 3; i++) {
       freqKnob[i] = Unpack(data, PackLocation{0 + i*6, 6});
       xmodKnob[i] = Unpack(data, PackLocation{18 + i*3, 3});
@@ -459,7 +459,7 @@ public:
   }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     help[HELP_DIGITAL1] = "Reset";
     help[HELP_DIGITAL2] = "";
     if (linked && (hemisphere & 1)) {

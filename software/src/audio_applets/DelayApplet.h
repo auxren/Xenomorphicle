@@ -1,22 +1,49 @@
 #pragma once
 
-#include "../Audio/AudioDelayExt.h"
+// F32-native: the delay buffer and every feedback pass stay float32 inside the
+// applet (no int16 truncation per recirculation); the chain still sees int16
+// via the HemisphereAudioAppletF32 edge adapters.
+
+#include "../HemisphereAudioAppletF32.h"
+#include "../extern/f32/AudioMixer_F32.h"
+#include "../Audio/AudioDelayExtF32.h"
 
 extern "C" uint8_t external_psram_size;
 
 template <AudioChannels Channels>
-class DelayApplet : public HemisphereAudioApplet {
+class DelayApplet : public HemisphereAudioAppletF32<Channels> {
 public:
+  // The base class chain is dependent on Channels, so inherited names need
+  // explicit import for unqualified use.
+  using Base = HemisphereAudioAppletF32<Channels>;
+  using Base::CONFIG_SIZE;
+  using Base::PatchCableF32;
+  using Base::InputF32;
+  using Base::OutputF32;
+  using Base::AllowRestart;
+  using Base::CancelEdit;
+  using Base::CheckEditInputMapPress;
+  using Base::CursorToggle;
+  using Base::EditMode;
+  using Base::EditSelectedInputMap;
+  using Base::MoveCursor;
+  using Base::gfxPos;
+  using Base::gfxPrint;
+  using Base::gfxPrintIcon;
+  using Base::gfxStartCursor;
+  using Base::gfxEndCursor;
+  using Base::gfxDisplayInputMapEditor;
+
   const char* applet_name() {
     return "Delay";
   }
   void Start() {
     for (int ch = 0; ch < Channels; ch++) {
-      channels[ch].Start(this, ch, input_stream, output_stream);
+      channels[ch].Start(this, ch);
     }
     if (Channels == STEREO) {
       ForEachChannel(ch) {
-        PatchCable(
+        PatchCableF32(
           channels[ch].taps_mixer, 0, channels[1 - ch].input_mixer, PP_CH
         );
         channels[1 - ch].input_mixer.gain(PP_CH, 0.0f);
@@ -131,7 +158,7 @@ public:
     }
   }
 
-  void View() {
+  FLASHMEM void View() {
     // gfxPrint(0, 15, delaySecs * 1000.0f, 0);
     int unit_x = 6 * 7 + 1;
     gfxPos(1, 15);
@@ -219,11 +246,11 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void AuxButton() override {
+  FLASHMEM void AuxButton() override {
     if (cursor == WET) send_mode ^= 1;
     CancelEdit();
   }
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(TIME_CV, delay_time_cv),
@@ -234,7 +261,7 @@ public:
     CursorToggle();
   }
 
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       MoveCursor(cursor, direction, CURSOR_LENGTH - 1);
       // cursor position 0 is the clock source, which is hidden if not using
@@ -317,27 +344,19 @@ public:
   delay_time, pack<3>(time_units), ratio, pack<1>(delay_mod_type), feedback, \
     wet, pack<4>(taps), pack<1>(send_mode)
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     data[0] = PackPackables(DELAY_PARAMS);
     data[1] = PackPackables(delay_time_cv, feedback_cv, wet_cv);
     data[2] = PackPackables(clock_source);
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     uint16_t oldclk = 0;
     UnpackPackables(data[0], DELAY_PARAMS);
     set_taps(taps);
     UnpackPackables(data[1], delay_time_cv, feedback_cv, wet_cv, oldclk);
     UnpackPackables(data[2], clock_source);
     if (oldclk) clock_source.Unpack(oldclk);
-  }
-
-  AudioStream* InputStream() {
-    return &input_stream;
-  }
-
-  AudioStream* OutputStream() {
-    return &output_stream;
   }
 
   int PitchFromDelaySecs(float secs) {
@@ -377,9 +396,12 @@ protected:
   }
 
 private:
-  // Uses 1MB of psram and gives just under 12 secs of delay time.
+  // 512K samples: with PSRAM, 2MB (float32) per channel for just under 12 secs
+  // of delay time. Without PSRAM the buffer falls back to the RAM2 heap, so
+  // divide by 32 (vs int16's /16) to keep the same byte footprint (64KB/ch,
+  // ~0.37s max delay).
   static const size_t DELAY_LENGTH = 1024 * 512;
-  using DelayStream = AudioDelayExt<9>;
+  using DelayStream = AudioDelayExtF32<9>;
 
   enum Cursor {
     CLOCK_SOURCE,
@@ -448,35 +470,35 @@ private:
 
   static const uint8_t PP_CH = 1;
 
-  AudioPassthrough<Channels> input_stream;
   struct DelayChannel {
-    AudioMixer<2> input_mixer;
+    AudioMixer4_F32 input_mixer;
     // 9th tap is freeze head
     DelayStream delaystream;
-    AudioMixer<8> taps_mixer;
-    AudioMixer<2> wet_dry_mixer;
+    AudioMixer8_F32 taps_mixer;
+    AudioMixer4_F32 wet_dry_mixer;
 
     DelayChannel()
-      : delaystream(external_psram_size ? DELAY_LENGTH : DELAY_LENGTH / 16) {}
+      : delaystream(external_psram_size ? DELAY_LENGTH : DELAY_LENGTH / 32) {}
 
-    void Start(HemisphereAudioApplet* owner, int channel, AudioStream& input, AudioStream& output) {
+    void Start(HemisphereAudioAppletF32<Channels>* owner, int channel) {
       delaystream.Acquire();
 
-      owner->PatchCable(input, channel, input_mixer, 0);
+      auto& input = owner->InputF32();
+      auto& output = owner->OutputF32();
+      owner->PatchCableF32(input, channel, input_mixer, 0);
       for (int i = 0; i < 8; i++) {
-        owner->PatchCable(delaystream, i, taps_mixer, i);
+        owner->PatchCableF32(delaystream, i, taps_mixer, i);
       }
-      owner->PatchCable(input_mixer, 0, delaystream, 0);
-      owner->PatchCable(taps_mixer, 0, wet_dry_mixer, WD_WET_CH);
-      owner->PatchCable(input, channel, wet_dry_mixer, WD_DRY_CH);
-      owner->PatchCable(wet_dry_mixer, 0, output, channel);
+      owner->PatchCableF32(input_mixer, 0, delaystream, 0);
+      owner->PatchCableF32(taps_mixer, 0, wet_dry_mixer, WD_WET_CH);
+      owner->PatchCableF32(input, channel, wet_dry_mixer, WD_DRY_CH);
+      owner->PatchCableF32(wet_dry_mixer, 0, output, channel);
     }
 
     void Stop() {
       delaystream.Release();
     }
   } channels[Channels];
-  AudioPassthrough<Channels> output_stream;
 
   // [-4,-2]=>-1, [-1,1]=>0, [2,4]=>1, etc
   int16_t semitones_to_div(int16_t semis) {

@@ -29,6 +29,10 @@ Plum Audio | [**OCP X**](https://www.plum-audio.com/product-page/ocp-x) (using f
     * [Internal Clock improvements](Clock-Setup): sync to external CV or MIDI clock, swing, per-channel multiplication / division
     * [Multiple Quantizer Engines](Hemisphere-Quantizer-Setup) (with pop-up editor and performance transposition)
     * [Expanded MIDI Input](MIDI-Input) options for MIDI-to-CV, including polyphony
+* On the [Xenomorpher](https://northernlightmodular.com/product/xenomorpher-model-2x0/): native Buchla [200e preset bus](200e-conformance) support
+    * [30-slot preset engine](Xenomorpher-Presets) — save/recall the whole module (active app, all app state, globals) always on internal flash, with SD card for export/import
+    * [200e Modules App](200e-Modules-App) to read and write other modules' banks (251e sequences, 259e programs) over the same bus
+    * Trying it before it merges to `main`? See the [Beta Guide](Xenomorpher-Beta-Guide)
 
 ![Various O_C modules running the firmware](images/three_criminals.jpg)
 

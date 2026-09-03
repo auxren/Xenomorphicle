@@ -85,13 +85,13 @@ public:
         }
     }
 
-    void DrawFullScreen() {
+    FLASHMEM void DrawFullScreen() {
       int thing = (current_display == XY_MODE) ? -1 : ((current_display & 0x2) >> 1);
       DrawInputFull(thing);
       DrawCurrentSetting();
     }
 
-    void View() {
+    FLASHMEM void View() {
         if(current_display == XY_MODE) {
             DrawInputSmall(-1);
         } else {
@@ -106,7 +106,7 @@ public:
         }
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (current_setting == 2 && !EditMode()) // FREEZE button
             freeze = !freeze;
         else if (OC::CORE::ticks - last_encoder_move < SCOPE_CURRENT_SETTING_TIMEOUT) // params visible? toggle edit
@@ -115,7 +115,7 @@ public:
             last_encoder_move = OC::CORE::ticks;
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) { // switch setting
             MoveCursor(current_setting, direction, 2);
         } else { // edit
@@ -130,20 +130,20 @@ public:
         last_encoder_move = OC::CORE::ticks;
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         // example: pack property_name at bit 0, with size of 8 bits
         // Pack(data, PackLocation {0,8}, property_name); 
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         // example: unpack value at bit 0 with size of 8 bits to property_name
         // property_name = Unpack(data, PackLocation {0,8}); 
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "BPM";
     help[HELP_DIGITAL2] = "Cycle";
@@ -175,7 +175,7 @@ private:
     int last_encoder_move; // The last the the sample_ticks value was changed
     int last_scope_tick; // Used to auto-calculate sample countdown
 
-    void DrawBPM() {
+    FLASHMEM void DrawBPM() {
         gfxPrint(9, 15, "BPM ");
         gfxPrint(bpm / 4);
         gfxLine(0, 24, 63, 24);
@@ -183,7 +183,7 @@ private:
         if (OC::CORE::ticks - last_bpm_tick < 1666) gfxBitmap(1, 15, 8, CLOCK_ICON);
     }
 
-    void DrawCurrentSetting() {
+    FLASHMEM void DrawCurrentSetting() {
         if (OC::CORE::ticks - last_encoder_move < SCOPE_CURRENT_SETTING_TIMEOUT) {
             if(current_setting == 0) {
                 gfxPrint(1, 26, "Rate");
@@ -213,7 +213,7 @@ private:
         gfxPrintVoltage(last_cv);
     }
 
-    void DrawInputSmall(const int input) {
+    FLASHMEM void DrawInputSmall(const int input) {
       const int width = 63;
       const int height = (input < 0) ? 54 : 28;
       for (int s = 0; s <= width; s++)
@@ -232,7 +232,7 @@ private:
         gfxPixel(px, py);
       }
     }
-    void DrawInputFull(const int input) {
+    FLASHMEM void DrawInputFull(const int input) {
       const int width = 127;
       const int height = (input < 0) ? 54 : 63;
       for (int s = 0; s <= width; s++)

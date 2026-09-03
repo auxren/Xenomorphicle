@@ -24,7 +24,9 @@ extern "C" char _extram_start[], _extram_end[];
 #endif
 extern "C" char _ebss[], _heap_end[], *__brkval, _estack;
 
+#ifdef ARDUINO_TEENSY41
 extern USBHost thisUSB;
+#endif
 
 #ifdef POLYLFO_DEBUG  
 extern void POLYLFO_debug();
@@ -389,8 +391,8 @@ static const DebugMenu debug_menus[] = {
   { "ADC min/max", debug_menu_adc2 },
 #endif
 #ifdef ARDUINO_TEENSY41
-  { "ADC (value)", debug_menu_adc_value },
-  { "ADC (noise)", debug_menu_adc_noise },
+  { "ADC value", debug_menu_adc_value },
+  { "ADC noise", debug_menu_adc_noise },
   { "AUDIO", debug_menu_audio },
 #endif
 #ifdef POLYLFO_DEBUG  
@@ -434,7 +436,7 @@ void midi_monitor() {
 #endif
 }
 
-void Ui::DebugStats() {
+FLASHMEM void Ui::DebugStats() {
   SERIAL_PRINTLN("DEBUG/STATS MENU");
 
   int current_menu_index = 0;
@@ -450,15 +452,30 @@ void Ui::DebugStats() {
       midi_monitor();
     }
 
+#ifdef ARDUINO_TEENSY41
     thisUSB.Task();
+#endif
     CORE::FlushTasks();
 
     const auto &current_menu = debug_menus[current_menu_index];
 
     GRAPHICS_BEGIN_FRAME(false);
-      graphics.setPrintPos(2, 2);
-      graphics.printf("%d/%u ", current_menu_index + 1, ARRAY_SIZE(debug_menus));
-      graphics.print(current_menu.title);
+      // This is a blocking loop, and its only way out used to be an encR press
+      // that the screen never mentioned anywhere: a page of numbers with no
+      // advertised exit reads as a crash, which is what it looked like to
+      // anyone who reached it by accident from the app menu. Say it. The title
+      // is clipped short of the hint so no page name can scribble over it.
+      static const char kExitHint[] = "R:exit";
+      // print_right ends at x=127, so the hint owns everything from kHintX; the
+      // title may not START a glyph inside the last cell before it.
+      static constexpr weegfx::coord_t kHintX =
+          127 - (sizeof(kExitHint) - 1) * weegfx::Graphics::kFixedFontW;
+      char header[32];
+      snprintf(header, sizeof(header), "%d/%u %s", current_menu_index + 1,
+               (unsigned)ARRAY_SIZE(debug_menus), current_menu.title);
+      graphics.drawStrClipX(2, 2, header, 2, kHintX - weegfx::Graphics::kFixedFontW - 2);
+      graphics.setPrintPos(127, 2);
+      graphics.print_right(kExitHint);
       current_menu.display_fn();
     GRAPHICS_END_FRAME();
 
@@ -467,10 +484,12 @@ void Ui::DebugStats() {
       if (UI::EVENT_ENCODER == event.type && CONTROL_ENCODER_L == event.control) {
         current_menu_index = current_menu_index + event.value;
       } else if (UI::EVENT_BUTTON_PRESS == event.type) {
-        if (CONTROL_BUTTON_R == event.control)
+        // Either encoder push leaves. encR is the advertised exit; encL leaves
+        // too, because backing out with encL is the reflex this instrument
+        // trains everywhere else -- and it previously only cycled pages here,
+        // i.e. the escape gesture kept you in the room.
+        if (CONTROL_BUTTON_R == event.control || CONTROL_BUTTON_L == event.control)
           exit_loop = true;
-        if (CONTROL_BUTTON_L == event.control)
-          ++current_menu_index;
       }
     }
     CONSTRAIN(current_menu_index, 0, (int)ARRAY_SIZE(debug_menus) - 1);

@@ -2,23 +2,30 @@
 // Authored by Ivan Cohen
 // modified by djphazer
 
-#include "../src/Audio/effect_phaser.h"
+// F32-native: the six TPT all-pass stages, the zero-delay feedback path, and
+// the dry/wet mix run on float32 blocks (see effect_phaser_F32.h); the chain
+// still sees int16 via the HemisphereAudioAppletF32 edge adapters.
+
+#include "../HemisphereAudioAppletF32.h"
+#include "../extern/f32/AudioMixer_F32.h"
+#include "../Audio/effect_phaser_F32.h"
 
 // MONO only... for now
-class PhazerApplet : public HemisphereAudioApplet {
+class PhazerApplet : public HemisphereAudioAppletF32<MONO> {
 public:
   const char* applet_name() {
     return "Phazer";
   }
   void Start() override {
-    if (!phaser && OC::CORE::FreeRam() > (int)sizeof(AudioEffectPhazer)) {
-      phaser = new AudioEffectPhazer();
+    if (!phaser && OC::CORE::FreeRam() > (int)sizeof(AudioEffectPhazerF32)) {
+      phaser = new AudioEffectPhazerF32();
     }
     if (!phaser) return;
 
-    PatchCable(input, 0, dry_wet_mixer, 1);
-    PatchCable(input, 0, *phaser, 0);
-    PatchCable(*phaser, 0, dry_wet_mixer, 0);
+    PatchCableF32(InputF32(), 0, dry_wet_mixer, 1);
+    PatchCableF32(InputF32(), 0, *phaser, 0);
+    PatchCableF32(*phaser, 0, dry_wet_mixer, 0);
+    PatchCableF32(dry_wet_mixer, 0, OutputF32(), 0);
 
     dry_wet_mixer.gain(1, 1.0f);
   }
@@ -42,7 +49,7 @@ public:
     dry_wet_mixer.gain(1, 1.0f - m);
   }
 
-  void View() override {
+  FLASHMEM void View() override {
     if (!phaser) {
       gfxPrint(1, 15, "Out Of RAM !!!");
       return;
@@ -87,17 +94,17 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     data[0] = PackPackables(mix, depth, feedback, rate);
     data[1] = PackPackables(mix_cv, depth_cv, feedback_cv, rate_cv);
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     UnpackPackables(data[0], mix, depth, feedback, rate);
     UnpackPackables(data[1], mix_cv, depth_cv, feedback_cv, rate_cv);
   }
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(MIX_CV, mix_cv),
@@ -109,7 +116,7 @@ public:
     CursorToggle();
   }
 
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       MoveCursor(cursor, direction, MIX_CV);
       return;
@@ -147,13 +154,6 @@ public:
     }
   }
 
-  AudioStream* InputStream() override {
-    return &input;
-  }
-  AudioStream* OutputStream() override {
-    return &dry_wet_mixer;
-  }
-
 protected:
   void SetHelp() override {}
 
@@ -172,10 +172,9 @@ private:
   static constexpr int MAX_RATE = 100;
 
   int8_t cursor = DEPTH;
-  AudioPassthrough<MONO> input;
 
-  AudioEffectPhazer* phaser;
-  AudioMixer<2> dry_wet_mixer;
+  AudioEffectPhazerF32* phaser = nullptr;
+  AudioMixer4_F32 dry_wet_mixer;
 
   uint8_t mix = 50; // 0 to 100 %
   uint8_t depth = 50; // 0 to 100%

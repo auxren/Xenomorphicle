@@ -54,11 +54,11 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawSelector();
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
         uint8_t ch = cursor / 2;
         HS::QuantizerEdit(io_offset + ch);
         CancelEdit();
@@ -66,7 +66,7 @@ public:
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 3);
             return;
@@ -83,7 +83,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,8}, GetScale(0));
         Pack(data, PackLocation {8,8}, GetScale(1));
@@ -92,7 +92,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         SetScale(0, Unpack(data, PackLocation {0,8}));
         SetScale(1, Unpack(data, PackLocation {8,8}));
         SetRootNote(0, Unpack(data, PackLocation {16,4}));
@@ -100,7 +100,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock 1";
     help[HELP_DIGITAL2] = "Clock 2";

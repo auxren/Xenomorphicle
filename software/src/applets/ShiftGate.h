@@ -42,13 +42,13 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 3);
             return;
@@ -60,7 +60,7 @@ public:
         if (c == 1) trigger[ch] = 1 - trigger[ch];
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,4}, length[0] - 1);
         Pack(data, PackLocation {4,4}, length[1] - 1);
@@ -70,7 +70,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         length[0] = Unpack(data, PackLocation {0,4}) + 1;
         length[1] = Unpack(data, PackLocation {4,4}) + 1;
         trigger[0] = Unpack(data, PackLocation {8,1});
@@ -79,7 +79,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "Freeze";
@@ -100,7 +100,7 @@ private:
     int8_t length[2]; // 1-16
     bool trigger[2]; // 0=Gate, 1=Trigger
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         gfxIcon(1, 14, LOOP_ICON);
         gfxIcon(35, 14, LOOP_ICON);
         gfxPrint(12 + pad(10, length[0]), 15, length[0]);

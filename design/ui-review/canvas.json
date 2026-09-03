@@ -1,0 +1,41 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html",         "x": 0,    "y": 0,    "w": 880, "h": 1320 },
+    { "file": "Navigation.dc.html",   "x": 1000, "y": 0,    "w": 900, "h": 1780 },
+    { "file": "ModuleSelect.dc.html", "x": 2020, "y": 0,    "w": 900, "h": 1080 },
+    { "file": "ActionRow.dc.html",    "x": 3040, "y": 0,    "w": 900, "h": 900 },
+    { "file": "WriteConfirm.dc.html", "x": 2020, "y": 1220, "w": 900, "h": 1040 },
+    { "file": "WriteScope.dc.html",   "x": 3040, "y": 1220, "w": 900, "h": 1180 }
+  ],
+  "annotations": [
+    {
+      "id": "start-here",
+      "x": 0,
+      "y": 1440,
+      "w": 420,
+      "text": "Start at Main, then Navigation — those two are whole-instrument. The four to the right are the 200e app specifically.\n\nEvery finding and recommendation is marked SHIPPED or OPEN. Where a proposal is half built, both halves are named."
+    },
+    {
+      "id": "coverage",
+      "x": 0,
+      "y": 1700,
+      "w": 460,
+      "text": "COVERAGE, honestly:\n\nWalked and reviewed — the app switcher, the preset-bus overlay, the 200e app, Setup/About, Scenery, Pong.\n\nNot reviewed — Quadrants and Hemisphere (the applet registry is not simulated), and Captain MIDI, Calibr8or and Scale Editor, which will not compile for the simulator because of a firmware portability bug. Captain MIDI is the default app on hardware, so that gap is the one worth closing first.\n\nAlso not reviewed, and newer than this canvas — the preset-slot storage path (30 slots, internal flash, one PB_NN.PBS container per slot) and the Backup app's EEPROM-over-SysEx flow. Neither has an artboard here; the screens exist and have not been walked."
+    },
+    {
+      "id": "write-answer",
+      "x": 2020,
+      "y": 2340,
+      "w": 480,
+      "text": "\"Why rewrite all 30?\" — answered on the artboard above. Short version: the bus has no command that sends data into a single preset. RESTORE moves the whole bank or nothing.\n\nThe other 29 get their own values back, read seconds earlier — so the danger is a stale or short read, not the rewrite itself.\n\nSince this review the write path has been hardened twice. First: the bank is fingerprinted at Read, re-checked at Save, the patch is proved byte-for-byte before anything is sent, and the whole bank is read straight back and compared. Second, and the one that changes the promise: a VERIFIED verdict now requires the FULL 63,120-byte read-back rather than the edited slot's 2,104-byte window — a short read-back says \"BAD: read-back short\" instead of blaming the other 29 — and the bank is snapshotted to internal flash before the first byte is modified, so a BAD verdict can offer encR:UNDO.\n\nThe confirm screen has not caught up: it still reads \"29 re-sent - no undo\". That line, and the two comments behind it, are firmware, and are recorded as stale rather than edited from here."
+    },
+    {
+      "id": "verified-against",
+      "x": 1000,
+      "y": 1900,
+      "w": 460,
+      "text": "VERIFIED AGAINST: commit cea7cc29 plus the uncommitted working tree on top of it — the global release-first rule, the hold-A/hold-Z chord card, the AppSwitcher::Init reordering, preset containers on internal flash, and the pre-write snapshot with its UNDO.\n\nThat tree was moving the whole time this canvas was updated; the chord card landed mid-revision. Anything marked SHIPPED was read in the source. Anything that could not be found there is marked proposed, however close it sounds to done."
+    }
+  ],
+  "launch": { "view": "canvas" }
+}

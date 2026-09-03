@@ -1,6 +1,12 @@
 #pragma once
 
-#include "../Audio/AudioEffectGlitch.h"
+// F32-native: the capture buffer, held slices, micro-fades, and wet/dry mix
+// stay float32 inside the applet (see AudioEffectGlitchF32.h); the chain still
+// sees int16 via the HemisphereAudioAppletF32 edge adapters.
+
+#include "../HemisphereAudioAppletF32.h"
+#include "../extern/f32/AudioMixer_F32.h"
+#include "../Audio/AudioEffectGlitchF32.h"
 
 extern "C" uint8_t external_psram_size;
 
@@ -30,13 +36,34 @@ extern "C" uint8_t external_psram_size;
 //
 // AuxButton latches manual hold without a patched gate.
 template <AudioChannels Channels>
-class GlitchApplet : public HemisphereAudioApplet {
+class GlitchApplet : public HemisphereAudioAppletF32<Channels> {
 public:
+    // The base class chain is dependent on Channels, so inherited names need
+    // explicit import for unqualified use.
+    using Base = HemisphereAudioAppletF32<Channels>;
+    using Base::CONFIG_SIZE;
+    using Base::PatchCableF32;
+    using Base::InputF32;
+    using Base::OutputF32;
+    using Base::AllowRestart;
+    using Base::CancelEdit;
+    using Base::CheckEditInputMapPress;
+    using Base::CursorToggle;
+    using Base::EditMode;
+    using Base::EditSelectedInputMap;
+    using Base::gfxPos;
+    using Base::gfxPrint;
+    using Base::gfxIcon;
+    using Base::gfxInvert;
+    using Base::gfxStartCursor;
+    using Base::gfxEndCursor;
+    using Base::gfxDisplayInputMapEditor;
+
     const char* applet_name() { return "Glitch"; }
 
     void Start() override {
         for (int ch = 0; ch < Channels; ch++) {
-            channels[ch].Start(this, ch, input_stream, output_stream);
+            channels[ch].Start(this, ch);
         }
         clock_source.SetClockSource(0); // default to CL1
     }
@@ -97,7 +124,7 @@ public:
         }
     }
 
-    void View() override {
+    FLASHMEM void View() override {
         if (!channels[0].glitch_stream.IsReady()) {
             gfxPrint(1, 15, "No PSRAM");
             return;
@@ -117,7 +144,7 @@ public:
         gfxDisplayInputMapEditor();
     }
 
-    void DrawRow(int row, int y) {
+    FLASHMEM void DrawRow(int row, int y) {
         switch (row) {
             case 0:
                 gfxPos(1, y);
@@ -199,12 +226,12 @@ public:
     }
 
     // AuxButton latches/unlatches manual hold for performance without a patch.
-    void AuxButton() override {
+    FLASHMEM void AuxButton() override {
         manual_hold_ ^= 1;
         CancelEdit();
     }
 
-    void OnButtonPress() override {
+    FLASHMEM void OnButtonPress() override {
         if (CheckEditInputMapPress(
                 cursor,
                 IndexedInput(CLOCK_SRC,   clock_source),
@@ -220,7 +247,7 @@ public:
         CursorToggle();
     }
 
-    void OnEncoderMove(int direction) override {
+    FLASHMEM void OnEncoderMove(int direction) override {
         if (!EditMode()) {
             cursor = (Cursor)constrain(cursor + direction, 0, CURSOR_LENGTH - 1);
             int row = cursorToRow(cursor);
@@ -254,7 +281,7 @@ public:
 
 #define GLITCH_PARAMS  pack<3>(div), pack<2>(mode), pack<3>(ratchet), mix, \
                        pack<4>(bits_), pack<4>(decimate_), pack<4>(offset_)
-    void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
         uint16_t clk = clock_source.Pack();
         uint16_t hld = hold_input.Pack();
         uint16_t frz = freeze_input.Pack();
@@ -264,7 +291,7 @@ public:
         data[3] = PackPackables(off_cv);
     }
 
-    void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
         uint16_t clk, hld, frz;
         UnpackPackables(data[0], GLITCH_PARAMS);
         UnpackPackables(data[1], clk, hld, frz, mix_cv);
@@ -276,9 +303,6 @@ public:
     }
 #undef GLITCH_PARAMS
 
-    AudioStream* InputStream()  override { return &input_stream; }
-    AudioStream* OutputStream() override { return &output_stream; }
-
 protected:
     void SetHelp() override {}
 
@@ -286,7 +310,7 @@ private:
     static const uint8_t NUM_DIVS  = 8;
     static const uint8_t NUM_MODES = 4;
     static const int     NUM_ROWS  = 8;
-    static const uint8_t MODE_RATCHET = AudioEffectGlitch::MODE_RATCHET;
+    static const uint8_t MODE_RATCHET = AudioEffectGlitchF32::MODE_RATCHET;
 
     static constexpr const char* DIV_NAMES[] = {
         "1/2", "1/3", "1/4", "1/6", "1/8", "1/16", "1/32", "1/64"
@@ -359,30 +383,26 @@ private:
         static const uint8_t DRY_CH = 0;
         static const uint8_t WET_CH = 1;
 
-        AudioEffectGlitch glitch_stream;
-        AudioMixer<2>     wet_dry_mixer;
+        AudioEffectGlitchF32 glitch_stream;
+        AudioMixer4_F32      wet_dry_mixer;
 
         GlitchChannel()
             : glitch_stream(
                 external_psram_size
-                    ? AudioEffectGlitch::GLITCH_BUFFER_SAMPLES
-                    : AudioEffectGlitch::GLITCH_BUFFER_SAMPLES / 16)
+                    ? AudioEffectGlitchF32::GLITCH_BUFFER_SAMPLES
+                    : AudioEffectGlitchF32::GLITCH_BUFFER_SAMPLES / 16)
         {}
 
-        void Start(HemisphereAudioApplet* owner, int ch,
-                   AudioStream& input, AudioStream& output) {
+        void Start(GlitchApplet* owner, int ch) {
             glitch_stream.Acquire();
-            owner->PatchCable(input,        ch,     glitch_stream,   0);
-            owner->PatchCable(input,        ch,     wet_dry_mixer,   DRY_CH);
-            owner->PatchCable(glitch_stream, 0,     wet_dry_mixer,   WET_CH);
-            owner->PatchCable(wet_dry_mixer, 0,     output,          ch);
+            owner->PatchCableF32(owner->InputF32(), ch, glitch_stream,   0);
+            owner->PatchCableF32(owner->InputF32(), ch, wet_dry_mixer,   DRY_CH);
+            owner->PatchCableF32(glitch_stream,     0,  wet_dry_mixer,   WET_CH);
+            owner->PatchCableF32(wet_dry_mixer,     0,  owner->OutputF32(), ch);
         }
 
         void Stop() { glitch_stream.Release(); }
     } channels[Channels];
-
-    AudioPassthrough<Channels> input_stream;
-    AudioPassthrough<Channels> output_stream;
 };
 
 // Out-of-line definitions for static constexpr members (C++14 ODR requirement).

@@ -38,6 +38,7 @@ void Init();
 void AdjustOffset(uint8_t offset);
 void SetFlipMode(bool flip180);
 void SetContrast(uint8_t contrast);
+void SetInverted(bool inverted);
 
 static inline void Flush() __attribute__((always_inline));
 static inline void Flush() {

@@ -202,13 +202,13 @@ public:
         Out(0, cv_out);
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawDisplay();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 2);
             return;
@@ -233,7 +233,7 @@ public:
 
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0, 5}, steps);
         Pack(data, PackLocation {5, 2}, dir);
@@ -241,7 +241,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         steps = Unpack(data, PackLocation {0, 5});
         dir = Unpack(data, PackLocation {5, 2});
         rand = Unpack(data, PackLocation {7, 1});
@@ -252,7 +252,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "Reset";

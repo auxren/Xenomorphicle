@@ -121,14 +121,19 @@ A: Not if you are updating from Phazerville v1.8.1 or later! If so, you can refl
 To do so:
 
 1. Navigate to the Setup / About App
-2. Turn the LEFT encoder — the display should read “Reflash”
+2. **Hold the LEFT encoder button.** While you hold it, the bottom row changes to `keep holding: Reflash`
+3. Keep holding past the long-press and let go. A confirmation screen appears reading `REFLASH: BOOTLOADER` — “Reboots to bootloader for Teensy Loader. Module stops running.”
+4. Press **B** to go (`B:BOOT`), or the LEFT encoder button to cancel (`encL:no`). The screen ignores a yes for the first 350&nbsp;ms, so a fumble does nothing; read it and press again.
 
 <img src="images/EZ_Reflash.png" alt="Ready to enter Reflash mode">
 
-3. Press the LEFT encoder to enter Flash Upgrade Mode, and proceed with the remaining instructions
-4. Open the [Teensy Loader](https://www.pjrc.com/teensy/loader.html) application on your computer
-5. Drag and drop the desired .hex file onto the Teensy Loader application
-6. Within the Teensy Loader click the Program icon, or choose Program from the Operation menu
-5. You should briefly see a progress bar as the firmware is uploaded
-6. Within the Teensy Loader, click the reboot icon or choose Operation > Reboot
-7. The module should restart with your new firmware, without ever having to touch a screwdriver
+> The screenshot above shows the older flow, where **turning** the left encoder latched a `[Reflash]` label and the next left-encoder press rebooted into the bootloader. That is no longer how it works on this firmware: a stray encoder nudge in a rack could latch it, and while latched it also removed `[RESET]` from the screen while the right encoder still reset the module. Reflash is now a held gesture that latches nothing, and factory reset is armed and confirmed on two different buttons (encR arms, B erases).
+
+5. Open the [Teensy Loader](https://www.pjrc.com/teensy/loader.html) application on your computer
+6. Drag and drop the desired .hex file onto the Teensy Loader application
+7. Within the Teensy Loader click the Program icon, or choose Program from the Operation menu
+8. You should briefly see a progress bar as the firmware is uploaded
+9. Within the Teensy Loader, click the reboot icon or choose Operation > Reboot
+10. The module should restart with your new firmware, without ever having to touch a screwdriver
+
+On a Xenomorpher the Teensy's PROGRAM button is not reachable once the module is mounted, so this is the only front-panel route in. There is a headless one as well — see [the bench console notes](bench-console).

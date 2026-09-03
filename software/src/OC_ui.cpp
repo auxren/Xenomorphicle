@@ -16,6 +16,8 @@
 #include "src/drivers/display.h"
 #include "HSUtils.h"
 
+#include "PresetBusUI.h"
+
 #ifdef VOR
 #include "VBiasManager.h"
 VBiasManager *VBiasManager::instance = 0;
@@ -48,9 +50,14 @@ void Ui::Init() {
   for (size_t i = 0; i < count; ++i) {
     buttons_[i].Init(button_pins[i], OC_GPIO_BUTTON_PINMODE);
   }
-  std::fill(button_press_time_, button_press_time_ + 4, 0);
+  // ...+ CONTROL_BUTTON_LAST, not + 4: on T4.1 the array is seven long, and
+  // the three tail entries (Z/X/Y) were left uninitialised, so the first
+  // long-press decision for those buttons compared `now` against garbage.
+  std::fill(button_press_time_, button_press_time_ + CONTROL_BUTTON_LAST, 0);
   button_state_ = 0;
-  button_ignore_mask_ = 0;
+  button_down_ = 0;
+  chord_hold_ = 0;
+  chord_release_ = 0;
   screensaver_ = false;
   preempt_screensaver_ = false;
   jump_to_menu_ = false;
@@ -106,10 +113,30 @@ void FASTRUN Ui::Poll() {
 
   for (size_t i = 0; i < count; ++i) {
     auto &button = buttons_[i];
+    const uint16_t control = control_mask(i);
     if (button.just_pressed()) {
+      button_down_ |= control;
       button_press_time_[i] = now;
       PushEvent(UI::EVENT_BUTTON_DOWN, control_mask(i), 0, button_state);
     } else if (button.released()) {
+      button_down_ &= ~control;
+      // Release-first rule: the held half of the guard ends HERE, on the
+      // debounced release -- seven consecutive high reads -- and never on
+      // button_state, which is the raw pin. A switch that bounces reads high
+      // for a poll or two while the user is still holding, and clearing the
+      // guard on that would hand the screen the very press the guard exists to
+      // absorb. The release event being pushed on this same tick is still the
+      // chord's own, so it goes to the other half rather than out.
+      //
+      // This is also why the guard cannot stick and leave a button dead: it is
+      // only ever armed on a pin that is (or has just been) low, and every low
+      // excursion ends here. UI::Button::state_ reaches 0x7f seven high reads
+      // after ANY low read, whether or not the press was long enough to have
+      // reached 0x80 and reported a press in the first place.
+      if (chord_hold_ & control) {
+        chord_hold_ &= ~control;
+        chord_release_ |= control;
+      }
       if (now - button_press_time_[i] < kLongPressTicks)
         PushEvent(UI::EVENT_BUTTON_PRESS, control_mask(i), 0, button_state);
       else
@@ -136,6 +163,30 @@ void FASTRUN Ui::Poll() {
   button_state_ = button_state;
 }
 
+FLASHMEM void Ui::Inject(UI::EventType type, uint16_t control, int16_t value) {
+  // Only the DOWN of a tap carries its button in the mask, as the raw pin
+  // would; by the PRESS the pin is high again. No chord is ever synthesized:
+  // the both-encoder and A/Z gestures open screens that run their own loops.
+  const uint16_t mask = (type == UI::EVENT_BUTTON_DOWN) ? control : 0;
+  noInterrupts();
+  PushEvent(type, control, value, mask);
+  interrupts();
+}
+
+// Loop context only, and only ever from Main.cpp's loop() -- which is itself
+// FLASHMEM. The ISR half of the UI is Ui::Poll() above (it fills the event
+// queue); this is the half that DRAINS it, so it does nothing at all unless a
+// human moved an encoder or pressed a button. Flash is the right home for it.
+//
+// FLASHMEM + noinline for the reason PresetBusUI.cpp's HandleEvent already
+// documents, seen from the other side: without an explicit placement here,
+// whether these ~1.5KB land in ITCM was decided by LTO's inlining mood. When
+// LTO folded it into FLASHMEM loop() the ITCM cost was zero; when unrelated
+// churn elsewhere in the image (a bigger Bus200e bridge, say) pushed it back
+// out of line, it reappeared as a 1544-byte ITCM function -- which on
+// T41_audio_dbg, sitting ~1KB under a 32KB ITCM bank boundary, cost a whole
+// extra bank and overflowed RAM1. Pinning it makes that deterministic.
+FLASHMEM __attribute__((noinline))
 UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
   AppBase* app = static_cast<AppBase*>(appslot.instance);
   if (!app) return UiMode::UI_MODE_APP_SETTINGS;
@@ -149,26 +200,53 @@ UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
 
     MENU_REDRAW = 1;
 
+    // 200e preset-bus overlay: it owns all input while open -- except the
+    // module-wide chords (A/Z + encoder), which it closes for and hands back
+    // so they land below as usual. Holding BOTH encoder buttons opens it
+    // (unused gesture; menu is A/Z + R) and, inside, closes it again.
+    if (OC::PresetBusUI::Active()) {
+      if (OC::PresetBusUI::HandleEvent(event)) continue;
+    }
+    if (UI::EVENT_BUTTON_DOWN == event.type &&
+        (CONTROL_BUTTON_L == event.control || CONTROL_BUTTON_R == event.control) &&
+        (event.mask & (CONTROL_BUTTON_L | CONTROL_BUTTON_R))
+            == (CONTROL_BUTTON_L | CONTROL_BUTTON_R)) {
+      // Claim the chord BEFORE the screen exists, so nothing it opens can be
+      // reached by the gesture that opened it -- including a screen that runs
+      // its own blocking loop and never returns here.
+      IgnoreUntilRelease(CONTROL_BUTTON_L | CONTROL_BUTTON_R);
+      OC::PresetBusUI::Enter();
+      continue;
+    }
+
     const bool z_hold = (event.mask & CONTROL_BUTTON_Z);
     const bool a_hold = (event.mask & CONTROL_BUTTON_A);
 
     // --- Handle global hotkeys
+    //
+    // Each of these opens a screen while its chord is still held, so each
+    // claims its whole chord on the way in. The mask names A and Z together
+    // rather than whichever of them the test above matched: the modifier may
+    // already have been let go a few ms early, in which case event.mask (the
+    // raw pin) no longer mentions it while its release event is still queued,
+    // and naming a button that turns out not to have been held costs nothing.
     if (UI::EVENT_BUTTON_DOWN == event.type) {
       // Hold Z or A and push right encoder for main menu
       if (CONTROL_BUTTON_R == event.control && (z_hold || a_hold)) {
+        IgnoreUntilRelease(CONTROL_BUTTON_R | CONTROL_BUTTON_A | CONTROL_BUTTON_Z);
         jump_to_menu_ = true;
         break;
       }
       // Hold Z or A and push left encoder for IO settings menu
       if (CONTROL_BUTTON_L == event.control && (z_hold || a_hold)) {
+        IgnoreUntilRelease(CONTROL_BUTTON_L | CONTROL_BUTTON_A | CONTROL_BUTTON_Z);
         app->EditIOSettings();
-        SetButtonIgnoreMask();
         continue;
       }
       // Hold Z and push A for screensaver (not available on O_C without VOR button)
       if (CONTROL_BUTTON_A == event.control && z_hold) {
+        IgnoreUntilRelease(CONTROL_BUTTON_A | CONTROL_BUTTON_Z);
         screensaver_ = true;
-        SetButtonIgnoreMask();
         break;
       }
     }
@@ -187,7 +265,10 @@ UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
   if (screensaver_) {
     return UI_MODE_SCREENSAVER;
   } else if (jump_to_menu_) {
-    SetButtonIgnoreMask(); // ignore release
+    // The A/Z + encR chord already claimed itself above; this covers the OTHER
+    // way in, JumpToMenu() from an app (Hemisphere's encR), whose button is
+    // likewise still down. Re-arming for a chord already armed is a no-op.
+    SetButtonIgnoreMask();
     jump_to_menu_ = false;
     return UI_MODE_APP_SETTINGS;
   } else {
@@ -211,12 +292,16 @@ UiMode Ui::Splashscreen(bool &reset_settings, uint8_t phase) {
       if (read_immediate(CONTROL_BUTTON_R))
         mode = UI_MODE_APP_SETTINGS;
 
+      // A+B (UP+DOWN), on every build. This used to be A+encR on
+      // NORTHERNLIGHT-without-IO_10V builds, but that is the exact same
+      // (button, encoder-push) chord as hold-A-press-encR for the app
+      // switcher elsewhere in the UI -- and ConfirmReset() below also answers
+      // OK on encR, so the app-switcher gesture and this factory-erase
+      // gesture could be confused for one another. A+B shares no control
+      // with either the app-switcher (A+encR) or IO-settings (A+encL) chord,
+      // so it cannot collide with them on any build.
       reset_settings =
-      #if defined(NORTHERNLIGHT) && !defined(IO_10V)
-         read_immediate(CONTROL_BUTTON_UP) && read_immediate(CONTROL_BUTTON_R);
-      #else
          read_immediate(CONTROL_BUTTON_UP) && read_immediate(CONTROL_BUTTON_DOWN);
-      #endif
 
       GRAPHICS_BEGIN_FRAME(true);
 

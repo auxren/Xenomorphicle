@@ -63,13 +63,13 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, CURSOR_LAST);
             return;
@@ -95,14 +95,14 @@ public:
         }
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
       if (cursor == QUANT_A || cursor == QUANT_B) {
         HS::QuantizerEdit( qselect[(cursor == QUANT_B)] );
       }
       CancelEdit();
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,6}, pigeons[0].val[0]);
         Pack(data, PackLocation {6,6}, pigeons[0].val[1]);
@@ -115,7 +115,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         pigeons[0].val[0] = Unpack(data, PackLocation {0,6});
         pigeons[0].val[1] = Unpack(data, PackLocation {6,6});
         pigeons[0].mod =    Unpack(data, PackLocation {12,6}) + 1;
@@ -127,7 +127,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock 1";
     help[HELP_DIGITAL2] = "Clock 2";
@@ -160,7 +160,7 @@ private:
 
     uint8_t qselect[2] = { 0, 1 };
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         // cursor LUT
         const struct { uint8_t x, y, w; } cur[CURSOR_LAST+1] = {
             { 1, 22, 13 }, // val1

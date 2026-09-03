@@ -228,7 +228,12 @@ public:
     }
 
     void Suspend() {
-      if (preset_modified) SavePreset();
+      // Not when a bus recall is about to overwrite SCENERY.DAT anyway: the
+      // flash erase would freeze audio (250 ms under the core's 64 KB blocks,
+      // ~45 ms per 4 KB sector now) to store bytes that the slot's copy
+      // replaces a millisecond later.
+      const bool replaced = OC::PresetEngine::RecallReplacing() & OC::PresetEngine::REPLACES_SCENERY;
+      if (preset_modified && !replaced) SavePreset();
     }
     void Resume() {
 #ifdef __IMXRT1062__
@@ -632,7 +637,7 @@ size_t AppScenery::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
 
 size_t AppScenery::RestoreAppData(util::StreamBufferReader &stream_buffer) {
 #ifndef __IMXRT1062__
-  for (int i = 0; i < 4; ++i) {
+  for (int i = 0; i < NR_OF_SCENE_PRESETS; ++i) {
     scene_presets[i].Restore(stream_buffer);
   }
   LoadPreset();
@@ -657,14 +662,13 @@ void AppScenery::GetIOConfig(OC::IOConfig &ioconfig) const
   ioconfig.cv[2].set("Slew");
   ioconfig.cv[3].set("RndScn4");
 
-  ioconfig.outputs[0].set("Out A", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[1].set("Out B", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[2].set("Out C", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[3].set("Out D", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[4].set("Out E", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[5].set("Out F", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[6].set("Out G", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[7].set("Out H", OUTPUT_MODE_PITCH);
+  // outputs[] is DAC_CHANNEL_COUNT long: eight literal sets on a
+  // four-channel build wrote past IOConfig.
+  static const char *const names[] = {
+    "Out A", "Out B", "Out C", "Out D", "Out E", "Out F", "Out G", "Out H",
+  };
+  static_assert(DAC_CHANNEL_COUNT <= 8, "extend the name table");
+  for (int i = 0; i < DAC_CHANNEL_COUNT; ++i) ioconfig.outputs[i].set(names[i], OUTPUT_MODE_PITCH);
 }
 
 FLASHMEM
@@ -677,6 +681,10 @@ void AppScenery::HandleAppEvent(OC::AppEvent event) {
     case OC::APP_EVENT_SUSPEND:
     case OC::APP_EVENT_SCREENSAVER_ON:
         Suspend();
+        break;
+
+    case OC::APP_EVENT_FLUSH:
+        SavePreset();  // preset-bus capture: persist file-backed state
         break;
 
     default: break;

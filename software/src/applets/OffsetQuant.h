@@ -97,11 +97,11 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawSelector();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (EditMode()) { // Exiting edit mode
             // Apply the temporary setting
             range_mode[cursor] = temp_range_mode;
@@ -112,7 +112,7 @@ public:
         CursorToggle();
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             cursor = (cursor + direction) % 2;
             ResetCursor();
@@ -122,7 +122,7 @@ public:
         temp_range_mode = (RangeMode)constrain(temp_range_mode + direction, 0, RANGE_LAST - 1);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0, 3}, range_mode[0]);
         Pack(data, PackLocation {3, 3}, range_mode[1]);
@@ -133,7 +133,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         range_mode[0] = (RangeMode)Unpack(data, PackLocation {0, 3});
         range_mode[1] = (RangeMode)Unpack(data, PackLocation {3, 3});
         SetScale(0, Unpack(data, PackLocation {6, 8}));
@@ -143,7 +143,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_OUT1]     = "Pitch 1";
     help[HELP_OUT2]     = "Pitch 2";

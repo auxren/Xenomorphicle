@@ -45,6 +45,7 @@ struct SH1106_128x64_Driver {
   static void ChangeSpeed(uint32_t speed);
   static void SetFlipMode(bool flip180);
   static void SetContrast(uint8_t contrast);
+  static void SetInverted(bool inverted);
 };
 
 #endif // SH1106_128X64_DRIVER_H_

@@ -1,6 +1,17 @@
 #pragma once
 
-#include "../Audio/AudioEffectModalResonator.h"
+// F32-native: the 12-mode Chamberlin SVF bank, excitation path, and wet/dry
+// mix run on float32 blocks (see AudioEffectModalResonatorF32.h), so the
+// high-Q ring tails decay smoothly below the int16 quantisation floor instead
+// of truncating — the resonator's decaying tails are exactly the signal int16
+// loses first. Control-rate coefficient math is verbatim from the int16
+// engine; the excitation scaling is bit-exact (powers of two). The chain
+// still sees int16 via the HemisphereAudioAppletF32 edge adapters. Params,
+// ranges, save data, and UI are unchanged.
+
+#include "../HemisphereAudioAppletF32.h"
+#include "../Audio/AudioEffectModalResonatorF32.h"
+#include "../Audio/AudioMixerF32.h"
 
 // ModalResonatorApplet — modal synthesis resonator bank
 //
@@ -24,15 +35,39 @@
 // Trg input: assignable gate trigger (rising edge). Vel CV: scales strike velocity.
 
 template <AudioChannels Channels>
-class ModalResonatorApplet : public HemisphereAudioApplet {
+class ModalResonatorApplet : public HemisphereAudioAppletF32<Channels> {
 public:
+    // this class template has a dependent base, so inherited names need
+    // explicit import
+    using Base = HemisphereAudioAppletF32<Channels>;
+    using Base::PatchCableF32;
+    using Base::InputF32;
+    using Base::OutputF32;
+    using Base::AllowRestart;
+    using Base::CONFIG_SIZE;
+    using Base::gfxPrint;
+    using Base::gfxRect;
+    using Base::gfxFrame;
+    using Base::gfxInvert;
+    using Base::gfxStartCursor;
+    using Base::gfxEndCursor;
+    using Base::gfxPrintTuningIndicator;
+    using Base::gfxPrintPitchHz;
+    using Base::gfxDisplayInputMapEditor;
+    using Base::CheckEditInputMapPress;
+    using Base::CursorToggle;
+    using Base::CancelEdit;
+    using Base::EditMode;
+    using Base::MoveCursor;
+    using Base::EditSelectedInputMap;
+
     const char* applet_name() { return "ModalRes"; }
 
     // --- Lifecycle -----------------------------------------------------------
 
     void Start() override {
         for (int ch = 0; ch < Channels; ch++)
-            channels[ch].Start(this, ch, input_stream, output_stream);
+            channels[ch].Start(this, ch, InputF32(), OutputF32());
     }
 
     void Unload() override {
@@ -171,14 +206,14 @@ public:
 
     // --- AuxButton: manual test strike ---------------------------------------
 
-    void AuxButton() override {
+    FLASHMEM void AuxButton() override {
         manual_strike_ = true;
         CancelEdit();
     }
 
     // --- Button / encoder ----------------------------------------------------
 
-    void OnButtonPress() override {
+    FLASHMEM void OnButtonPress() override {
         if (CheckEditInputMapPress(
                 cursor,
                 IndexedInput(FREQ_CV,   freq_cv),
@@ -194,7 +229,7 @@ public:
         CursorToggle();
     }
 
-    void OnEncoderMove(int direction) override {
+    FLASHMEM void OnEncoderMove(int direction) override {
         if (!EditMode()) {
             MoveCursor(cursor, direction, VEL_CV);
             return;
@@ -232,7 +267,7 @@ public:
     // --- Persistence ---------------------------------------------------------
 
 #define MODAL_PARAMS pitch, structure, brightness, damping, position, mix, velocity
-    void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
         uint16_t dummy = 0;
         data[0] = PackPackables(MODAL_PARAMS);
         data[1] = PackPackables(freq_cv, struct_cv, bright_cv, damp_cv);
@@ -240,7 +275,7 @@ public:
         data[3] = PackPackables(strike_input);
     }
 
-    void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+    FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
         uint16_t dummy = 0;
         UnpackPackables(data[0], MODAL_PARAMS);
         UnpackPackables(data[1], freq_cv, struct_cv, bright_cv, damp_cv);
@@ -248,11 +283,6 @@ public:
         UnpackPackables(data[3], strike_input);
     }
 #undef MODAL_PARAMS
-
-    // --- Audio routing -------------------------------------------------------
-
-    AudioStream* InputStream()  override { return &input_stream;  }
-    AudioStream* OutputStream() override { return &output_stream; }
 
 protected:
     void SetHelp() override {}
@@ -307,23 +337,20 @@ private:
         static const uint8_t DRY_CH = 0;
         static const uint8_t WET_CH = 1;
 
-        AudioEffectModalResonator resonator;
-        AudioMixer<2>             wet_dry_mixer;
+        AudioEffectModalResonatorF32 resonator;
+        AudioMixerF32<2>             wet_dry_mixer;
 
-        void Start(HemisphereAudioApplet* owner, int ch,
-                   AudioStream& input, AudioStream& output) {
+        void Start(HemisphereAudioAppletF32<Channels>* owner, int ch,
+                   AudioStream_F32& input, AudioStream_F32& output) {
             resonator.Acquire();
-            owner->PatchCable(input,         ch, resonator,      0);
-            owner->PatchCable(input,         ch, wet_dry_mixer,  DRY_CH);
-            owner->PatchCable(resonator,      0, wet_dry_mixer,  WET_CH);
-            owner->PatchCable(wet_dry_mixer,  0, output,         ch);
+            owner->PatchCableF32(input,         ch, resonator,      0);
+            owner->PatchCableF32(input,         ch, wet_dry_mixer,  DRY_CH);
+            owner->PatchCableF32(resonator,      0, wet_dry_mixer,  WET_CH);
+            owner->PatchCableF32(wet_dry_mixer,  0, output,         ch);
         }
 
         void Stop() { resonator.Release(); }
     } channels[Channels];
-
-    AudioPassthrough<Channels> input_stream;
-    AudioPassthrough<Channels> output_stream;
 };
 
 template <AudioChannels Channels>

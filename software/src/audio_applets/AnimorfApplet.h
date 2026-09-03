@@ -80,7 +80,7 @@ public:
     }
   }
 
-  void View() {
+  FLASHMEM void View() {
     const int row = RowOfCursor();
     int scroll = row - (kVisibleRows - 1);
     if (scroll < 0) scroll = 0;
@@ -92,12 +92,12 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void AuxButton() override {
+  FLASHMEM void AuxButton() override {
     if (cursor == MIX) send_mode ^= 1;
     CancelEdit();
   }
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(MIX_CV, mix_cv),
@@ -109,7 +109,7 @@ public:
     CursorToggle();
   }
 
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       MoveCursor(cursor, direction, CURSOR_LENGTH - 1);
       return;
@@ -171,7 +171,7 @@ public:
   wet, env, drive, sweep, rate_x10, pack<4>(pattern), pack<1>(bass_mode), \
   pack<1>(send_mode)
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     data[0] = PackPackables(ANIMORFER_MAIN_PARAMS);
     data[1] = PackPackables(mix_cv, rate_cv, env_cv, sweep_cv);
     data[2] = PackPackables(
@@ -181,7 +181,7 @@ public:
     data[3] = PackPackables(clock_source);
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     UnpackPackables(data[0], ANIMORFER_MAIN_PARAMS);
     UnpackPackables(data[1], mix_cv, rate_cv, env_cv, sweep_cv);
     UnpackPackables(
@@ -236,7 +236,7 @@ private:
     }
   }
 
-  void DrawRow(int r, int y) {
+  FLASHMEM void DrawRow(int r, int y) {
     const int rx = 63 - 8;
     switch (r) {
       case 0:

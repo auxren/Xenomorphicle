@@ -80,14 +80,14 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawControls();
         DrawSequence();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 2);
             return;
@@ -107,7 +107,7 @@ public:
         ResetCursor();
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,7}, compose);
         Pack(data, PackLocation {7,7}, decompose);
@@ -115,14 +115,14 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         compose = Unpack(data, PackLocation {0,7});
         decompose = Unpack(data, PackLocation {7,7});
         length = Unpack(data, PackLocation {14,4}) + 1;
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "Brush";
@@ -148,7 +148,7 @@ private:
     int compose;
     int decompose;
 
-    void DrawControls() {
+    FLASHMEM void DrawControls() {
         int comp_w = Proportion(effective_compose, HEM_PALIMPSEST_MAX_VALUE, 30);
         int decomp_w = Proportion(effective_decompose, HEM_PALIMPSEST_MAX_VALUE, 30);
 
@@ -167,7 +167,7 @@ private:
         }
     }
 
-    void DrawSequence() {
+    FLASHMEM void DrawSequence() {
         for (int s = 0; s < length; s++)
         {
             int index = s + step;

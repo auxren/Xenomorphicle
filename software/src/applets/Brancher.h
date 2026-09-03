@@ -62,31 +62,31 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         choice = 1 - choice;
     }
 
     /* Change the pability */
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         p = constrain(p + direction, 0, 100);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,7}, p);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         p = constrain(Unpack(data, PackLocation {0,7}), 0, 100);
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clk/Gte";
     help[HELP_DIGITAL2] = "AltClk";
@@ -105,7 +105,7 @@ private:
     bool clocked; // indicates a logical clock without a physical gate
     bool flipflopmode = 0; // simple flip-flop gate
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         // Show the probability in the middle
         gfxPrint(1, 15, "p=");
         gfxPrint(15 + pad(100, p_mod), 15, p_mod);

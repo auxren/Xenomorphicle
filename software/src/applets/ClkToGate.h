@@ -71,13 +71,13 @@ public:
       }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawSelector();
     }
 
     //void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, LAST_SETTING);
             return;
@@ -107,7 +107,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         for (size_t i = 0; i < 2; ++i) {
           Pack(data, PackLocation {0 + i*32,7}, width[i]);
@@ -118,7 +118,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         for (size_t i = 0; i < 2; ++i) {
           width[i] = Unpack(data, PackLocation {0 + i*32,7});
           range[i] = Unpack(data, PackLocation {8 + i*32,7});
@@ -133,7 +133,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clk1";
     help[HELP_DIGITAL2] = "Clk2";
@@ -155,7 +155,7 @@ private:
 
     int cursor = 0;
 
-    void DrawSelector() {
+    FLASHMEM void DrawSelector() {
         ForEachChannel(ch)
         {
             const int y = 16 + (ch * 26);

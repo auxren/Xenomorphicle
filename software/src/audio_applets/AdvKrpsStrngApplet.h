@@ -81,7 +81,7 @@ public:
 
   // --- View (64×64 display) ----------------------------------------------
 
-  void View() override {
+  FLASHMEM void View() override {
     // Row 1 — Pitch (two editable cursors + CV source)
     gfxStartCursor(1, 15);
     gfxPrintTuningIndicator(pitch);          // note name + tuning bar
@@ -144,7 +144,7 @@ public:
 
   // --- Button / encoder --------------------------------------------------
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(PITCH_CV, pitch_cv),
@@ -158,7 +158,7 @@ public:
     CursorToggle();
   }
 
-  void OnEncoderMove(int direction) override {
+  FLASHMEM void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       MoveCursor(cursor, direction, MIX_CV);
       return;
@@ -216,14 +216,14 @@ public:
 
 #define ADVKS_PARAMS pitch, decay, brightness, body, mix
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     uint16_t dummy = 0;
     data[0] = PackPackables(ADVKS_PARAMS);
     data[1] = PackPackables(pitch_cv, dummy, decay_cv, brightness_cv);
     data[2] = PackPackables(body_cv, mix_cv, trig_cv);
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     uint16_t dummy = 0;
     UnpackPackables(data[0], ADVKS_PARAMS);
     UnpackPackables(data[1], pitch_cv, dummy, decay_cv, brightness_cv);

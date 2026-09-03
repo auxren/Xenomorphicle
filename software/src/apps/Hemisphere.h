@@ -236,7 +236,7 @@ public:
 #ifdef __IMXRT1062__
   0 // no EEPROM needed on T4
 #else
-  HemispherePreset::storageSize() * HEM_NR_OF_PRESETS + 1
+  HemispherePreset::storageSize() * (HEM_NR_OF_PRESETS + 1)  // + the hidden-applet mask preset
 #endif
   );
 

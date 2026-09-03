@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [preset-bus, main, hoc-midi]
+  pull_request:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run host test suites
+        working-directory: software/test
+        run: |
+          mkdir -p build
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_bus200e \
+              test_bus200e.cpp ../src/PresetBus200e.cpp
+          ./build/test_bus200e
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_bus200e_master \
+              test_bus200e_master.cpp ../src/Bus200eMaster.cpp ../src/PresetBus200e.cpp
+          ./build/test_bus200e_master
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_bus200e_sysex \
+              test_bus200e_sysex.cpp ../src/Bus200eSysEx.cpp
+          ./build/test_bus200e_sysex
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_bus200e_bridge \
+              test_bus200e_bridge.cpp ../src/Bus200eBridge.cpp ../src/Bus200eSysEx.cpp
+          ./build/test_bus200e_bridge
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_buscard \
+              test_buscard.cpp ../src/PresetBusCard.cpp
+          ./build/test_buscard
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_midi_types \
+              test_midi_types.cpp
+          ./build/test_midi_types
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_miditxring \
+              test_miditxring.cpp
+          ./build/test_miditxring
+          g++ -std=c++17 -Wall -Werror -O2 -I host_stubs \
+              -o build/test_buchla251e_slot_codec \
+              test_buchla251e_slot_codec.cpp ../src/Buchla251eSlotCodec.cpp \
+              ../src/Buchla251eGenerator.cpp ../src/src/extern/bjorklund.cpp
+          ./build/test_buchla251e_slot_codec
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_buchla251e_recorder \
+              test_buchla251e_recorder.cpp ../src/Buchla251eSlotCodec.cpp \
+              ../src/Buchla251eRecorder.cpp
+          ./build/test_buchla251e_recorder
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_buchla259e_slot_codec \
+              test_buchla259e_slot_codec.cpp ../src/Buchla259eSlotCodec.cpp
+          ./build/test_buchla259e_slot_codec
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_buchla200e_module_table \
+              test_buchla200e_module_table.cpp ../src/Buchla200eModuleTable.cpp
+          ./build/test_buchla200e_module_table
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_buchla200e_write_guard \
+              test_buchla200e_write_guard.cpp ../src/Buchla200eWriteGuard.cpp
+          ./build/test_buchla200e_write_guard
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_buchla200e_uigate \
+              test_buchla200e_uigate.cpp ../src/Buchla200eUiGate.cpp
+          ./build/test_buchla200e_uigate
+          g++ -std=c++17 -Wall -Werror -O2 -I host_stubs \
+              -o build/test_buchla251e_editgenrec \
+              test_buchla251e_editgenrec.cpp ../src/Buchla251eSlotCodec.cpp \
+              ../src/Buchla251eGenerator.cpp ../src/Buchla251eRecorder.cpp \
+              ../src/src/extern/bjorklund.cpp
+          ./build/test_buchla251e_editgenrec
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_tweighty_transport \
+              test_tweighty_transport.cpp ../src/TweightyTransport.cpp
+          ./build/test_tweighty_transport
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_tweighty_tap_phase \
+              test_tweighty_tap_phase.cpp ../src/TweightyTapPhase.cpp
+          ./build/test_tweighty_tap_phase
+
+  firmware:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # T40/antihem/nlm_hoc_midi (T3.2/T4.0/older-NLM reduced builds) dropped
+        # from CI: this fork only targets Xenomorpher (T4.1/O.R.N.8) hardware
+        # from here on. They previously caught breaks from a call fenced behind
+        # __IMXRT1062__ or a full app set (96d33a89) -- watch for that class of
+        # bug manually if touching code shared with those configs.
+        env: [T41, T41_audio, T41_audio_dbg, T41_console]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ runner.os }}-${{ hashFiles('software/platformio.ini') }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Build ${{ matrix.env }}
+        working-directory: software
+        run: pio run -e ${{ matrix.env }}

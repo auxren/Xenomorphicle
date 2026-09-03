@@ -47,10 +47,23 @@
 #include "HSMIDI.h"
 
 #include "PhzConfig.h"
+#include "PresetEngine.h"
+#include "PresetBus.h"
+#include "PresetBusUI.h"
+#include "Bus200eBridgeUsb.h"
+#include "HSUtils.h"
+
+void CaptainDumpProfiles();  // CaptainMIDI.h (global scope)
+void CaptainMidiHealth();    // CaptainMIDI.h (global scope)
 
 #if defined(ARDUINO_TEENSY41)
 USBHost thisUSB;
 USBHub hub1(thisUSB);
+// These MUST stay in DTCM: their member arrays are the EHCI DMA buffers,
+// and USBHost_t36's midi/ehci paths do NO cache maintenance - DTCM is
+// non-cacheable (EHCI reaches it via the CM7 AHBS backdoor), while RAM2 is
+// write-back cached and silently corrupts host MIDI both directions.
+// (Stack headroom is bought by app_container living in RAM2 instead.)
 MIDIDevice_BigBuffer usbHostMIDI[2] {
   MIDIDevice_BigBuffer(thisUSB),
   MIDIDevice_BigBuffer(thisUSB)
@@ -92,6 +105,7 @@ void ScanI2C() {
 #endif // ARDUINO_TEENSY41
 
 uint_fast8_t MENU_REDRAW = true;
+volatile uint32_t loop_counter = 0;   // main-loop rate, read by DebugDump
 static OC::UiMode ui_mode = OC::UI_MODE_MENU;
 static OC::IOFrame io_frame;
 
@@ -153,7 +167,8 @@ extern "C" {
   }
 }
 
-void BootMenu() {
+// boot-time only; noinline so FLASHMEM sticks (free-function LTO rule)
+FLASHMEM __attribute__((noinline)) void BootMenu() {
   bool save = false;
   int choice = -1;
 
@@ -218,15 +233,230 @@ void BootMenu() {
 }
 #endif
 
-void setup() {
+// ---------------------------------------------------------------------------
+// Crash forensics + hardware watchdog (T4.x)
+// ---------------------------------------------------------------------------
+#if defined(__IMXRT1062__)
+// The core never zeroes .bss.dma (DMAMEM is documented as uninitialized), so
+// C++ objects placed there boot with garbage in any member their constructor
+// doesn't touch - USBHost_t36 state machines rely on bss-zero and lock up.
+// Zero the section here: ResetHandler calls this hook after the DTCM bss
+// clear and BEFORE __libc_init_array (C++ ctors). .bss.dma is the first
+// section in RAM2 (origin 0x20200000) and ends at _heap_start per the .ld.
+extern unsigned long _heap_start;
+extern "C" FLASHMEM void startup_middle_hook(void) {
+  memset((void *)0x20200000, 0, (uint32_t)&_heap_start - 0x20200000u);
+}
+
+FLASHMEM static void print_build_stamp(Print &out);  // defined with SelfTest
+
+// Capture CrashReport text at boot so it can be appended to CRASH.LOG once
+// LittleFS is mounted (the Serial print is gone if nobody was watching).
+// buffer lives in RAM2 (DMAMEM) - DTCM stack headroom is precious,
+// especially in the dbg env (a 1KB DTCM buffer here caused a real stack
+// overflow into the MPU guard: DACCVIOL at the exact end of variables)
+static DMAMEM char crash_buf[1024];
+class BufferPrint : public Print {
+public:
+  char *buf = crash_buf;
+  size_t len = 0;
+  size_t write(uint8_t c) override {
+    if (len < sizeof(crash_buf) - 1) { buf[len++] = c; buf[len] = 0; return 1; }
+    return 0;
+  }
+};
+static BufferPrint crash_capture;
+
+// Reset cause, captured then cleared at boot: SRSR bits are sticky w1c and
+// would otherwise show every cause since the last power-on, forever.
+//
+// SRC_SRSR bit 1 is named lockup_sysresetreq for a reason: per the RT1060
+// RM it is set by a CPU lockup *OR* by any software write of SYSRESETREQ to
+// SCB_AIRCR -- and the Teensy core's own default fault handler
+// (unused_interrupt_vector in startup.c) ends with exactly that write after
+// parking for ~8s. So 0x02 alone does NOT mean "CPU lockup"; it means
+// "lockup or somebody asked for a reset". SRC_GPR5 is the discriminator the
+// core itself uses (CrashReport.cpp): the fault handler stamps 0x0BAD00F1
+// there on its way out. Capture it here, BEFORE anything reads/clears it --
+// CrashReportClass::clear() (called at the END of printTo!) zeroes both
+// SRC_GPR5 and SRC_SRSR.
+static uint32_t boot_srsr = 0;
+static uint32_t boot_gpr5 = 0;
+static constexpr uint32_t kFaultRebootMarker = 0x0BAD00F1;
+
+// ---- stack low-water instrumentation ---------------------------------------
+// DTCM stack on this board is whatever is left of RAM1 after ITCM banks and
+// variables -- currently ~8.6KB in the dbg env, and the ld/MPU put a 32-byte
+// NOACCESS guard at _ebss to trap an overflow. A stack that dips into that
+// guard while an interrupt is being taken faults *during exception stacking*,
+// which escalates and genuinely does lock the core up -- indistinguishable
+// from a software reset by SRSR alone, which is exactly why this needs
+// measuring rather than arguing about. Paint the unused region at the end of
+// setup(), then report the deepest word ever touched.
+extern unsigned long _ebss;
+static constexpr uint32_t kStackPaint = 0xA5C3A5C3u;
+static uint32_t *stack_paint_lo = nullptr;
+static uint32_t *stack_paint_hi = nullptr;
+// 'j' + one character: press the panel from the console. Lowercase taps a
+// button (DOWN then PRESS, as the panel reports one); uppercase holds it
+// (DOWN, LONG_PRESS, LONG_RELEASE); the bracket and sign keys turn an
+// encoder one detent. The event goes through the queue the physical panel
+// fills, so it lands wherever a real press would. The scan was the case in
+// point: the only thing that starts one is encL on the module list, which
+// had no remote form, so the scan path could not be exercised from a
+// headless bench at all.
+#if defined(__IMXRT1062__)
+FLASHMEM static void ConsolePress(char which) {
+  uint16_t button = 0;
+  int16_t detent = 0;
+  uint16_t encoder = 0;
+  switch (which) {
+    case 'l': case 'L': button = OC::CONTROL_BUTTON_L; break;
+    case 'r': case 'R': button = OC::CONTROL_BUTTON_R; break;
+    case 'a': case 'A': button = OC::CONTROL_BUTTON_A; break;
+    case 'b': case 'B': button = OC::CONTROL_BUTTON_B; break;
+    case 'z': case 'Z': button = OC::CONTROL_BUTTON_Z; break;
+    case 'x': case 'X': button = OC::CONTROL_BUTTON_X; break;
+    case 'y': case 'Y': button = OC::CONTROL_BUTTON_Y; break;
+    case '[': encoder = OC::CONTROL_ENCODER_L; detent = -1; break;
+    case ']': encoder = OC::CONTROL_ENCODER_L; detent = +1; break;
+    case '-': encoder = OC::CONTROL_ENCODER_R; detent = -1; break;
+    case '+': case '=': encoder = OC::CONTROL_ENCODER_R; detent = +1; break;
+    default:
+      Serial.println("press: cancelled (l r a b z x y tap, capitals hold, "
+                     "[ ] encL, - + encR)");
+      return;
+  }
+  if (encoder) {
+    OC::ui.Inject(UI::EVENT_ENCODER, encoder, detent);
+    Serial.printf("press: enc%c %+d\n",
+                  encoder == OC::CONTROL_ENCODER_L ? 'L' : 'R', detent);
+    return;
+  }
+  const bool hold = (which >= 'A' && which <= 'Z');
+  OC::ui.Inject(UI::EVENT_BUTTON_DOWN, button, 0);
+  if (hold) {
+    OC::ui.Inject(UI::EVENT_BUTTON_LONG_PRESS, button, 0);
+    OC::ui.Inject(UI::EVENT_BUTTON_LONG_RELEASE, button, 0);
+  } else {
+    OC::ui.Inject(UI::EVENT_BUTTON_PRESS, button, 0);
+  }
+  Serial.printf("press: %c %s\n", which, hold ? "held" : "tapped");
+}
+#endif
+
+FLASHMEM static void stack_paint() {
+  uint32_t sp;
+  asm volatile("mov %0, sp" : "=r"(sp));
+  // start just above the MPU guard region that sits at _ebss
+  uint32_t *lo = (uint32_t *)((((uintptr_t)&_ebss) + 32u + 31u) & ~31u);
+  uint32_t *hi = (uint32_t *)((sp - 512u) & ~3u);   // leave our own frame be
+  if (hi <= lo) return;
+  // IRQs off: a nested ISR's frame can reach below sp-512, and painting over
+  // a live exception frame would be a spectacular own goal. ~8KB of stores.
+  __disable_irq();
+  for (uint32_t *p = lo; p < hi; ++p) *p = kStackPaint;
+  stack_paint_lo = lo;
+  stack_paint_hi = hi;
+  __enable_irq();
+}
+// Bytes of stack never touched since boot. 0 means the paint is gone: the
+// stack has been at least this deep and the guard is in play.
+uint32_t stack_low_water() {
+  if (!stack_paint_lo) return 0xFFFFFFFFu;  // not painted yet
+  const uint32_t *p = stack_paint_lo;
+  while (p < stack_paint_hi && *p == kStackPaint) ++p;
+  return (uint32_t)((const uint8_t *)p - (const uint8_t *)stack_paint_lo);
+}
+
+// WDOG1: 128s timeout, fed only from loop(). Long enough that the slowest
+// legitimate blocking op (a full 4MB LittleFS format, ~45s) never trips it;
+// a hard loop() hang (the K-Board-lockup class of bug) reboots instead of
+// bricking the module until power-cycle, and boot recall restores state.
+// Armed at the END of setup() so interactive boot flows (BootMenu,
+// ConfirmReset) can block indefinitely.
+static bool watchdog_armed = false;
+FLASHMEM static void watchdog_arm() {
+  // the core never ungates WDOG1's clock ("WDOG1 requires CCM_CCGR3_WDOG1"
+  // per imxrt.h) - touching its registers without this bus-faults
+  CCM_CCGR3 |= CCM_CCGR3_WDOG1(CCM_CCGR_ON);
+  asm volatile("dsb");
+  // PDE (set at reset) is a one-shot 16s power-down counter that asserts
+  // reset unless cleared - with the clock just ungated it would fire ~16s
+  // after arming and masquerade as a watchdog timeout
+  WDOG1_WMCR = 0;
+  WDOG1_WCR = (uint16_t)(255u << 8)  // WT: (255+1)*0.5s = 128s
+            | WDOG_WCR_WDE | WDOG_WCR_SRS | WDOG_WCR_WDA
+            | WDOG_WCR_WDBG | WDOG_WCR_WDZST;
+  watchdog_armed = true;
+}
+// Not static: PresetEngine.cpp (SaveSlot/RecallSlot) feeds it directly
+// between their own sequential LittleFS writes -- see the extern there.
+void watchdog_feed() {
+  WDOG1_WSR = 0x5555;
+  WDOG1_WSR = 0xAAAA;
+}
+
+// A full 4MB LittleFS format can exceed 128s worst-case (flash sector
+// erase is 400ms MAX, ~1024 sectors) - the one legitimate loop-blocking
+// op longer than the watchdog. Feed from a timer for its duration only.
+static IntervalTimer wdog_format_feeder;
+static void watchdog_feed_isr() { watchdog_feed(); }  // ISR: stays in ITCM
+FLASHMEM static void watchdog_feed_during(void (*op)()) {
+  wdog_format_feeder.begin(watchdog_feed_isr, 1000000);  // 1s
+  op();
+  wdog_format_feeder.end();
+}
+#endif
+
+FLASHMEM void setup() {
   delay(50);
+#if defined(__IMXRT1062__)
+  boot_srsr = SRC_SRSR;
+  boot_gpr5 = SRC_GPR5;  // 0x0BAD00F1 = the core's fault handler rebooted us
+  SRC_SRSR = boot_srsr;  // w1c: next boot reports only its own cause
+#endif
   Serial.begin(9600);
 
   if (CrashReport) {
     while (!Serial && millis() < 3000) ; // wait
+#if defined(__IMXRT1062__)
+    // CAPTURE FIRST, then echo the buffer. CrashReportClass::printTo() calls
+    // clear() on its way out (Teensy core), so the SECOND print of
+    // CrashReport only ever yields "No Crash Data To Report" -- which is
+    // exactly what CRASH.LOG has been recording, and why two rounds of
+    // debugging had no fault data to work from. Also stamp the decoded reset
+    // cause in: printTo()'s own "Reboot was caused by..." lines read
+    // SRC_SRSR, which we cleared three lines above, so they never fire.
+    crash_capture.printf("reset_cause SRC_SRSR=%08lX SRC_GPR5=%08lX (%s)\n",
+                         boot_srsr, boot_gpr5,
+                         (boot_srsr & (1u << 4)) ? "WDOG timeout"
+                         : !(boot_srsr & (1u << 1)) ? "power-on / external"
+                         : (boot_gpr5 == kFaultRebootMarker)
+                               ? "fault handler rebooted (report below)"
+                               : "CPU LOCKUP or software SYSRESETREQ");
+    crash_capture.print(CrashReport);
+    Serial.write((const uint8_t *)crash_capture.buf, crash_capture.len);
+    Serial.println();
+#else
     Serial.println(CrashReport);
+#endif
     delay(1500);
   }
+#if defined(__IMXRT1062__)
+  else if (boot_srsr & (1u << 1)) {
+    // Bit 1 with no fault report at all: either a genuine CPU lockup (no
+    // handler ever ran, so nothing was recorded) or a deliberate software
+    // reset. Record it -- this is the case the preset-bus Store crash has
+    // been landing in, and it deserves a line in CRASH.LOG either way.
+    crash_capture.printf("reset_cause SRC_SRSR=%08lX SRC_GPR5=%08lX "
+                         "(%s, no fault report captured)\n",
+                         boot_srsr, boot_gpr5,
+                         (boot_gpr5 == kFaultRebootMarker)
+                             ? "fault handler rebooted"
+                             : "CPU LOCKUP or software SYSRESETREQ");
+  }
+#endif
 
   #if defined(ARDUINO_TEENSY41)
   OC::Pinout_Detect();
@@ -365,11 +595,64 @@ void setup() {
   vbias_m->SetState(VBiasManager::BI);
 #endif
 
+  bool firstrun = false;
+#ifdef __IMXRT1062__
   // use default global config file in LFS
-  bool firstrun = !PhzConfig::load_config();
+  firstrun = !PhzConfig::load_config();
+  if (firstrun) {
+    // GLOBALS.CFG missing/corrupt: try the boot-time backup before the
+    // ConfirmReset flow gets a chance to threaten a factory wipe.
+    if (PhzConfig::load_config(PhzConfig::BACKUP_FILENAME)) {
+      Serial.println("CONFIG: GLOBALS.CFG bad; restored from GLOBALS.BAK");
+      PhzConfig::save_config();  // re-materialize the primary from memory
+      firstrun = false;
+    }
+  } else {
+    PhzConfig::backup_config();  // known-good primary: refresh the backup
+  }
 
-  // initialize apps
-  OC::app_switcher.Init(reset_settings || firstrun);
+  // append any captured crash report to CRASH.LOG (rotate at 8KB)
+  if (crash_capture.len) {
+    File cl = PhzConfig::myfs.open("CRASH.LOG", FILE_READ);
+    const bool rotate = cl && cl.size() > 8192;
+    if (cl) cl.close();
+    if (rotate) {  // keep one generation of history instead of deleting
+      PhzConfig::myfs.remove("CRASH.OLD");
+      PhzConfig::myfs.rename("CRASH.LOG", "CRASH.OLD");
+    }
+    cl = PhzConfig::myfs.open("CRASH.LOG", FILE_WRITE);  // append
+    if (cl) {
+      cl.printf("--- boot @ %lu ms ---\n", millis());
+      print_build_stamp(cl);
+      cl.write((const uint8_t *)crash_capture.buf, crash_capture.len);
+      cl.close();
+      Serial.println("CrashReport appended to CRASH.LOG");
+    }
+  }
+#endif
+
+  // initialize apps (on T3.x firstrun is detected by the EEPROM load inside)
+  firstrun |= !OC::app_switcher.Init(reset_settings || firstrun);
+#if defined(ARDUINO_TEENSY41) && defined(AUDIO_INTERFACE)
+  // Force the audio output path (I2S codec out + host-playback monitor mix)
+  // into existence. It is lazily built and was only ever constructed when an
+  // audio applet wired up the chain - an appletless boot had DEAD panel outs
+  // and no USB monitoring. Called here so it is created after every other
+  // stream (its documented ordering requirement).
+  OC::AudioIO::OutputStream();
+#endif
+
+  OC::PresetEngine::Init();
+  OC::PresetBus::Init();
+  OC::PresetBusUI::Init();
+  // browser <-> 200e preset bridge: registers a usbMIDI SysEx handler that
+  // rides along with whatever already polls the port (see
+  // Bus200eBridgeUsb.h). No bus traffic until a host asks for some.
+  OC::Bus200eBridgeUsb::Init();
+  HS::LoadClockRouting();  // GLOBALS.CFG is still the loaded map here
+  // restores the last bus preset on any T4.1 (bench units included);
+  // no bus traffic is emitted, so non-bus hardware is unaffected
+  OC::PresetEngine::BootRecall();
 
   // Welcome splash
   OC::ui.Splashscreen(firstrun, 1);
@@ -379,12 +662,213 @@ void setup() {
 
   OC::app_switcher.current_app()->DispatchAppEvent(OC::APP_EVENT_RESUME);
 
+#if defined(__IMXRT1062__)
+  // paint the unused stack before loop() takes over, so 't' (and the
+  // post-save report in PresetEngine) can say how close DTCM ever came to
+  // the MPU guard instead of anyone having to guess
+  stack_paint();
+
+  // last: everything interactive that can legitimately block forever is
+  // behind us, and loop() takes over feeding from here
+  watchdog_arm();
+  SERIAL_PRINTLN("* WDOG1 armed (128s, fed from loop)");
+#endif
+
   SERIAL_PRINTLN("[End of setup()]");
 }
 
 /*  ---------    main loop  --------  */
 
-void FASTRUN loop() {
+// loop() is the slow path (drawing, UI events, deferred work) — all the
+// real-time work happens in the CORE/UI timer ISRs. Run it from cached
+// flash instead of burning ~4KB of ITCM (it gets inlined into main()).
+#if defined(__IMXRT1062__)
+// console 't': one-shot system health report
+#ifdef AUDIO_INTERFACE
+#include "extern/f32/AudioStream_F32.h"
+#ifdef ARDUINO_TEENSY41
+#include "Audio/USB_F32.h"
+#endif
+#endif
+// TEMPORARY bench diagnostic: name the physical buttons. The pin tables in
+// OC_gpio.cpp branch on the hardware ID voltage and the variants disagree
+// about which pin is X vs Z, so read the panel rather than the source.
+// Watches for ~20s and prints every press/release with its control name.
+FLASHMEM __attribute__((noinline)) static void ButtonWatch() {
+  using namespace OC;
+  static const struct { UiControl c; const char *name; } kBtns[] = {
+    { CONTROL_BUTTON_UP,    "UP / A"      },
+    { CONTROL_BUTTON_DOWN,  "DOWN / B"    },
+    { CONTROL_BUTTON_L,     "encL (left encoder push)"  },
+    { CONTROL_BUTTON_R,     "encR (right encoder push)" },
+    { CONTROL_BUTTON_M,     "M / Z"       },
+    { CONTROL_BUTTON_UP2,   "UP2 / X"     },
+    { CONTROL_BUTTON_DOWN2, "DOWN2 / Y"   },
+  };
+  const int n = (int)(sizeof(kBtns) / sizeof(kBtns[0]));
+  bool prev[7] = { false, false, false, false, false, false, false };
+  Serial.println("=== button watch: press each button (20s) ===");
+  const uint32_t t0 = millis();
+  while (millis() - t0 < 20000) {
+    for (int i = 0; i < n; ++i) {
+      const bool now = ui.read_immediate(kBtns[i].c);
+      if (now != prev[i]) {
+        Serial.printf("  %-28s %s\n", kBtns[i].name, now ? "PRESSED" : "released");
+        prev[i] = now;
+      }
+    }
+    watchdog_feed();
+    delay(5);
+  }
+  Serial.println("=== button watch done ===");
+}
+
+extern char _heap_end[], *__brkval;
+
+// Build fingerprint. A CrashReport's code address only means something against
+// the ELF that produced it, and three DACCVIOL entries at "0x58552" in
+// CRASH.LOG could not be tied to any build once the .pio directory had been
+// rebuilt over. __DATE__/__TIME__ is Main.cpp's compile time (stale if Main.cpp
+// was not rebuilt), so the link-time image length and ITCM end go with it:
+// together they change with essentially any code edit. The git revision
+// (res/progname.py, "dirty" suffix when the tree had edits) names the source.
+extern char _flashimagelen[], _etext[];
+#ifndef OC_BUILD_TAG
+#define OC_BUILD_TAG "?"
+#endif
+FLASHMEM static void print_build_stamp(Print &out) {
+  out.printf("build: " __DATE__ " " __TIME__ " git=" OC_BUILD_TAG
+             " image=%lu etext=%08lX\n",
+             (unsigned long)(uintptr_t)_flashimagelen,
+             (unsigned long)(uintptr_t)_etext);
+}
+
+FLASHMEM __attribute__((noinline)) static void SelfTest() {
+  Serial.println("=== selftest ===");
+  print_build_stamp(Serial);
+  // SRC_SRSR (i.MX RT1060 RM 21.6.3): bit 1 = lockup_sysresetreq, bit 4 =
+  // wdog_rst_b, bit 5 = JTAG. Bit 1 is AMBIGUOUS by design -- CPU lockup OR
+  // a software write of SYSRESETREQ, which is how the core's own fault
+  // handler reboots. SRC_GPR5 == 0x0BAD00F1 is the core's discriminator
+  // (see CrashReport.cpp): stamped by that handler, so bit 1 WITHOUT it is
+  // the only reading that actually means lockup. Both captured at boot.
+  Serial.printf("uptime=%lus  reset_cause(SRC_SRSR@boot)=%08lX gpr5=%08lX%s%s\n",
+                millis() / 1000, boot_srsr, boot_gpr5,
+                !(boot_srsr & (1 << 1)) ? ""
+                : (boot_gpr5 == kFaultRebootMarker) ? " [FAULT-REBOOT]"
+                                                    : " [LOCKUP or SW-RESET]",
+                (boot_srsr & (1 << 4)) ? " [WDOG]" : "");
+  {
+    // CrashReport stamps each entry with the RTC's "system time" and nothing
+    // else on the console shows what the RTC reads, so a CRASH.LOG entry could
+    // not be dated: 17:07 is either wall-clock or 17 hours since power-on.
+    const uint32_t t = rtc_get();
+    Serial.printf("rtc: %lu s = %02lu:%02lu:%02lu on day %lu since 1970-01-01\n",
+                  (unsigned long)t, (unsigned long)(t / 3600 % 24),
+                  (unsigned long)(t / 60 % 60), (unsigned long)(t % 60),
+                  (unsigned long)(t / 86400));
+  }
+  Serial.printf("watchdog: %s (128s, fed from loop)\n",
+                watchdog_armed ? "armed" : "OFF");
+  Serial.printf("stack: %lu bytes never touched (of ~%lu free; 0 = guard hit)\n",
+                (unsigned long)stack_low_water(),
+                (unsigned long)((uintptr_t)stack_paint_hi
+                                - (uintptr_t)stack_paint_lo));
+  {
+    static uint32_t last_lc = 0, last_ms = 0;
+    const uint32_t lc = loop_counter, ms = millis();
+    if (last_ms && ms != last_ms)
+      // loop() has been observed north of 300 kHz between UI/audio work; at
+      // that rate any gap over ~12-40s between two 't' presses overflowed
+      // this in 32-bit arithmetic ((lc-last_lc)*1000 wrapping uint32_t) and
+      // printed a silently-wrong number -- confirmed on the bench 2026-09-03
+      // (a 92s gap read ~29802 Hz where the true rate, from an adjacent
+      // ~3s-gap reading, was ~357928 Hz; the wrapped math matches exactly).
+      // 64-bit intermediate math avoids it regardless of interval length.
+      Serial.printf("loop rate ~%lu Hz\n",
+                    (unsigned long)((uint64_t)(lc - last_lc) * 1000 / (ms - last_ms)));
+    last_lc = lc; last_ms = ms;
+    const uint32_t t0 = OC::CORE::ticks;
+    delay(5);
+    Serial.printf("core delta5ms=%lu (expect ~83)\n", OC::CORE::ticks - t0);
+  }
+  Serial.printf("heap free: %lu bytes (RAM2)\n",
+                (unsigned long)(_heap_end - __brkval));
+#ifdef AUDIO_INTERFACE
+  // integer tenths: %f would drag the float-printf tables into DTCM
+  Serial.printf("audio i16 pool: %u now / %u max   cpu: %lu.%lu%% now / %lu.%lu%% max\n",
+                AudioMemoryUsage(), AudioMemoryUsageMax(),
+                (unsigned long)(AudioProcessorUsage() * 10) / 10,
+                (unsigned long)(AudioProcessorUsage() * 10) % 10,
+                (unsigned long)(AudioProcessorUsageMax() * 10) / 10,
+                (unsigned long)(AudioProcessorUsageMax() * 10) % 10);
+  Serial.printf("audio f32 pool: %u now / %u max\n",
+                AudioStream_F32::f32_memory_used, AudioStream_F32::f32_memory_used_max);
+  {
+    bool tw_acquired = false, tw_ready = false;
+    float tw_meter = 0.0f;
+    if (OC::TweightyDebugAudioState(tw_acquired, tw_ready, tw_meter))
+      Serial.printf("tweighty: acquired=%d ready=%d meter=%d\n",
+                    tw_acquired, tw_ready, (int)(tw_meter * 1000));
+  }
+#ifdef ARDUINO_TEENSY41
+  // All four must stay 0. Non-zero = the USB audio transport handed an ISR
+  // callback a ring index or block pointer it had already invalidated, which
+  // is what used to hard-fault inside copy_to_buffers after a preset Store.
+  // See the note at the top of src/Audio/USB_F32.cpp.
+  Serial.printf("usb f32 guards: rx idx=%lu null=%lu  tx idx=%lu null=%lu\n",
+                (unsigned long)usb_audio_f32_guards.rx_bad_index,
+                (unsigned long)usb_audio_f32_guards.rx_null_block,
+                (unsigned long)usb_audio_f32_guards.tx_bad_index,
+                (unsigned long)usb_audio_f32_guards.tx_null_block);
+#endif
+#endif
+  {
+    // %llu is unsupported by Print::printf (prints literal "lu")
+    Serial.printf("littlefs: %luKB/%luKB used\n",
+                  (unsigned long)(PhzConfig::myfs.usedSize() >> 10),
+                  (unsigned long)(PhzConfig::myfs.totalSize() >> 10));
+    // write-verify: the failure mode where writes "succeed" as 0-byte files
+    const char *tf = "SELFTST.TMP";
+    uint8_t pat[64], chk[64];
+    for (unsigned i = 0; i < sizeof(pat); ++i) pat[i] = (uint8_t)(i * 37 + 5);
+    PhzConfig::myfs.remove(tf);
+    File f = PhzConfig::myfs.open(tf, FILE_WRITE_BEGIN);
+    bool ok = f && f.write(pat, sizeof(pat)) == sizeof(pat);
+    if (f) f.close();
+    if (ok) {
+      f = PhzConfig::myfs.open(tf, FILE_READ);
+      ok = f && f.read(chk, sizeof(chk)) == sizeof(chk)
+             && memcmp(pat, chk, sizeof(pat)) == 0;
+      if (f) f.close();
+    }
+    PhzConfig::myfs.remove(tf);
+    Serial.printf("fs write-verify: %s\n", ok ? "PASS" : "FAIL");
+    f = PhzConfig::myfs.open("CRASH.LOG", FILE_READ);
+    if (f) {
+      Serial.printf("CRASH.LOG present: %lu bytes (crashes recorded)\n",
+                    (unsigned long)f.size());
+      f.close();
+    } else {
+      Serial.println("CRASH.LOG: none (no crashes recorded)");
+    }
+  }
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+  {
+    const OC::PresetBus::Stats &s = OC::PresetBus::GetStats();
+    Serial.printf("bus rings hw: ev=%lu midi_rx=%lu midi_tx=%lu  stuck=%lu/%lu\n",
+                  s.ring_hw, s.midi_rx_hw, s.midi_tx_hw,
+                  s.bus_recovered, s.bus_stuck);
+  }
+#endif
+#if defined(ARDUINO_TEENSY41)
+  CaptainMidiHealth();
+#endif
+  Serial.println("=== selftest done ===");
+}
+#endif
+
+FLASHMEM __attribute__((noinline)) void loop() {
   using namespace OC;
   CORE::app_isr_enabled = true;
   CORE::display_update_enabled = true;
@@ -393,6 +877,10 @@ void FASTRUN loop() {
   uint32_t last_redraw_time = 0;
 
   while (true) {
+    ++loop_counter;
+#if defined(__IMXRT1062__)
+    watchdog_feed();  // a wedged loop() now reboots instead of bricking
+#endif
 #if defined(ARDUINO_TEENSY41)
     thisUSB.Task();
 #endif
@@ -404,8 +892,40 @@ void FASTRUN loop() {
       if (UI_MODE_APP_SETTINGS == ui_mode) {
         // Only draw the App menu here...
         // Handle events and process state changes elsewhere.
+        //
+        // No AppBase::Draw() call happens on this branch, so OC_app_base.cpp's
+        // 700ms chord card (DrawChordHint) never appears here either -- and
+        // that turns out to be correct rather than a gap. The card's content
+        // is the four module-wide A/Z chords (app switcher, I/O settings,
+        // screensaver, presets); NONE of them are live in this mode. This
+        // branch calls ui.AppSettings(false) for events below, not
+        // ui.DispatchEvents() -- the function that recognises those chords in
+        // the first place (OC_ui.cpp) -- and AppSettings()'s own event switch
+        // has no case for CONTROL_BUTTON_A or _Z at all: holding A here does
+        // exactly nothing, on purpose, the same as before you opened this
+        // screen by holding it. A card listing gestures that cannot fire
+        // would teach the wrong thing. This screen also already carries its
+        // own permanent "encR:pick  encL:back" legend, so the discoverability
+        // gap the chord card exists to close (holding a button drawing
+        // nothing) does not exist here to begin with.
         ui.AppSettings(true);
 
+      } else if (OC::PresetBusUI::Active()) {
+        // Same absence, different reason: PresetBusUI is not an AppBase
+        // subclass and never routes through AppBase::Draw()/DispatchEvent(),
+        // which is where the chord card's state (chord_hint_modifier/
+        // chord_hint_ticks, both file-static in OC_app_base.cpp) is armed and
+        // drawn. Unlike the app-switcher case above, the card's content WOULD
+        // be accurate here -- PresetBusUI.cpp's HandleEvent() deliberately
+        // forwards the A/Z+encoder chords instead of consuming them (see its
+        // own comment above the CONTROL_BUTTON_L/R check) -- so this is a
+        // real gap, not a deliberate omission: wiring it in would mean
+        // exposing ArmChordHint/DrawChordHint out of OC_app_base.cpp, calling
+        // the former from here (or OC_ui.cpp) on every event while the
+        // overlay is open, and giving PresetBusUI a card of its own since it
+        // has no AppBase id for the kChordGloss table to key on. Left undone
+        // for now -- TODO.md tracks it.
+        OC::PresetBusUI::Draw();
       } else { // if (UI_MODE_MENU == ui_mode) {
         OC_DEBUG_RESET_CYCLES(menu_draw_count, 512, DEBUG::MENU_draw_cycles);
         OC_DEBUG_PROFILE_SCOPE(DEBUG::MENU_draw_cycles);
@@ -430,6 +950,13 @@ void FASTRUN loop() {
 
     // Take care of queued tasks
     OC::CORE::FlushTasks();
+    OC::PresetEngine::Process();
+    OC::TweightyBackgroundPump();   // after Process(): picks up a
+                                     // just-applied RECALL in the same pass
+    OC::PresetBus::Task();
+    OC::PresetBusUI::Task();
+    OC::Bus200eBridgeUsb::Task();
+    HS::ClockRoutingPump();
 
     // UI events
     if (UI_MODE_APP_SETTINGS == ui_mode) {
@@ -466,25 +993,346 @@ void FASTRUN loop() {
     // check for request from PC to capture the screen
     if (Serial && Serial.available() > 0) {
       bool capreq = false;
+      // Console lock: hosts like the Jetson's ModemManager AT/MBIM-probe every
+      // new CDC port, and that byte soup has hit real commands ('D' froze the
+      // display, '(' fired preset saves, 'i'/'C'/'F' are worse). Ignore all
+      // input until the literal sequence "pew!" arrives.
+      static bool console_unlocked = false;
+      static uint32_t unlock_shift = 0;
+      static uint32_t destructive_arm_ms = 0;  // C/F double-press confirm
+      static char destructive_arm_key = 0;
+      static uint8_t destructive_arm_addr = 0; // 'x': the address that was armed
+      // 'm' bench trigger: master a BACKUP against a foreign module. The
+      // address isn't known ahead of time (this is the empirical-discovery
+      // step), so it's typed as 2 hex digits right after the key -- no
+      // blocking Serial read, just two more passes through this same loop
+      // with the next bytes captured as digits instead of dispatched.
+      static bool master_addr_pending = false;
+      static uint8_t master_addr_digits = 0;
+      static uint8_t master_addr_value = 0;
+      // 'q' bench trigger: master a QUERY at a foreign module and print the
+      // version string it answers with -- the direct way to find out WHICH
+      // module is at an address (a BACKUP only proves something is there).
+      // Same 2-hex-digit, no-blocking-read convention as 'm' above.
+      static bool query_addr_pending = false;
+      static uint8_t query_addr_digits = 0;
+      static uint8_t query_addr_value = 0;
+      // 'S' bench trigger: bus-wide broadcast SAVE to a specific slot
+      // (0-29), typed as 2 DECIMAL digits right after the key -- same
+      // no-blocking-read pattern as master_addr_pending above.
+      static bool save_slot_pending = false;
+      static uint8_t save_slot_digits = 0;
+      static uint8_t save_slot_value = 0;
+      // 'R' bench trigger: bus-wide broadcast RECALL from a specific slot
+      // (0-29), same 2-DECIMAL-digit convention as 'S'.
+      // LOCAL slot save/recall by number. The bench had only '(' and ')' for
+      // slot 0 and '{' '}' for slot 1, which is useless on a module whose
+      // low slots hold real presets: there was no way to exercise the slot
+      // writer without overwriting somebody's work. These touch this module's
+      // own storage only -- no bus traffic, nothing broadcast.
+      static bool lsave_pending = false;
+      static uint8_t lsave_digits = 0;
+      static uint8_t lsave_value = 0;
+      static bool lrecall_pending = false;
+      static uint8_t lrecall_digits = 0;
+      static uint8_t lrecall_value = 0;
+      // 'A' bench trigger: switch to any app by container index, 2 decimal
+      // digits. 'a' only reaches Captain, which left cross-app preset recall
+      // -- the one path where a slot changes the running app -- untestable
+      // from a headless bench: every slot saved here was the same app.
+      static bool app_switch_pending = false;
+      static uint8_t app_switch_digits = 0;
+      static uint8_t app_switch_value = 0;
+#if defined(__IMXRT1062__)
+      // 'j' bench trigger: one more character names the control to press.
+      // See ConsolePress().
+      static bool press_pending = false;
+#endif
+      static bool recall_slot_pending = false;
+      static uint8_t recall_slot_digits = 0;
+      static uint8_t recall_slot_value = 0;
+      // 'w' bench trigger: patch ONE byte in the resident card image (the
+      // last MasterBackup capture) -- 4 hex digits for the offset (0-0xFFFF,
+      // covers the whole card), then 2 hex digits for the new byte value.
+      // Read-modify-verify only: never touches the bus by itself. Pairs
+      // with 'x' below to actually push the patched image back out.
+      static bool patch_pending = false;
+      static uint8_t patch_digits = 0;
+      static uint16_t patch_offset = 0;
+      static uint8_t patch_value = 0;
+      // 'x' bench trigger: MasterRestore() the resident (possibly just-'w'-
+      // patched) card image out to a foreign module -- the first time this
+      // codebase has ever pushed bytes TO a real module rather than only
+      // reading them. Same double-press-within-3s guard as C/F/Z, on
+      // purpose: this is the one bench command that can actually change
+      // what a real, physical Buchla module has stored. 2 hex digits for
+      // the target address, same convention as 'm'/'q'.
+      static bool restore_addr_pending = false;
+      static uint8_t restore_addr_digits = 0;
+      static uint8_t restore_addr_value = 0;
       do {
         int cmd = Serial.read();
+        if (!console_unlocked) {
+          unlock_shift = (unlock_shift << 8) | (uint8_t)cmd;
+          if (unlock_shift == 0x70657721) {  // "pew!"
+            console_unlocked = true;
+            Serial.println("-=[ console unlocked ]=-");
+          }
+          continue;
+        }
+        if (master_addr_pending) {
+          int v = -1;
+          if (cmd >= '0' && cmd <= '9') v = cmd - '0';
+          else if (cmd >= 'a' && cmd <= 'f') v = cmd - 'a' + 10;
+          else if (cmd >= 'A' && cmd <= 'F') v = cmd - 'A' + 10;
+          if (v < 0) {
+            Serial.println("master backup: cancelled (not a hex digit)");
+            master_addr_pending = false;
+            continue;
+          }
+          master_addr_value = (uint8_t)((master_addr_value << 4) | v);
+          if (++master_addr_digits < 2) continue;  // wait for the 2nd digit
+          master_addr_pending = false;
+#if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
+          Serial.printf("master backup: targeting module %02X\n",
+                        master_addr_value);
+          // Same discipline as StartRead(): retire whatever the last job
+          // left behind, or the master FSM refuses this one as busy.
+          OC::PresetBus::MasterReset();
+          const int rc = OC::PresetBus::MasterBackup(master_addr_value);
+          Serial.printf("  MasterBackup() returned %d (0=accepted; "
+                        "watch 'b' for progress)\n", rc);
+#endif
+          continue;
+        }
+#if defined(__IMXRT1062__)
+        if (press_pending) {
+          press_pending = false;
+          ConsolePress((char)cmd);
+          continue;
+        }
+#endif
+        if (app_switch_pending) {
+          if (cmd < '0' || cmd > '9') {
+            Serial.println("app switch: cancelled (not a decimal digit)");
+            app_switch_pending = false;
+            continue;
+          }
+          app_switch_value = (uint8_t)(app_switch_value * 10 + (cmd - '0'));
+          if (++app_switch_digits < 2) continue;
+          app_switch_pending = false;
+          if (app_switch_value >= OC::NumApps()) {
+            Serial.printf("app switch: index %d out of range (0-%u)\n",
+                          app_switch_value, (unsigned)OC::NumApps() - 1);
+            continue;
+          }
+          OC::SwitchToApp(app_switch_value);
+          continue;
+        }
+        if (query_addr_pending) {
+          int v = -1;
+          if (cmd >= '0' && cmd <= '9') v = cmd - '0';
+          else if (cmd >= 'a' && cmd <= 'f') v = cmd - 'a' + 10;
+          else if (cmd >= 'A' && cmd <= 'F') v = cmd - 'A' + 10;
+          if (v < 0) {
+            Serial.println("query: cancelled (not a hex digit)");
+            query_addr_pending = false;
+            continue;
+          }
+          query_addr_value = (uint8_t)((query_addr_value << 4) | v);
+          if (++query_addr_digits < 2) continue;  // wait for the 2nd digit
+          query_addr_pending = false;
+#if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
+          Serial.printf("query: asking module %02X who it is\n",
+                        query_addr_value);
+          // Clear a terminal state left by the PREVIOUS query before starting
+          // this one -- exactly what AppBus200e::StartProbe does, and what
+          // this path was missing. A query to an address nobody answers ends
+          // FAILED/NO_RESPONSE and stays there, so the next MasterQuery is
+          // refused and so is every one after it. Found scanning the bus: the
+          // first address in the sweep was empty, and all sixty that followed
+          // reported nothing while the modules were sitting right there.
+          OC::PresetBus::MasterQueryReset();
+          const int qrc = OC::PresetBus::MasterQuery(query_addr_value);
+          // The answer is a separate bus frame arriving milliseconds later,
+          // so it can't be printed here: PresetBus::Task() prints it (or the
+          // timeout) as soon as it lands. 'b' shows the same result on demand.
+          Serial.printf("  MasterQuery() returned %d (0=accepted; the reply "
+                        "prints itself when it arrives)\n", qrc);
+#endif
+          continue;
+        }
+        if (lsave_pending || lrecall_pending) {
+          const bool saving = lsave_pending;
+          uint8_t &digits = saving ? lsave_digits : lrecall_digits;
+          uint8_t &value  = saving ? lsave_value  : lrecall_value;
+          if (cmd < '0' || cmd > '9') {
+            Serial.printf("local %s: cancelled (not a decimal digit)\n",
+                          saving ? "save" : "recall");
+            lsave_pending = lrecall_pending = false;
+            continue;
+          }
+          value = (uint8_t)(value * 10 + (cmd - '0'));
+          if (++digits < 2) continue;
+          lsave_pending = lrecall_pending = false;
+          if (value > 29) {
+            Serial.printf("local %s: slot %d out of range (0-29)\n",
+                          saving ? "save" : "recall", value);
+            continue;
+          }
+          Serial.printf("local %s slot %d\n", saving ? "save" : "recall", value);
+          if (saving) OC::PresetEngine::RequestSave(value);
+          else        OC::PresetEngine::RequestRecall(value);
+          continue;
+        }
+        if (save_slot_pending) {
+          if (cmd < '0' || cmd > '9') {
+            Serial.println("broadcast save: cancelled (not a decimal digit)");
+            save_slot_pending = false;
+            continue;
+          }
+          save_slot_value = (uint8_t)(save_slot_value * 10 + (cmd - '0'));
+          if (++save_slot_digits < 2) continue;  // wait for the 2nd digit
+          save_slot_pending = false;
+          if (save_slot_value > 29) {
+            Serial.printf("broadcast save: slot %d out of range (0-29), "
+                          "cancelled\n", save_slot_value);
+            continue;
+          }
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+          Serial.printf("broadcast SAVE: slot %d -- every remote-enabled "
+                        "module on the bus stores its current state here "
+                        "now\n", save_slot_value);
+          OC::PresetBus::BroadcastSave(save_slot_value);
+#endif
+          continue;
+        }
+        if (recall_slot_pending) {
+          if (cmd < '0' || cmd > '9') {
+            Serial.println("broadcast recall: cancelled (not a decimal digit)");
+            recall_slot_pending = false;
+            continue;
+          }
+          recall_slot_value = (uint8_t)(recall_slot_value * 10 + (cmd - '0'));
+          if (++recall_slot_digits < 2) continue;  // wait for the 2nd digit
+          recall_slot_pending = false;
+          if (recall_slot_value > 29) {
+            Serial.printf("broadcast recall: slot %d out of range (0-29), "
+                          "cancelled\n", recall_slot_value);
+            continue;
+          }
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+          Serial.printf("broadcast RECALL: slot %d\n", recall_slot_value);
+          OC::PresetBus::BroadcastRecall(recall_slot_value);
+#endif
+          continue;
+        }
+        if (patch_pending) {
+          int v = -1;
+          if (cmd >= '0' && cmd <= '9') v = cmd - '0';
+          else if (cmd >= 'a' && cmd <= 'f') v = cmd - 'a' + 10;
+          else if (cmd >= 'A' && cmd <= 'F') v = cmd - 'A' + 10;
+          if (v < 0) {
+            Serial.println("patch: cancelled (not a hex digit)");
+            patch_pending = false;
+            continue;
+          }
+          if (patch_digits < 4) {
+            patch_offset = (uint16_t)((patch_offset << 4) | v);
+          } else {
+            patch_value = (uint8_t)((patch_value << 4) | v);
+          }
+          if (++patch_digits < 6) continue;  // 4 offset digits + 2 value digits
+          patch_pending = false;
+#if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
+          uint8_t *img = OC::PresetBus::MasterCardImage();
+          if (!img) {
+            Serial.println("patch: no card image resident (not CardServing())");
+          } else if (patch_offset >= 65536) {
+            Serial.printf("patch: offset %04X out of range\n", patch_offset);
+          } else {
+            const uint8_t old = img[patch_offset];
+            img[patch_offset] = patch_value;
+            Serial.printf("patch: offset %04X (%u): %02X -> %02X\n",
+                          patch_offset, patch_offset, old, patch_value);
+          }
+#endif
+          continue;
+        }
+        if (restore_addr_pending) {
+          int v = -1;
+          if (cmd >= '0' && cmd <= '9') v = cmd - '0';
+          else if (cmd >= 'a' && cmd <= 'f') v = cmd - 'a' + 10;
+          else if (cmd >= 'A' && cmd <= 'F') v = cmd - 'A' + 10;
+          if (v < 0) {
+            Serial.println("master restore: cancelled (not a hex digit)");
+            restore_addr_pending = false;
+            continue;
+          }
+          restore_addr_value = (uint8_t)((restore_addr_value << 4) | v);
+          if (++restore_addr_digits < 2) continue;  // wait for the 2nd digit
+          restore_addr_pending = false;
+          // The prompt says "the SAME 2 hex digits", and the code now means
+          // it: a second 'x' with a DIFFERENT address inside the window used
+          // to fire at that address, which had never been confirmed at all.
+          // Different address = a fresh arm, not a confirmation.
+          if (millis() - destructive_arm_ms >= 3000 || destructive_arm_key != 'x'
+              || destructive_arm_addr != restore_addr_value) {
+            destructive_arm_ms = millis();
+            destructive_arm_key = 'x';
+            destructive_arm_addr = restore_addr_value;
+            Serial.printf("master restore: target %02X armed -- press 'x' "
+                          "then the SAME 2 hex digits again within 3s to "
+                          "actually push the card image to the module\n",
+                          restore_addr_value);
+            continue;
+          }
+          destructive_arm_ms = 0;
+#if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
+          Serial.printf("master restore: pushing card image to module %02X "
+                        "NOW\n", restore_addr_value);
+          const int rrc = OC::PresetBus::MasterRestore(restore_addr_value);
+          Serial.printf("  MasterRestore() returned %d (0=accepted; "
+                        "watch 'b' for progress)\n", rrc);
+#endif
+          continue;
+        }
         switch (cmd) {
 #ifdef PRINT_DEBUG
           case 'z':
             Serial.println("-=[ PEW PEW NERDS! ]=-");
-            Serial.println("Secret Menu Options:");
-            Serial.printf("'I' = Toggle App ISR [%s]\n", OC::CORE::app_isr_enabled ? "ON" : "OFF");
-            Serial.printf("'D' = Toggle Display Redraw [%s]\n", OC::CORE::display_update_enabled ? "ON" : "OFF");
-            Serial.printf("'L' = Toggle App Loop [%s]\n", OC::CORE::app_loop_enabled ? "ON" : "OFF");
+            Serial.println("-- system --");
+#if defined(__IMXRT1062__)
+            Serial.println("t selftest   a activate Captain MIDI   A switch app by index (lists them)");
+            Serial.println("j<key> press the panel: l r a b z x y tap, capitals hold, [ ] encL, - + encR");
+#endif
+            Serial.printf("I app ISR [%s]   D display [%s]   L app loop [%s]\n",
+                          OC::CORE::app_isr_enabled ? "on" : "OFF",
+                          OC::CORE::display_update_enabled ? "on" : "OFF",
+                          OC::CORE::app_loop_enabled ? "on" : "OFF");
 #if defined(__IMXRT1062__)
 #if defined(ARDUINO_TEENSY41)
-            Serial.println("'i' = scan all i2c addresses");
+            Serial.println("i i2c scan   u host devices + MIDI profiles   g save globals+app data");
+            Serial.println("-- preset bus --");
+            Serial.println("local:  ( save0  ) recall0  { save1  } recall1");
+#if defined(PRESET_BUS)
+            Serial.println("bus:    > save0  < recall0  . save1  , recall1  (broadcast!)");
 #endif
-            Serial.println("'l' = list all files in flash (LittleFS)");
-            Serial.println("'s' = list all files on SD card");
-            Serial.println("'C' = clear/reset default Config file");
-            Serial.println("'F' = format/erase all LittleFS files");
+            Serial.printf("p overlay UI [%s]   b bus dump   B verbose [%s]   k card serve [%s]\n",
+                          OC::PresetBusUI::Active() ? "open" : "closed",
+                          OC::PresetBus::Verbose() ? "on" : "off",
+                          OC::PresetBus::CardServing() ? "on" : "off");
+            Serial.println("m master BACKUP <2 hex digit addr>   c dump last capture (hex)");
+            Serial.println("q QUERY module identity <2 hex digit addr>");
+            Serial.printf("y USB bridge status + fallback usbMIDI poll [%s]\n",
+                          OC::Bus200eBridgeUsb::Polling() ? "on" : "off");
 #endif
+            Serial.println("-- files --");
+            Serial.println("l list LittleFS   s list SD   h LittleFS health (open() cost)");
+            Serial.println("-- DANGER --");
+            Serial.println("C RESET config file   F ERASE ALL LittleFS files");
+#endif
+            Serial.println("(any other key = screen capture)");
             break;
 
           case 'I':
@@ -505,11 +1353,194 @@ void FASTRUN loop() {
           case 'i':
             ScanI2C();
             break;
+          // preset-engine bench triggers: [ = save, ] = recall (slot 0);
+          // { and } use slot 1
+          case '(': OC::PresetEngine::RequestSave(0); break;
+          case ')': OC::PresetEngine::RequestRecall(0); break;
+          case '{': OC::PresetEngine::RequestSave(1); break;
+          case '}': OC::PresetEngine::RequestRecall(1); break;
+          // Preset export/import to the SD card. Presets themselves always
+          // live on internal flash; the card is how one moves between modules.
+          // Console-only for now -- there is deliberately no panel gesture
+          // yet, because a half-built one would be worse than none.
+          case 'E': {   // export every used slot
+            int n = 0, fail = 0, legacy = 0, nocard = 0, damaged = 0;
+            for (uint8_t i = 0; i < OC::PresetEngine::kNumSlots; ++i) {
+              switch (OC::PresetEngine::ExportSlot(i)) {
+                case OC::PresetEngine::EXPORT_OK:     ++n; break;
+                case OC::PresetEngine::EXPORT_EMPTY:  break;
+                case OC::PresetEngine::EXPORT_LEGACY: ++legacy; break;
+                case OC::PresetEngine::EXPORT_NO_CARD: ++nocard; break;
+                case OC::PresetEngine::EXPORT_BAD_FILE:
+                  Serial.printf("slot %d is damaged on the module\n", i);
+                  ++damaged; break;
+                default: ++fail; break;
+              }
+            }
+            // Report each cause separately. "N failed" alone sent someone
+            // looking at the card when the real answer was that every slot
+            // predated the container format.
+            if (nocard) { Serial.println("no card"); break; }
+            Serial.printf("exported %d slot(s)\n", n);
+            if (legacy)
+              Serial.printf("%d slot(s) are pre-container: save each one once "
+                            "to convert it, then export again\n", legacy);
+            if (damaged)
+              Serial.printf("%d slot(s) are damaged on the module and were not "
+                            "exported: a recall would refuse them too; re-save "
+                            "each one to replace it\n", damaged);
+            if (fail) Serial.printf("%d slot(s) FAILED to copy\n", fail);
+            break;
+          }
+          // 'J', not 'I': 'I' is the app-ISR toggle thirty lines up, and this
+          // clashed with it. It compiled everywhere the four-target build gate
+          // looks because none of those define PRINT_DEBUG -- which is also
+          // why nobody noticed the whole export/import feature was compiled
+          // OUT of every shipping target. The gate must include T41_console.
+          case 'J': {   // import every slot the card holds
+            const int have = OC::PresetEngine::CardSlotCount();
+            if (have < 0) { Serial.println("no card"); break; }
+            int n = 0, fail = 0;
+            for (uint8_t i = 0; i < OC::PresetEngine::kNumSlots; ++i) {
+              const OC::PresetEngine::ExportResult r =
+                  OC::PresetEngine::ImportSlot(i);
+              if (r == OC::PresetEngine::EXPORT_OK) ++n;
+              else if (r != OC::PresetEngine::EXPORT_EMPTY) ++fail;
+            }
+            OC::PresetEngine::FlushSlotNames();   // one write for the batch
+            Serial.printf("card holds %d, imported %d, %d failed\n",
+                          have, n, fail);
+            break;
+          }
+          case 'g':
+            Serial.println("Saving global settings + app data...");
+            OC::SaveAppData();
+            break;
+          case 'u':  // USB host port device identities + profile table
+            for (int hp = 0; hp < 2; ++hp) {
+              const char *pn = (const char *)usbHostMIDI[hp].product();
+              Serial.printf("host%d: vid=%04X pid=%04X product=%s\n", hp + 1,
+                            usbHostMIDI[hp].idVendor(), usbHostMIDI[hp].idProduct(),
+                            (usbHostMIDI[hp].idVendor() && pn) ? pn : "-");
+            }
+            CaptainDumpProfiles();
+            break;
+          case 'p':  // toggle the preset-bus overlay (remote UI inspection)
+            if (OC::PresetBusUI::Active()) OC::PresetBusUI::Exit();
+            else OC::PresetBusUI::Enter();
+            Serial.printf("PresetBusUI %s\n",
+                          OC::PresetBusUI::Active() ? "open" : "closed");
+            break;
+          case 'b': OC::PresetBus::DebugDump(); break;
+          case 'k':  // toggle 0x50 card serving (WPM-less bus only; hard-gated)
+            OC::PresetBus::CardServeEnable(!OC::PresetBus::CardServing());
+            break;
+          case 'B':
+            OC::PresetBus::SetVerbose(!OC::PresetBus::Verbose());
+            Serial.printf("PresetBus verbose = %d\n", OC::PresetBus::Verbose());
+            break;
+          case 'm':  // master BACKUP from a foreign module (address: see above)
+            Serial.println("master backup: type 2 hex digits for the target "
+                           "module address");
+            master_addr_pending = true;
+            master_addr_digits = 0;
+            master_addr_value = 0;
+            break;
+          case 'q':  // master QUERY at a foreign module: "who are you?"
+            Serial.println("query: type 2 hex digits for the module address "
+                           "to identify");
+            query_addr_pending = true;
+            query_addr_digits = 0;
+            query_addr_value = 0;
+            break;
+          case 'c': OC::PresetBus::DumpCard(); break;  // hex-dump the last capture
+          case 'w':  // patch one byte in the resident card image: 4 hex
+                     // digits offset + 2 hex digits value, no bus traffic
+            Serial.println("patch: type 4 hex digits for the offset, then "
+                           "2 hex digits for the new byte value");
+            patch_pending = true;
+            patch_digits = 0;
+            patch_offset = 0;
+            patch_value = 0;
+            break;
+          case 'x':  // MasterRestore() the resident card image to a module.
+                     // 2 hex digits for the address; press 'x' + the SAME
+                     // 2 digits again within 3s to actually fire.
+            Serial.println("master restore: type 2 hex digits for the "
+                           "target module address");
+            restore_addr_pending = true;
+            restore_addr_digits = 0;
+            restore_addr_value = 0;
+            break;
+          case 'y':  // browser bridge status; toggles the fallback usbMIDI poll
+            OC::Bus200eBridgeUsb::SetPolling(!OC::Bus200eBridgeUsb::Polling());
+            Serial.printf("bridge fallback poll = %s (leave OFF under any app "
+                          "that reads USB MIDI itself)\n",
+                          OC::Bus200eBridgeUsb::Polling() ? "ON" : "off");
+            OC::Bus200eBridgeUsb::DebugDump();
+            break;
+          case 'r': {  // print LittleFS CRASH.LOG (bench diagnostic, one-off)
+            File f = PhzConfig::myfs.open("CRASH.LOG", FILE_READ);
+            if (!f) {
+              Serial.println("CRASH.LOG: not present");
+              break;
+            }
+            Serial.printf("--- CRASH.LOG (%lu bytes) ---\n",
+                          (unsigned long)f.size());
+            while (f.available()) Serial.write(f.read());
+            Serial.println("\n--- end CRASH.LOG ---");
+            f.close();
+            break;
+          }
+          case 'V':  // LOCAL save to slot NN -- this module only, no bus
+            Serial.println("local save: type 2 decimal digits (00-29)");
+            lsave_pending = true; lsave_digits = 0; lsave_value = 0;
+            break;
+          case 'N':  // LOCAL recall of slot NN -- this module only, no bus
+            Serial.println("local recall: type 2 decimal digits (00-29)");
+            lrecall_pending = true; lrecall_digits = 0; lrecall_value = 0;
+            break;
+          case 'S':  // broadcast SAVE to slot NN (2 decimal digits, 00-29)
+            Serial.println("broadcast save: type 2 decimal digits for the "
+                           "target slot (00-29)");
+            save_slot_pending = true;
+            save_slot_digits = 0;
+            save_slot_value = 0;
+            break;
+          case 'R':  // broadcast RECALL from slot NN (2 decimal digits, 00-29)
+            Serial.println("broadcast recall: type 2 decimal digits for the "
+                           "target slot (00-29)");
+            recall_slot_pending = true;
+            recall_slot_digits = 0;
+            recall_slot_value = 0;
+            break;
 #endif
+          // destructive keys need a second press within 3s ('pew!' stops
+          // robots typing garbage; this stops human typos)
           case 'C':
-            Serial.println("Resetting Config File!!");
-            PhzConfig::clear_config();
-            PhzConfig::save_config();
+            if (millis() - destructive_arm_ms < 3000 && destructive_arm_key == 'C') {
+              destructive_arm_ms = 0;
+              Serial.println("Resetting Config File!!");
+              PhzConfig::clear_config();
+              PhzConfig::save_config();
+            } else {
+              destructive_arm_ms = millis();
+              destructive_arm_key = 'C';
+              Serial.println("'C' RESETS the config - press 'C' again within 3s");
+            }
+            break;
+          case 't': SelfTest(); break;  // one-shot system health report
+          case 'K': ButtonWatch(); break;  // name the physical buttons
+          case 'a': OC::SwitchToDefaultApp(); break;  // remote: activate Captain
+          case 'j':  // press the panel: one more character names the control
+            Serial.println("press: l r a b z x y tap, capitals hold, [ ] encL, - + encR");
+            press_pending = true;
+            break;
+          case 'A':  // switch to any app by container index (2 decimal digits)
+            Serial.println("app switch: type 2 decimal digits for the index");
+            OC::ListApps();
+            app_switch_pending = true; app_switch_digits = 0; app_switch_value = 0;
+            break;
           case 'l':
             Serial.println(" -=- LittleFS -=- ");
             PhzConfig::listFiles();
@@ -518,9 +1549,72 @@ void FASTRUN loop() {
             Serial.println(" -=- SD Card -=- ");
             PhzConfig::listFiles(SD);
             break;
+          case 'h': {
+            // LittleFS health: what one open() costs right now, and why.
+            // Recall and save timings drifted 3-5x slower across a crash
+            // loop that appended dozens of CrashReports; this is the number
+            // that says whether the root metadata log is the reason.
+            Serial.println(" -=- LittleFS health -=- ");
+            const uint32_t t0 = micros();
+            int opened = 0;
+            for (int i = 0; i < 10; ++i) {
+              File f = PhzConfig::myfs.open(PhzConfig::CONFIG_FILENAME, FILE_READ);
+              if (f) { ++opened; f.close(); }
+            }
+            const uint32_t per_open_us = (micros() - t0) / 10;
+            const uint32_t log = PhzConfig::myfs.rootLogBytes();
+            const uint32_t cap = PhzConfig::myfs.metadataMax();
+            Serial.printf("open(%s): %lu us each (%d/10 ok)\n",
+                          PhzConfig::CONFIG_FILENAME, (unsigned long)per_open_us, opened);
+            const uint32_t block = PhzConfig::myfs.blockBytes();
+            Serial.printf("root metadata log: %lu bytes used, compacts at %lu\n",
+                          (unsigned long)log, (unsigned long)(cap ? cap : block));
+            Serial.printf("blocks: %lu / %lu used (%lu KB each)\n",   // no %llu on Teensy printf
+                          (unsigned long)(PhzConfig::myfs.usedSize() / block),
+                          (unsigned long)(PhzConfig::myfs.totalSize() / block),
+                          (unsigned long)(block >> 10));
+            break;
+          }
           case 'F':
+            if (millis() - destructive_arm_ms >= 3000 || destructive_arm_key != 'F') {
+              destructive_arm_ms = millis();
+              destructive_arm_key = 'F';
+              Serial.println("'F' ERASES ALL LittleFS files - press 'F' again within 3s");
+              break;
+            }
+            destructive_arm_ms = 0;
             Serial.println("!! ERASING ALL FILES on LittleFS !!");
-            PhzConfig::eraseFiles();
+            // worst-case format outlives the 128s watchdog: timer-fed
+            watchdog_feed_during([] { PhzConfig::eraseFiles(); });
+            break;
+          case 'Z':
+            // Drop into HalfKay so the host can flash us, WITHOUT anybody
+            // touching the module.
+            //
+            // This board is mounted with the Teensy's PROGRAM button
+            // unreachable, so the only way into the bootloader was the
+            // front panel (SETTINGS -> Reflash). That is fine at a bench
+            // and impossible from the Orin, which is where every build
+            // actually comes from -- a deploy that needs a human to walk
+            // over is a deploy that does not happen. docs/bench-console.md
+            // and FAQ.md both still say "press the PROGRAM button"; they
+            // are inherited from upstream hardware that exposes one.
+            //
+            // Same double-press guard as C and F: this stops the
+            // instrument dead until something re-flashes it, which mid-set
+            // would be the worst possible surprise.
+            if (millis() - destructive_arm_ms >= 3000 || destructive_arm_key != 'Z') {
+              destructive_arm_ms = millis();
+              destructive_arm_key = 'Z';
+              Serial.println("'Z' REBOOTS to the bootloader (stops playing) "
+                             "- press 'Z' again within 3s");
+              break;
+            }
+            destructive_arm_ms = 0;
+            Serial.println("rebooting into HalfKay -- run teensy_loader_cli now");
+            Serial.flush();
+            delay(50);          // let the line reach the host before USB drops
+            _reboot_Teensyduino_();
             break;
 #endif
 
@@ -533,6 +1627,13 @@ void FASTRUN loop() {
           case ']':
             // simulate Encoder button press
             break;
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+          // commander mode: bus-wide preset ops (every module + local engine)
+          case '<': OC::PresetBus::BroadcastRecall(0); break;
+          case '>': OC::PresetBus::BroadcastSave(0); break;
+          case ',': OC::PresetBus::BroadcastRecall(1); break;
+          case '.': OC::PresetBus::BroadcastSave(1); break;
+#else
           case ',':
           case '.':
             // simulate Left Encoder turn
@@ -540,6 +1641,7 @@ void FASTRUN loop() {
           case '<':
           case '>':
             // simulate Right Encoder turn
+#endif
             break;
 #endif
           default:

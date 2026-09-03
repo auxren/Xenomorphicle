@@ -65,6 +65,7 @@ using namespace HS;
 #include "EnvSeq.h"
 #include "EuclidO.h"
 #include "EuclidX.h"
+#include "Fungen.h"
 #ifdef PEWPEWPEW
 #include "GameOfLife.h"
 #endif
@@ -181,6 +182,7 @@ constexpr Registry reg = Registry<HemisphereApplet, HS::APPLET_SLOTS
 #endif
     , DeclareApplet<EuclidO, 83, CAT_SEQUENCER>
     , DeclareApplet<EuclidX, 15, CAT_SEQUENCER>
+    , DeclareApplet<Fungen, 95, CAT_MODULATOR>
 #ifdef PEWPEWPEW
     , DeclareApplet<GameOfLife, 22, CAT_MODULATOR>
 #endif

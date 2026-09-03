@@ -55,13 +55,13 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
     //void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 3);
             return;
@@ -80,7 +80,7 @@ public:
         }
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,6}, waveform_number[0]);
         Pack(data, PackLocation {6,6}, waveform_number[1]);
@@ -89,7 +89,7 @@ public:
         Pack(data, PackLocation {30,1}, linked);
         return data;
     }
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         phase[0] = Unpack(data, PackLocation {12,9});
         phase[1] = Unpack(data, PackLocation {21,9});
         SwitchWaveform(0, Unpack(data, PackLocation {0,6}));
@@ -98,7 +98,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "";
         help[HELP_DIGITAL2] = "";
@@ -121,7 +121,7 @@ private:
     int phase[2];
     bool linked = 1;
     
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         byte c = cursor;
         byte ch = cursor < 2 ? 0 : 1;
         if (ch) c -= 2;
@@ -143,7 +143,7 @@ private:
         if (linked) gfxIcon(54, 15, LINK_ICON);
     }
 
-    void DrawWaveform(byte ch) {
+    FLASHMEM void DrawWaveform(byte ch) {
         uint16_t total_time = osc[ch].TotalTime();
         VOSegment seg = osc[ch].GetSegment(osc[ch].SegmentCount() - 1);
         byte prev_x = 0; // Starting coordinates

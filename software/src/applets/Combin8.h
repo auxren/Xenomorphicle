@@ -55,12 +55,12 @@ public:
     }
   }
 
-  void View() {
+  FLASHMEM void View() {
     DrawInterface();
     gfxDisplayInputMapEditor();
   }
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(CH1_AUX1, sources[0][0]),
@@ -72,7 +72,7 @@ public:
     CursorToggle();
   }
 
-  void OnEncoderMove(int direction) {
+  FLASHMEM void OnEncoderMove(int direction) {
     if (!EditMode()) {
       MoveCursor(cursor, direction, MAX_CURSOR);
       return;
@@ -82,20 +82,20 @@ public:
     sources[cursor/2][cursor%2].ChangeSource(direction);
   }
 
-  uint64_t OnDataRequest() {
+  FLASHMEM uint64_t OnDataRequest() {
     return PackPackables(
       sources[0][0], sources[0][1], sources[1][0], sources[1][1]
     );
   }
 
-  void OnDataReceive(uint64_t data) {
+  FLASHMEM void OnDataReceive(uint64_t data) {
     UnpackPackables(
       data, sources[0][0], sources[0][1], sources[1][0], sources[1][1]
     );
   }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "";
     help[HELP_DIGITAL2] = "";
@@ -115,7 +115,7 @@ private:
   CVInputMap sources[2][2];
   // XXX: offset?
 
-  void DrawInterface() {
+  FLASHMEM void DrawInterface() {
     ForEachChannel(ch) {
       int ypos = 13 + 26*ch;
       gfxPrint(2, ypos, OutputLabel(ch));
@@ -142,7 +142,7 @@ private:
     }
   }
 
-  void DrawMeter(int cv, int ypos, int height = 1) {
+  FLASHMEM void DrawMeter(int cv, int ypos, int height = 1) {
       // positve values extend bars from left side of screen to the right
       // negative values go from right side to left
       int max_length = 60;//px

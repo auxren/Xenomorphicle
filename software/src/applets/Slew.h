@@ -65,15 +65,15 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawIndicator();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         cursor = 1 - cursor;
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (cursor == 0) {
             rise = constrain(rise + direction, 0, HEM_SLEW_MAX_VALUE);
             last_ms_value = Proportion(rise, HEM_SLEW_MAX_VALUE, HEM_SLEW_MAX_TICKS) / 17;
@@ -85,20 +85,20 @@ public:
         last_change_ticks = OC::CORE::ticks;
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,8}, rise);
         Pack(data, PackLocation {8,8}, fall);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         rise = Unpack(data, PackLocation {0,8});
         fall = Unpack(data, PackLocation {8,8});
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Defeat1";
         help[HELP_DIGITAL2] = "Defeat2";
@@ -119,7 +119,7 @@ private:
     int last_ms_value;
     int last_change_ticks;
 
-    void DrawIndicator() {
+    FLASHMEM void DrawIndicator() {
         // Rise portion
         int r_x = Proportion(rise, 200, 31);
         gfxLine(0, 62, r_x, 33, cursor == 1);

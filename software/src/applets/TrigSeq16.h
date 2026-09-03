@@ -58,17 +58,17 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawDisplay();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         cursor++;
         if (cursor > 4) cursor = 0;
         ResetCursor();
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         // Update end_step
         if (cursor == 4) {
             end_step = constrain(end_step + direction, 0, 15);
@@ -90,7 +90,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,8}, pattern[0]);
         Pack(data, PackLocation {8,8}, pattern[1]);
@@ -98,7 +98,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         pattern[0] = Unpack(data, PackLocation {0,8});
         pattern[1] = Unpack(data, PackLocation {8,8});
         end_step = Unpack(data, PackLocation {16,4});
@@ -107,7 +107,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "Reset";
@@ -144,7 +144,7 @@ private:
         return s;
     }
 
-    void DrawDisplay() {
+    FLASHMEM void DrawDisplay() {
         bool stop = 0; // Stop displaying when end_step is reached
 
         int offset = Offset();

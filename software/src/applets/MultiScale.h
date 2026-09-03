@@ -74,7 +74,7 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawKeyboard();
         DrawIndicators();
     }
@@ -85,7 +85,7 @@ public:
             SetMask(scale_mask[current_scale]);
         }
     }
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (cursor == 0) { // scale page selection mode
             CursorToggle();
         } else { // scale note edit mode
@@ -95,7 +95,7 @@ public:
 
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             // move cursor along the "keyboard"
             MoveCursor(cursor, direction, 12);
@@ -106,7 +106,7 @@ public:
         scale_page = constrain(scale_page + direction, 0, MS_QUANT_SCALES_COUNT - 1);
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation { 0, 12}, scale_mask[0]);
         Pack(data, PackLocation {12, 12}, scale_mask[1]);
@@ -115,7 +115,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         scale_mask[0] = Unpack(data, PackLocation { 0, 12});
         scale_mask[1] = Unpack(data, PackLocation {12, 12});
         scale_mask[2] = Unpack(data, PackLocation {24, 12});
@@ -124,7 +124,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "UnClock";
@@ -146,7 +146,7 @@ private:
     int8_t current_scale = 0;
     int8_t scale_page = 0;
 
-    void DrawKeyboard() {
+    FLASHMEM void DrawKeyboard() {
         gfxFrame(4, 27, 56, 32);
 
         // white keys
@@ -170,7 +170,7 @@ private:
         
     }
 
-    void DrawIndicators() {
+    FLASHMEM void DrawIndicators() {
         if (cursor == 0) {
             // draw cursor at scale page text
             gfxCursor(31, 23, 20);

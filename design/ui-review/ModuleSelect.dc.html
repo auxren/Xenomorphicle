@@ -1,0 +1,127 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif; }
+    a { color: #b06a3b; } a:hover { color: #8a4f28; }
+    .oled { background: #05070a; border-radius: 4px; padding: 14px 16px; box-shadow: inset 0 0 0 1px #333a43; }
+    .oled pre { margin: 0; font: 700 16px/1.55 "JetBrains Mono", monospace; color: #cfe6ff; letter-spacing: .055em; white-space: pre; }
+    .inv { background: #cfe6ff; color: #05070a; }
+    .tag { font: 700 10px/1 "JetBrains Mono", monospace; letter-spacing: .16em; text-transform: uppercase; }
+  </style>
+</helmet>
+
+<div style="width: 900px; height: 1080px; background: #14161a; color: #e6e9ee; padding: 40px 44px; box-sizing: border-box; display: flex; flex-direction: column; gap: 24px">
+
+  <div style="display: flex; flex-direction: column; gap: 7px">
+    <div style="font: 700 11px/1 'JetBrains Mono', monospace; letter-spacing: .28em; color: #b06a3b">PROPOSAL 01 · MOSTLY SHIPPED</div>
+    <div style="font: 700 30px/1.1 'Space Grotesk', sans-serif; letter-spacing: -.015em">Open on your case, not on an address</div>
+    <div style="font-size: 14.5px; line-height: 1.6; color: #9aa3ad; max-width: 700px">
+      Scanning is setup, not a step you repeat. Remember what answered, and let the
+      list be the way in. The remembering landed; the list is on screen but is not
+      yet the handle.
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 26px">
+
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div class="tag" style="color: #6fae78">Today, in the firmware</div>
+      <div class="oled">
+        <pre>200e Modules
+Addr <span class="inv">5C</span>  251 A
+encL:scan B:probe  2
+ 5C 251 A
+ 28 259 A</pre>
+      </div>
+      <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab">
+        The responder list is drawn, by name, and it now <b style="color:#e6e9ee">survives
+        a power cycle</b> — so the ~49 s sweep is paid once, not every morning. But the
+        inverted <span style="font-family:'JetBrains Mono',monospace">5C</span> is
+        still the right encoder's target: you dial hex, and the list beside it is a
+        read-out rather than a cursor. A marker dot shows which row the dialled
+        address is sitting on.
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div class="tag" style="color: #cf9153">Still proposed</div>
+      <div class="oled">
+        <pre>200e Modules
+<span class="inv">&gt;251 A      5C</span>
+ 259 A      28
+ 210        20
+
+encR:open  encL:rescan</pre>
+      </div>
+      <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab">
+        The encoder walks the list; the address moves right — still visible, no
+        longer the handle. That last step is the one that has not been taken, and
+        it is the one that turns "we remembered your case" into "you never type an
+        address again".
+      </div>
+    </div>
+
+  </div>
+
+  <div style="background: #171d19; border: 1px solid #2f3d33; border-radius: 6px; padding: 13px 16px; font-size: 13px; line-height: 1.6; color: #9fb0a4">
+    <b style="color: #cfe6d3">How the memory actually works</b>, since the original
+    proposal guessed at "one 64-bit word": the found set is a bitmap over the module
+    <i>table</i>, not over raw addresses, and it is stored in the app's own app-data
+    chunk together with the table's length. If a firmware update changes the table,
+    the saved set is refused rather than reinterpreted as different modules. It is
+    written only at a quiescent moment — never during a scan, probe, read, write or
+    while serving the card — because the save is a whole-EEPROM rewrite, not a field
+    poke. Rescan is manual, on encL.
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 26px">
+
+    <div style="display: flex; flex-direction: column; gap: 9px">
+      <div class="tag" style="color: #8b939d">Why it earns the rows</div>
+      <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab">
+        The list replaces the address field, the progress line and the hint line —
+        three rows spent on a process, returned to content. Names are already
+        known: identification on this bus is an address→model table, so the
+        instrument can name what it found without asking anything.
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 9px">
+      <div class="tag" style="color: #c8b280">The tradeoff, now live</div>
+      <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab">
+        A remembered module that has since been unplugged still appears — you find
+        out when a read fails. Verifying the list on every open would just be the
+        scan again, wearing a different hat. Rescan is the cure, and it stays one
+        press away. This is no longer a hypothetical cost of a proposal: the
+        persistence shipped, so a stale row is something a player can meet today.
+      </div>
+    </div>
+
+  </div>
+
+  <div style="margin-top: auto; font-size: 12.5px; line-height: 1.6; color: #6d7681; border-top: 1px solid #262b32; padding-top: 14px">
+    A clone squats the address of whatever it emulates — the CSR answers at 0x20 as
+    a “210”. The name is a strong hint, never a proof, which is why every name on
+    these screens is prefixed <span style="font-family:'JetBrains Mono',monospace">?</span>
+    and the address stays beside it rather than being hidden. (The hedge was
+    <span style="font-family:'JetBrains Mono',monospace">~</span> when this artboard
+    was drawn. That character is not in the 6×8 font — 92 glyphs from 0x20, ending at
+    <span style="font-family:'JetBrains Mono',monospace">{</span> — so all four sites
+    drew a noise block that read as display corruption, and the screen then asserted
+    the model as fact.)
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

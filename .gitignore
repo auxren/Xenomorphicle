@@ -16,3 +16,5 @@ builds
 compile_commands.json
 *.hex
 *.swp
+__pycache__/
+tools/xeno-sim/build

@@ -157,7 +157,7 @@ public:
     }
   }
 
-  void OnEncoderMove(int direction) {
+  FLASHMEM void OnEncoderMove(int direction) {
     if (!EditMode()) {
       MoveCursor(cursor, direction, MAX_CURSOR);
       return;
@@ -203,7 +203,7 @@ public:
     SetParams();
   }
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     data[0] = PackPackables(
       gate_threshold[0],
       comp_threshold[0],
@@ -219,7 +219,7 @@ public:
       splitfreq[0], splitfreq[1]
     );
   }
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     UnpackPackables(
       data[0],
       gate_threshold[0],

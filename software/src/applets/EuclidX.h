@@ -131,18 +131,18 @@ public:
         }
     }
 
-    void DrawFullScreen() {
+    FLASHMEM void DrawFullScreen() {
         DrawSteps(true);
         DrawEditor();
     }
-    void View() {
+    FLASHMEM void View() {
         DrawSteps(false);
         DrawEditor();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, LAST_SETTING);
             return;
@@ -184,7 +184,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         size_t idx = 0;
         ForEachChannel(ch) {
@@ -198,7 +198,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         size_t idx = 0;
         ForEachChannel(ch) {
             actual_length[ch] = length[ch] = Unpack(data, PackLocation {idx++ * PARAM_SIZE, PARAM_SIZE}) + 1;
@@ -212,7 +212,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "Reset";
@@ -243,7 +243,7 @@ private:
 
     EuclidXParam cv_dest[2] = {BEATS1, BEATS2}; // input modulation
 
-    void DrawSteps(bool fullscreen) {
+    FLASHMEM void DrawSteps(bool fullscreen) {
         const int x = -(fullscreen * gfx_offset);
         const int w = (fullscreen+1)*64 - 1;
         gfxLine(x, 45, x+w, 45);
@@ -269,7 +269,7 @@ private:
         }
     }
 
-    void DrawEditor() {
+    FLASHMEM void DrawEditor() {
         const int spacing = 16;
         const int pad_left = 5;
 

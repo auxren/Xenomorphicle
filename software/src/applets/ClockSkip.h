@@ -50,14 +50,14 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawSelector();
         DrawIndicator();
     }
 
     //void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 1);
             return;
@@ -65,20 +65,20 @@ public:
         p_mod[cursor] = p[cursor] = constrain(p[cursor] + direction, 0, 100);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,7}, p[0]);
         Pack(data, PackLocation {7,7}, p[1]);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         p_mod[0] = p[0] = constrain(Unpack(data, PackLocation {0,7}), 0, 100);
         p_mod[1] = p[1] = constrain(Unpack(data, PackLocation {7,7}), 0, 100);
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock1";
     help[HELP_DIGITAL2] = "Clock2";

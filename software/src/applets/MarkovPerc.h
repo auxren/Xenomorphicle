@@ -342,7 +342,7 @@ public:
         gfxLine(0, ybot + 1, 63, ybot + 1);
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, CURSOR_LAST);
             return;
@@ -366,7 +366,7 @@ public:
         }
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
         if (cursor == CURSOR_SEED) {
             rng_seed  = (uint32_t)micros();
             randomSeed(rng_seed);
@@ -378,7 +378,7 @@ public:
         CancelEdit();
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation{0,  2}, profile);
         Pack(data, PackLocation{2,  3}, hit_state);
@@ -388,7 +388,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         profile    = constrain((int)Unpack(data, PackLocation{0,  2}), 0, NUM_PROFILES - 1);
         hit_state  = constrain((int)Unpack(data, PackLocation{2,  3}), 0, NUM_STATES - 1);
         chaos_base = constrain((int)Unpack(data, PackLocation{5,  7}), 0, 100);
@@ -397,7 +397,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "RstSeed";
         help[HELP_CV1]      = "Chaos+";

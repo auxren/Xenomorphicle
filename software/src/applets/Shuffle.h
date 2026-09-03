@@ -94,14 +94,14 @@ public:
 
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawSelector();
         DrawIndicator();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 1);
             return;
@@ -110,20 +110,20 @@ public:
         delay[cursor] = constrain(delay[cursor], 0, 99);
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,7}, delay[0]);
         Pack(data, PackLocation {7,7}, delay[1]);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         delay[0] = Unpack(data, PackLocation {0,7});
         delay[1] = Unpack(data, PackLocation {7,7});
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "Reset";
@@ -152,7 +152,7 @@ private:
     int16_t delay[2]; // Percentage delay for even (0) and odd (1) clock
     int16_t _delay[2]; // after CV modulation
 
-    void DrawSelector() {
+    FLASHMEM void DrawSelector() {
         ForEachChannel(i)
         {
             gfxPrint(32 + pad(10, _delay[i]), 15 + (i * 10), _delay[i]);
@@ -169,7 +169,7 @@ private:
         gfxDottedLine(Proportion(delay[1], 100, 20) + 28, 45, 41, 33, 3);
     }
 
-    void DrawIndicator() {
+    FLASHMEM void DrawIndicator() {
         // Draw some cool-looking barlines
         gfxLine(1, 40, 1, 62);
         gfxLine(57, 40, 57, 62);

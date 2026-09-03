@@ -1,4 +1,16 @@
-#include "synth_waveform.h"
+// F32-native: all 12 swarm oscillators render float32 (shared float sine
+// table, integer skew math for the variable-triangle saw shapes kept
+// bit-exact, no int16 magnitude requantization) and are summed in float by
+// AudioMixerF32, so the normalized swarm keeps full precision through the
+// VCA and passthru mix. The chain still sees int16 via the
+// HemisphereAudioAppletF32 edge adapters. Params, ranges, and UI are
+// unchanged.
+
+#include "../HemisphereAudioAppletF32.h"
+#include "../Audio/synth_waveform_F32.h"
+#include "../Audio/AudioMixerF32.h"
+#include "../Audio/InterpolatingStreamF32.h"
+#include "../Audio/AudioVCA_F32.h"
 
 // Per-oscillator detune and phase scale factors.
 // 12 oscillators split into 4 voices of 3 each.
@@ -8,7 +20,7 @@
 static constexpr float HANDSAW_DETUNE[12] = {  0,  3, -2,   1,  4, -5,  -1,  2, -3,   6,  5, -4 };
 static constexpr float HANDSAW_PHASE[12]  = {  1,  3,  2,   1,  4,  5,   1,  2,  3,   6,  5,  4 };
 
-class HandSawApplet : public HemisphereAudioApplet {
+class HandSawApplet : public HemisphereAudioAppletF32<MONO> {
     public:
         const char* applet_name() {
             return "HandSaw";
@@ -22,14 +34,15 @@ class HandSawApplet : public HemisphereAudioApplet {
             // Call order follows signal flow: sources before sinks,
             // so the audio scheduler can process them in one pass.
             for (int i = 0; i < 12; i++) {
-              PatchCable(synths[i], 0, outputMixer, i);
+              PatchCableF32(synths[i], 0, outputMixer, i);
             }
 
-            PatchCable(outputMixer,   0, vca,         0);
-            PatchCable(vca_level,     0, vca,         1);
+            PatchCableF32(outputMixer,   0, vca,         0);
+            PatchCableF32(vca_level,     0, vca,         1);
 
-            PatchCable(vca,           0, final_out, 0);
-            PatchCable(input_stream,  0, final_out, 1);
+            PatchCableF32(vca,           0, final_out, 0);
+            PatchCableF32(InputF32(),    0, final_out, 1);
+            PatchCableF32(final_out,     0, OutputF32(), 0);
 
             final_out.gain(0, 1.0f); // voice
             final_out.gain(1, 1.0f); // passthru
@@ -68,10 +81,10 @@ class HandSawApplet : public HemisphereAudioApplet {
 
             float m = amp < LVL_MIN_DB ? 0.0f : dbToScalar(amp);
             m += (amp_cv.InF() * amp_cv.InF());
-            vca_level.Push(float_to_q15(m));
+            vca_level.Push(m);
         }
 
-        void View() override {
+        FLASHMEM void View() override {
 
             gfxPrint(1, 25, "Wave: ");
             gfxStartCursor();
@@ -127,7 +140,7 @@ class HandSawApplet : public HemisphereAudioApplet {
     #define SWARM_OSC_PARAMS \
         pitch[0], pitch[1], pitch[2], pitch[3]
 
-        void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+        FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
             int8_t dummy = 0;
             data[0] = PackPackables(SWARM_OSC_PARAMS);
             data[1] = PackPackables(pitch_cv[0], pitch_cv[1], pitch_cv[2], pitch_cv[3]);
@@ -135,7 +148,7 @@ class HandSawApplet : public HemisphereAudioApplet {
             data[3] = PackPackables(waveform, detune, phase, dummy, amp);
         }
 
-        void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+        FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
             int8_t dummy;
             UnpackPackables(data[0], SWARM_OSC_PARAMS);
             UnpackPackables(data[1], pitch_cv[0], pitch_cv[1], pitch_cv[2], pitch_cv[3]);
@@ -144,7 +157,7 @@ class HandSawApplet : public HemisphereAudioApplet {
             SetWaveform(waveform);
         }
 
-        void AuxButton() override {
+        FLASHMEM void AuxButton() override {
             switch (cursor) {
                 case PITCH1:
                 case PITCH2:
@@ -167,7 +180,7 @@ class HandSawApplet : public HemisphereAudioApplet {
             }
         }
 
-        void OnButtonPress() override {
+        FLASHMEM void OnButtonPress() override {
             if (CheckEditInputMapPress(cursor,
                 IndexedInput(DETUNE_CV, detune_cv),
                 IndexedInput(PHASE_CV,  phase_cv),
@@ -190,7 +203,7 @@ class HandSawApplet : public HemisphereAudioApplet {
             }
         }
 
-        void OnEncoderMove(int direction) override {
+        FLASHMEM void OnEncoderMove(int direction) override {
             if (!EditMode()) {
                 MoveCursor(cursor, direction, AMP_CV);
                 return;
@@ -250,9 +263,6 @@ class HandSawApplet : public HemisphereAudioApplet {
             }
         }
 
-        AudioStream* InputStream()  override { return &input_stream; }
-        AudioStream* OutputStream() override { return &final_out; }
-
     protected:
         void SetHelp() override {}
 
@@ -307,10 +317,9 @@ class HandSawApplet : public HemisphereAudioApplet {
         CVInputMap phase_cv;
         CVInputMap amp_cv;
 
-        AudioPassthrough<MONO>  input_stream;
-        AudioSynthWaveform      synths[12];
-        AudioMixer<12>          outputMixer;
-        AudioVCA                vca;
-        InterpolatingStream<>   vca_level;
-        AudioMixer<2>           final_out;
+        AudioSynthWaveformF32   synths[12];
+        AudioMixerF32<12>       outputMixer;
+        AudioVCA_F32            vca;
+        InterpolatingStreamF32<> vca_level;
+        AudioMixerF32<2>        final_out;
 };

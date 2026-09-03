@@ -1,0 +1,165 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif; }
+    a { color: #b06a3b; } a:hover { color: #8a4f28; }
+    .oled { background: #05070a; border-radius: 4px; padding: 14px 16px; box-shadow: inset 0 0 0 1px #333a43; }
+    .oled pre { margin: 0; font: 700 16px/1.55 "JetBrains Mono", monospace; color: #cfe6ff; letter-spacing: .055em; white-space: pre; }
+    .inv { background: #cfe6ff; color: #05070a; }
+    .tag { font: 700 10px/1 "JetBrains Mono", monospace; letter-spacing: .16em; text-transform: uppercase; }
+    .badge { font: 700 11px/1 "JetBrains Mono", monospace; letter-spacing: .1em; }
+  </style>
+</helmet>
+
+<div style="width: 900px; height: 1040px; background: #14161a; color: #e6e9ee; padding: 40px 44px; box-sizing: border-box; display: flex; flex-direction: column; gap: 22px">
+
+  <div style="display: flex; flex-direction: column; gap: 7px">
+    <div style="font: 700 11px/1 'JetBrains Mono', monospace; letter-spacing: .28em; color: #b06a3b">PROPOSAL 03 · NOT SHIPPED</div>
+    <div style="font: 700 30px/1.1 'Space Grotesk', sans-serif; letter-spacing: -.015em">Lead with the blast radius</div>
+    <div style="font-size: 14.5px; line-height: 1.6; color: #9aa3ad; max-width: 700px">
+      A save rewrites all thirty presets, not the one you edited. That is the single
+      most important fact on the screen, and it still sits in body position on
+      row three.
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 26px">
+
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div class="badge" style="color: #6fae78">TODAY, IN THE FIRMWARE</div>
+      <div class="oled">
+        <pre><span class="inv">WRITE to 5C slot 10  </span>
+1 byte change
+Rewrites ALL 30 slots
+29 re-sent - no undo
+encR:CONFIRM  encL:no</pre>
+      </div>
+      <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab">
+        Correct, complete, and better than it was — the row that used to read
+        <span style="font-family:'JetBrains Mono',monospace">29 re-sent, then chkd</span>
+        now says what the user actually needs to hear. But the sentence that should
+        stop you is still one line above the button that does it, in the same weight
+        as everything else.
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div class="badge" style="color: #cf9153">STILL PROPOSED</div>
+      <div class="oled">
+        <pre>&#9608;&#9608; REWRITES ALL 30 &#9608;&#9608;
+251e @5C
+1 byte differs
+slot 10 - stage 4
+encR:CONFIRM  encL:no</pre>
+      </div>
+      <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab">
+        The consequence as the headline, inverted so it reads as a banner rather
+        than a sentence. Then what changes, then how much, then where. Same rows,
+        reordered by what could hurt. Note this costs the
+        <span style="font-family:'JetBrains Mono',monospace">29 re-sent</span> row,
+        which is not a free trade — it is the row that explains <i>why</i> all thirty.
+      </div>
+    </div>
+
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 11px">
+    <div class="tag" style="color: #6fae78">Landed since this review</div>
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; font-size: 13.5px; line-height: 1.6">
+      <div style="background: #171d19; border: 1px solid #2f3d33; border-radius: 6px; padding: 13px 15px; color: #9fb0a4">
+        <b style="color: #cfe6d3">VERIFIED now means the whole bank came back.</b>
+        The verdict used to be reachable after reading back 2,104 of 63,120 bytes,
+        because the read-back lands in the same image the write was sourced from —
+        so the untouched bytes still held what we intended and the hash agreed.
+        The verify now requires <span style="font-family:'JetBrains Mono',monospace">bytes ≥ bank_len</span>
+        first, and a short read-back says
+        <span style="font-family:'JetBrains Mono',monospace">BAD: read-back short</span>
+        rather than accusing the other 29.
+      </div>
+      <div style="background: #171d19; border: 1px solid #2f3d33; border-radius: 6px; padding: 13px 15px; color: #9fb0a4">
+        <b style="color: #cfe6d3">A yes is ignored for 350 ms after arming.</b>
+        The app switcher is hold-A-press-encR; on the module home A alone arms and
+        encR commits, so the two halves of the commonest navigation chord were, in
+        order, arm and commit. One fumble put 63,120 bytes on the wire with the
+        prompt on screen for 51 ms. The refusal inside the window is deliberately
+        silent — a slip should feel like nothing happened.
+      </div>
+      <div style="background: #171d19; border: 1px solid #2f3d33; border-radius: 6px; padding: 13px 15px; color: #9fb0a4">
+        <b style="color: #cfe6d3">A pre-write snapshot, and an UNDO.</b>
+        The bank is written to internal flash immediately before the first byte is
+        modified. On a <span style="font-family:'JetBrains Mono',monospace">BAD</span>
+        verdict the action row is replaced by
+        <span style="font-family:'JetBrains Mono',monospace">encR:UNDO  encL:keep</span>,
+        and the restore goes back through the ordinary write machinery so the undo
+        is itself verified. A snapshot that fails to write does not block the write —
+        it is a net, not a precondition.
+      </div>
+      <div style="background: #241c1a; border: 1px solid #5d3b34; border-radius: 6px; padding: 13px 15px; color: #c9b3ac">
+        <b style="color: #fff">…which makes this screen's own copy stale.</b>
+        <span style="font-family:'JetBrains Mono',monospace">29 re-sent - no undo</span>
+        was written when the instrument genuinely kept no copy. As of this revision
+        it keeps one, on the same code path, a few lines above. The line and the
+        comment explaining it both still say otherwise. Flagged rather than fixed
+        here: the screen copy is firmware, not a design artefact.
+      </div>
+    </div>
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 11px">
+    <div class="tag" style="color: #8b939d">What is already right, and should not be traded away</div>
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; font-size: 13.5px; line-height: 1.6">
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-radius: 6px; padding: 13px 15px; color: #98a1ab">
+        <b style="color: #e6e9ee">The changed-byte count is shown.</b> “1 byte change”
+        is a real check against a mistake — a number in the thousands means the
+        wrong bank, not the wrong stage.
+      </div>
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-radius: 6px; padding: 13px 15px; color: #98a1ab">
+        <b style="color: #e6e9ee">A nothing-to-do write is refused.</b> Zero changed
+        bytes blocks with “No changes to write”, rather than pushing 63,120 bytes
+        for no reason.
+      </div>
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-radius: 6px; padding: 13px 15px; color: #98a1ab">
+        <b style="color: #e6e9ee">Stale reads cannot be written.</b> The bank must
+        have come from this module, this session, at full length — a short read
+        blocks the write outright, and the guard re-runs at commit rather than
+        trusting the verdict from when it was armed.
+      </div>
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-left: 3px solid #a9713a; border-radius: 6px; padding: 13px 15px; color: #98a1ab">
+        <b style="color: #e6e9ee">Arm, then confirm — on two buttons, usually.</b>
+        A arms and encR commits from the module home. But reaching the same prompt
+        through the action row’s <i>Save</i> entry arms it with encR too, so both
+        halves are one button and the 350 ms window is the only thing between them.
+        Worth closing.
+      </div>
+    </div>
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 9px">
+    <div class="tag" style="color: #c8b280">The failure this is guarding against</div>
+    <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab; max-width: 790px">
+      One real read came back <b style="color: #e6e9ee">957 bytes instead of 990</b> —
+      one record short — while reporting success with no error. Harmless on a read.
+      Behind a write, it would have shifted every subsequent record and rewritten
+      twenty-nine presets that were never touched, silently. The guards exist
+      because that has already happened once.
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

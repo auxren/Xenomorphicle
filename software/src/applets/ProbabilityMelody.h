@@ -139,7 +139,7 @@ public:
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, CV_MODE);
             return;
@@ -175,7 +175,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         for (size_t i = 0; i < 12; ++i) {
             Pack(data, PackLocation {i*4, 4}, weights[i]+1);
@@ -186,7 +186,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         for (size_t i = 0; i < 12; ++i) {
             weights[i] = Unpack(data, PackLocation {i*4,4})-1;
         }
@@ -197,7 +197,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "Clock 1";
         help[HELP_DIGITAL2] = "Clock 2";
@@ -336,7 +336,7 @@ private:
         }
     }
 
-    void DrawKeyboard() {
+    FLASHMEM void DrawKeyboard() {
         // Border
         gfxFrame(0, 27, 63, 32);
 
@@ -358,7 +358,7 @@ private:
         }
     }
 
-    void DrawParams() {
+    FLASHMEM void DrawParams() {
         int8_t ws[12];
         if (FIRST_NOTE <= cursor && cursor <= LAST_NOTE) {
             std::copy(weights, weights + 12, ws);

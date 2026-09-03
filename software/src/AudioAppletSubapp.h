@@ -450,6 +450,10 @@ public:
         }
       }
     }
+    // The lines above open with '\n' and never close, so whatever the
+    // caller prints next (a preset-bus recall's "done" line) ran on to the
+    // last applet's "no data[3]" and hid from grep.
+    Serial.println();
   }
 
   void SavePreset(int id) {

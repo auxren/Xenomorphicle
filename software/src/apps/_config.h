@@ -42,6 +42,24 @@ namespace menu = OC::menu;
 #include "ScaleEditor.h"
 #include "WaveformEditor.h"
 #include "PongGame.h"
+#ifdef ENABLE_APP_TUNER
+#include "TunerApp.h"
+#endif
+#ifdef ENABLE_APP_BUS200E
+#include "Bus200eApp.h"
+#endif
+#ifdef ENABLE_APP_TWEIGHTY
+#include "TweightyApp.h"
+#endif
+#ifdef ENABLE_APP_SCOPE
+#include "ScopeApp.h"
+#endif
+#ifdef ENABLE_APP_SAMPLER
+#include "SamplerApp.h"
+#endif
+#ifdef ENABLE_APP_USBDRIVE
+#include "UsbDriveApp.h"
+#endif
 #include "Backup.h"
 #include "SETTINGS.h"
 
@@ -59,7 +77,10 @@ namespace OC {
 // Any type not listed here should not exist, i.e. the linker should be able to
 // triage all code (minus any dangling static parts).
 
-static AppContainer<void // this space intentionally left blank
+// RAM2 (needs the startup .bss.dma zeroing hook): 5.9KB of app instances,
+// CPU-only access (no DMA), buys DTCM stack headroom so the USB host MIDI
+// objects can live in non-cacheable DTCM where EHCI DMA needs them.
+static DMAMEM AppContainer<void // this space intentionally left blank
   , AppSettings
 #ifndef NO_HEMISPHERE
   #ifdef ARDUINO_TEENSY41
@@ -131,6 +152,24 @@ static AppContainer<void // this space intentionally left blank
 #ifdef ENABLE_APP_PONG
   , AppPong
 #endif
+#ifdef ENABLE_APP_TUNER
+  , AppTuner
+#endif
+#ifdef ENABLE_APP_BUS200E
+  , AppBus200e
+#endif
+#ifdef ENABLE_APP_TWEIGHTY
+  , AppTweighty
+#endif
+#ifdef ENABLE_APP_SCOPE
+  , AppScope
+#endif
+#ifdef ENABLE_APP_SAMPLER
+  , AppSampler
+#endif
+#ifdef ENABLE_APP_USBDRIVE
+  , AppUsbDrive
+#endif
   , AppScaleEditor
 #ifndef NO_HEMISPHERE
   , AppWaveformEditor
@@ -141,7 +180,19 @@ static AppContainer<void // this space intentionally left blank
 static_assert(decltype(app_container)::TotalAppDataStorageSize() < AppData::kAppDataSize,
               "Apps use too much EEPROM space!");
 
+#if defined(NLM_hOC) && defined(ENABLE_APP_MIDI)
+// hOC MIDI build boots into Captain MIDI: [0]=AppSettings, [1]=Calibr8or, [2]=CaptainMIDI
+static constexpr int DEFAULT_APP_INDEX = 2;
+#elif defined(DEFAULT_APP_MIDI) && defined(ENABLE_APP_MIDI) && defined(ARDUINO_TEENSY41) && !defined(NO_HEMISPHERE)
+// T41 boots into Captain MIDI:
+// [0]=AppSettings, [1]=Quadrants, [2]=Calibr8or, [3]=Scenery, [4]=CaptainMIDI
+static constexpr int DEFAULT_APP_INDEX = 4;
+#else
 static constexpr int DEFAULT_APP_INDEX = 1;
+#endif
 static constexpr uint16_t DEFAULT_APP_ID = decltype(app_container)::GetAppIDAtIndex<DEFAULT_APP_INDEX>();
+#if defined(ENABLE_APP_MIDI) && (defined(NLM_hOC) || defined(DEFAULT_APP_MIDI))
+static_assert(DEFAULT_APP_ID == AppCaptainMIDI::kAppId, "DEFAULT_APP_INDEX must select Captain MIDI");
+#endif
 
 }

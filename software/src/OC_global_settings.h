@@ -51,7 +51,7 @@ public:
 
   // NOTE These are used by load/save functions and might be hidden
   bool encoders_enable_acceleration;
-  bool reserved0;
+  bool invert_display;
   bool reserved1;
   uint32_t reserved2;
   uint16_t current_app_id;

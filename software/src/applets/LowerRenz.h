@@ -63,14 +63,14 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawEditor();
         DrawOutput();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 1);
             return;
@@ -80,20 +80,20 @@ public:
         if (cursor == 1) rho = constrain(rho + direction, 4, 127);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,8}, (uint8_t)freq);
         Pack(data, PackLocation {8,8}, (uint8_t)rho);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         freq = Unpack(data, PackLocation {0,8});
         rho = Unpack(data, PackLocation {8,8});
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Reset";
     help[HELP_DIGITAL2] = "Freeze";
@@ -112,7 +112,7 @@ private:
     int rho;
     int cursor; // 0 = Frequency, 1 = Rho
 
-    void DrawEditor() {
+    FLASHMEM void DrawEditor() {
         gfxPrint(1, 15, "Freq");
         gfxPrint(1, 24, freq);
         if (cursor == 0) gfxCursor(1, 32, 30);
@@ -122,7 +122,7 @@ private:
         if (cursor == 1) gfxCursor(32, 32, 31);
     }
 
-    void DrawOutput() {
+    FLASHMEM void DrawOutput() {
         gfxPrint(1, 38, "x");
         gfxPrint(1, 50, "y");
         ForEachChannel(ch)

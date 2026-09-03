@@ -1,0 +1,338 @@
+:root {
+  color-scheme: dark;
+  --bg: #14161a;
+  --panel: #1d2128;
+  --panel-2: #262b34;
+  --border: #333a46;
+  --text: #e6e8eb;
+  --text-dim: #8b93a1;
+  --accent: #ff8a3d;
+  --accent-2: #4dd6c4;
+  --ok: #59d67a;
+  --error: #ff5d5d;
+  --step-inactive: #2a2f38;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  padding: 24px;
+}
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+h1 {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+
+h1 .subtitle {
+  display: block;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+select,
+button,
+input[type="text"],
+input[type="number"] {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button:not(:disabled):hover {
+  border-color: var(--accent);
+}
+
+#connect-btn {
+  background: var(--accent);
+  color: #1a1206;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.status {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+
+.status-ok {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.status-error {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.status-info {
+  color: var(--text-dim);
+}
+
+.addr-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+#module-addr {
+  width: 48px;
+  text-align: center;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+#module-addr.invalid {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.dirty-badge {
+  font-size: 11px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.banner {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  margin: 14px 0 20px;
+  line-height: 1.5;
+}
+
+.banner strong {
+  color: var(--text);
+}
+
+#grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.sequence-row {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.sequence-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+
+.sequence-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent-2);
+  color: #072620;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.sequence-caption {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* ---- bank navigation (slot picker + A-D tabs + per-slot/per-sequence fields) */
+
+.navbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+
+.nav-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.seq-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.seq-tab {
+  width: 34px;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.seq-tab-active {
+  background: var(--accent-2);
+  color: #072620;
+  border-color: var(--accent-2);
+}
+
+.slot-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.meta-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.meta-field input {
+  width: 92px;
+  font-size: 11.5px;
+  padding: 4px 6px;
+}
+
+/* ---- stage grid: 50 stages, wrapping rather than shrinking to nothing ----- */
+
+.steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(58px, 1fr));
+  gap: 6px;
+  overflow-x: auto;
+}
+
+.step {
+  position: relative;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-height: 110px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 6px 4px;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.step-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(180deg, var(--accent-2), transparent);
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.step-index {
+  position: absolute;
+  top: 4px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 9.5px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+.step-value,
+.step-time {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  font-size: 11px;
+  padding: 3px 2px;
+  text-align: center;
+}
+
+.step-time {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+#log {
+  margin-top: 20px;
+  background: #0d0f12;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  height: 160px;
+  overflow-y: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.log-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+footer {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+}

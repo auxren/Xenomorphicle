@@ -55,18 +55,18 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (cursor == 4) // special case toggle
             mix = !mix;
         else
             CursorToggle();
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 4);
             return;
@@ -84,7 +84,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,9}, offset[0] + 256);
         Pack(data, PackLocation {10,9}, offset[1] + 256);
@@ -94,7 +94,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         int min = -HEMISPHERE_MAX_CV / ATTENOFF_INCREMENTS;
         int max = HEMISPHERE_MAX_CV / ATTENOFF_INCREMENTS;
         offset[0] = constrain((Unpack(data, PackLocation {0,9}) - 256), min, max);
@@ -105,7 +105,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "";
     help[HELP_DIGITAL2] = "Mix 1+2";
@@ -125,7 +125,7 @@ private:
     bool mix = false;
     bool mix_final = false;
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         ForEachChannel(ch)
         {
             gfxPrint(0, 15 + (ch * 20), OutputLabel(ch));

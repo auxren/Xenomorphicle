@@ -82,8 +82,16 @@ static uint8_t SH1106_init_seq[] = {
   0x0c8,          /* c0: scan dir normal, c8: reverse */
   #endif
   0x0da, 0x012,   /* com pin HW config, sequential com pin config (bit 4), disable left/right remap (bit 5) */
-  0x081, 0x0cf,   /* [2] set contrast control */
-  0x0d9, 0x0f1,   /* [2] pre-charge period 0x022/f1*/
+  // Lower contrast compresses per-pixel brightness differences — matters
+  // for INVERT_DISPLAY builds where a mostly-lit panel shows streaking.
+#ifndef OLED_CONTRAST
+#define OLED_CONTRAST 0x0cf
+#endif
+  0x081, OLED_CONTRAST, /* [2] set contrast control */
+#ifndef OLED_PRECHARGE
+#define OLED_PRECHARGE 0x0f1
+#endif
+  0x0d9, OLED_PRECHARGE, /* [2] pre-charge period 0x022/f1 — affects row uniformity on lit fields */
   0x0db, 0x040,   /* vcomh deselect level */
 
   0x02e,        /* 2012-05-27: Deactivate scroll */
@@ -100,6 +108,7 @@ static uint8_t SH1106_init_seq[] = {
 static constexpr int CONTRAST_VALUE = 17;
 static constexpr int FLIP_CMD_A = 12;
 static constexpr int FLIP_CMD_B = 13;
+static constexpr int INVERT_CMD = 24;
 
 static uint8_t SH1106_display_on_seq[] = {
   0xaf
@@ -423,6 +432,20 @@ void SH1106_128x64_Driver::SetFlipMode(bool flip180) {
 /*static*/
 void SH1106_128x64_Driver::SetContrast(uint8_t contrast) {
   SH1106_init_seq[CONTRAST_VALUE] = contrast;
+}
+
+/*static*/
+void SH1106_128x64_Driver::SetInverted(bool inverted) {
+  // Update the init sequence so a future Init() (reset/reboot) keeps this
+  // setting, then send the SSD1306/SH1106 INVERTDISPLAY/NORMALDISPLAY
+  // command (0xA7/0xA6) live -- same single-command-frame pattern as
+  // Clear()'s display-on command, so it takes effect immediately.
+  SH1106_init_seq[INVERT_CMD] = inverted ? 0x0a7 : 0x0a6;
+  uint8_t cmd = SH1106_init_seq[INVERT_CMD];
+  digitalWriteFast(OLED_DC, LOW);
+  digitalWriteFast(OLED_CS, OLED_CS_ACTIVE);
+  SPI_send(&cmd, 1);
+  digitalWriteFast(OLED_CS, OLED_CS_INACTIVE);
 }
 
 #if defined(__MK20DX256__)

@@ -1,0 +1,127 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif; }
+    a { color: #b06a3b; } a:hover { color: #8a4f28; }
+    .oled { background: #05070a; border-radius: 4px; padding: 14px 16px; box-shadow: inset 0 0 0 1px #333a43; }
+    .oled pre { margin: 0; font: 700 16px/1.55 "JetBrains Mono", monospace; color: #cfe6ff; letter-spacing: .055em; white-space: pre; }
+    .inv { background: #cfe6ff; color: #05070a; }
+    .tag { font: 700 10px/1 "JetBrains Mono", monospace; letter-spacing: .16em; text-transform: uppercase; }
+    .badge { font: 700 11px/1 "JetBrains Mono", monospace; letter-spacing: .1em; }
+  </style>
+</helmet>
+
+<div style="width: 900px; height: 900px; background: #14161a; color: #e6e9ee; padding: 40px 44px; box-sizing: border-box; display: flex; flex-direction: column; gap: 22px">
+
+  <div style="display: flex; flex-direction: column; gap: 7px">
+    <div style="font: 700 11px/1 'JetBrains Mono', monospace; letter-spacing: .28em; color: #b06a3b">PROPOSAL 02 · HALF SHIPPED</div>
+    <div style="font: 700 30px/1.1 'Space Grotesk', sans-serif; letter-spacing: -.015em">Say why, before the press</div>
+    <div style="font-size: 14.5px; line-height: 1.6; color: #9aa3ad; max-width: 700px">
+      The action row already knows which actions can't run. The <i>state line</i> now
+      says so and names the remedy. The <i>row itself</i> still doesn't.
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 26px">
+
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div class="badge" style="color: #6fae78">TODAY, IN THE FIRMWARE</div>
+      <div class="oled">
+        <pre>251 A @5C   Slot 10
+Seq A  end@16  ^2.4V
+&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;
+NO DATA - Read first
+<span class="inv">Read</span> Edit Gen Rec Save</pre>
+      </div>
+      <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab">
+        The state line carries the reason and the remedy in one breath — that half
+        of this proposal shipped verbatim. Selection is an inverted label, not a
+        <span style="font-family:'JetBrains Mono',monospace">&gt;</span> caret. All
+        five actions are drawn (Save was missing from the first draft of this
+        artboard); the row is laid out at 4 px gaps rather than on the 6 px
+        character grid, which is the only way five labels reach x=124 on a 128 px
+        screen.
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div class="badge" style="color: #cf9153">STILL PROPOSED</div>
+      <div class="oled">
+        <pre>251 A @5C   Slot 10
+Seq A  end@16  ^2.4V
+&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;&#9600;&#9604;
+NO DATA - Read first
+<span class="inv">Read</span> &middot;Edit &middot;Gen &middot;Rec &middot;Save</pre>
+      </div>
+      <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab">
+        A leading dot marks an action that cannot run yet. Nothing moves, nothing is
+        added — <b style="color:#e8a795">except that it does not fit</b>. The font is
+        fixed 6&times;8, so four dots cost 24 px, and the five labels already end at
+        x=124 with 4 px to spare. As drawn this overflows by 20 px. The first version
+        of this artboard hid the problem by omitting Save. Shipping it means
+        shortening a label, dropping to a 2 px gap, or marking availability some
+        other way — and that decision has not been made.
+      </div>
+    </div>
+
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 12px">
+    <div class="tag" style="color: #8b939d">The state line does the work — these are the strings, verbatim</div>
+    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px">
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-radius: 6px; padding: 13px 15px">
+        <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; color: #cfe6ff">NO DATA - Read first</div>
+        <div style="font-size: 12.5px; line-height: 1.55; color: #8b939d; margin-top: 7px">Nothing loaded. Says the fix, not just the fact.</div>
+      </div>
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-radius: 6px; padding: 13px 15px">
+        <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; color: #cfe6ff">LIVE 8s ago</div>
+        <div style="font-size: 12.5px; line-height: 1.55; color: #8b939d; margin-top: 7px">Matches the module. Age matters — banks go stale. Clamped to <span style="font-family:'JetBrains Mono',monospace">LIVE 9m+ ago</span> so the field can never overflow the row.</div>
+      </div>
+      <div style="background: #1b1f25; border: 1px solid #2b313a; border-radius: 6px; padding: 13px 15px">
+        <div style="font: 700 13px/1.5 'JetBrains Mono', monospace; background:#ffd7a8; color:#1b1f25; display:inline-block; padding:1px 3px">EDITED*</div>
+        <div style="font-size: 12.5px; line-height: 1.55; color: #8b939d; margin-top: 7px">Local changes, drawn inverted. The module still holds the old values.</div>
+      </div>
+    </div>
+    <div style="background: #241c1a; border: 1px solid #5d3b34; border-radius: 6px; padding: 13px 16px; font-size: 13px; line-height: 1.6; color: #c9b3ac">
+      <b style="color: #fff">The middle one used to read <span style="font-family:'JetBrains Mono',monospace">LIVE 8s ago  wire 9</span>, and that killed it.</b>
+      The format's fixed overhead was 17 of the 21 columns, so a three-digit age plus
+      a two-digit slot index pushed the last character off the right edge — turning
+      <span style="font-family:'JetBrains Mono',monospace">wire 10</span> into
+      <span style="font-family:'JetBrains Mono',monospace">wire 1</span>, which does not
+      look truncated because it is a perfectly well-formed slot number. On the screen
+      that precedes a thirty-slot rewrite. The header already prints
+      <span style="font-family:'JetBrains Mono',monospace">Slot 11</span> thirty-three
+      pixels above, so the field was a trap in exchange for a duplicate.
+    </div>
+  </div>
+
+  <div style="height: 1px; background: #262b32"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 9px">
+    <div class="tag" style="color: #c8b280">Why this one matters beyond the bug</div>
+    <div style="font-size: 13.5px; line-height: 1.65; color: #98a1ab; max-width: 780px">
+      The 251e's own front panel does not repaint when we write to it — confirmed
+      three ways. So this screen is the only honest account of what the module
+      holds. A state line that distinguishes <b style="color:#e6e9ee">live</b>,
+      <b style="color:#e6e9ee">edited</b> and <b style="color:#e6e9ee">nothing loaded</b>
+      is not decoration; it is the only place that truth exists. It now also
+      distinguishes <b style="color:#e6e9ee">writing</b>,
+      <b style="color:#e6e9ee">verifying</b>, <b style="color:#e6e9ee">verified</b> and
+      four flavours of <b style="color:#e6e9ee">bad</b> — see the write artboards.
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

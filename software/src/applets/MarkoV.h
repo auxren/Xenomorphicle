@@ -283,7 +283,7 @@ public:
         gfxLine(0, GRAPH_BOTTOM + 1, 63, GRAPH_BOTTOM + 1);
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, CURSOR_LAST);
             return;
@@ -312,7 +312,7 @@ public:
         }
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
         if (cursor == CURSOR_SCALE) {
             HS::QuantizerEdit(qselect);
         } else if (cursor == CURSOR_SEED) {
@@ -324,7 +324,7 @@ public:
         CancelEdit();
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation{0,  3}, profile);    // 3 bits for 5 profiles
         Pack(data, PackLocation{3,  4}, state);      // 4 bits for 10 states (0-9)
@@ -335,7 +335,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         profile    = constrain((int)Unpack(data, PackLocation{0,  3}), 0, NUM_PROFILES - 1);
         state      = constrain((int)Unpack(data, PackLocation{3,  4}), 0, NUM_STATES - 1);
         qselect    = constrain((int)Unpack(data, PackLocation{7,  2}), 0, QUANT_CHANNEL_COUNT - 1);
@@ -345,7 +345,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         help[HELP_DIGITAL1] = "Clock";
         help[HELP_DIGITAL2] = "RstSeed";
         help[HELP_CV1]      = "Chaos+";

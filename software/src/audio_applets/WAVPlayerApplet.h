@@ -142,7 +142,7 @@ public:
     }
   }
 
-  void View() {
+  FLASHMEM void View() {
     if (!SDcard_Ready) {
       gfxPrint(4, 25, "NO SD CARD!!");
       return;
@@ -246,7 +246,7 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void AuxButton() {
+  FLASHMEM void AuxButton() {
     if (FILTER_PARAM == cursor) {
       filter_on = !filter_on;
     } else if (PLAYRATE == cursor) {
@@ -254,7 +254,7 @@ public:
     } else
       ToggleFilePlayer();
   }
-  void OnButtonPress() {
+  FLASHMEM void OnButtonPress() {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(PLAYSTOP_GATE_CV, playstop_cv),
@@ -270,7 +270,7 @@ public:
     } else
       CursorToggle();
   };
-  void OnEncoderMove(int direction) {
+  FLASHMEM void OnEncoderMove(int direction) {
     if (!EditMode()) {
       MoveCursor(cursor, direction, NUM_PARAMS - 1);
       return;
@@ -314,7 +314,7 @@ public:
     }
   }
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     // STOP playback to avoid SD card hangup on preset save
     wavplayer.stop();
     uint16_t dummy = 0;
@@ -324,7 +324,7 @@ public:
     data[2] = PackPackables(start_beat, start_beat_cv, playstop_cv);
     data[3] = PackPackables(wavplayer_select);
   }
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     // jeez this is a mess... maybe let's start over soon
     int8_t old_playrate;
     uint8_t oldfilenum;

@@ -574,6 +574,12 @@ public:
             if ( dual ) {
               clock_setup = 1;
               click_tick = 0;
+              // Both UP and DOWN are still down at this instant (that's how
+              // the dual-press was recognised) -- arm the release-first
+              // guard the same way Hemisphere/Quadrants do on entry to their
+              // own dual-press Clock Setup screens, so the entry chord's
+              // releases/long-presses can't leak into it.
+              OC::ui.SetButtonIgnoreMask();
             } else {
               first_click = hemisphere;
               click_tick = OC::CORE::ticks;
@@ -830,23 +836,15 @@ void AppCalibr8or::GetIOConfig(OC::IOConfig &ioconfig) const
   ioconfig.digital_inputs[DIGITAL_INPUT_3].set("Ch3 Clk");
   ioconfig.digital_inputs[DIGITAL_INPUT_4].set("Ch4 Clk");
 
-  ioconfig.cv[0].set("Ch1 CV");
-  ioconfig.cv[1].set("Ch2 CV");
-  ioconfig.cv[2].set("Ch3 CV");
-  ioconfig.cv[3].set("Ch4 CV");
-  ioconfig.cv[4].set("Ch5 CV");
-  ioconfig.cv[5].set("Ch6 CV");
-  ioconfig.cv[6].set("Ch7 CV");
-  ioconfig.cv[7].set("Ch8 CV");
-
-  ioconfig.outputs[0].set("Ch1", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[1].set("Ch2", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[2].set("Ch3", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[3].set("Ch4", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[4].set("Ch5", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[5].set("Ch6", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[6].set("Ch7", OUTPUT_MODE_PITCH);
-  ioconfig.outputs[7].set("Ch8", OUTPUT_MODE_PITCH);
+  // cv[] and outputs[] are ADC_/DAC_CHANNEL_COUNT long: eight literal sets
+  // on a four-channel build wrote past IOConfig.
+  static const char *const cv_names[] = {
+    "Ch1 CV", "Ch2 CV", "Ch3 CV", "Ch4 CV", "Ch5 CV", "Ch6 CV", "Ch7 CV", "Ch8 CV",
+  };
+  static const char *const out_names[] = {"Ch1", "Ch2", "Ch3", "Ch4", "Ch5", "Ch6", "Ch7", "Ch8"};
+  static_assert(ADC_CHANNEL_COUNT <= 8 && DAC_CHANNEL_COUNT <= 8, "extend the name tables");
+  for (int i = 0; i < ADC_CHANNEL_COUNT; ++i) ioconfig.cv[i].set(cv_names[i]);
+  for (int i = 0; i < DAC_CHANNEL_COUNT; ++i) ioconfig.outputs[i].set(out_names[i], OUTPUT_MODE_PITCH);
 }
 
 FLASHMEM
@@ -945,7 +943,7 @@ void AppCalibr8or::HandleButtonEvent(const UI::Event &event) {
     }
 }
 
-void AppCalibr8or::HandleEncoderEvent(const UI::Event &event) {
+FLASHMEM void AppCalibr8or::HandleEncoderEvent(const UI::Event &event) {
   /*
   if (autotuner.active()) {
     autotuner.HandleEncoderEvent(event);

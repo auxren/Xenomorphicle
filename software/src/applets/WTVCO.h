@@ -169,7 +169,7 @@ public:
         ] * MAX_AMPLITUDE / 127) / 100);
     }
 
-    void View() {
+    FLASHMEM void View() {
         switch (menu_page) {
             case MENU_WAVETABLES:
                 DrawWaveMenu();
@@ -188,7 +188,7 @@ public:
         DrawSelector();
     }
 
-    void AuxButton() {
+    FLASHMEM void AuxButton() {
         switch(menu_page) {
             case MENU_WAVETABLES: {
                 if (page_cursor > WAVEFORM_OUT) {
@@ -203,7 +203,7 @@ public:
         }
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, CURSOR_LAST);
             if (cursor > PARAM_LAST + WAVEFORM_LAST) {
@@ -279,7 +279,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,8}, (uint8_t)(pitch[0] / 128)); // only need to store semitone, can unpack to full pitch value
         Pack(data, PackLocation {8,8}, (uint8_t)(pitch[1] / 128)); // unsigned cast fixes packing of negative pitch values
@@ -299,7 +299,7 @@ public:
         return data;
     }//
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         pitch[0] = constrain(128 * (int8_t)Unpack(data, PackLocation {0,8}), MIN_PITCH, MAX_PITCH);
         pitch[1] = constrain(128 * (int8_t)Unpack(data, PackLocation {8,8}), MIN_PITCH, MAX_PITCH);
         wt_blend = constrain((int)Unpack(data, PackLocation{16,8}), 0, (int)(WT_SIZE - 1));
@@ -319,7 +319,7 @@ public:
     }
 
 protected:
-    void SetHelp() {
+    FLASHMEM void SetHelp() {
         //                    "-------" <-- Label size guide
         help[HELP_DIGITAL1] = "OctDn";
         help[HELP_DIGITAL2] = "OctUp";
@@ -375,7 +375,7 @@ private:
         }
     }
 
-    void DrawSelector() {
+    FLASHMEM void DrawSelector() {
         uint8_t w = X_DIV;
         uint8_t x = 0;
         uint8_t y = HEADER_HEIGHT + Y_DIV;
@@ -403,7 +403,7 @@ private:
         gfxCursor(x, y, w);
     }
 
-    void DrawBlendicator(int b) {
+    FLASHMEM void DrawBlendicator(int b) {
         const uint8_t y = HEADER_HEIGHT;
         const uint8_t h = 1;
 
@@ -413,7 +413,7 @@ private:
         gfxRect(x, y, w, h);
     }
 
-    void DrawWaveMenu() {
+    FLASHMEM void DrawWaveMenu() {
         uint8_t x = 3;
         uint8_t y = MENU_ROW;
 
@@ -446,7 +446,7 @@ private:
         gfxLine(0, 63, 63, 63);
     }
 
-    void DrawWaveForm() {
+    FLASHMEM void DrawWaveForm() {
         switch(page_cursor) {
             case WAVEFORM_OUT:
                 gfxRenderWave(OUT);
@@ -460,7 +460,7 @@ private:
         }
     }
 
-    void DrawParamMenu() {
+    FLASHMEM void DrawParamMenu() {
         uint8_t x = 3;
         uint8_t y = MENU_ROW;
 
@@ -472,7 +472,7 @@ private:
         gfxLine(0, 63, 63, 63);
     }
 
-    void DrawParams() {
+    FLASHMEM void DrawParams() {
         uint8_t y = MENU_ROW + Y_DIV;
 
         // ForEachChannel(ch) {
@@ -506,7 +506,7 @@ private:
         }
     }
 
-    void DrawCVDestMenu() {
+    FLASHMEM void DrawCVDestMenu() {
         uint8_t x = 3;
         uint8_t y = MENU_ROW;
 
@@ -518,7 +518,7 @@ private:
         gfxLine(0, 63, 63, 63);
     }
 
-    void DrawCVDestinations() {
+    FLASHMEM void DrawCVDestinations() {
         const uint8_t y = MENU_ROW + Y_DIV;
         ForEachChannel(ch) {
             gfxPrint(1, y + ch * Y_DIV, OC::Strings::cv_input_names_none[ch + io_offset + 1]);

@@ -43,11 +43,48 @@ void SaveAppData();
 
 static inline void save_app_data() { SaveAppData(); }
 
+// True once BuildAppData has had to drop an app's chunk because the runtime
+// serialized size overflowed EEPROM_APPDATA_BINARY_SIZE. The only other
+// report of that (APPS_SERIAL_PRINTLN) is compiled out of the production
+// T41/T41_audio builds, so this is the sole always-available signal; Setup/
+// About surfaces it. Sticky for the session: see BuildAppData in OC_apps.cpp.
+bool AppDataOverflowed();
+
+#ifdef __IMXRT1062__
+// Preset-engine access to the whole-module state paths (PresetEngine.cpp).
+// Build/Apply operate on a caller-supplied AppData buffer (RAM only);
+// the GlobalSettings pair reads/writes the *currently loaded* PhzConfig map.
+struct AppData;
+void BuildAppData(AppData &data);
+void ApplyAppData(const AppData &data);
+void BuildGlobalSettingsValues();
+void RestoreGlobalSettingsFromConfig(uint8_t scala_loaded_mask = 0);
+// app-container index for an app id; falls back to the current app
+size_t ResolveAppIndexByID(uint16_t app_id);
+#endif
+
+// Runs every loop() pass regardless of which app is current -- keeps
+// AppTweighty's always-connected audio engine's live control-rate
+// parameters (feedback, mix, tap-count, loop time) synced to whatever
+// RestoreAppData() last wrote, even while Tweighty is backgrounded. No-op
+// when ENABLE_APP_TWEIGHTY isn't compiled in. See TweightyApp.h's
+// BackgroundPump() for exactly what this does (and does not) touch.
+void TweightyBackgroundPump();
+
+// Bench diagnostic (2026-09-03 silence investigation): true + the engine's
+// own state if Tweighty exists and has ever been activated this session,
+// false otherwise. No-op/false when ENABLE_APP_TWEIGHTY isn't compiled in.
+bool TweightyDebugAudioState(bool &acquired, bool &engine_ready, float &meter);
+
 enum AppEvent {
   APP_EVENT_SUSPEND,
   APP_EVENT_RESUME,
   APP_EVENT_SCREENSAVER_ON,
-  APP_EVENT_SCREENSAVER_OFF
+  APP_EVENT_SCREENSAVER_OFF,
+  // Flush volatile state to backing storage (bank files / config maps)
+  // regardless of auto-save settings. Sent before a bus preset capture;
+  // apps that don't care simply ignore it.
+  APP_EVENT_FLUSH
 };
 
 // The original "app" interface was built around structs filled with function
@@ -125,6 +162,14 @@ protected:
 void draw_save_message(uint8_t c);
 void save_app_data();
 void start_calibration();
+// remote bench control: suspend/switch/resume to an app (loop context only)
+void SwitchToApp(size_t index);
+void SwitchToDefaultApp();
+// re-run AppSwitcher::Init live (Backup restore, factory reset): same
+// choreography as SwitchToApp around it (loop context only)
+void ReinitApps(bool reset_settings);
+size_t NumApps();
+void ListApps();  // console: index, id, name of every app in the container
 
 template <typename T, typename Traits> class AppBaseImpl : public AppBase {
 public:

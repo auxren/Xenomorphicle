@@ -58,7 +58,7 @@ public:
     }
   }
 
-  void View() {
+  FLASHMEM void View() {
     gfxPrint(0, 15, OC::scale_names_short[GetScale(0)]);
     if (cursor == 0) gfxCursor(0, 23, 30);
 
@@ -86,7 +86,7 @@ public:
     gfxBitmap(5 * note_ix(harm_pitch), 50, 8, NOTE4_ICON);
   }
 
-  void OnButtonPress() {
+  FLASHMEM void OnButtonPress() {
     if (cursor < 2) {
       CursorToggle();
     } else {
@@ -95,7 +95,7 @@ public:
     }
   }
 
-  void OnEncoderMove(int direction) {
+  FLASHMEM void OnEncoderMove(int direction) {
     if (!EditMode()) {
       MoveCursor(cursor, direction, 1 + int(active_scale.num_notes));
       return;
@@ -117,7 +117,7 @@ public:
     update_chord_quantizer();
   }
 
-  uint64_t OnDataRequest() {
+  FLASHMEM uint64_t OnDataRequest() {
     uint64_t data = 0;
     Pack(data, PackLocation{0, 8}, GetScale(0));
     Pack(data, PackLocation{8, 4}, GetRootNote(0));
@@ -125,7 +125,7 @@ public:
     return data;
   }
 
-  void OnDataReceive(uint64_t data) {
+  FLASHMEM void OnDataReceive(uint64_t data) {
     SetScale(0, Unpack(data, PackLocation{0, 8}));
     SetRootNote(0, Unpack(data, PackLocation{8, 4}));
     SetRootNote(1, GetRootNote(0));
@@ -134,7 +134,7 @@ public:
   }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "S&H Sig";
     help[HELP_DIGITAL2] = "S&H Wgt";

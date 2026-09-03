@@ -1,11 +1,41 @@
 #pragma once
 
-#include "../Audio/AudioVCA.h"
-#include "../Audio/InterpolatingStream.h"
+// F32-native: the VCA gain path and level CV run on float32 blocks
+// (AudioVCA_F32 / InterpolatingStreamF32), so the shaped CV reaches the gain
+// stage at full float precision instead of q15 and the signal is never
+// requantized between stages. The chain still sees int16 via the
+// HemisphereAudioAppletF32 edge adapters. Params, ranges, and UI are
+// unchanged.
+
+#include "../HemisphereAudioAppletF32.h"
+#include "../Audio/AudioVCA_F32.h"
+#include "../Audio/InterpolatingStreamF32.h"
 
 template <AudioChannels Channels>
-class VcaApplet : public HemisphereAudioApplet {
+class VcaApplet : public HemisphereAudioAppletF32<Channels> {
 public:
+  // this class template has a dependent base, so inherited names need
+  // explicit import
+  using Base = HemisphereAudioAppletF32<Channels>;
+  using Base::PatchCableF32;
+  using Base::InputF32;
+  using Base::OutputF32;
+  using Base::AllowRestart;
+  using Base::CONFIG_SIZE;
+  using Base::LVL_MIN_DB;
+  using Base::LVL_MAX_DB;
+  using Base::gfxPrint;
+  using Base::gfxPrintDb;
+  using Base::gfxPrintIcon;
+  using Base::gfxStartCursor;
+  using Base::gfxEndCursor;
+  using Base::gfxDisplayInputMapEditor;
+  using Base::CheckEditInputMapPress;
+  using Base::CursorToggle;
+  using Base::EditMode;
+  using Base::MoveCursor;
+  using Base::EditSelectedInputMap;
+
   const char* applet_name() {
     return "VCA";
   }
@@ -16,9 +46,9 @@ public:
     cv_stream.Method(INTERPOLATION_LINEAR);
     cv_stream.Acquire();
     for (int i = 0; i < Channels; i++) {
-      PatchCable(input, i, vcas[i], 0);
-      PatchCable(cv_stream, 0, vcas[i], 1);
-      PatchCable(vcas[i], 0, output, i);
+      PatchCableF32(InputF32(), i, vcas[i], 0);
+      PatchCableF32(cv_stream, 0, vcas[i], 1);
+      PatchCableF32(vcas[i], 0, OutputF32(), i);
     }
     SetLevel(level);
     SetBias(bias);
@@ -33,10 +63,10 @@ public:
   void Controller() {
     float lin_cv = level_cv.InF(1.0f);
     float cv = shape > 0 ? varexp(0.3f * shape, lin_cv) : lin_cv;
-    cv_stream.Push(float_to_q15(invert ? -cv : cv));
+    cv_stream.Push(invert ? -cv : cv);
   }
 
-  void View() {
+  FLASHMEM void View() {
     gfxPrint(1, 15, "Lvl:");
     gfxStartCursor();
     gfxPrintDb(level);
@@ -71,7 +101,7 @@ public:
     gfxDisplayInputMapEditor();
   }
 
-  void OnButtonPress() override {
+  FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
           IndexedInput(1, level_cv),
@@ -81,7 +111,7 @@ public:
     CursorToggle();
   }
 
-  void OnEncoderMove(int direction) {
+  FLASHMEM void OnEncoderMove(int direction) {
     if (!EditMode()) {
       MoveCursor(cursor, direction, NUM_PARAMS - 1);
       return;
@@ -112,7 +142,7 @@ public:
     }
   }
 
-  void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) {
+  FLASHMEM void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) {
     uint64_t& d = data[0];
     d = PackPackables(level, bias, shape);
     Pack(d, {62, 1}, rectify);
@@ -120,7 +150,7 @@ public:
     data[1] = PackPackables(level_cv, shape_cv);
   }
 
-  void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) {
+  FLASHMEM void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) {
     uint64_t d = data[0];
     UnpackPackables(d, level, bias, shape);
     rectify = Unpack(d, {62, 1});
@@ -130,13 +160,6 @@ public:
     SetLevel(level);
     SetBias(bias);
     SetRectify(rectify);
-  }
-
-  AudioStream* InputStream() override {
-    return &input;
-  }
-  AudioStream* OutputStream() override {
-    return &output;
   }
 
   void SetLevel(int lvl) {
@@ -171,10 +194,8 @@ private:
   bool rectify = true;
   bool invert = false;
 
-  AudioPassthrough<Channels> input;
-  InterpolatingStream<> cv_stream;
-  std::array<AudioVCA, Channels> vcas;
-  AudioPassthrough<Channels> output;
+  InterpolatingStreamF32<> cv_stream;
+  std::array<AudioVCA_F32, Channels> vcas;
 
   // Gives variable curve exponent by controlling the base normalized to go from
   // 0 to 1 for powers 0 to 1.

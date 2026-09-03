@@ -64,13 +64,13 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
     //void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, MAX_CURSOR);
             return;
@@ -97,7 +97,7 @@ public:
         }
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation { 0,10}, scale_factor[0] + 500);
         Pack(data, PackLocation {10,10}, scale_factor[1] + 500);
@@ -108,7 +108,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         scale_factor[0] = constrain((Unpack(data, PackLocation { 0,10}) - 500), -500, 500);
         scale_factor[1] = constrain((Unpack(data, PackLocation {10,10}) - 500), -500, 500);
         offset[0]       = constrain((Unpack(data, PackLocation {20, 8}) - 100), -100, 100);
@@ -118,7 +118,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "";
@@ -139,7 +139,7 @@ private:
     int transpose[2] = {0,0}; // in semitones
     int transpose_active[2] = {0,0}; // held value while waiting for trigger
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         int y_shift = 27; // B+D section y offset
         ForEachChannel(ch) {
             int y = 13 + (ch * y_shift);

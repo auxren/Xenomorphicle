@@ -114,18 +114,18 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
-    void OnButtonPress() {
+    FLASHMEM void OnButtonPress() {
         if (cursor >= TOGGLE_A1 && !EditMode())
             ToggleDiv(cursor - TOGGLE_A1);
         else
             CursorToggle();
     }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, LAST_SETTING);
             return;
@@ -137,7 +137,7 @@ public:
             ToggleDiv(cursor - TOGGLE_A1);
     }
 
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         const size_t b = 6; // bitsize
 
@@ -148,7 +148,7 @@ public:
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         const size_t b = 6; // bitsize
         div_enabled = Unpack(data, PackLocation {0, 8});
         ForAllChannels(i) {
@@ -158,7 +158,7 @@ public:
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "Reset";
@@ -178,7 +178,7 @@ private:
     uint8_t div_enabled = 0b00100001; // bitmask for enabling dividers per output
                          // bits 0-3 for A, bits 4-7 for B
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
       char outlabel[] = { (char)('A' + io_offset), ' ',  (char)('B' + io_offset), '\0' };
       gfxPrint(32, 14, outlabel);
       ForAllChannels(ch) {

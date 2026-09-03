@@ -56,13 +56,13 @@ public:
         }
     }
 
-    void View() {
+    FLASHMEM void View() {
         DrawInterface();
     }
 
     // void OnButtonPress() { }
 
-    void OnEncoderMove(int direction) {
+    FLASHMEM void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 1);
             return;
@@ -74,20 +74,20 @@ public:
         time[cursor] = constrain(time[cursor] + direction, 0, 2000);
     }
         
-    uint64_t OnDataRequest() {
+    FLASHMEM uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,11}, time[0]);
         Pack(data, PackLocation {11,11}, time[1]);
         return data;
     }
 
-    void OnDataReceive(uint64_t data) {
+    FLASHMEM void OnDataReceive(uint64_t data) {
         time[0] = Unpack(data, PackLocation {0,11});
         time[1] = Unpack(data, PackLocation {11,11});
     }
 
 protected:
-  void SetHelp() {
+  FLASHMEM void SetHelp() {
     //                    "-------" <-- Label size guide
     help[HELP_DIGITAL1] = "Gate 1";
     help[HELP_DIGITAL2] = "Gate 2";
@@ -108,7 +108,7 @@ private:
     int cursor;
     int16_t ms_countdown; // Countdown for 1 ms
 
-    void DrawInterface() {
+    FLASHMEM void DrawInterface() {
         ForEachChannel(ch)
         {
             int y = 15 + (ch * 25);
