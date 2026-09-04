@@ -1,6 +1,10 @@
 // workaround
 namespace menu = OC::menu;
 
+// For the kMaxApps assertion below the container. OC_apps.cpp includes this
+// file before OC_app_folders.h, so the assert cannot wait for that one.
+#include "../OC_app_folders.h"
+
 #ifndef NO_HEMISPHERE
 
 #ifdef ARDUINO_TEENSY41
@@ -179,6 +183,18 @@ static DMAMEM AppContainer<void // this space intentionally left blank
 
 static_assert(decltype(app_container)::TotalAppDataStorageSize() < AppData::kAppDataSize,
               "Apps use too much EEPROM space!");
+
+// The app switcher files apps by position, four bits each across two words, so
+// it can only see the first kMaxApps of them. An app past that never enters the
+// switcher's visible list at all and would be PERMANENTLY UNREACHABLE -- and
+// since the switcher is the only route between apps, a build that booted into
+// one would open on SYSTEM with the running app simply not listed.
+//
+// The maximal roster is at 31 of 32 today; uncommenting Passencore makes it
+// exactly 32. Fail the build rather than ship a silently invisible app.
+static_assert(decltype(app_container)::kNumApps <= OC::AppFolders::kMaxApps,
+              "More apps than the app switcher can file: raise "
+              "OC::AppFolders::kMaxApps (and widen State::bits) first.");
 
 #if defined(NLM_hOC) && defined(ENABLE_APP_MIDI)
 // hOC MIDI build boots into Captain MIDI: [0]=AppSettings, [1]=Calibr8or, [2]=CaptainMIDI

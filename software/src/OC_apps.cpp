@@ -106,7 +106,10 @@ enum GlobalSettingsDataKeys : uint16_t {
   AUTOCAL_KEY         = 7 << 8,
   PRESETBUS_KEY       = 8 << 8, // preset-bus module addr + slot manifests
   APPFOLDER_KEY       = 11 << 8, // app-switcher folder assignments
-                                 // (9 is free; 10 is HSUtils' clock routing)
+                                 // (9 is CaptainMIDI's DEVICE_PROFILE_KEY,
+                                 // apps/CaptainMIDI.h -- it lives in this same
+                                 // GLOBALS.CFG and is NOT free; 10 is
+                                 // HSUtils' clock routing)
 
   // lower 8 bits of key
   SCALE_METADATA = 0xff,
@@ -119,13 +122,43 @@ enum GlobalSettingsDataKeys : uint16_t {
 static OC::AppFolders::State app_folders;
 
 // Put every app in the folder OC_app_folders.h's table names for it. Keyed by
-// app ID rather than position, so a module whose roster changed between builds
-// still comes up arranged correctly.
+// app ID, so this is correct for whatever roster the running build has.
+//
+// Note what this does NOT buy: it only runs when there is no stored
+// arrangement to apply. Once anything has written one, the stored words are
+// position-indexed and win, which is what the roster stamp below exists to
+// police.
 FLASHMEM
 static void SeedAppFolderDefaults() {
   const size_t n = app_container.num_apps();
   for (size_t i = 0; i < n && i < OC::AppFolders::kMaxApps; ++i)
     app_folders.Set(i, OC::AppFolders::DefaultFor(app_container[i].id()));
+}
+
+// Identifies the app roster a stored, POSITION-indexed folder arrangement was
+// written against: the app count, plus an FNV-1a hash of every app id in
+// container order. Any insertion, removal or reordering changes it.
+//
+// Without this the arrangement is silently reinterpreted after the single most
+// common real-world transition. Flashing T41 (10 apps) and then T41_audio (15)
+// inserts AppTuner at position 6 and shifts everything after it, so Tuner comes
+// up under SYSTEM, the 200e app under PITCH, and the whole tail under APPLETS
+// because those nibbles were never written. Nothing becomes unreachable -- Of()
+// clamps and the switcher's turn skips empty folders -- but the taxonomy is
+// gone, which is the entire point of the feature.
+//
+// apps/Bus200eApp.h stamps its scan bitmap with the module-table size for
+// exactly this reason: refuse a set built against a different table rather than
+// read old bits as new meanings.
+FLASHMEM
+static uint64_t AppFolderRosterStamp() {
+  const size_t n = app_container.num_apps();
+  uint64_t h = 1469598103934665603ull;   // FNV-1a offset basis
+  for (size_t i = 0; i < n; ++i) {
+    h ^= app_container[i].id();
+    h *= 1099511628211ull;
+  }
+  return (h & ~0xffffull) | (uint64_t)(n & 0xffff);
 }
 
 #ifdef __IMXRT1062__
@@ -144,9 +177,11 @@ void BuildGlobalSettingsValues() {
   Pack(data, PackLocation{18, 1}, global_settings.invert_display);
   PhzConfig::setValue(METADATA_KEY, data);
 
-  // App-switcher folders
+  // App-switcher folders, stamped with the roster they are indexed against.
+  // The words are position-indexed, so they are meaningless without it.
   PhzConfig::setValue(APPFOLDER_KEY | 0, app_folders.bits[0]);
   PhzConfig::setValue(APPFOLDER_KEY | 1, app_folders.bits[1]);
+  PhzConfig::setValue(APPFOLDER_KEY | 2, AppFolderRosterStamp());
 
   // User Scales
   for (size_t i = 0; i < Scales::SCALE_USER_COUNT; ++i) {
@@ -462,15 +497,37 @@ FLASHMEM
 void RestoreGlobalSettingsFromConfig(uint8_t scala_loaded_mask) {
   uint64_t data = 0;
 
-  // App-switcher folders. Absent on a module that predates them, or one whose
-  // arrangement has never been changed -- either way the compiled defaults are
-  // the right answer, so seed first and let a stored value win if there is one.
-  SeedAppFolderDefaults();
+  // App-switcher folders. Deliberately NOT seeded before the read, unlike the
+  // first version of this: an absent key means "leave the live value alone"
+  // here, exactly as it does for scales, patterns, chords, Turing machines and
+  // waveforms below.
+  //
+  // Seeding first destroyed user data on every power-up. This function's other
+  // caller is a preset recall (PresetEngine.cpp), where the resident map is a
+  // preset CONTAINER's G section, not GLOBALS.CFG -- and any container captured
+  // before folders existed has no APPFOLDER_KEY at all. Boot enqueues
+  // REQ_BOOT_RECALL whenever the slot is used (Main.cpp), so the arrangement,
+  // including one deliberately saved to GLOBALS.CFG, was overwritten with
+  // compiled defaults a second or two after every boot. Deterministic, not a
+  // race. Boot seeds these in SeedGlobalSettingsDefaults() instead, on both
+  // branches, before this runs.
   {
-    uint64_t w = 0;
-    if (PhzConfig::getValue(APPFOLDER_KEY | 0, w)) app_folders.bits[0] = w;
-    w = 0;
-    if (PhzConfig::getValue(APPFOLDER_KEY | 1, w)) app_folders.bits[1] = w;
+    uint64_t w0 = 0, w1 = 0, stamp = 0;
+    const bool have_w0 = PhzConfig::getValue(APPFOLDER_KEY | 0, w0);
+    const bool have_w1 = PhzConfig::getValue(APPFOLDER_KEY | 1, w1);
+    const bool have_stamp = PhzConfig::getValue(APPFOLDER_KEY | 2, stamp);
+    if (have_w0 || have_w1) {
+      if (have_stamp && stamp == AppFolderRosterStamp()) {
+        app_folders.bits[0] = w0;
+        app_folders.bits[1] = w1;
+      } else {
+        // Written against a different app roster (or by a build that predates
+        // the stamp), so the nibbles no longer name the apps they did. Refuse
+        // the set and fall back to the ID-keyed defaults, which are correct for
+        // whatever roster is running now.
+        SeedAppFolderDefaults();
+      }
+    }
   }
 
   // User Scales
@@ -904,6 +961,9 @@ bool Ui::AppSettings(bool drawmenu) {
   static bool move_notice = false;
   static uint8_t move_notice_folder = 0;
   static elapsedMillis move_notice_time;
+  // X/Y mutate the arrangement in RAM. Nothing else on this screen persists
+  // it, so it needs flushing on the way out -- see the exit block below.
+  static bool folders_dirty = false;
   static bool change_app = false;
   static bool save = false;
   static bool opened = false;
@@ -1093,6 +1153,7 @@ bool Ui::AppSettings(bool drawmenu) {
           const int pos = cursor.cursor_pos();
           const size_t moved = visible_apps[pos];
           app_folders.Nudge(moved, dir);
+          folders_dirty = true;
           move_notice_folder = static_cast<uint8_t>(app_folders.Of(moved));
           move_notice = true;
           move_notice_time = 0;
@@ -1197,6 +1258,29 @@ bool Ui::AppSettings(bool drawmenu) {
   }
 
   OC::ui.encoders_enable_acceleration(global_settings.encoders_enable_acceleration);
+
+#ifdef __IMXRT1062__
+  // Persist an X/Y move on ANY way out of this screen, not just the long-press
+  // that saves everything. The move was only ever written by SaveAppData()
+  // above, gated on a long press of encR, so a plain pick, an encL cancel or
+  // the timeout all discarded it -- while the legend says "X:move" and never
+  // says the move needs a hold to survive.
+  //
+  // The hidden_applets analogy this was built on fails exactly here: Quadrants
+  // auto-saves that on Suspend, and app_folders has no equivalent owner.
+  //
+  // Same three lines every other light-weight writer of GLOBALS.CFG uses
+  // (apps/SETTINGS.h's invert-display commit, Bus200eApp's scan persist): own
+  // the map, re-state all the global settings into it so a virgin module does
+  // not get a file with only these keys and no METADATA_KEY, then write it.
+  // Ordered before APP_EVENT_RESUME so the map is handed back first.
+  if (folders_dirty) {
+    PhzConfig::load_config();
+    BuildGlobalSettingsValues();
+    PhzConfig::save_config();
+    folders_dirty = false;
+  }
+#endif
 
   // Restore state
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
