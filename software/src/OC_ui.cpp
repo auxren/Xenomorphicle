@@ -17,6 +17,7 @@
 #include "HSUtils.h"
 
 #include "PresetBusUI.h"
+#include "BootWeasel.h"
 
 #ifdef VOR
 #include "VBiasManager.h"
@@ -331,26 +332,14 @@ UiMode Ui::Splashscreen(bool &reset_settings, uint8_t phase) {
       graphics.print(" ");
       graphics.print(OC::Strings::BUILD_TAG);
 
-      const uint8_t *iconroulette[] = {
-        PhzIcons::clockDivider, PhzIcons::clockSkip,
-        PhzIcons::clock_warp_A, PhzIcons::clock_warp_B,
-        PhzIcons::snowflakeB,
-        PhzIcons::snowflakeA
-      };
-
-      static int pick = 0;
-      if (timeout % 50 == 0) pick = random(6);
-      // pew pew?
-      for (int i = 0; i < 124; i+=8)
-        graphics.drawBitmap8(i, 56, 8, iconroulette[pick]);
-
-      // chargin mah lazerrrr
+      // Plain progress bar -- was a cycling row of clock/snowflake icons
+      // ("chargin mah lazerrrr"); the character animation below is where
+      // this splash's personality lives now, so this stays a simple,
+      // silent "still booting" indicator instead of competing with it.
       weegfx::coord_t w = timeout * 128 / SPLASHSCREEN_DELAY_MS;
       w %= 256;
       if (w > 128) w = 256 - w;
       graphics.invertRect(0, 56, w, 8);
-
-      ZapScreensaver();
 
       /* fixes spurious button presses when booting ? */
       while (event_queue_.available())
@@ -365,27 +354,33 @@ UiMode Ui::Splashscreen(bool &reset_settings, uint8_t phase) {
   default:
     do {
       GRAPHICS_BEGIN_FRAME(true);
-      /*
-      const uint8_t *flake_icon[] = { PhzIcons::snowflakeA, PhzIcons::snowflakeB, ZAP_ICON };
-      for (int i=0; i<128; ++i) {
-        graphics.drawBitmap8(i*8%128 + random(2), i/16*8 + random(2), 8, flake_icon[random(3)]);
-      }
-      */
-      ZapScreensaver();
 
-      graphics.clearRect(27, 22, 74, 22);
       if (reset_settings) {
+        // Safety-relevant confirmation text -- unchanged, no animation
+        // competing with it.
+        graphics.clearRect(27, 22, 74, 22);
         graphics.setPrintPos(28, 23);
         graphics.print("Time for a ");
         graphics.setPrintPos(28, 33);
         graphics.print("Fresh Start!");
       } else {
-        graphics.setPrintPos(28, 23);
-        graphics.print(" Welcome to");
-        graphics.setPrintPos(28, 33);
-        graphics.print("Phazerville!");
+        // The weasel slides in from off-screen right over the first 600ms
+        // of this ~1000ms phase (SPLASHSCREEN_DELAY_MS/2), then holds
+        // centered and waves (alternating BootWeasel's two frames every
+        // 150ms) for the remainder. See BootWeasel.h for the character
+        // itself -- an original mascot, not a reproduction of anything.
+        static constexpr int kSlideMs = 600;
+        static constexpr int kRestX = (128 - BootWeasel::kWidth) / 2;
+        static constexpr int kY = 8;
+        const uint32_t t = timeout;
+        const int x = (t < kSlideMs)
+            ? 128 - (128 - kRestX) * (int)t / kSlideMs
+            : kRestX;
+        const bool arm_up = ((t / 150) % 2) == 0;
+        const auto &frame = arm_up ? BootWeasel::kFrameUp : BootWeasel::kFrameDown;
+        for (int band = 0; band < BootWeasel::kBands; ++band)
+          graphics.drawBitmap8(x, kY + band * 8, BootWeasel::kWidth, frame[band]);
       }
-      //graphics.print(OC::Strings::RELEASE_NAME);
 
       while (event_queue_.available())
         (void)event_queue_.PullEvent();
