@@ -170,7 +170,7 @@ all. If exactly one thing ships tonight, it is Delay.
 | # | Bug | Verified | Scheduled |
 | --- | --- | --- | --- |
 | 1 | `AbyssApplet.h:31-59` runs the whole `Controller()` with no arena, writing faded dry gain -> **silence**, where Freeverb (`:38-41`) and Samverb (`:39-42`) both force dry to unity and early-return | yes -- Abyss has no `else { gain(1,1.0f); return; }` | deferred, Abyss is dead code |
-| 2 | `SamverbApplet.h:38` passes `1.0f - damp*0.01f`, `FreeverbApplet.h:37` passes `damp*0.01f`. Same label, opposite meaning | yes, literally inverted | with Samverb |
+| 2 | ~~`SamverbApplet.h:38` passes `1.0f - damp*0.01f`, `FreeverbApplet.h:37` passes `damp*0.01f`. Same label, opposite meaning~~ **WITHDRAWN** — the two engines assign their coefficient to opposite operands, so both applets are correct and "Damp: 90%" already means dark in both. "Verified: yes, literally inverted" verified the *expressions* and not the *engines*. See the withdrawal note under M-1 in Audio-Apps-Screens.md | the inversion is real, the bug is not | done: comment fixed `ff473435` |
 | 3 | `DelayApplet.h:94-96`: `float t = d * (taps-tap)/taps;` is computed **before** `CONSTRAIN(d, ...)`, and the clamp lands on `d` while `t` is what reaches `cf_delay()`/`delay()` | yes | **now** |
 | 4 | `AuxButton()` a silent no-op unless the cursor sits on MIX/WET (`AbyssApplet.h:64-67`, `DelayApplet.h:249-252`) | yes | with each app |
 | 5 | `DelayApplet.h:399-401` documents a RAM2 fallback that does not exist -- `ExtAudioBuffer::Acquire()` only ever calls `extmem_calloc` (`AudioBuffer.h:146-150`), so a board with no PSRAM is **silent**, not shorter | yes | **now**, fix the comment |

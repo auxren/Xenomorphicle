@@ -637,16 +637,62 @@ case. Abyss should do the same, so the failure mode is "no effect" rather than
 
 ### 6.2 Medium
 
-**M-1 — Samverb's Damp label is inverted relative to Freeverb's.**
-`SamverbApplet.h:38` passes `1.0f - ((damp * 0.01f) + damp_cv.InF())` to
-`setDamping()`, whose contract is documented as *"0..1 where 1 = strong
-high-frequency damping"* (`software/src/Audio/effect_reverb_schroeder_F32.h:44-45`).
-`FreeverbApplet.h:37` passes `(damp * 0.01f) + damp_cv.InF()` to `damping()`,
-which has the same contract
-(`software/src/Audio/effect_freeverb_F32.h:39-48`). So **"Damp: 90%" means dark
-in Freeverb and bright in Samverb** — two sibling reverbs, one label, opposite
-meanings. The ranges disagree too: 1..100 (`FreeverbApplet.h:139`) versus 1..99
-(`SamverbApplet.h:139`). Decide which way "Damp" points and make both agree.
+**M-1 — ~~Samverb's Damp label is inverted relative to Freeverb's.~~ WITHDRAWN.**
+
+> **This finding is wrong, and acting on it would have broken Samverb.** It is
+> left here rather than deleted so nobody rediscovers it. Both applets are
+> correct; "Damp: 90%" already means dark in both.
+
+The original finding read: *`SamverbApplet.h:38` passes `1.0f - ((damp * 0.01f)
++ damp_cv.InF())` to `setDamping()`, whose contract is documented as "0..1 where
+1 = strong high-frequency damping"; `FreeverbApplet.h:37` passes `(damp * 0.01f)
++ damp_cv.InF()` to `damping()`, which has the same contract. So "Damp: 90%"
+means dark in Freeverb and bright in Samverb. The ranges disagree too: 1..100
+versus 1..99. Decide which way "Damp" points and make both agree.*
+
+**Why it is wrong.** The two engines do NOT have the same contract. They use the
+same variable name for opposite operands:
+
+- `AudioEffectReverbSchroederF32` (`effect_reverb_schroeder_F32.h`, comb loop):
+  `combStore = combStore*damp2 + y*damp1` with `damp1 = d`. The coefficient
+  multiplies the **input**, so as a one-pole `y[n] = a·x[n] + (1-a)·y[n-1]` the
+  new-sample weight **is** `d`. Higher `d` = less smoothing = **brighter**.
+  `setDamping()` actually means *brightness*.
+- `AudioEffectFreeverbF32` (`effect_freeverb_F32.h`, comb loop):
+  `combfilter = bufout*damp2 + combfilter*damp1` with `damp1 = n·0.4`. The
+  coefficient multiplies the **state**, so the new-sample weight is
+  `damp2 = 1-0.4n`. Higher `n` = more smoothing = **darker**. `damping()` means
+  *damping*.
+
+So a row labelled "Damp" must pass its value **straight through to Freeverb and
+inverted to Schroeder** — which is exactly what the two applets already do. Each
+is compensating correctly for its own engine.
+
+**What the finding actually caught** was a lying comment. The "documented
+contract" it quoted (`0..1 where 1 = strong high-frequency damping`) described
+the opposite of what the code did. That comment was the whole basis of the
+finding, and it is fixed in `ff473435`, along with the Freeverb contrast written
+down at the point of confusion.
+
+**The range half is wrong too, and for a better reason.** 1..99 versus 1..100 is
+not sloppiness: Samverb's 99 ceiling is **load-bearing**. `damp = 100` gives
+`d = 0`, and at `d = 0` the comb loop degenerates to `combStore = combStore*1.0
++ y*0.0` — the damping state stops tracking its input and holds its last value
+forever, injecting a constant into every comb's feedback path. Freeverb's 100 is
+safe because its coefficient maxes at 0.4 and never approaches a degenerate
+value. Two different numbers for two different engines, both correct.
+
+That degenerate point *was* reachable, though not by the knob: `damp_cv` is
+summed in after the knob and routes around the 99 cap. Guarded in `72429502` with
+a symmetric low clamp in the engine.
+
+**Method note, since this is the second time it has happened in this document's
+subject area.** The finding trusted a prose comment over the arithmetic beneath
+it. So did the claim that Delay falls back to the RAM2 heap without PSRAM
+(`DelayApplet.h`), which `e789b9cf` corrected — `ExtAudioBuffer::Acquire()` only
+ever calls `extmem_calloc`. **In this tree, when a comment and an implementation
+disagree about DSP or allocation, assume the comment is wrong until the code says
+otherwise.**
 
 **M-2 — Delay's tap-time clamp is on the wrong variable and in the wrong place.**
 `DelayApplet.h:94-105`:
