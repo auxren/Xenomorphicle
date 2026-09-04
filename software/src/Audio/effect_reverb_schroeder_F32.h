@@ -46,7 +46,33 @@ public:
     __enable_irq();
   }
 
-  // 0..1 where 1 = strong high-frequency damping
+  // 0..1, and READ THE NEXT PARAGRAPH BEFORE USING IT: higher d is BRIGHTER.
+  //
+  // This comment used to say "1 = strong high-frequency damping", which is the
+  // opposite of what the code does, and that error propagated: it is cited as
+  // the contract in Audio-Apps-Screens.md finding M-1, which concluded on the
+  // strength of it that SamverbApplet's `1.0f - damp*0.01f` was an inversion
+  // bug. It is not. The applet is compensating for this function correctly.
+  //
+  // The arithmetic, from update() below: `combStore = combStore*damp2 +
+  // y*damp1` with damp1 = d and damp2 = 1-d. As a one-pole
+  // y[n] = a*x[n] + (1-a)*y[n-1], the coefficient multiplies the INPUT, so the
+  // new-sample weight IS d. Higher d means LESS smoothing, so more high
+  // frequency survives: brighter.
+  //
+  // CONTRAST WITH FREEVERB, because the two live side by side in this build and
+  // the trap is that they use the same variable name for opposite roles.
+  // AudioEffectFreeverbF32::damping() (Audio/effect_freeverb_F32.h:39-47) sets
+  // damp1 = n*0.4 and its loop is `combfilter = bufout*damp2 +
+  // combfilter*damp1` -- the coefficient multiplies the STATE there, so its
+  // new-sample weight is damp2 = 1-0.4n and higher n means DARKER. Freeverb's
+  // parameter genuinely means "damping"; this one means "brightness".
+  //
+  // Hence: a UI row labelled "Damp" must pass damp straight through to
+  // Freeverb and INVERTED to this. Both applets in this tree already do.
+  // KNOWN HAZARD, not guarded here yet: at d == 0 exactly the loop degenerates
+  // to `combStore = combStore*1.0 + y*0.0`, so the damping state stops tracking
+  // its input and holds its last value until reset().
   void setDamping(float d) {
     if (d < 0.0f) d = 0.0f;
     if (d > 0.99f) d = 0.99f;

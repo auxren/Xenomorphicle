@@ -144,7 +144,10 @@ class BungverbApplet : public HemisphereAudioAppletF32<MONO> {
                     decay_time_cv.ChangeSource(direction);
                     break;
                 case DAMP:
-                    damp = constrain(damp + direction, 1, 99);
+                    // Through the accessor so the 99 ceiling has ONE definition
+                    // and one explanation -- see kMaxDamp below for why it is
+                    // 99 and not Freeverb's 100.
+                    NudgeDamp(direction);
                     break;
                 case DAMP_CV:
                     damp_cv.ChangeSource(direction);
