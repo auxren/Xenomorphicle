@@ -87,8 +87,20 @@ public:
 
   // Per tick, from the app's Controller() (i.e. inside BaseController(), so
   // HS::frame is already loaded). NOT FLASHMEM: this runs at core tick rate.
+  //
+  // The AudioNoInterrupts bracket is Quadrants' shipped precedent, not
+  // caution: AudioAppletSubapp::Controller() wraps its applets' Controller()
+  // calls the same way (AudioAppletSubapp.h:86-97). An applet's Controller()
+  // writes live DSP parameters that the audio ISR reads -- Delay's
+  // cf_delay() sets a crossfade's phase and target as two separate stores,
+  // and an update() landing between them would start a crossfade toward the
+  // old target. The window here is one applet's Controller(), which is short.
   void Tick() {
-    if (started_) applet_.Controller();
+    if (started_) {
+      AudioNoInterrupts();
+      applet_.Controller();
+      AudioInterrupts();
+    }
     HemisphereApplet::ProcessCursors();
   }
 
