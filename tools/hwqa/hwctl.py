@@ -168,10 +168,22 @@ class Panel:
         A bare number is a pause in milliseconds, so a script can wait out a
         hold threshold (the chord card's is 700ms) without the caller sleeping
         around the call.
+
+        A '~' token captures the screen AT THAT POINT and is returned in the
+        list this yields. That exists because the screens most worth testing
+        are modal and do not survive the gap between two invocations: the app
+        switcher was observed closing on its own between one run and the next,
+        so "open the switcher" and "now turn the encoder" could not be
+        expressed as two commands. Everything a check needs to see has to
+        happen inside one session.
         """
+        frames = []
         for tok in [t.strip() for t in script.split(",") if t.strip()]:
             if tok.isdigit():
                 time.sleep(int(tok) / 1000.0)
+                continue
+            if tok == "~":
+                frames.append(self.capture())
                 continue
             if "+" in tok and len(tok) == 3:      # "a+r": hold a, press r
                 self.chord(tok[0], tok[2])
@@ -179,6 +191,7 @@ class Panel:
                 continue
             self.press(tok)
             time.sleep(settle)
+        return frames
 
     def capture(self, timeout=6.0):
         """Ask for the framebuffer and return it as a 2048-char hex string.
@@ -218,7 +231,8 @@ class Panel:
 def main():
     ap = argparse.ArgumentParser(description="Drive the Xenomorpher panel over serial.")
     ap.add_argument("--port", default="/dev/cu.usbmodem192573201")
-    ap.add_argument("--keys", default="", help="press script, e.g. 'a+r,],],r' (a+r = chord; bare number = ms pause)")
+    ap.add_argument("--keys", default="", help="press script, e.g. 'a+r,300,~,+,~' "
+                    "(a+r = chord; bare number = ms pause; ~ = capture the screen here)")
     ap.add_argument("--dump-fb", action="store_true", help="print the framebuffer as hex")
     ap.add_argument("--settle", type=float, default=0.12, help="seconds between presses")
     ap.add_argument("--no-unlock", action="store_true", help="skip the pew! unlock")
@@ -229,11 +243,16 @@ def main():
     try:
         if not args.no_unlock:
             p.unlock()
+        frames = []
         if args.keys:
-            p.keys(args.keys, settle=args.settle)
+            frames = p.keys(args.keys, settle=args.settle)
             time.sleep(0.25)
         if args.dump_fb:
-            print(p.capture())
+            frames.append(p.capture())
+        # One frame per line, so a caller can split them and hand each to
+        # fbtext.py. A single frame prints exactly as it always did.
+        for f in frames:
+            print(f)
     finally:
         p.close()
 
