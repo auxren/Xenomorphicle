@@ -185,11 +185,22 @@ FLASHMEM __attribute__((noinline)) void BootMenu() {
     if (x_held) choice = 2;
     if (y_held) choice = 3;
     if (choice > -1) {
-      if (OC::calibration_data.bootchoice() != choice) {
-        OC::calibration_data.set_bootchoice(choice);
-        if (z_held) {
-          save = true;
-        }
+      OC::calibration_data.set_bootchoice(choice);
+      // Z arms the EEPROM write, and it is re-checked on EVERY pass. It used
+      // to be checked only inside an `if (bootchoice() != choice)` guard,
+      // which could only ever be true on the FIRST pass that saw the button:
+      // set_bootchoice() makes bootchoice()==choice immediately, so from the
+      // second pass on the guard was false and `save` could never be armed
+      // again. Pressing the slot button a moment before reaching for Z --
+      // or re-picking the slot already stored -- therefore changed the
+      // in-memory value, showed the row highlighted as if it had taken, and
+      // wrote nothing. The next boot read the old value out of EEPROM and
+      // went straight back to the mode the user had just tried to leave,
+      // with no way to tell that the menu had silently done nothing. Cost a
+      // real recovery session; flashing does not clear bootchoice, so the
+      // module cannot be freed by reflashing either.
+      if (z_held) {
+        save = true;
       }
       if (!any_held)
         break;
@@ -221,7 +232,11 @@ FLASHMEM __attribute__((noinline)) void BootMenu() {
     }
 
     graphics.setPrintPos(1, 55);
-    graphics.print("(hold Z to set)");
+    // Says which of the two things is about to happen, rather than only what
+    // to do: without Z the pick lasts this boot only, with Z it is written.
+    // The silent-no-op bug above was invisible partly because this row read
+    // the same either way.
+    graphics.print(save ? "SAVED on release" : "(hold Z to set)");
     GRAPHICS_END_FRAME();
 
     delay(10);
@@ -555,14 +570,50 @@ FLASHMEM void setup() {
     }
     OC::ui.DebugStats();
   } else if (OC::calibration_data.bootchoice()) {
-    GRAPHICS_BEGIN_FRAME(true);
-    graphics.setPrintPos(1, 28);
-    graphics.print("Switching to alt mode!");
-    GRAPHICS_END_FRAME();
-    AudioNoInterrupts();
-    delay(10);
-    disableCache();
-    jump_to_alt(OC::calibration_data.bootchoice());
+    // Hold-to-escape. bootchoice lives in EEPROM, so it survives a reflash:
+    // a module left pointing at an alt slot jumps before loop(), before the
+    // console, before anything a host can talk to, and reflashing slot 0
+    // does not clear it -- the only ways back were BootMenu's pre-boot
+    // window (easy to miss, and it silently no-opped until the fix above)
+    // and a gesture inside whichever alt build you landed in. That was
+    // enough to strand the module more than once.
+    //
+    // So the jump now always announces itself and always offers a way out:
+    // hold any button during this window and the alt mode is cancelled AND
+    // cleared, so the next power-cycle is normal too. No timing precision
+    // and no prior knowledge required -- the instruction is on the screen
+    // being shown. The cost is this delay on every deliberate alt-mode
+    // boot, which is a mode entered on purpose and rarely.
+    static constexpr uint32_t kAltEscapeMs = 2000;
+    const uint32_t start = millis();
+    bool escape = false;
+    while (millis() - start < kAltEscapeMs) {
+      escape = OC::ui.read_immediate(OC::CONTROL_BUTTON_A)
+            || OC::ui.read_immediate(OC::CONTROL_BUTTON_B)
+            || OC::ui.read_immediate(OC::CONTROL_BUTTON_X)
+            || OC::ui.read_immediate(OC::CONTROL_BUTTON_Y)
+            || OC::ui.read_immediate(OC::CONTROL_BUTTON_Z);
+      if (escape) break;
+
+      GRAPHICS_BEGIN_FRAME(true);
+      graphics.setPrintPos(1, 20);
+      graphics.print("Switching to alt mode!");
+      graphics.setPrintPos(1, 34);
+      graphics.print("hold any key to stay");
+      graphics.setPrintPos(1, 44);
+      graphics.print("in normal mode");
+      GRAPHICS_END_FRAME();
+    }
+
+    if (escape) {
+      OC::calibration_data.set_bootchoice(0);
+      OC::calibration_save();   // blocks, draws its own "saved" screen
+    } else {
+      AudioNoInterrupts();
+      delay(10);
+      disableCache();
+      jump_to_alt(OC::calibration_data.bootchoice());
+    }
   }
 #endif
 
@@ -1541,6 +1592,90 @@ FLASHMEM __attribute__((noinline)) void loop() {
             OC::ListApps();
             app_switch_pending = true; app_switch_digits = 0; app_switch_value = 0;
             break;
+          case 'f': {  // BENCH TOOL (2026-09-03, Sampler concurrent-voice test):
+            // receive a raw file over serial, write straight to SD. No
+            // MTP/host client needed -- this is temporary scaffolding to get
+            // WAV files onto the card for a bench test, not a shipped
+            // feature. Wire protocol, no delimiters: 3 ASCII digits (the
+            // file number, "000".."999"), 8 ASCII hex digits (payload length,
+            // big-endian text), then exactly that many raw bytes.
+            // Prints "FTOK" or "FTFAIL <reason>".
+            if (!SDcard_Ready) { Serial.println("FTFAIL no card"); break; }
+            // (Do NOT discard queued bytes here: the header usually arrives
+            // in the same USB burst as 'f' itself, so it is very often
+            // already sitting in the buffer the instant this case starts --
+            // an earlier version of this discarded exactly those bytes
+            // before ever reading them. Genuinely stale bytes from a prior
+            // failed attempt are handled by the drain on the failure path
+            // below instead.)
+            const uint32_t saved_timeout = 1000;  // Stream default; restored below
+            Serial.setTimeout(5000);
+            char numbuf[4] = {0};
+            const size_t n_got = Serial.readBytes(numbuf, 3);
+            bool ok = n_got == 3;
+            for (int i = 0; ok && i < 3; ++i) ok = isdigit((unsigned char)numbuf[i]);
+            char lenbuf[9] = {0};
+            size_t l_got = 0;
+            if (ok) { l_got = Serial.readBytes(lenbuf, 8); ok = l_got == 8; }
+            for (int i = 0; ok && i < 8; ++i) ok = isxdigit((unsigned char)lenbuf[i]);
+            if (!ok) {
+              // DEBUG (temporary): show exactly what arrived, not just that
+              // it was wrong -- printable bytes as chars, everything else as
+              // hex, so a control/garbage byte in the header is visible.
+              Serial.printf("FTFAIL bad header: n_got=%u numbuf=[", (unsigned)n_got);
+              for (size_t i = 0; i < n_got; ++i)
+                isprint((unsigned char)numbuf[i]) ? Serial.write(numbuf[i])
+                                                  : Serial.printf("\\x%02X", (unsigned char)numbuf[i]);
+              Serial.printf("] l_got=%u lenbuf=[", (unsigned)l_got);
+              for (size_t i = 0; i < l_got; ++i)
+                isprint((unsigned char)lenbuf[i]) ? Serial.write(lenbuf[i])
+                                                  : Serial.printf("\\x%02X", (unsigned char)lenbuf[i]);
+              Serial.println("]");
+              while (Serial.available()) Serial.read();  // drop whatever else is queued
+              Serial.setTimeout(saved_timeout);
+              break;
+            }
+            const uint32_t len = strtoul(lenbuf, nullptr, 16);
+            // Sanity cap: nothing this bench test sends is anywhere near
+            // this size, and refusing outright beats a multi-hour loop
+            // waiting for bytes that were never coming, if the header ever
+            // does get misparsed despite the checks above.
+            if (len > 2000000UL) {
+              Serial.println("FTFAIL length too large");
+              Serial.setTimeout(saved_timeout);
+              break;
+            }
+            char fname[12];
+            snprintf(fname, sizeof(fname), "%s.WAV", numbuf);
+            SD.remove(fname);
+            File f = SD.open(fname, FILE_WRITE);
+            if (!f) { Serial.println("FTFAIL open"); Serial.setTimeout(saved_timeout); break; }
+            // Header parsed and file opened -- explicitly hand back to the
+            // sender before it sends a single payload byte. The small USB-
+            // CDC RX ring buffer overflows (silently, oldest bytes lost) if
+            // the sender blasts header+payload as one continuous stream
+            // faster than loop() drains it; this handshake keeps the
+            // payload from ever starting until we're actually ready to
+            // drain it chunk by chunk.
+            Serial.println("FTGO");
+            uint32_t remaining = len;
+            uint8_t buf[512];
+            while (remaining && ok) {
+              watchdog_feed();
+              const size_t chunk = remaining < sizeof(buf) ? remaining : sizeof(buf);
+              const size_t n = Serial.readBytes((char *)buf, chunk);
+              if (n != chunk) { ok = false; break; }
+              f.write(buf, n);
+              remaining -= n;
+            }
+            watchdog_feed();
+            f.close();
+            watchdog_feed();
+            Serial.setTimeout(saved_timeout);
+            Serial.printf("%s %s (%lu bytes)\n", ok ? "FTOK" : "FTFAIL short",
+                          fname, (unsigned long)(len - remaining));
+            break;
+          }
           case 'l':
             Serial.println(" -=- LittleFS -=- ");
             PhzConfig::listFiles();
