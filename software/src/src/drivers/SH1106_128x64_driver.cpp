@@ -435,6 +435,22 @@ void SH1106_128x64_Driver::SetContrast(uint8_t contrast) {
 }
 
 /*static*/
+void SH1106_128x64_Driver::SetDisplayOn(bool on) {
+  // 0xAF/0xAE -- display on / display off (sleep). Same single-command-frame
+  // pattern as SetInverted above.
+  //
+  // Deliberately NOT written back into SH1106_init_seq: its first byte is
+  // already 0xAE and the sequence ends by turning the panel on, so a reset or
+  // reboot must always come up lit. A module that booted dark would be
+  // indistinguishable from a dead one.
+  uint8_t cmd = on ? 0x0af : 0x0ae;
+  digitalWriteFast(OLED_DC, LOW);
+  digitalWriteFast(OLED_CS, OLED_CS_ACTIVE);
+  SPI_send(&cmd, 1);
+  digitalWriteFast(OLED_CS, OLED_CS_INACTIVE);
+}
+
+/*static*/
 void SH1106_128x64_Driver::SetInverted(bool inverted) {
   // Update the init sequence so a future Init() (reset/reboot) keeps this
   // setting, then send the SSD1306/SH1106 INVERTDISPLAY/NORMALDISPLAY

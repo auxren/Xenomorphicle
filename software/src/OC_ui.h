@@ -277,6 +277,21 @@ private:
   uint32_t ticks_ = 0;
   uint32_t screensaver_timeout_ = 120;
 
+  // Panel sleep. The screensaver replaces what is drawn; this turns the OLED's
+  // drive off entirely, because a screensaver still lights pixels and an OLED
+  // ages the pixels it lights. Nothing in this firmware ever stopped drawing:
+  // AppBase::Draw() calls DrawScreensaver() for as long as the module idles, so
+  // before this a module left powered held a static image indefinitely -- and
+  // gfxHeader() draws a 128-pixel full-width rule, which is the worst shape for
+  // burn-in there is.
+  //
+  // Ten minutes, in milliseconds, matched against event_queue_.idle_time().
+  // Note this fires BEFORE the default screensaver (25 minutes, because the
+  // stored seconds get a * 60 at the comparison), which is deliberate: a dark
+  // panel protects the display better than any animation can.
+  static constexpr uint32_t kDisplaySleepMs = 10UL * 60UL * 1000UL;
+  bool display_asleep_ = false;
+
   UI::Button buttons_[CONTROL_BUTTON_LAST];
   uint32_t button_press_time_[CONTROL_BUTTON_LAST];
   uint16_t button_state_ = 0;

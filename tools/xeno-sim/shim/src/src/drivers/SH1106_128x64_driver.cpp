@@ -27,6 +27,7 @@
 namespace {
 uint8_t g_panel[SH1106_128x64_Driver::kFrameSize];
 bool g_inverted = false;
+bool g_display_on = true;
 bool g_flipped = false;
 uint8_t g_contrast = 0;
 uint8_t g_offset = SH1106_128x64_Driver::kDefaultOffset;
@@ -36,6 +37,7 @@ uint8_t g_offset = SH1106_128x64_Driver::kDefaultOffset;
 // 128 + x] -- the same bytes the panel is sent, in the same order.
 const uint8_t *SimPanelBytes() { return g_panel; }
 bool SimPanelInverted() { return g_inverted; }
+bool SimPanelDisplayOn() { return g_display_on; }
 bool SimPanelFlipped() { return g_flipped; }
 uint8_t SimPanelContrast() { return g_contrast; }
 uint8_t SimPanelOffset() { return g_offset; }
@@ -70,3 +72,4 @@ void SH1106_128x64_Driver::ChangeSpeed(uint32_t) {}
 void SH1106_128x64_Driver::SetFlipMode(bool flip180) { g_flipped = flip180; }
 void SH1106_128x64_Driver::SetContrast(uint8_t contrast) { g_contrast = contrast; }
 void SH1106_128x64_Driver::SetInverted(bool inverted) { g_inverted = inverted; }
+void SH1106_128x64_Driver::SetDisplayOn(bool on) { g_display_on = on; }

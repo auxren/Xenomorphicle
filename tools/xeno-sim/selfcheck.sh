@@ -1493,6 +1493,50 @@ $SIM --app "Tweighty" --keys "$SW" --dump-fb 2>/dev/null | python3 edgecheck.py 
   && ok "no clipped text on the app switcher" \
   || bad "something on the app switcher is clipped at the right edge"
 
+echo "the panel sleeps when the module is left alone"
+
+# An OLED ages the pixels it lights, and nothing in this firmware ever stopped
+# drawing: AppBase::Draw() calls DrawScreensaver() for as long as the module
+# idles, so a module left powered held a static image indefinitely -- with
+# gfxHeader()'s 128-pixel full-width rule, the worst shape for burn-in there
+# is. Ui now turns the panel's DRIVE off after ten minutes idle.
+#
+# These assert on `panel=` from the status line, NOT on a blank framebuffer.
+# An app whose screensaver draws nothing and a panel that is genuinely asleep
+# both dump an all-zero frame; only one of them stops the display ageing, and
+# an early version of this check could not tell them apart.
+#
+# Margins are wide on purpose: `step` advances simulated time a couple of
+# percent over what is asked, so a check written tight against 600000 would
+# sit right on the boundary and flap.
+panel_state() { $SIM "$@" 2>&1 | grep -oE 'panel=[a-z]+' | tail -1; }
+
+# A press well inside the window leaves it lit.
+[ "$(panel_state --app Scenery --keys 'a-down,step20,a-up,step400000')" = "panel=on" ] \
+  && ok "the panel stays lit while the module is in use" \
+  || bad "the panel slept while still inside the idle window"
+
+# Left alone past ten minutes, the drive goes off.
+[ "$(panel_state --app Scenery --keys 'a-down,step20,a-up,step700000')" = "panel=asleep" ] \
+  && ok "the panel sleeps after ten minutes idle" \
+  || bad "the panel was still lit after ten minutes idle"
+
+# Every control wakes it. This is derived from idle_time() rather than hooked
+# to a wake path, so there is no control that can be forgotten -- assert that
+# for a button and for BOTH encoders rather than trusting the argument.
+for k in a z encr+ encl+ encr- encl-; do
+  [ "$(panel_state --app Scenery --keys "a-down,step20,a-up,step700000,$k,step200")" = "panel=on" ] \
+    && ok "'$k' wakes the sleeping panel" \
+    || bad "'$k' did not wake the sleeping panel"
+done
+
+# And it wakes showing the live screen, not a stale or empty one: the firmware
+# keeps flushing to a sleeping panel, which is exactly what makes this true.
+$SIM --app Scenery --keys "a-down,step20,a-up,step700000,a,step200" --dump-fb 2>/dev/null \
+  | grep -qE '[1-9a-fA-F]' \
+  && ok "the woken panel shows a drawn screen, not a blank one" \
+  || bad "the panel woke to an empty frame"
+
 echo "hold Z reveals the chord list"
 
 # Every global gesture here is an unlabelled chord, which is fine once and

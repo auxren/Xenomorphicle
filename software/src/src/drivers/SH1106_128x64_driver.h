@@ -46,6 +46,10 @@ struct SH1106_128x64_Driver {
   static void SetFlipMode(bool flip180);
   static void SetContrast(uint8_t contrast);
   static void SetInverted(bool inverted);
+  // Panel power. Not a blank screen -- 0xAE turns the OLED's drive off, so
+  // no pixel is lit and nothing ages. Blanking the framebuffer would still
+  // sweep every row; this stops the panel entirely.
+  static void SetDisplayOn(bool on);
 };
 
 #endif // SH1106_128X64_DRIVER_H_

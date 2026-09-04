@@ -133,6 +133,21 @@ void SimMidiPortBase::send(uint8_t t, uint8_t d1, uint8_t d2, uint8_t ch, uint8_
 // --- the panel -------------------------------------------------------------
 void SimPanelVisible(uint8_t out[1024]) {
   const uint8_t *src = SimPanelBytes();
+  // NOTE: this deliberately reports the FRAMEBUFFER, not what the eye sees.
+  // When the panel is asleep (0xAE) the firmware keeps flushing to it, so the
+  // buffer still holds the live screen and nothing is lit.
+  //
+  // An earlier version zeroed the frame while asleep, on the reasoning that a
+  // capture should show what a person would see. That broke an existing check
+  // outright -- the provenance-row test ages a bank by 700 simulated seconds
+  // and then reads the screen, which is past the sleep threshold, so it read a
+  // blank panel and could no longer see the row it exists to assert. The same
+  // trap that reverted L-06 step 1: a change that removes the harness's only
+  // view of the thing it is checking.
+  //
+  // So the two questions stay separate. --dump-fb answers "what is drawn";
+  // the status line's panel= answers "is the display lit". Both are needed and
+  // neither substitutes for the other.
   if (SimPanelInverted())
     for (int i = 0; i < 1024; ++i) out[i] = (uint8_t)~src[i];
   else

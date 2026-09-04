@@ -273,6 +273,23 @@ UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
   if (idle_time() > (screensaver_timeout() * 60) && !preempt_screensaver_)
     screensaver_ = true;
 
+  // Panel sleep, evaluated from idle_time() every pass rather than latched on
+  // an edge: idle_time() is millis() - last_event_time_, so it is already reset
+  // by ANY event from ANY control (ui_event_queue.h). Deriving the state
+  // instead of hooking a wake-up path means there is no gesture that can turn
+  // the panel off and no path back on that can be missed -- if the module is
+  // being touched, the display is on, by construction.
+  //
+  // The SPI command only goes out on a transition, so the steady state costs
+  // one comparison per pass. The framebuffer keeps flushing while asleep, which
+  // is harmless (the panel accepts data with its drive off) and is what lets it
+  // come back showing the current screen rather than a stale one.
+  const bool should_sleep = idle_time() > kDisplaySleepMs;
+  if (should_sleep != display_asleep_) {
+    display_asleep_ = should_sleep;
+    display::SetDisplayOn(!should_sleep);
+  }
+
   if (screensaver_) {
     return UI_MODE_SCREENSAVER;
   } else if (jump_to_menu_) {

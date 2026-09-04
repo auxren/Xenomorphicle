@@ -348,9 +348,15 @@ const char *SimRuntimeAppName() {
 
 std::string SimRuntimeStatusLine() {
   char buf[256];
-  snprintf(buf, sizeof(buf), "%s  app=%s  held=[%s]  t=%ums  ticks=%lu",
+  // panel= reports the OLED's DRIVE state, which is not the same question as
+  // whether the framebuffer is blank. An app whose screensaver draws nothing
+  // and a panel that has been put to sleep both dump an all-zero frame, so a
+  // capture alone cannot tell them apart -- and only one of the two stops the
+  // display ageing. Say it explicitly rather than leaving it to be inferred.
+  snprintf(buf, sizeof(buf), "%s  app=%s  held=[%s]  t=%ums  ticks=%lu  panel=%s",
            SimRuntimeScreen(), SimRuntimeAppName(),
            SimInputHeldTokens().c_str(), SimNowMs(),
-           (unsigned long)OC::ui.ticks());
+           (unsigned long)OC::ui.ticks(),
+           SimPanelDisplayOn() ? "on" : "asleep");
   return buf;
 }
