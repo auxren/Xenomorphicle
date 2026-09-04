@@ -149,3 +149,158 @@ under test was the one carrying the fix.
   walking folders walks the instrument through apps, and a script that turns the
   folder has changed the running app by the time it captures. Flagged for UX
   review; not changed here.
+
+## Corrections to earlier claims in this log
+
+Both of these are claims I made tonight and then disproved. Recorded because a
+wrong claim that sounds confident is worse than an admitted gap, and one of
+them is already in a commit message where it will outlive this session.
+
+**The app switcher does NOT commit the app as the cursor moves.** Commit
+`3c27a768`'s message says it does. That is wrong. Tested directly: open the
+switcher, turn `encL` to another folder, press `encL` to cancel -- the module
+returns to the app it started in, unchanged. It also does not time out within
+5 s of sitting open. Something across the longer gaps between bench sessions
+did commit the app under the cursor, but I did not pin the mechanism down and
+am not going to guess at one. What is verified: `encR` press picks, `encL`
+press cancels, and cursor movement alone changes nothing.
+
+**Framebuffer captures can tear.** One capture of Setup/About decoded as
+garbled wrapped text -- runs starting mid-word at x=0 on the following row --
+and the identical screen decoded cleanly moments later with no input in
+between. So a garbled decode is worth one retry before it is believed to be a
+rendering bug. Several confusing captures earlier tonight were this, not the
+firmware.
+
+## Finding H-02 -- `-fpermissive` is on for every target build
+
+**Verified, and it reaches well past tonight.**
+
+Commit `3e2893be`'s message, and the comment at `SegmentDisplay.h:147-148`,
+both say `arm-none-eabi-g++` accepted a const violation that Apple clang
+rejected. That is false. GCC rejects it too. What actually lets it through is
+**`-fpermissive`, injected by the PlatformIO Teensy platform builder** at
+`~/.platformio/platforms/teensy/builder/frameworks/arduino.py:111` and `:157`
+-- not from `platformio.ini`, which is why nobody looking at this repo would
+find it.
+
+So every target build downgrades that whole class of error to a warning. More
+const violations of the same kind are very likely still in the tree, and the
+**only** thing that will ever find them is the clang-based simulator -- which
+builds 6 apps of 15 and neither Hemisphere nor Quadrants. That is a standing
+hole in the safety net, not a one-off bug.
+
+## Known gap in tonight's own work
+
+The roster stamp added in `5f4c7b69` (HIGH 2) is new behaviour and, by this
+program's own rule, owes a new self-check. It does not have one. The simulator
+compiles `OC_apps.cpp` so the code is built, but `selfcheck.sh` drives only
+through `--keys` and framebuffer capture, and there is no way to pre-seed a
+stored arrangement carrying a mismatched stamp without adding a new simulator
+entry point. That is real work and it was not done. **The stamp-refusal path is
+therefore build-verified and reasoned about, but not exercised by any test.**
+
+One consequence worth stating plainly: a module that already has a stored
+arrangement written before this commit has no stamp, so the fix **resets that
+arrangement to defaults exactly once** on upgrade. That is deliberate -- bits
+that cannot be attributed to a roster must not be reinterpreted -- and in
+practice it affects nobody, because folders shipped only hours earlier the same
+night.
+
+## What the bench harness can and cannot test (measured, not assumed)
+
+The correctness review's MEDIUM 3 says `hwctl.py` "cannot test any
+LONG_PRESS/LONG_RELEASE distinction". Tested on hardware, and the truth is
+narrower and more useful than that:
+
+- **Injection DOES deliver `LONG_PRESS`.** Sending the hold form of Z while
+  Quadrants was on screen raised `Clock Armed` immediately -- Quadrants acts on
+  the event when it arrives, so it works.
+- **A consumer that LATCHES on `LONG_PRESS` and CLEARS on `LONG_RELEASE` never
+  sees it.** `ConsolePress` (Main.cpp:386-391) queues DOWN, LONG_PRESS and
+  LONG_RELEASE back to back and `AppSettings` drains all three in one
+  while-loop pass, so `save` is set true and then false again before it is
+  tested. On a real panel those land in different `loop()` passes. This is the
+  app switcher's hold-to-save specifically, not holds in general.
+- **Anything driven by SUSTAINED BUTTON-DOWN DURATION cannot be expressed at
+  all.** The chord card's 700 ms hold and its progress bar need a button to
+  stay down over time; injection has no sustained down-state to offer, only
+  discrete events. Holding Z through the harness never raised the card.
+
+So the chord card is **not automatable through this harness**. Its hardware
+verification remains the manual one Oren did on 2026-09-03. Any future claim
+that a self-check "covers the chord card on hardware" is false by construction
+unless the console gains a real press-and-hold-for-N-ms injection.
+
+## Delay standalone app: hardware QA of `d85d556d`
+
+Flashed T41_console (FLASH 565,096 / RAM1 96,992 / RAM2 137,280, free 387,008
+-- the implementer's reported figures reproduced exactly). Driven over serial.
+
+| Check | Result |
+| --- | --- |
+| Appears in the AUDIO folder | PASS, 4th of 5 |
+| Full-width 128px layout, not a 64px render | PASS |
+| MAIN / MODE / CV pages render | PASS, all three |
+| encR press cycles pages | PASS, MAIN -> MODE -> CV -> MAIN |
+| encL press returns to MAIN | PASS |
+| encR turn edits the cursor row | PASS, Time 0.50s -> 0.65s |
+| A toggles bypass | PASS, footer reads `BYPASSED - A:active` and back |
+| Right-edge clipping (`edgecheck.py`) | PASS on all three pages |
+| L-06: exactly one inverted region | PASS, the cursor band only |
+| **Does not strand the instrument** | PASS, z+r opens the switcher from inside Delay |
+
+**The pixel arithmetic was right.** Every predicted x-coordinate reproduced on
+the panel: labels x=4, Time value x=97, Fdbk value x=115, Wet value x=109,
+footer x=1, header x=1. That is worth stating because this project's history is
+that pixel maths reviewed on paper has been wrong more than once.
+
+### A bug I nearly reported, and did not
+
+Delay first appeared to open on the MODE page rather than MAIN, which would
+have been an entry-gesture leak -- the switcher commits on encR RELEASE, and
+that release reaching the new app would cycle the page. That is a real hazard
+class here and it was fixed once already in `be1573c3`.
+
+It was not happening. Re-entry lands on MAIN and stays there, and `page_` is
+initialised properly at `apps/DelayApp.h:178`. The giveaway was the Time value
+reading **0.65s instead of the 0.50s default**: an earlier bench session had
+left the switcher open, it committed Delay between sessions, and the three
+encoder turns I thought were moving a switcher cursor were raising Time by
+0.05s each -- after which my "pick" press was just a page cycle in an app that
+was already running.
+
+Recorded because the false version was more interesting than the truth, and
+because it is the second time tonight that the switcher committing between
+bench sessions produced a confusing result.
+
+### Verified by accident: the roster stamp works
+
+Adding DelayApp took the roster from 15 apps to 16, so the stored
+position-indexed folder words no longer matched `AppFolderRosterStamp()`. The
+arrangement I had made by hand earlier in the night (Tweighty moved to SYSTEM)
+was **refused and re-seeded to the ID-keyed defaults**, and Tweighty came back
+in AUDIO where its default says it belongs.
+
+That is HIGH 2 doing exactly its job, in exactly the scenario it was written
+for, on real hardware -- and it happened without being staged. Without it those
+nibbles would have been reinterpreted against a shifted roster and the taxonomy
+would have quietly scrambled.
+
+### Still NOT verified, and cannot be from this bench
+
+- **Whether it makes sound.** Claiming `kOutputRouteEffectSlot` is a
+  build-verified claim. Nothing here can hear the module.
+- **The CLOCK time unit** on the MODE page (the path needing
+  `ClockSetup_instance.Controller()` pumped per tick).
+- **The ~10.9 s maximum delay**, which is arithmetic on AUDIO_SAMPLE_RATE_EXACT
+  and has never been timed.
+- **The A2 reverb decay change**, unverified by ear.
+
+### One design question for Oren
+
+The Time bar's range is 0..10,921 ms, so a 500 ms delay fills **2 pixels of
+52** and reads as empty. Every musically common delay time (100 ms - 1 s) sits
+in the bottom 10% of that bar. The arithmetic is right and the display is
+useless, which is a scale choice, not a bug. A log or dual-rate scale would fix
+it. Not changed unattended because it is a design decision.
