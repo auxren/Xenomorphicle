@@ -145,10 +145,18 @@ under test was the one carrying the fix.
 - **The chord needs ~800 ms of settle** before the following key. At 600 ms the
   chord was intermittently missed and the key went to the app instead. Several
   confusing captures came from this before it was pinned down.
-- **The switcher activates the app under the cursor as the cursor moves**, so
-  walking folders walks the instrument through apps, and a script that turns the
-  folder has changed the running app by the time it captures. Flagged for UX
-  review; not changed here.
+- **RETRACTED, see the corrections section below: the switcher does NOT
+  activate the app under the cursor as the cursor moves.** That is what it
+  looked like from the bench and it is wrong. `set_current_app()` is called at
+  exactly one place, `OC_apps.cpp:288`, guarded by `if (change_app)`, and
+  `change_app` is set at exactly one place, `case CONTROL_BUTTON_R` at `:224`.
+  The `CONTROL_ENCODER_L` and `CONTROL_ENCODER_R` cases (`:170`, `:175`) never
+  touch it, and `APP_SELECTION_TIMEOUT_MS` (`:163`) expiring leaves it false --
+  so an idle timeout closes the switcher WITHOUT switching apps.
+
+  What actually changed the running app between bench sessions was the harness:
+  sending `z+r` while the switcher was ALREADY open injects an encR PRESS into
+  it, which is a pick. The confusing app changes were self-inflicted.
 
 ## Corrections to earlier claims in this log
 
