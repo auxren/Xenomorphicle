@@ -648,3 +648,68 @@ The ~90 `S`/`P`/`V`/`F` applet sites in §4.3. See §6.
    and "Bus recall OK" are **silently swallowed** in Tweighty, Sampler, the 200e
    app and Setup/About. That is not an L-06 finding and I have not chased it,
    but it looks like a real one and it is worth its own pass.
+
+---
+
+# ATTEMPTED AND REVERTED: Step 1 is not safe to ship as specified
+
+Step 1 was implemented in full (all seven sites) and then **reverted**. The
+attempt is what found the problem, so it is recorded rather than discarded.
+
+## What happened
+
+The change builds on both envs. It then **failed four simulator self-checks**:
+
+```
+FAIL  the recovery cursor did not start on keep (on: '')
+FAIL  the recovery cursor stayed on UNDO through a second verdict
+FAIL  the recovery cursor did not move on an encL detent
+```
+
+## Why that is a real objection and not a stale test
+
+Two separate problems, and the second is the serious one.
+
+**1. It destroys the automated check, not just the assertion.** `selfcheck.sh`'s
+`cursor_on()` helper finds the cursor by extracting the INVERTED run at y=56
+from `fbtext.py`. A drawn frame is invisible to a glyph decoder -- `fbtext.py`
+matches 6x8 glyph cells and reports nothing about a rectangle around them. So
+replacing inversion with a frame does not break a wording assertion; it removes
+the only means the harness has of seeing where that cursor is. **Every step of
+this migration has the same property**, which the plan above did not account
+for: the migration systematically converts cursor state from something the text
+decoder can read into something only a pixel probe can read.
+
+**2. It reduces prominence on the most destructive screen in the instrument.**
+The recovery row is reached by being told your module is damaged, and one of its
+two entries rewrites **63,120 bytes**. The self-check's own comment records why
+it exists: *"the reflex answer to a verdict is encR"*. The row's selection is
+what that reflex acts on. Swapping a filled inversion for a thin outline makes
+the dangerous selection quieter, which is the wrong direction on that screen
+regardless of what the grammar says.
+
+There is also a genuine grammar edge case here that the plan did not weigh:
+L-06 is about what encR **turns**, but on this row encR **presses** to commit
+the selection. "encL chooses, encR fires" is not the case the rule was written
+for, and a row where the encR press is destructive has a safety claim on
+prominence that the grammar does not override.
+
+## What has to happen first
+
+1. **Build the pixel probe before touching any cursor.** The plan's own Step 0
+   (sim goldens) is not optional and is not sufficient: the harness needs a way
+   to ASSERT a frame, e.g. `framecheck.py <fb> <x> <y> <w> <h>`, so a converted
+   cursor stays checkable. Written once, it serves every later step.
+2. **Convert the checks in the same commit as the code**, not after. A step that
+   lands with checks failing cannot be distinguished from a step that broke
+   something.
+3. **Treat the recovery row as an explicit exception, or argue it out with
+   Oren.** It is the one row where prominence is a safety property.
+
+## What was NOT in question
+
+The `Slot %d` half of Step 1 is straightforwardly right and carries none of
+this: `slot_` is the encR target (`:2898-2922`, verified -- encR drives only
+`slot_`; `recover_cursor_`, `ScrollRows` and `action_` are all in the `else if
+(CONTROL_ENCODER_L)` branch at `:2923-2941`), it was the one element on the
+screen NOT inverted, and inverting it breaks no check. It could ship alone.
