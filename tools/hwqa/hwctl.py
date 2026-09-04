@@ -13,12 +13,35 @@ builds all of them. A check that passes in the simulator and a check that
 passes here are different claims, and only the second one is about the
 instrument.
 
-TWO THINGS TO KNOW BEFORE USING IT:
+THREE THINGS TO KNOW BEFORE USING IT:
 
 The console ignores every byte until it receives the literal "pew!", and
 re-locks on every reboot and every flash. Silence is the locked state, not a
 dead module -- hosts probe new CDC ports with AT/MBIM byte soup and real
 commands were being hit by it ('D' froze the display, '(' fired preset saves).
+
+THE UNLOCK TOKEN IS ITSELF MADE OF COMMANDS, so it must never be sent to a
+console that is already unlocked. Main.cpp only feeds the unlock shift register
+while LOCKED; once unlocked, every byte dispatches through the command switch,
+and "pew!" then reads as four commands:
+
+    'p'  toggle the preset-bus overlay        (Main.cpp:1521)
+    'e'  unrecognised -> framebuffer capture
+    'w'  begin "patch a byte in the resident card image", which then eats
+         the next 6 bytes as hex digits       (Main.cpp:1550)
+    '!'  not a hex digit, so it cancels the pending patch
+
+The net effect is that a second unlock silently TOGGLES THE PRESET-BUS OVERLAY
+over whatever app is running, and any bytes arriving between 'w' and a non-hex
+byte are swallowed as patch digits instead of being obeyed. Observed on
+hardware 2026-09-03: three consecutive invocations returned three different
+screens (an app screen, the preset-bus overlay, then a frame short enough to
+decode as blank) purely from re-unlocking. No bus traffic results -- 'p' is
+display-only and 'w' patches a RAM image and says so -- but every panel script
+run through a re-unlocked console is measuring the wrong thing.
+
+So unlock() PROBES FIRST and only sends the token if the console is actually
+locked. Do not "simplify" it back into an unconditional write.
 
 Capture is triggered by the DEFAULT branch of the console's command switch, so
 the capture byte must be one the firmware does not recognise. '~' is used here.
@@ -60,8 +83,57 @@ class Panel:
         if self.verbose:
             print(*a, file=sys.stderr)
 
+    def _settle_argument_state(self):
+        """Cancel any half-finished multi-byte command argument.
+
+        Several console commands read their argument from the following bytes
+        ('w' wants 6 hex digits, 'm'/'q'/'x' want 2, 'A' wants 2, 'j' and 'o'
+        want 1 or 2 control characters). A script that died mid-argument, or a
+        stray unlock's 'w', leaves the console waiting -- and the next thing we
+        send is eaten as an argument rather than obeyed.
+
+        '!' is not a command and not a hex digit, so every one of those pending
+        readers cancels on it, and the command switch's default branch treats
+        it as a capture request. Sending a few is therefore always safe and
+        always clears the decks.
+        """
+        self.ser.write(b"!!!")
+        self.ser.flush()
+        time.sleep(0.15)
+        self.ser.reset_input_buffer()
+
+    def is_unlocked(self, timeout=1.5):
+        """True if the console answers a capture request.
+
+        A locked console answers nothing at all, so a frame coming back is
+        proof of an unlocked one. This is the whole reason unlock() is safe to
+        call repeatedly -- see the module docstring on why sending the token
+        twice toggles the preset-bus overlay.
+        """
+        self.ser.reset_input_buffer()
+        self.ser.write(CAPTURE_BYTE)
+        self.ser.flush()
+        got = 0
+        deadline = time.time() + timeout
+        while got < FRAME_HEXCHARS and time.time() < deadline:
+            chunk = self.ser.read(256).decode("ascii", "ignore")
+            got += sum(1 for c in chunk if c in "0123456789abcdefABCDEF")
+        self.ser.reset_input_buffer()
+        return got >= FRAME_HEXCHARS
+
     def unlock(self):
-        """Send the console's unlock token. Required after every boot/flash."""
+        """Unlock the console, but ONLY if it is actually locked.
+
+        Required after every boot and every flash. Sending the token to an
+        already-unlocked console executes it as commands and toggles the
+        preset-bus overlay over whatever app is running; see the module
+        docstring. So: clear any pending argument, ask for a frame, and send
+        the token only if nothing came back.
+        """
+        self._settle_argument_state()
+        if self.is_unlocked():
+            self.log("already unlocked -- token not sent")
+            return
         self.ser.write(b"pew!")
         self.ser.flush()
         time.sleep(0.3)
