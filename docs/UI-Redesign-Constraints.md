@@ -138,6 +138,19 @@ columns 126-127 should be uniform" -- a graphic drawn through a text band breaks
 that assumption without anything being clipped. Expect the same on any screen
 that draws a meter, waveform or bar through a row that also carries text.
 
+**A third false positive: text under an inverted cursor band.** Verified on
+hardware 2026-09-04 against Bungverb's MAIN page, which reports `y=17 CLIPPED`
+while Reverb's identically-laid-out page does not. Nothing is clipped -- the
+value decodes complete as `1.0s`. The cause is the cursor band itself:
+`invertRect(0, y-1, 128, 10)` spans the FULL width, so column 127 is lit solid
+through the band (measured: rows 12-20 lit on both apps), and inside the band a
+glyph's ink inverts to dark, leaving column 126 part-lit in the shape of the
+inverted glyph. The check cannot tell an inverted glyph from a clipped one.
+
+This one matters more than the other two, because it fires precisely where the
+L-06 migration works: **every row carrying the encR cursor is a row where
+edgecheck is least trustworthy.**
+
 **And a defect class edgecheck CANNOT see at all.** It looks for a PARTIALLY
 drawn glyph in columns 126-127, because a 22nd character starts at x=126 and two
 of its columns fit. A string long enough that the surplus glyphs are clipped away

@@ -713,3 +713,38 @@ this: `slot_` is the encR target (`:2898-2922`, verified -- encR drives only
 `slot_`; `recover_cursor_`, `ScrollRows` and `action_` are all in the `else if
 (CONTROL_ENCODER_L)` branch at `:2923-2941`), it was the one element on the
 screen NOT inverted, and inverting it breaks no check. It could ship alone.
+
+
+---
+
+# FOR OREN: the rule itself has a gap, and it changes the scope
+
+**This needs deciding before the migration resumes. It cannot be derived from
+the existing rule.**
+
+L-06 says: *invert exactly what the right encoder will CHANGE.* That is
+unambiguous for a row whose value encR TURNS. It says nothing about a row where
+**encL chooses between entries and encR PRESSES to fire the chosen one.**
+
+The recovery prompt is exactly that shape, and it is why Step 1 was reverted:
+encR is not turning anything, so a strict reading says do not invert -- but encR
+is unambiguously the control that ACTS, and the highlighted entry is
+unambiguously what it will act on, and on that particular row what it acts on
+rewrites 63,120 bytes.
+
+**It is a whole class, not one screen.** Every confirm, arm and commit row in
+the instrument has this shape: the 200e arm/confirm carve-out, `ConfirmReset`,
+the bootloader arm. The migration plan above assumed the rule covered them. It
+does not.
+
+**The choice, stated as a choice rather than a recommendation:**
+
+- **(A) L-06 extends to "what encR will ACT on."** Press-to-fire rows keep their
+  inversion. The migration gets materially SMALLER, several planned changes
+  disappear, and the dangerous rows keep the prominence they have today.
+- **(B) L-06 stays strictly "what encR TURNS."** Press-to-fire rows need a third
+  convention that is neither inversion nor a leading cursor caret, and somebody
+  has to design it -- on the screens where being misread is most expensive.
+
+The answer changes the scope of everything below Step 1, so it is worth five
+minutes before any of it is written.
