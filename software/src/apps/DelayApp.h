@@ -237,12 +237,44 @@ FLASHMEM void AppDelay::DrawMain() const {
     default: {
       const int lo = delay_applet.MinDelayMs(), hi = delay_applet.MaxDelayMs();
       const int ms = delay_applet.GetDelayMs();
-      const float span = (float)(hi - lo);
       // Same %d.%02ds Tweighty uses for its own Time field (:626), so the two
       // screens read a delay time the same way.
       snprintf(buf, sizeof(buf), "%d.%02ds", ms / 1000, (ms % 1000) / 10);
-      S::ParamRow(M_TIME, "Time:", span > 0.0f ? (float)(ms - lo) / span : 0.0f,
-                  buf);
+      // LOG, not linear. The range here is about 3ms to 10.9s -- a ratio of
+      // roughly 3600:1 -- and a linear bar spends almost all of its 52 pixels
+      // on times nobody dials. Measured against the real bounds:
+      //
+      //        ms      linear      log
+      //        10        0 px      8 px
+      //        50        0 px     18 px
+      //       100        0 px     22 px
+      //       250        1 px     28 px
+      //       500        2 px     32 px
+      //      1000        5 px     37 px
+      //
+      // Linear renders EVERY delay under 250ms as an empty bar, which is most
+      // of the musically useful range and the whole of the slapback end. The
+      // bar was not merely coarse there, it was blank -- unreadable as a
+      // quantity and indistinguishable from "no value set".
+      //
+      // Log is also the honest curve rather than a cosmetic stretch: delay
+      // time is heard as a RATIO, not a difference. Doubling 50ms to 100ms is
+      // the same musical step as doubling 1s to 2s, and a log bar gives those
+      // two the same width. HZ mode already reads well for exactly this
+      // reason -- pitch is logarithmic in frequency -- so this makes SECS
+      // agree with a mode that was already right, rather than inventing a
+      // scale for one row.
+      // MinDelayMs() is (ChunkSize + 2) / 48000 seconds turned into whole
+      // milliseconds -- 10/48000 s is 0.208 ms, which truncates to ZERO. A
+      // log needs a non-zero floor, and an earlier version of this guarded
+      // with `lo > 0` and so disabled itself silently on every build: the bar
+      // read empty at every delay time, which looked exactly like the linear
+      // bug it was meant to fix. Found on hardware, not in review.
+      const float floor_ms = lo > 0 ? (float)lo : 1.0f;
+      float frac = 0.0f;
+      if ((float)hi > floor_ms && (float)ms > floor_ms)
+        frac = logf((float)ms / floor_ms) / logf((float)hi / floor_ms);
+      S::ParamRow(M_TIME, "Time:", frac, buf);
       break;
     }
   }
