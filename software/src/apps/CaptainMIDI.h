@@ -172,7 +172,7 @@ struct CaptainMIDILog {
     int16_t data1;
     int16_t data2;
 
-    void DrawAt(int y) {
+    void DrawAt(int y) const {
         if (message == 5) {
             int app_code = static_cast<char>(data1);
             if (app_code > 0) {
@@ -1821,7 +1821,7 @@ private:
         }
     }
 
-    void DrawLogScreen() {
+    void DrawLogScreen() const {
         gfxHeader("IO Ch Type  Values");
         if (log_index) {
             for (int l = 0; l < 6; l++)
@@ -1842,7 +1842,7 @@ private:
         }
     }
 
-    void DrawCopyScreen() {
+    void DrawCopyScreen() const {
         gfxHeader("Copy");
 
         graphics.setPrintPos(8, 28);

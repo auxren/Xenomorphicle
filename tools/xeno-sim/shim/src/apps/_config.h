@@ -7,10 +7,13 @@
 // app classes, the app switcher that lists them -- is the real thing, and each
 // app below is the firmware's own header, unmodified.
 //
-// Which apps are here, which are not, and why, is in README.md. Three of the
-// missing ones are blocked by the same firmware issue: they call a non-const
-// member from a const draw path, which arm-none-eabi-g++ accepts and clang
-// rejects. See README.md, "Apps that are not simulated".
+// Which apps are here, which are not, and why, is in README.md. The
+// const-correctness issue that used to block Captain MIDI, Calibr8or and
+// Scale Editor is fixed; each now compiles under clang. They are still absent
+// because three unrelated blockers sat behind it -- a 4-vs-5 argument
+// usbMIDI.send() in this shim, a real int8_t truncation in ScaleEditor, and
+// cursor_countdown being undefined in a NO_HEMISPHERE build. See README.md,
+// "Apps that are not simulated".
 namespace menu = OC::menu;
 
 // The firmware's redraw flag lives in Main.cpp and is declared by whichever

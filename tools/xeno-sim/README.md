@@ -263,18 +263,31 @@ it. This build carries six apps:
   (`applets/_config.h`, ~60 applets and the audio applet chain). This is the
   big one, and it is the largest single gap in coverage: much of the module's
   UI lives in Hemisphere. It is a project, not a shim.
-* **Captain MIDI**, **Calibr8or**, **Scale Editor** — blocked by a **firmware
-  portability issue, not by the simulator**. Each calls a non-`const` member
-  from a `const` draw path:
-  * `apps/CaptainMIDI.h:393-394` — `MainView() const` calls `DrawCopyScreen()`
-    and `DrawLogScreen()`
-  * `apps/Calibr8or.h:755,757` and `apps/ScaleEditor.h:192-213` — a `const`
-    draw method calls `SegmentDisplay::PrintWhole()` / `PrintDecimal()`
+* **Captain MIDI**, **Calibr8or**, **Scale Editor** — the const-correctness
+  issue that blocked these is **fixed**. Each called a non-`const` member from
+  a `const` draw path; `arm-none-eabi-g++` accepted it and clang did not.
+  `SegmentDisplay`'s printers are now `const` with a `mutable` cursor (which
+  covers Calibr8or and Scale Editor), and `CaptainMIDI::DrawLogScreen()` /
+  `DrawCopyScreen()` / `CaptainMIDILog::DrawAt()` are `const`. Verified: each
+  app compiles under clang, and both `T41` and `T41_console` still build.
 
-  `arm-none-eabi-g++` accepts all of these; Apple clang rejects them. Marking
-  those methods `const` (and `SegmentDisplay`'s cursor members `mutable`) would
-  fix it and cost the firmware nothing — no simulator change is needed. Captain
-  MIDI is the module's default app on hardware, so this is worth doing.
+  They are still not in the manifest, because fixing that uncovered three
+  further blockers behind it — each a different root cause, none of them
+  const-correctness:
+  * **Captain MIDI** — the shim's `usbMIDI.send()` takes 4 arguments; the real
+    Teensy core has a 5-argument overload carrying the cable number, which
+    `midi_thru()` uses (`apps/CaptainMIDI.h:2233`). A **simulator shim** gap.
+  * **Scale Editor** — `apps/ScaleEditor.h:270` assigns
+    `OC::Scales::NUM_SCALES - 1` (= 148) into an `int8_t`, truncating to -108.
+    This is a **real firmware bug**, not a host-build artefact: scale import
+    cannot reach any scale above index 127 on target either. clang catches it
+    via `-Wconstant-conversion`; gcc does not.
+  * **Any app that pulls in `ClockSetup`** — `HemisphereApplet::cursor_countdown`
+    is defined in `HemisphereApplet.cpp`, which this build excludes under
+    `NO_HEMISPHERE`, while `ClockSetup` still references it. A **build-config**
+    inconsistency, and one that may affect the firmware's own `T41_MTP`
+    (also a `NO_HEMISPHERE` build).
+
 * Everything else in `apps/` — simply not in this build's manifest. Adding one
   is a line in `shim/src/apps/_config.h` plus its `-DENABLE_APP_*`.
 

@@ -21,7 +21,7 @@ struct PixO {
     uint8_t ox;
     uint8_t oy;
 
-    void DrawAt(uint8_t x, uint8_t y) {
+    void DrawAt(uint8_t x, uint8_t y) const {
         graphics.setPixel(x + ox, y + oy);
     }
 };
@@ -30,7 +30,7 @@ struct Segment {
     PixO pixels[6];
     int8_t size;
 
-    void DrawAt(uint8_t x, uint8_t y) {
+    void DrawAt(uint8_t x, uint8_t y) const {
         for (uint8_t i = 0; i < size; i++) pixels[i].DrawAt(x, y);
     }
 };
@@ -62,12 +62,12 @@ public:
         }
     }
 
-    void SetPosition(uint8_t x, uint8_t y) {
+    void SetPosition(uint8_t x, uint8_t y) const {
         x_pos = x;
         y_pos = y;
     }
 
-    void PrintWhole(uint8_t x, uint8_t y, int number, int range = 10000) {
+    void PrintWhole(uint8_t x, uint8_t y, int number, int range = 10000) const {
         SetPosition(x, y);
 
         uint8_t to_print[5];
@@ -99,7 +99,7 @@ public:
         }
     }
 
-    void PrintDecimal(int number, int places, int range) {
+    void PrintDecimal(int number, int places, int range) const {
         uint8_t to_print[5];
         uint8_t q = 0;
 
@@ -124,7 +124,7 @@ public:
         }
     }
 
-    void PrintDigit(uint8_t d) {
+    void PrintDigit(uint8_t d) const {
         for (uint8_t b = 0; b < 7; b++)
         {
             if ((digit[d] >> b) & 0x01) segment[b].DrawAt(x_pos, y_pos);
@@ -132,7 +132,7 @@ public:
         x_pos += DigitWidth();
     }
 
-    void PrintDigit(uint8_t x, uint8_t y, uint8_t d) {
+    void PrintDigit(uint8_t x, uint8_t y, uint8_t d) const {
         SetPosition(x, y);
         PrintDigit(d);
     }
@@ -140,18 +140,24 @@ public:
 private:
     Segment segment[7];
     uint8_t size;
-    uint8_t x_pos = 0;
-    uint8_t y_pos = 0;
+    // The print cursor: scratch state for the duration of one draw call, not
+    // logical state of the display. Apps hold a SegmentDisplay as a member and
+    // draw from const methods, so the printers must be const; the cursor they
+    // advance is mutable rather than the callers being forced to hold a
+    // mutable display. arm-none-eabi-g++ let the non-const calls through,
+    // clang does not, which is what kept these apps out of the host build.
+    mutable uint8_t x_pos = 0;
+    mutable uint8_t y_pos = 0;
 
-    uint8_t DigitWidth() {
+    uint8_t DigitWidth() const {
         return (size == SegmentSize::BIG_SEGMENTS ? 10 : 4);
     }
 
-    uint8_t DecimalWidth() {
+    uint8_t DecimalWidth() const {
         return (size == SegmentSize::BIG_SEGMENTS ? 6 : 4);
     }
 
-    void DrawDecimalPoint() {
+    void DrawDecimalPoint() const {
         if (size == SegmentSize::BIG_SEGMENTS) {
             for (int x = 0; x < 2; x++)
             {
