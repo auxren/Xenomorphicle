@@ -16,8 +16,19 @@ namespace OC {
   const char * const BUILD_TAG = "";
 #endif
 
-  // 17 char width                  |                 |
-  const char * const RELEASE_NAME = "Phazerville Suite";
+  // The firmware's own name. This fork stopped tracking upstream and no
+  // longer keeps compatibility with it (see README), so the About screen
+  // naming itself "Phazerville Suite" identified the wrong product -- the
+  // build it describes cannot be produced from that project.
+  //
+  // Authorship is a separate matter from product identity and is NOT removed
+  // with it: the per-file copyright headers crediting djphazer, Patrick
+  // Dowling, Max Stadler, Tim Churches and the other o_C/Phazerville authors
+  // stay exactly as they are, which is both the licence terms and the honest
+  // record of who wrote this code.
+  //
+  // 21 char max (SETTINGS.h row width)   |                   |
+  const char * const RELEASE_NAME = "Xenomorphicle";
   // TODO: array of alternate titles, one for every letter of the alphabet
 
 #if defined(VOR)

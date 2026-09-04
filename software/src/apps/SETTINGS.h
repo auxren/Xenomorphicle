@@ -962,7 +962,11 @@ FLASHMEM void AppSettings::View() const {
       #ifdef PEWPEWPEW
       gfxPrint(21, 15, "PEW! PEW! PEW!");
       #else
-      gfxPrint(12, 15, OC::Strings::RELEASE_NAME);
+      // Centred between the two iconography slots (x=0 and x=120) rather than
+      // pinned at the old x=12, which was chosen for a 17-character name and
+      // left a 13-character one visibly hanging to the left of centre.
+      gfxPrint((128 - 6 * (int)strlen(OC::Strings::RELEASE_NAME)) / 2, 15,
+               OC::Strings::RELEASE_NAME);
       #endif
       gfxIcon(0, 25, PhzIcons::full_book);
       gfxPrint(10, 25, OC::Strings::VERSION);
@@ -1005,7 +1009,11 @@ FLASHMEM void AppSettings::View() const {
         // UsbDriveApp.h.
         gfxPrint(10, 45, "hold B: normal mode");
 #else
-        gfxPrint(10, 45, "github.com/djphazer");
+        // This fork's own project, not upstream's: the build on this screen
+        // is not one djphazer's repository can produce, so sending a user
+        // there for it would be a dead end. 17 columns, inside the 21 the
+        // row allows.
+        gfxPrint(10, 45, "github.com/auxren");
 #endif
       }
       // 21 columns exactly, and it states its bindings rather than relying on
