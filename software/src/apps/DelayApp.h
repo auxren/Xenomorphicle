@@ -396,10 +396,34 @@ FLASHMEM void AppDelay::DrawMenu() const {
   }
 }
 
-// Nothing. The effect is still running and still audible while the screensaver
-// is up -- that is the point of not releasing the slot on suspend -- but
-// nothing on this screen moves on its own, so there is nothing to show.
-FLASHMEM void AppDelay::DrawScreensaver() const {}
+// The idle screen is the HEADER LINE AND NOTHING ELSE: the effect's name and
+// the same filled/hollow presence box the live screen uses.
+//
+// It used to draw nothing at all, and nothing is a lie here. These three apps
+// KEEP SOUNDING when they are backgrounded -- that is the deliberate idiom (see
+// HandleAppEvent's SUSPEND case) -- so a player can be hearing an effect whose
+// screen is 0 of 8192 pixels, which is indistinguishable from a crashed module.
+// The panel audit used exactly those words about the old DebugStats screen. A
+// blank screensaver is the shipped default for a simple app like AppScaleEditor
+// and is fine there, because nothing is happening; it is not fine for something
+// actively processing audio.
+//
+// THE BOX REFLECTS BYPASS, and that was a judgement call. It is read live from
+// host_.Live(), the same accessor the live screen uses, so there is no second
+// copy of the state that could disagree with the first. Drawing it filled while
+// bypassed would make a mark that means "this effect is reaching the output"
+// mean something else on one screen -- a new meaning for an existing glyph,
+// which is the class of defect finding L-06 exists to stop. It is also the most
+// useful thing this screen can say: bypass is the one state that explains
+// silence, so a player who bypassed, walked away and now hears nothing gets an
+// answer instead of a mystery.
+//
+// Deliberately no footer, no parameter rows, no animation: the bar is "a player
+// glancing at a dark rack can tell this is alive and which effect is running",
+// and everything past that is a decision for daylight.
+FLASHMEM void AppDelay::DrawScreensaver() const {
+  AudioEffectScreen::Header("D E L A Y", host_.Live());
+}
 
 // --- input -----------------------------------------------------------------
 
