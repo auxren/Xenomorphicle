@@ -1524,6 +1524,18 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.printf("PresetBusUI %s\n",
                           OC::PresetBusUI::Active() ? "open" : "closed");
             break;
+          case 'P':  // poke a MESSAGE_POPUP, so the cross-app popup path can
+                     // actually be TESTED on the bench instead of reasoned
+                     // about. Every real producer of these is a failure that
+                     // cannot be provoked safely from here: PhzConfig's
+                     // "Corrupt File!!" needs a damaged file, PresetEngine's
+                     // "Disk full !!" needs a full card, and "Empty preset"
+                     // needs a preset recall, which changes this module's own
+                     // state. This pokes the same popup those do, and touches
+                     // nothing else.
+            HS::PokePopup(HS::MESSAGE_POPUP, "BENCH POPUP");
+            Serial.println("poked MESSAGE_POPUP");
+            break;
           case 'b': OC::PresetBus::DebugDump(); break;
           case 'k':  // toggle 0x50 card serving (WPM-less bus only; hard-gated)
             OC::PresetBus::CardServeEnable(!OC::PresetBus::CardServing());

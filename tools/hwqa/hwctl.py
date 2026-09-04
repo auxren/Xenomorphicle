@@ -250,6 +250,10 @@ def main():
                     "(a+r = chord; bare number = ms pause; ~ = capture the screen here)")
     ap.add_argument("--dump-fb", action="store_true", help="print the framebuffer as hex")
     ap.add_argument("--settle", type=float, default=0.12, help="seconds between presses")
+    ap.add_argument("--raw", default="", help="send these literal console command bytes "
+                    "before --keys (e.g. 'P' to poke a test popup). Check Main.cpp's "
+                    "command switch first: several commands eat the bytes that follow "
+                    "them as arguments, and 'C'/'F'/'Z' are destructive.")
     ap.add_argument("--no-unlock", action="store_true", help="skip the pew! unlock")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
@@ -259,6 +263,11 @@ def main():
         if not args.no_unlock:
             p.unlock()
         frames = []
+        if args.raw:
+            p.ser.write(args.raw.encode())
+            p.ser.flush()
+            time.sleep(0.25)
+            p.ser.reset_input_buffer()
         if args.keys:
             frames = p.keys(args.keys, settle=args.settle)
             time.sleep(0.25)

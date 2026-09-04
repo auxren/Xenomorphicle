@@ -26,6 +26,7 @@
 #include <string.h>
 
 #include "OC_apps.h"
+#include "HSUtils.h"  // HS::DrawPopup, for the cross-app MESSAGE_POPUP below
 #include "OC_global_settings.h"
 #include "OC_io_settings_menu.h"
 #include "OC_calibration.h"
@@ -509,6 +510,37 @@ FLASHMEM void AppBase::Draw(UiMode ui_mode) const
   // protected member: this file owns the card, but AppBase's declaration lives
   // in OC_apps.h and is not ours to extend.
   DrawChordHint(id(), io_settings_allowed());
+
+  // MESSAGE_POPUP is raised by code that runs under EVERY app, but until now it
+  // was DRAWN by only four of them.
+  //
+  // HS::PokePopup(HS::MESSAGE_POPUP, ...) fires from PhzConfig.cpp ("Write
+  // ERROR !!" :666, "File ERROR !!" :672, "TempFile ERR !!" :691, "Corrupt
+  // File!!" :807 and :818) and from PresetEngine.cpp ("Disk full !!" :917,
+  // "Bus save OK"/"Bus save ERR" :1089, "Empty preset" :1240, "Bad preset"
+  // :1249 and :1293, "Bad preset ver" :1260, "Bus recall OK" :1356) -- none of
+  // which is Hemisphere-specific; they are filesystem and preset-engine
+  // failures that can happen under any app.
+  //
+  // But HS::DrawPopup() was only ever called from Quadrants.h:1699,
+  // CaptainMIDI.h:457, Hemisphere.h:887 and Calibr8or.h:503. In Tweighty,
+  // Sampler, Scope, Delay, Reverb, the 200e app, Setup/About, the Wave editor,
+  // Tuner and Back It Up!, every one of those messages was raised into a
+  // variable and never put on the glass. A save that hit "Disk full !!" looked
+  // exactly like a save that worked.
+  //
+  // Drawn here because this is already where a cross-app overlay belongs --
+  // DrawChordHint() above is one -- and because every app reaches it.
+  //
+  // ONLY MESSAGE_POPUP. The other popup types are Hemisphere-family UI whose
+  // rendering needs the config_cursor/preset_id state this layer does not have
+  // and must not invent; the four apps above still draw their own. MESSAGE_POPUP
+  // is the one case that reads nothing but popup_msg (HSUtils.cpp:561-583), so
+  // it is safe to draw from here. The four apps drawing it twice is harmless:
+  // clearRect + drawFrame + print over the same rect is idempotent.
+  if (HS::popup_type == HS::MESSAGE_POPUP
+      && OC::CORE::ticks - HS::popup_tick < HEMISPHERE_CURSOR_TICKS)
+    HS::DrawPopup();
 }
 
 UiMode AppBase::DispatchEvent(const UI::Event &event)
