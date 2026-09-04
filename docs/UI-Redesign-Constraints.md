@@ -143,11 +143,18 @@ Grammar already established in the tree, and a proposal should not contradict it
 
 ## 7. Unverified, and load-bearing
 
-- **Z's reachability on the real panel is unconfirmed.** The firmware maps it,
-  but two attempts to observe the grey clock button firing it on hardware were
-  inconclusive. The chord card is now Z-only and the screensaver chord is
-  Z+A — so if Z is not reachable on this panel, both are unreachable. Cheap to
-  settle on the bench; two shipped changes depend on it.
+- **Z's reachability on the real panel is CONFIRMED.** Verified on hardware
+  2026-09-03 by Oren against firmware 0b56f3bd (T41_console): holding the grey
+  clock button ~700 ms raises the chord card. This had been unverified through
+  two earlier inconclusive attempts, and two shipped changes depended on it --
+  the chord card is Z-only and the screensaver is Z+A, so both would have
+  shipped unreachable had this gone the other way.
+
+  What it unblocks: retiring the A-modifier aliases is viable (A can be an
+  ordinary per-app button because Z carries the global chords), and Z+X / Z+Y
+  are available as new gestures -- Quadrants' CheckButtonCombo() is an exact
+  mask match, so Z+X yields Z|X and collides with none of its eight bindings.
+
 - **Calibr8or's CV voltmeter** (`HS::frame.In` -> `OC::IO::pitch_to_millivolts`,
   committed in 34c29316) has never been checked against a real signal. Sign and
   scale unverified. Test is a jumper from an output to its own input.
