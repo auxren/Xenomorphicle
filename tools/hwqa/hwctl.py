@@ -43,6 +43,21 @@ run through a re-unlocked console is measuring the wrong thing.
 So unlock() PROBES FIRST and only sends the token if the console is actually
 locked. Do not "simplify" it back into an unconditional write.
 
+A CHORD SENT AT AN ALREADY-OPEN SCREEN IS NOT A NO-OP. `z+r` injects an encR
+BUTTON_PRESS with Z held. If the app switcher is already open, the switcher does
+not see "open me" -- it sees a press of encR, which is a PICK, and it commits
+whatever app the cursor happens to be on (OC_apps.cpp:1176, 1240). So a script
+that opens a screen, and a later script that opens "the same" screen, are not
+idempotent the way `--dump-fb` now is.
+
+This cost an hour. Apps appeared to change by themselves between bench runs,
+which looked like the switcher activating apps as the cursor moved -- it does
+not; turning either encoder never assigns `change_app`. Every one of those app
+changes was a `z+r` aimed at a switcher that was already open from the previous
+invocation. If you are scripting a screen, either drive it inside ONE session
+(that is what the `~` capture token is for) or capture first and check what is
+on screen before you chord at it.
+
 Capture is triggered by the DEFAULT branch of the console's command switch, so
 the capture byte must be one the firmware does not recognise. '~' is used here.
 Do not substitute a letter without checking Main.cpp: 'C' and 'F' are

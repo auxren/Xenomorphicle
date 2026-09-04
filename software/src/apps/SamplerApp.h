@@ -466,8 +466,21 @@ FLASHMEM void AppSampler::DrawMenu() const {
 #ifdef AUDIO_INTERFACE
     const bool playing = file_loaded_[s] && players_[s].isPlaying();
     if (playing) {
+      // Solid box with a hollow core. NOT drawRect-then-invertRect over the
+      // same rect, which is what this used to be: invertRect is XOR
+      // (src/drivers/weegfx.cpp:204-209, draw_rect<PIXEL_OP_XOR>), so filling
+      // every pixel and then inverting every pixel turned them all back off.
+      // A PLAYING slot rendered as a blank hole -- less visible than an idle
+      // loaded one, and indistinguishable from the gap between boxes. The
+      // state the header comment calls "what's live right now ... a glance"
+      // was the one state you could not see.
+      //
+      // Inverting a filled box cannot work on a black panel; there is no
+      // surround for it to invert against. So live reads as the loaded box
+      // with its centre punched out, which is distinct from both a solid box
+      // (loaded, idle) and an outline (no file) at a glance.
       graphics.drawRect(x, kRingY, 8, 6);
-      graphics.invertRect(x, kRingY, 8, 6);
+      graphics.invertRect(x + 2, kRingY + 2, 4, 2);
     } else if (file_loaded_[s]) {
       graphics.drawRect(x, kRingY, 8, 6);
     } else {

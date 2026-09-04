@@ -148,11 +148,21 @@ under test was the one carrying the fix.
 - **RETRACTED, see the corrections section below: the switcher does NOT
   activate the app under the cursor as the cursor moves.** That is what it
   looked like from the bench and it is wrong. `set_current_app()` is called at
-  exactly one place, `OC_apps.cpp:288`, guarded by `if (change_app)`, and
-  `change_app` is set at exactly one place, `case CONTROL_BUTTON_R` at `:224`.
-  The `CONTROL_ENCODER_L` and `CONTROL_ENCODER_R` cases (`:170`, `:175`) never
-  touch it, and `APP_SELECTION_TIMEOUT_MS` (`:163`) expiring leaves it false --
-  so an idle timeout closes the switcher WITHOUT switching apps.
+  exactly one place, `OC_apps.cpp:1240`, guarded by `if (change_app)` at
+  `:1237`, and `change_app` is assigned at exactly one place,
+  `case CONTROL_BUTTON_R` at `:1176` (declared `:967`, cleared `:1257`). The
+  `CONTROL_ENCODER_R` and `CONTROL_ENCODER_L` cases (`:1122`, `:1127`) never
+  touch it, and `APP_SELECTION_TIMEOUT_MS` (`:1115`) expiring leaves it false
+  -- so an idle timeout closes the switcher WITHOUT switching apps.
+
+  > **Citation correction.** An earlier version of this entry, and commit
+  > `3b6176b5`'s message, cited `:288` / `:224` / `:170` / `:175`. Those are
+  > offsets WITHIN `Ui::AppSettings`, not file lines -- they came from piping
+  > the function through `sed` and then `grep -n`, which renumbers from the
+  > function's first line. The structural claim was right and the numbers were
+  > not. This is the second drifted citation on this program (the Panel Audit's
+  > `PresetBusUI.cpp:355` is really `:433`), so: never cite a line number taken
+  > from a filtered view.
 
   What actually changed the running app between bench sessions was the harness:
   sending `z+r` while the switcher was ALREADY open injects an encR PRESS into
