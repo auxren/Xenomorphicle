@@ -91,9 +91,13 @@ public:
         );
         break;
     }
+    // Clamp the base time ONCE, before any tap time is derived from it. This
+    // used to sit inside the loop, below `t`, so tap 0 (t == d) always got the
+    // unclamped value and the clamp landed on a variable nothing downstream
+    // read.
+    CONSTRAIN(d, 0.0f, MAX_DELAY_SECS);
     for (int tap = 0; tap < taps; tap++) {
-      float t = d * static_cast<float>(taps - tap) / taps;
-      CONSTRAIN(d, 0.0f, MAX_DELAY_SECS);
+      const float t = d * static_cast<float>(taps - tap) / taps;
       switch (delay_mod_type) {
         case CROSSFADE:
           for (auto& ch : channels) ch.delaystream.cf_delay(tap, t);
