@@ -437,3 +437,51 @@ file, a full card, or a preset recall that would change this module's state).
 Found as a side observation of the L-06 inversion sweep -- the second real
 defect that sweep turned up outside its own subject, after the Sampler blank
 hole. `hwctl.py` gained `--raw` to make the A/B possible.
+
+## Bungverb (Samverb) standalone app: hardware QA of `71abab02`
+
+Third and last effect. Flashed from a clean tree (FLASH 568,232 / RAM1 101,120
+/ RAM2 138,400, free 385,888). Reached at container index 13.
+
+| Check | Result |
+| --- | --- |
+| MAIN renders full-width | PASS |
+| Two pages, MAIN <-> CV, no MODE page | PASS |
+| `Cut :` at x=97, `Damp`/`Mix` at x=109, Time at x=103 | PASS |
+| CV page values at x=103, footer `A:byp  Y:src  R:main` | PASS |
+| A toggles bypass | PASS, `BYPASSED - A:active` |
+| L-06: one inverted region, the cursor band | PASS |
+| M-4 tenths grid | PASS -- Time reads `1.0s`, integer tenths |
+
+**All three effects are now shipped and hardware-verified**: Delay (Time / Taps
+/ Fdbk / Wet, three pages including MODE), Reverb (Size / Damp / Cut / Mix, two
+pages), Bungverb (Time / Damp / Cut / Mix, two pages). Every predicted
+coordinate reproduced on the panel in all three.
+
+### Delay, additionally verified
+
+- **The CLOCK time unit works.** `Unit:` cycles `ms -> clk -> Hz` on MODE, and
+  selecting `clk` correctly switches MAIN's Time row from `0.50s` to the ratio
+  display `/1`. That exercises the one path needing
+  `ClockSetup_instance.Controller()` pumped every tick, which had no other route
+  to verification without hardware.
+- **`B:snd` works** -- pressing B flips the row label `Wet :` -> `Snd :`.
+
+### The blank screensaver
+
+These apps render **0 of 8192 pixels** while still processing audio -- measured,
+stable across three captures. It is indistinguishable from a crashed module, and
+it matters more here than elsewhere because Delay and Reverb keep sounding when
+backgrounded BY DESIGN, so a player can be hearing an effect whose app shows
+nothing. Being fixed minimally: the header line only, no animation.
+
+### Still NOT verified, and not verifiable from this bench
+
+- **Whether any of it makes sound.** Delay, Reverb, Bungverb, the A2 decay-time
+  change and the CV freeze clamp are all UNHEARD. The bench drives the panel and
+  reads the framebuffer; it has no ear on the jacks.
+- **The shared effect-slot handoff** -- that opening one effect disconnects the
+  previous holder -- has no on-screen consequence and was not observed.
+- **The CV freeze clamp** needs a CV source patched to Bungverb's damp input near
+  maximum. No general pass stumbles into it. Recorded as unverified, not passed.
+- Delay's ~10.9 s maximum, and clock-following behaviour with a real clock.
