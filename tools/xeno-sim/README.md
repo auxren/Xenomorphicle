@@ -283,10 +283,15 @@ it. This build carries six apps:
     cannot reach any scale above index 127 on target either. clang catches it
     via `-Wconstant-conversion`; gcc does not.
   * **Any app that pulls in `ClockSetup`** — `HemisphereApplet::cursor_countdown`
-    is defined in `HemisphereApplet.cpp`, which this build excludes under
-    `NO_HEMISPHERE`, while `ClockSetup` still references it. A **build-config**
-    inconsistency, and one that may affect the firmware's own `T41_MTP`
-    (also a `NO_HEMISPHERE` build).
+    is defined at `HemisphereApplet.cpp:9`, and **this Makefile's `FW_SRCS`
+    does not list that file**, so the sim link has no definition for it while
+    `ClockSetup` still references it. Purely a gap in *this* manifest: the
+    firmware is fine. `NO_HEMISPHERE` gates app and applet *registration*, not
+    that translation unit, so `T41_MTP` — also a `NO_HEMISPHERE` build —
+    compiles `HemisphereApplet.cpp` and ships the symbol (verified: it builds
+    and links clean, and `.pio/build/T41_MTP/src/HemisphereApplet.cpp.o`
+    exists). The fix is adding the source here; watch what it drags in, since
+    it will want the applet registry.
 
 * Everything else in `apps/` — simply not in this build's manifest. Adding one
   is a line in `shim/src/apps/_config.h` plus its `-DENABLE_APP_*`.
