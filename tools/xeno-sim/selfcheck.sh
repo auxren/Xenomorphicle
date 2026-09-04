@@ -1265,9 +1265,13 @@ echo "a power cycle comes back in the app that was on screen"
 # below sit for 4 s first: the app is written down with the slot, ~3 s after
 # the last change, one cheap EEPROM program -- not a GLOBALS.CFG block erase
 # in the middle of a recall.
+# Navigating to Scenery takes two encL turns and one encR detent now that the
+# switcher has folders: Pong starts in HIDDEN on its own, so the old
+# 'encr-,encr-' walked a one-app list and never left Pong. encL skips the
+# empty folders, so +2 from HIDDEN lands on SYSTEM, where Scenery is second.
 rm -f "$IMG/keepapp"
 $SIM --app "Pong 2.0" --state-out "$IMG/keepapp" \
-     --keys "$ENTER,l-down,step600,l-up,step4000,$MENU,encr-,encr-,step100,r,step4000" \
+     --keys "$ENTER,l-down,step600,l-up,step4000,$MENU,encl+,encl+,encr+,step100,r,step4000" \
      >/dev/null 2>&1
 $SIM --state-in "$IMG/keepapp" --keys "step2000" > "$TMP/keepapp" 2>&1
 keep_app=$(sed -n 's/^  [a-z][a-z]*  *app=\(.*\)  held=.*/\1/p' "$TMP/keepapp" | tail -1)
@@ -1426,6 +1430,68 @@ $SIM --keys "$MENU,encr-,encr-,step100,r,step600" 2>&1 | grep -q 'app=Setup/Abou
 $SIM --keys "$ENTER,l-down,step600,l-up,step3000" 2>&1 | grep -q 'PresetEngine: save' \
   && ok "the release-first rule leaves the hold-sampled STORE working" \
   || bad "the release-first rule broke the 500ms STORE hold"
+
+echo "the app switcher has folders, and cannot lose an app in one"
+
+# Thirty-two apps in one flat list is a scroll, not a menu, so the switcher
+# shows one folder at a time: encL turns the folder, encR walks the apps in it.
+# It is the ONLY route between apps, so the checks that matter here are the
+# ones about not being able to get stuck: it opens where you already are, an
+# emptied folder is skipped rather than becoming a dead turn, and every move is
+# reversible.
+sw_rows() { $SIM "$@" --dump-fb 2>/dev/null | python3 fbtext.py -; }
+SW="step300,$MENU"
+
+# Opens on the folder holding the app you are in, never on folder 0. Tweighty
+# is the only app in AUDIO in this build, so this is unambiguous.
+sw_rows --app "Tweighty" --keys "$SW" | grep -q 'AUDIO' \
+  && ok "the switcher opens on the folder holding the current app" \
+  || bad "the switcher did not open on AUDIO with Tweighty running"
+
+# And the app you are in is the row under the cursor, not merely on screen.
+sw_rows --app "Tweighty" --keys "$SW" | grep -q '\[inv\] Tweighty' \
+  && ok "the current app is the row the right encoder would pick" \
+  || bad "the current app was not under the cursor"
+
+# encL skips folders with nothing in them. This build fills only AUDIO,
+# SYSTEM and HIDDEN, so one turn from AUDIO must land on SYSTEM -- if empty
+# folders were not skipped it would stop on PITCH and show "(empty)".
+sw_rows --app "Tweighty" --keys "$SW,encl+,step200" | grep -q 'SYSTEM' \
+  && ok "turning the folder skips the empty ones" \
+  || bad "turning encL landed on an empty folder"
+
+# HIDDEN is an ordinary folder, reachable by turning, not a special mode.
+sw_rows --app "Tweighty" --keys "$SW,encl-,step200" | grep -q 'HIDDEN' \
+  && ok "HIDDEN is reachable by turning, like any other folder" \
+  || bad "HIDDEN was not reachable by turning encL"
+
+# X moves the app under the cursor to the next folder, and the screen follows
+# it there. Following is what keeps X and Y exact inverses: an emptied folder
+# has no row under the cursor, so staying behind would strand the app with no
+# gesture able to move it back.
+sw_rows --app "Tweighty" --keys "$SW,x,step200" | grep -q 'SYSTEM' \
+  && ok "the screen follows the app to the folder it was moved into" \
+  || bad "moving an app did not follow it to its new folder"
+
+# ...and the move is announced, because otherwise the app just vanishes.
+sw_rows --app "Tweighty" --keys "$SW,x,step200" | grep -q 'moved to' \
+  && ok "a move says where the app went" \
+  || bad "a move gave no feedback at all"
+
+# Y undoes X exactly: the round trip puts it back in AUDIO, under the cursor.
+sw_rows --app "Tweighty" --keys "$SW,x,step100,y,step200" | grep -q '\[inv\] Tweighty' \
+  && ok "X then Y returns the app to where it started" \
+  || bad "moving an app forward then back did not restore it"
+
+# The legend names the three controls this screen actually has.
+sw_rows --app "Tweighty" --keys "$SW" | grep -q 'L:fldr R:pick X:move' \
+  && ok "the switcher states its own controls" \
+  || bad "the switcher legend is missing or changed"
+
+# Nothing on the new header or legend runs off the right edge.
+$SIM --app "Tweighty" --keys "$SW" --dump-fb 2>/dev/null | python3 edgecheck.py - >/dev/null 2>&1 \
+  && ok "no clipped text on the app switcher" \
+  || bad "something on the app switcher is clipped at the right edge"
 
 echo "hold Z reveals the chord list"
 

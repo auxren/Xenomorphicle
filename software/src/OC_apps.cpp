@@ -79,6 +79,7 @@
 
 // actual apps are included and instantiated here
 #include "apps/_config.h"
+#include "OC_app_folders.h"
 
 namespace OC {
 
@@ -104,12 +105,28 @@ enum GlobalSettingsDataKeys : uint16_t {
   WAVEFORMS_KEY       = 6 << 8,
   AUTOCAL_KEY         = 7 << 8,
   PRESETBUS_KEY       = 8 << 8, // preset-bus module addr + slot manifests
+  APPFOLDER_KEY       = 11 << 8, // app-switcher folder assignments
+                                 // (9 is free; 10 is HSUtils' clock routing)
 
   // lower 8 bits of key
   SCALE_METADATA = 0xff,
   SCALE_NOTEDATA = 0,
 };
 #endif
+
+// Which folder each app sits in, for the app switcher. Position-indexed, 4
+// bits per app, mirroring HS::hidden_applets[2]. See OC_app_folders.h.
+static OC::AppFolders::State app_folders;
+
+// Put every app in the folder OC_app_folders.h's table names for it. Keyed by
+// app ID rather than position, so a module whose roster changed between builds
+// still comes up arranged correctly.
+FLASHMEM
+static void SeedAppFolderDefaults() {
+  const size_t n = app_container.num_apps();
+  for (size_t i = 0; i < n && i < OC::AppFolders::kMaxApps; ++i)
+    app_folders.Set(i, OC::AppFolders::DefaultFor(app_container[i].id()));
+}
 
 #ifdef __IMXRT1062__
 // Write the global-settings key/values into the *currently loaded* PhzConfig
@@ -126,6 +143,10 @@ void BuildGlobalSettingsValues() {
   Pack(data, PackLocation{17, 1}, 1); // v2.0 first-run validation
   Pack(data, PackLocation{18, 1}, global_settings.invert_display);
   PhzConfig::setValue(METADATA_KEY, data);
+
+  // App-switcher folders
+  PhzConfig::setValue(APPFOLDER_KEY | 0, app_folders.bits[0]);
+  PhzConfig::setValue(APPFOLDER_KEY | 1, app_folders.bits[1]);
 
   // User Scales
   for (size_t i = 0; i < Scales::SCALE_USER_COUNT; ++i) {
@@ -441,6 +462,17 @@ FLASHMEM
 void RestoreGlobalSettingsFromConfig(uint8_t scala_loaded_mask) {
   uint64_t data = 0;
 
+  // App-switcher folders. Absent on a module that predates them, or one whose
+  // arrangement has never been changed -- either way the compiled defaults are
+  // the right answer, so seed first and let a stored value win if there is one.
+  SeedAppFolderDefaults();
+  {
+    uint64_t w = 0;
+    if (PhzConfig::getValue(APPFOLDER_KEY | 0, w)) app_folders.bits[0] = w;
+    w = 0;
+    if (PhzConfig::getValue(APPFOLDER_KEY | 1, w)) app_folders.bits[1] = w;
+  }
+
   // User Scales
   for (size_t i = 0; i < Scales::SCALE_USER_COUNT; ++i) {
     if ((scala_loaded_mask & (1 << i)) ||
@@ -543,6 +575,7 @@ static void SeedGlobalSettingsDefaults() {
   global_settings.reserved1 = false;
   global_settings.reserved2 = 0U;
   global_settings.current_app_id = DEFAULT_APP_ID;
+  SeedAppFolderDefaults();
 }
 
 // True once Init() has completed. It tells the boot call (nothing is live
@@ -861,7 +894,16 @@ void draw_save_message(uint8_t c) {
 
 FLASHMEM
 bool Ui::AppSettings(bool drawmenu) {
-  static menu::ScreenCursor<5> cursor;
+  // Four rows, not five: the folder header takes the top of the screen. A
+  // folder holds a handful of apps rather than all thirty-two, so the window
+  // lost a row and the scrolling got shorter anyway.
+  static menu::ScreenCursor<4> cursor;
+  static int folder_tab = 0;
+  static uint8_t visible_apps[OC::AppFolders::kMaxApps];
+  static int visible_count = 0;
+  static bool move_notice = false;
+  static uint8_t move_notice_folder = 0;
+  static elapsedMillis move_notice_time;
   static bool change_app = false;
   static bool save = false;
   static bool opened = false;
@@ -874,10 +916,33 @@ bool Ui::AppSettings(bool drawmenu) {
   // that the legend it covers is back before the next thing you try.
   static constexpr uint32_t kAccelNoticeMs = 2000;
 
+  // Long enough to read a folder name, short enough to stay out of the way
+  // while walking an app across several folders with repeated presses.
+  static constexpr uint32_t kMoveNoticeMs = 1200;
+
+  // The apps in the folder on screen, in roster order. Rebuilt whenever the
+  // folder changes or an app leaves it, which is the only time it can change.
+  auto rebuild_visible = [&]() {
+    const size_t n = app_container.num_apps();
+    visible_count = 0;
+    for (size_t i = 0; i < n && i < OC::AppFolders::kMaxApps; ++i)
+      if (static_cast<int>(app_folders.Of(i)) == folder_tab)
+        visible_apps[visible_count++] = static_cast<uint8_t>(i);
+    cursor.Init(0, visible_count > 0 ? visible_count - 1 : 0);
+  };
+
   // --- state change: entering App Menu
   if (!opened) {
-    cursor.Init(0, app_container.num_apps() - 1);
-    cursor.Scroll(app_container.IndexOfAppByID(global_settings.current_app_id));
+    // Open on the folder holding the app you are in, never on folder 0. The
+    // switcher is the only route between apps, so it must always open showing
+    // you where you already are.
+    const int cur = app_container.IndexOfAppByID(global_settings.current_app_id);
+    folder_tab = (cur >= 0) ? static_cast<int>(app_folders.Of(cur)) : 0;
+    rebuild_visible();
+    for (int i = 0; i < visible_count; ++i) {
+      if (visible_apps[i] == cur) { cursor.Scroll(i); break; }
+    }
+    move_notice = false;
     opened = true;
   }
 
@@ -896,10 +961,39 @@ bool Ui::AppSettings(bool drawmenu) {
     if (global_settings.encoders_enable_acceleration)
       graphics.drawBitmap8(120, 1, 4, bitmap_indicator_4x8);
 
-    weegfx::coord_t y = 0;
-    for (int current = max(cursor.first_visible(), 0);
-         current <= cursor.last_visible() && current < (int)app_container.num_apps();
-         ++current, y += kAppLineH) {
+    // The folder header. Chevrons rather than inversion, deliberately: L-06's
+    // rule is that inversion means "the RIGHT encoder changes this", and the
+    // right encoder does not change the folder -- the left one does. Inverting
+    // this row would make it the instrument's seventh meaning for inversion.
+    {
+      graphics.setPrintPos(2, 1);
+      graphics.print('<');
+      graphics.setPrintPos(14, 1);
+      graphics.print(OC::AppFolders::kFolderName[folder_tab]);
+      graphics.setPrintPos(92, 1);
+      graphics.print(folder_tab + 1);
+      graphics.print('/');
+      graphics.print((int)OC::AppFolders::FOLDER_COUNT);
+      graphics.setPrintPos(120, 1);
+      graphics.print('>');
+      graphics.drawHLine(0, 10, menu::kDisplayWidth);
+    }
+
+    // Defensive, and expected to be unreachable: the switcher opens on a
+    // folder that contains at least the running app, turning skips empty
+    // folders, and moving an app follows it. No path lands here. It stays
+    // because the alternative if one ever does is a blank screen, which reads
+    // as a hang rather than as a folder with nothing in it.
+    if (visible_count == 0) {
+      graphics.setPrintPos(kNameX, 12);
+      graphics.print("(empty)");
+    }
+
+    weegfx::coord_t y = 11;
+    for (int vi = max(cursor.first_visible(), 0);
+         vi <= cursor.last_visible() && vi < visible_count;
+         ++vi, y += kAppLineH) {
+      const int current = visible_apps[vi];
       // todo: make a secret button combo to switch to boring names
       // if (your_mom_is_boring)
       //   graphics.print(app_container[current]->boring_name());
@@ -910,7 +1004,7 @@ bool Ui::AppSettings(bool drawmenu) {
       if (global_settings.current_app_id == app_container[current].id())
         graphics.drawBitmap8(0, y + 1, 8, ZAP_ICON);
 
-      if (current == cursor.cursor_pos()) {
+      if (vi == cursor.cursor_pos()) {
         // The selection bar used to run to x=127 regardless: 118px of the
         // screen's brightest object for a name that needs 66, so nearly half of
         // it was blank. Hug the text instead -- the bar means "this one", and a
@@ -935,8 +1029,19 @@ bool Ui::AppSettings(bool drawmenu) {
                      ? "Encoder accel: ON" : "Encoder accel: OFF");
     else if (encoder_r_held)
       graphics.print("keep holding to save");
+    else if (move_notice && move_notice_time < kMoveNoticeMs) {
+      // Where it went, in words. A folder move is invisible otherwise: the app
+      // simply leaves the screen, which on its own reads as having deleted it.
+      graphics.print("moved to ");
+      graphics.print(OC::AppFolders::kFolderName[move_notice_folder]);
+    }
     else
-      graphics.print("encR:pick  encL:back");
+      // Three controls, one 21-column row. encL's PRESS is still cancel, as it
+      // is everywhere else in the instrument, but its label lost the argument
+      // with X:move -- an unlabelled move gesture would be undiscoverable,
+      // where backing out is the one thing a player already reaches for by
+      // habit. "L:fldr" is its turn; the press keeps working unannounced.
+      graphics.print("L:fldr R:pick X:move");
 
 #ifdef VOR
     VBiasManager *vbias_m = vbias_m->get();
@@ -957,6 +1062,52 @@ bool Ui::AppSettings(bool drawmenu) {
       case CONTROL_ENCODER_R:
         if (UI::EVENT_ENCODER == event.type)
           cursor.Scroll(event.value);
+        break;
+
+      case CONTROL_ENCODER_L:
+        // Turning encL changes folder. Its PRESS is still cancel, below --
+        // these are separate events and the turn was previously unbound here.
+        if (UI::EVENT_ENCODER == event.type && event.value != 0) {
+          const int dir = event.value > 0 ? 1 : -1;
+          // Skip folders with nothing in them, so emptying one does not leave
+          // a dead turn in the rotation. The loop is bounded by the folder
+          // count, so an all-empty roster (impossible: the apps are somewhere)
+          // would stop rather than spin.
+          for (int n = 0; n < OC::AppFolders::FOLDER_COUNT; ++n) {
+            folder_tab = (folder_tab + dir + OC::AppFolders::FOLDER_COUNT)
+                       % OC::AppFolders::FOLDER_COUNT;
+            rebuild_visible();
+            if (visible_count > 0) break;
+          }
+          move_notice = false;
+        }
+        break;
+
+      case CONTROL_BUTTON_UP2:    // X
+      case CONTROL_BUTTON_DOWN2:  // Y
+        // Move the app under the cursor one folder on, wrapping. Wrapping is
+        // what makes this safe to poke at: every press is one press from being
+        // undone, and no run of presses reaches a state that is not a folder.
+        if (UI::EVENT_BUTTON_PRESS == event.type && visible_count > 0) {
+          const int dir = (CONTROL_BUTTON_UP2 == event.control) ? 1 : -1;
+          const int pos = cursor.cursor_pos();
+          const size_t moved = visible_apps[pos];
+          app_folders.Nudge(moved, dir);
+          move_notice_folder = static_cast<uint8_t>(app_folders.Of(moved));
+          move_notice = true;
+          move_notice_time = 0;
+          // Follow the app to its new folder, always. The alternative --
+          // staying put so a run of apps can be filed without the screen
+          // moving -- makes X and Y stop being inverses the moment a folder
+          // empties, because an empty folder has no row under the cursor and
+          // so no way to move anything back. Watching the app travel is also
+          // simply the clearer model of what the button did.
+          folder_tab = move_notice_folder;
+          rebuild_visible();
+          for (int i = 0; i < visible_count; ++i) {
+            if (visible_apps[i] == moved) { cursor.Scroll(i); break; }
+          }
+        }
         break;
 
       case CONTROL_BUTTON_R:
@@ -1014,6 +1165,7 @@ bool Ui::AppSettings(bool drawmenu) {
   cancel = false;
   encoder_r_held = false;
   accel_notice = false;
+  move_notice = false;
   event_queue_.Flush();
   event_queue_.Poke();
 
@@ -1022,7 +1174,9 @@ bool Ui::AppSettings(bool drawmenu) {
   delay(1);
 
   if (change_app) {
-    app_switcher.set_current_app(cursor.cursor_pos());
+    // cursor_pos() indexes the folder's list, not the roster.
+    if (visible_count > 0)
+      app_switcher.set_current_app(visible_apps[cursor.cursor_pos()]);
     FreqMeasure.end();
     OC::DigitalInputs::reInit();
     if (save) {
