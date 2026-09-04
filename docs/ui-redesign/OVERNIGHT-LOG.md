@@ -401,3 +401,39 @@ Specifically unverified: whether either app reaches the codec at all, whether
 claiming `kOutputRouteEffectSlot` disconnects the previous holder as designed,
 whether Reverb (the first MONO applet through the host's summed-to-both path)
 is audible on both channels, Delay's CLOCK unit, and its ~10.9 s maximum.
+
+## Finding H-03 -- ten apps were silently swallowing their error popups
+
+**Severity: high. Verified on hardware by A/B. Fixed in `d2b2aa3d`.**
+
+`HS::PokePopup(HS::MESSAGE_POPUP, ...)` is raised from code that runs under
+EVERY app -- `PhzConfig.cpp` ("Write ERROR !!", "File ERROR !!", "TempFile ERR
+!!", "Corrupt File!!" x2) and `PresetEngine.cpp` ("Disk full !!", "Bus save
+OK"/"Bus save ERR", "Empty preset", "Bad preset" x2, "Bad preset ver", "Bus
+recall OK"). None of it is Hemisphere-specific: it is filesystem and
+preset-engine failure reporting.
+
+But `HS::DrawPopup()` was called from exactly four places -- `Quadrants.h:1699`,
+`CaptainMIDI.h:457`, `Hemisphere.h:887`, `Calibr8or.h:503`. In **Tweighty,
+Sampler, Scope, Delay, Reverb, the 200e app, Setup/About, the Wave editor,
+Tuner and Back It Up!**, every one of those messages was written into a variable
+and a timer started, and nothing was ever put on the glass. **A save that hit
+"Disk full !!" looked exactly like a save that worked.**
+
+Fixed by drawing it from `AppBase::Draw()`, which is where a cross-app overlay
+already belongs (`DrawChordHint()` is one, immediately above) and which every
+app reaches. Only `MESSAGE_POPUP` -- the other popup types are Hemisphere-family
+UI needing `config_cursor`/`preset_id` state this layer does not have.
+
+**Verified by A/B on the module, not reasoned about.** A new console command
+`P` pokes a `MESSAGE_POPUP` and touches nothing else, because every real
+producer is a failure that cannot be provoked safely from a bench (a damaged
+file, a full card, or a preset recall that would change this module's state).
+
+- Fix reverted, `P` kept: poked, **two byte-identical stable captures**, the
+  Sampler screen completely unchanged. No popup, ever.
+- Fix restored: `BENCH POPUP` renders centred at y=28 and times out on its own.
+
+Found as a side observation of the L-06 inversion sweep -- the second real
+defect that sweep turned up outside its own subject, after the Sampler blank
+hole. `hwctl.py` gained `--raw` to make the A/B possible.
