@@ -485,3 +485,63 @@ nothing. Being fixed minimally: the header line only, no animation.
 - **The CV freeze clamp** needs a CV source patched to Bungverb's damp input near
   maximum. No general pass stumbles into it. Recorded as unverified, not passed.
 - Delay's ~10.9 s maximum, and clock-following behaviour with a real clock.
+
+## Screensaver fix, verified — and a hardware risk that outlives it (`f0ba817b`)
+
+The three effect apps rendered **0 of 8192 pixels** while still processing
+audio. Fixed with one line each: `AudioEffectScreen::Header(name, host_.Live())`
+— app name plus the existing filled/hollow presence box, `Header()` reused
+unchanged so the three cannot diverge. Cost: FLASH code +48 bytes total, RAM1
+code +16, everything else byte-identical.
+
+Verified on hardware, in pixels rather than by eye:
+
+| Check | Result |
+| --- | --- |
+| Screensaver renders anything at all | PASS — 264-331 lit pixels, was 0 |
+| Bungverb's 15-char title vs the presence box | PASS — title ends x=90, box x=118-125, **27px clear** |
+| Box FILLED when the effect is live | PASS — 64/64 lit |
+| Box HOLLOW when bypassed | PASS — 28/64 lit, the 8x8 perimeter |
+
+That last pair is the design judgement being right: the box reports **bypass**,
+the one state that explains silence, read live from `host_.Live()` at draw time
+rather than cached. A player who bypassed, walked away and now hears nothing
+gets an answer instead of a mystery. Drawing it filled regardless would have
+given an existing glyph a second meaning — the L-06 defect class, expressed in a
+box instead of an inversion.
+
+> **The first measurement of this was WRONG and nearly shipped as a finding.**
+> Both screensaver captures read hollow, which looked like the box ignoring
+> state. Delay was simply already bypassed for both. Establishing ground truth
+> from the live footer first (`A:byp...` vs `BYPASSED - A:active`) is what
+> separated them. Third time tonight that a confusing hardware result was the
+> bench's fault and not the firmware's.
+
+### FOR OREN — a burn-in risk on your actual panel
+
+**There is no display-off state anywhere in this firmware.** Grepped
+`OC_ui.cpp`, `OC_app_base.cpp` and `src/drivers/display.h`: nothing past the
+screensaver. `AppBase::Draw()` calls `DrawScreensaver()` for as long as the
+module idles, so on an OLED it paints a static image indefinitely.
+
+The new header makes that worse in one specific way, measured: `gfxHeader()`
+draws a **solid 128-pixel horizontal rule at y=10** (confirmed, all 128 columns
+lit). A static, full-width, high-contrast line is the worst possible shape for
+burn-in. The title glyphs and the 8x8 box are thin by comparison.
+
+The risk is not new in kind — Quadrants and the zap screensaver already paint
+while idle — but it is newly true of three apps *designed to be left running*.
+
+**Three options, cheapest first, none taken because all are design decisions:**
+
+1. Drop the rule on the idle screen only. Cheapest, but breaks the "one shared
+   `Header()`" property that stops the three diverging.
+2. Drift the header a few pixels on a slow timer. Not really animation at
+   "3px every 30 seconds", and it defeats burn-in directly.
+3. **A real display-off after N minutes.** The only one that fixes the general
+   case, and it would help every app in the build rather than these three.
+
+**The bench was left on Quadrants, deliberately, not incidentally.** Its screen
+is actively changing — 761 bytes differ between two captures 1.5 s apart — so
+nothing static is being held on the panel overnight. All three effects were left
+un-bypassed.
