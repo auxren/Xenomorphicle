@@ -128,6 +128,24 @@ tested across most of the UI.
 is picked at random from eight, some have pixels in the last two columns, and an
 8px icon at x=120 fits exactly. Not a real clip.
 
+**It also false-positives on Scope**, for a different reason worth understanding
+before trusting the tool on any full-width screen. Verified on hardware
+2026-09-04: Scope reports `y=1 CLIPPED` and `y=13 CLIPPED` at x=126, but the
+only text on those rows is `SCOPE` and `CV IN 1`, both starting at x=1 and
+nowhere near the right edge. The lit columns are Scope's own waveform, which
+spans the full 128px. The check's rule is "in a band where text was found,
+columns 126-127 should be uniform" -- a graphic drawn through a text band breaks
+that assumption without anything being clipped. Expect the same on any screen
+that draws a meter, waveform or bar through a row that also carries text.
+
+**And a defect class edgecheck CANNOT see at all.** It looks for a PARTIALLY
+drawn glyph in columns 126-127, because a 22nd character starts at x=126 and two
+of its columns fit. A string long enough that the surplus glyphs are clipped away
+*entirely* leaves no partial glyph anywhere, so the check passes. That is exactly
+how `SamplerApp.h`'s 26-character footer sat in a 21-column row reading
+"...L/R:se" until it was found by counting (fixed in `6f67672d`). **Count footer
+strings; do not rely on the tool for over-length.**
+
 ## 6. weegfx / panel grammar
 
 128x64, 1-bit. ~21 characters per row at 6px/char, 9px row pitch, so ~6 usable
