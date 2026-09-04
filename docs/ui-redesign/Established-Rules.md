@@ -16,7 +16,7 @@ pre-audit.**
 
 ## L-06 — the single most important open finding
 
-`PresetBusUI.cpp:355` **already states the intended rule**:
+`PresetBusUI.cpp:433` **already states the intended rule**:
 
 > one focus grammar: invert exactly what the right encoder will change.
 
@@ -30,6 +30,8 @@ The recommended global fix, status **DEFERRED, still open**:
 - Cursors get a leading `>`.
 - State gets a suffix or bracket.
 - Banners get a drawn box.
+
+> **Citation drift:** the Panel Audit cited this comment at `PresetBusUI.cpp:355`. It has since moved to **line 433** — verified in the current tree. The rule is unchanged; only the line moved. Treat audit line numbers as needing re-verification before use.
 
 **Any new proposal must adopt that rule or explicitly argue against it. It
 cannot invent a different inversion convention without becoming the seventh

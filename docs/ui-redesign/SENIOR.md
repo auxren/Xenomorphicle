@@ -26,6 +26,24 @@
 > today (2026-09-03), not carried over unchecked. Line numbers may drift a few
 > lines from the audit's own citations where commits have landed since; I note
 > the ones that moved.
+>
+> **Mid-task addition:** [`docs/Panel-Binding-Matrix.md`](../Panel-Binding-Matrix.md)
+> landed after my first drafting pass and is now folded in throughout —
+> it is the only written record of bindings for the five apps the simulator
+> cannot build (Quadrants, Hemisphere, Captain MIDI, Calibr8or, Scale Editor),
+> and it supplies exact line numbers for the ASR/Chords A/B collision, the
+> encL-overload sites, and a trap I had not accounted for: `CONTROL_BUTTON_A`
+> is a bare alias of `CONTROL_BUTTON_UP` and `B` of `CONTROL_BUTTON_DOWN`
+> (`OC_ui.h:53-56`), inherited from 2-button-shield hardware this panel does
+> not have — and three apps (`NeuralNetwork.h:657-678`,
+> `WaveformEditor.h:414-436`, `ScaleEditor.h:380-402`) bind `CONTROL_BUTTON_A`
+> to a function *named* `OnDownButtonPress()`. I verified this directly:
+> `NeuralNetwork.h`'s `HandleButtonEvent` reads `if (event.control ==
+> OC::CONTROL_BUTTON_A && ...) OnDownButtonPress();` — the binding is A, the
+> name says Down. Anyone implementing this proposal's later steps by reading
+> those three files as a template will get the mapping backwards. I call this
+> out explicitly wherever it bears on the sequence below, and it changes one
+> risk rating in the SHIP SEQUENCE.
 
 ## Concept: **RATIFY**
 
@@ -163,12 +181,16 @@ service actions:
 
 | Site | Action | Confirmed at |
 |---|---|---|
-| Preset-bus STORE | commit write (500 ms hold) | `PresetBusUI.cpp` |
-| App-switcher DebugStats | enter diagnostic loop | `OC_apps.cpp:967-977` |
+| Preset-bus STORE | commit write (500 ms hold), broadcasts bus-wide | `PresetBusUI.cpp:270-280` |
+| App-switcher DebugStats | enter diagnostic loop, exit only via encR | `OC_apps.cpp:967-978` |
 | SETTINGS.h bootloader arm | offer reflash | `SETTINGS.h:516-532` |
 | H1200.h reset to defaults | wipe scale/root config | `H1200.h:1037-1039` |
-| Automatonnetz.h clear grid | wipe the grid | `Automatonnetz.h:747-749` |
+| Automatonnetz.h clear grid | ClearGrid + Reset | `Automatonnetz.h:747-749` |
 | QQ.h / DQ.h copy scale/root | copy to other channels | `QQ.h:1484-1493`, `DQ.h:1393` |
+
+(Cross-checked against `docs/Panel-Binding-Matrix.md`'s own encL-long-press
+inventory, which lists the same six meanings independently — good
+corroboration this is the closed set.)
 
 **What changes:** nothing about *what* fires — this is a discoverability fix,
 not a rebinding. Each site's footer legend (already-established grammar,
@@ -195,11 +217,31 @@ another dependency on Step 0.
 
 Established-Rules flags "A+B means a different thing in each app that binds
 it" as already-documented, intentional per-app polymorphism, not a defect.
-The specific collision named in this brief — ASR and Chords both claiming A/B
-inside the Hemisphere applet family — is real but is exactly the case the
-`OC_app_base.cpp` comment already accounts for: A+B is **scoped per app**, so
-two *different* Hemisphere applets each owning A+B is not a global-chord
-collision, it's two local ones, each legal within its own applet's screen.
+`docs/Panel-Binding-Matrix.md` now gives this the exact grounding it lacked
+in my first run. I re-verified it myself against source:
+
+- **ASR is asymmetric, not just "different."** `ASR.h:872-989`: A (press) is
+  `HandleTopButton()` — octave, toggle-based ±1. B (press) routes through
+  `CONTROL_BUTTON_DOWN -> HandleLowerButton()`, and `HandleLowerButton()`'s
+  entire body is `asr_.toggle_manual_freeze()` — **freeze/sample-and-hold, not
+  octave** (confirmed at `ASR.h:883` for the dispatch, `ASR.h:952-954` for the
+  handler body). A naive "A/B always means octave" read of this app is simply
+  wrong for B.
+- **Chords overloads A/B with menu-page navigation on top of octave.**
+  `Chords.h:1162-1341`: A is octave ±1 *only* while `MENU_PARAMETERS` is the
+  active page, and jumps to that page otherwise; B toggles
+  `MENU_PARAMETERS <-> MENU_CV_MAPPING`, with a long-press that clears the CV
+  mapping — a second destructive long-press site this proposal's Step 3 table
+  above did not carry, because it lives on B, not encL. I'm flagging it here
+  rather than folding it into Step 3's table, since Step 3 was scoped to
+  encL specifically and this is a different control with a different owner
+  (per-applet B, not the global encL).
+
+Both are real, but they are exactly the case the `OC_app_base.cpp` comment
+already accounts for: A+B is **scoped per app**, so two *different*
+Hemisphere applets each giving A+B a different meaning — including ASR's own
+internal A-means-octave/B-means-freeze asymmetry — is not a global-chord
+collision, it's legal local polymorphism within each applet's own screen.
 
 **What changes:** nothing structural. The fix is documentation, not
 rebinding: each applet's own chord card (generalized in Step 1 to cover
@@ -231,6 +273,19 @@ resemble, not a special case to reconcile with the confirm-screen rule — a
 hold-to-commit *is* the commit, by design, and adding a second confirm
 screen on top would be redundant ceremony on the one gesture in the
 instrument already proven safe by a live incident and its fix.
+
+`docs/Panel-Binding-Matrix.md` independently names this exact carve-out as
+**must-not-rebind**: in `Bus200eApp.h:2589-2860`, A (press) *arms* a whole-
+bank Write and encR (after the dead-window) *confirms* it — deliberately
+different buttons, "because a fumbled `A+encR` is also the global
+app-switcher chord, and a mis-commit writes 63KB to the wrong module." On the
+confirm screens A+B is deliberately inert (`Bus200eApp.h:242-246, 421`) — not
+an oversight, a second layer of the same guard. Any future step that
+"standardizes" arm/confirm onto one button, or reactivates A+B there for
+consistency with some other screen's grammar, breaks this carve-out on
+purpose while believing it's cleaning something up. I'm naming it as
+explicitly out of scope for every later step in this document, not just this
+one.
 **What changes:** nothing. This step is a call-out, not a code change:
 future steps must not "fix" this carve-out into conformance with the
 generic confirm-screen rule.
@@ -442,11 +497,17 @@ Reuses the shipped pattern verbatim, no new mechanism:
  scenery        
  tweighty       
  + 10 more...
-A:toggle B:env R:edit
+L:invert     R:toggle
 ```
 
-(Illustrative row content; exact roster and card wording pulled from the
-real app table once Step 1's content pass runs.)
+(Illustrative row content; exact roster pulled from the real app table once
+Step 1's content pass runs. Footer deliberately does **not** reuse the A/B
+Tweighty-style legend — this screen's own shipped logic
+(`OC_app_base.cpp` SHOWHIDELIST case) only ever dispatches on encL/encR
+turns, never A or B, so the footer follows the encoder-only precedent
+already in the tree at `HSUtils.cpp:656,686`: `"L:cursor     R:adjust"`.
+Labeling a button that does nothing on this screen would itself be an L-06-
+adjacent lie — stating a control means something it doesn't.)
 
 ---
 
@@ -458,10 +519,28 @@ boot app**), Calibr8or, Scale Editor, and — because it's the same root cause
 — Hemisphere and Quadrants **in their entirety** are unreachable by
 `xeno-sim`. That is not a corner of this proposal; Steps 2, 3 and 4 above are
 each partially or fully gated on it, and Section 2's routing screen lives
-inside `Hemisphere.h`. Fixing it (Step 0) is cheap — a signature fix, not an
-architecture change — and is the one piece of this whole document I'd put
-ahead of every visible UI change, because every later verification claim in
-this section is conditional on it.
+inside `Hemisphere.h`. `docs/Panel-Binding-Matrix.md` names the exact sites: a
+non-const member called from a const draw path at `CaptainMIDI.h:393-394`,
+`Calibr8or.h:755,757`, `ScaleEditor.h:192-213` — `arm-none-eabi-g++` accepts
+it, Apple clang (and therefore the simulator's host build) rejects it. Fixing
+it (Step 0) is small and named, not an architecture change, and is the one
+piece of this whole document I'd put ahead of every visible UI change,
+because every later verification claim in this section is conditional on it.
+
+**A related, not-a-prerequisite item: the `CONTROL_BUTTON_A`/`UP` alias
+trap.** `OC_ui.h:53-56` aliases `CONTROL_BUTTON_A` to `CONTROL_BUTTON_UP` and
+`B` to `DOWN`, a leftover from 2-button-shield hardware this panel doesn't
+have. Three apps (`NeuralNetwork.h:657-678`, `WaveformEditor.h:414-436`,
+`ScaleEditor.h:380-402`) bind `CONTROL_BUTTON_A` to a function *named*
+`OnDownButtonPress()` — verified directly in `NeuralNetwork.h`. This is not
+something xeno-sim catches for you (it exercises the binding, which is
+correct; the trap is purely in a human reading the *name* while writing new
+code against these three files as a template). It's a documentation/process
+risk, not a code-under-test risk, so it doesn't gate any step above — but it
+belongs in this test plan because "does the sim cover it" is the wrong
+question for it. I'd handle it by never adding these three files to a
+"reference implementation" list in any implementation ticket without a
+one-line warning attached.
 
 | What | xeno-sim can verify today | Needs hardware | Needs Step 0 first |
 |---|---|---|---|
@@ -474,6 +553,7 @@ this section is conditional on it.
 | Curation bitmask generalized to apps (Section 4) | Yes — same pattern the applet toggle already regression-tests | — | No |
 | Z's real-panel reachability | No — this is a hardware-only unknown the whole chord-card and Step-1 design depends on | **Yes — unconfirmed today**, two prior bench attempts inconclusive | — |
 | Audio concurrency claims (Section 3) | Partial — graph wiring logic, not audible correctness | Yes, for actual audio-quality verification | — |
+| `CONTROL_BUTTON_A`/`UP` alias trap | N/A — not a behavior bug, a naming trap for implementers; the sim exercises the (correct) binding, not the (misleading) name | — | — |
 
 **Two standing unverified items this proposal inherits rather than resolves**
 (flagging, not re-litigating): Z's reachability on the real panel, and
@@ -566,7 +646,14 @@ direction has a real migration cost against **existing saved presets**:
    round specifically (two meanings resolving on one screen at once is the
    riskiest single change in this document); **low** on the cursor round.
    Value: closes the instrument's single most-cited open UI defect (L-06),
-   the one this whole team was pointed at first.
+   the one this whole team was pointed at first. **Caution carried from the
+   binding matrix:** this step is the one most likely to have an implementer
+   reading many apps side-by-side as reference, which is exactly the
+   situation the `CONTROL_BUTTON_A`/`UP` alias trap bites in — and
+   `ScaleEditor.h` is both a Step-0 const-bug site (`:192-213`) and an
+   alias-trap site (`:380-402`), so it will be touched twice in this
+   sequence by two different people for two different reasons. Flag it once,
+   here, so neither pass rediscovers it the hard way.
 8. **200e arm/confirm carve-out**: explicitly no change — call it done, keep
    it as the reference implementation. Risk: **none** (this step is a
    decision, not a diff). Value: prevents a future well-intentioned
