@@ -70,11 +70,17 @@ public:
   //
   // Hence: a UI row labelled "Damp" must pass damp straight through to
   // Freeverb and INVERTED to this. Both applets in this tree already do.
-  // KNOWN HAZARD, not guarded here yet: at d == 0 exactly the loop degenerates
-  // to `combStore = combStore*1.0 + y*0.0`, so the damping state stops tracking
-  // its input and holds its last value until reset().
   void setDamping(float d) {
-    if (d < 0.0f) d = 0.0f;
+    // The low clamp is 0.01, not 0, and it is a guard rather than taste. At
+    // d == 0 exactly the loop degenerates to `combStore = combStore*1.0 +
+    // y*0.0`: the damping state stops tracking its input and holds its last
+    // value FOREVER, injecting a constant into every comb's feedback path
+    // until reset() is called. SamverbApplet's damp knob caps at 99 to stay
+    // off that point, but damp_cv is summed in AFTER the knob
+    // (SamverbApplet.h:38) and routes around the cap, so the engine has to
+    // defend itself. Symmetric with the 0.99 already on the high end, which
+    // exists for the mirror-image reason.
+    if (d < 0.01f) d = 0.01f;
     if (d > 0.99f) d = 0.99f;
     __disable_irq();
     damp1 = d;
