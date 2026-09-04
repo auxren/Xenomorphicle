@@ -128,7 +128,7 @@ void SimMidiPortBase::sendAfterTouch(uint8_t v, uint8_t ch) { note_tx("aftertouc
 void SimMidiPortBase::sendPitchBend(int b, uint8_t ch) { note_tx("bend", b, 0, ch); }
 void SimMidiPortBase::sendRealTime(uint8_t t) { note_tx("realtime", t, 0, 0); }
 void SimMidiPortBase::sendSysEx(unsigned len, const uint8_t *, bool) { note_tx("sysex", (int)len, 0, 0); }
-void SimMidiPortBase::send(uint8_t t, uint8_t d1, uint8_t d2, uint8_t ch) { note_tx("raw", t, d1, d2 | (ch << 8)); }
+void SimMidiPortBase::send(uint8_t t, uint8_t d1, uint8_t d2, uint8_t ch, uint8_t) { note_tx("raw", t, d1, d2 | (ch << 8)); }
 
 // --- the panel -------------------------------------------------------------
 void SimPanelVisible(uint8_t out[1024]) {

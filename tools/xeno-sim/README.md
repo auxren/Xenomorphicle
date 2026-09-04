@@ -274,15 +274,25 @@ it. This build carries six apps:
   They are still not in the manifest, because fixing that uncovered three
   further blockers behind it — each a different root cause, none of them
   const-correctness:
-  * **Captain MIDI** — the shim's `usbMIDI.send()` takes 4 arguments; the real
-    Teensy core has a 5-argument overload carrying the cable number, which
-    `midi_thru()` uses (`apps/CaptainMIDI.h:2233`). A **simulator shim** gap.
+  * **Captain MIDI** — ~~the shim's `usbMIDI.send()` takes 4 arguments~~ FIXED:
+    `SimMidiPortBase::send()` now carries the real core's fifth cable-number
+    argument, defaulted so USBHost_t36's four-argument `MIDIDevice::send()`
+    keeps compiling against the same declaration.
   * **Scale Editor** — `apps/ScaleEditor.h:270` assigns
     `OC::Scales::NUM_SCALES - 1` (= 148) into an `int8_t`, truncating to -108.
     This is a **real firmware bug**, not a host-build artefact: scale import
     cannot reach any scale above index 127 on target either. clang catches it
     via `-Wconstant-conversion`; gcc does not.
-  * **Any app that pulls in `ClockSetup`** — `HemisphereApplet::cursor_countdown`
+  * **Any app that pulls in `ClockSetup`** — adding `HemisphereApplet.cpp` to
+    `FW_SRCS` resolves the symbol but does **not** work, and the reason is the
+    scope of the job: `HemisphereApplet::BaseView() const` calls the non-const
+    virtuals `View()`, `DrawFullScreen()` and `SetHelp()`, which is the same
+    const-correctness class fixed for the three apps above — except that
+    **93 applets override `View()`**. Dropping `BaseView`'s own `const`
+    instead is not a shortcut: `Quadrants.h:450` calls it from
+    `DrawFullScreen() const`, so the const sheds upward through Quadrants too.
+    This is the "project, not a shim" entry above wearing a different hat.
+    Original symptom: `HemisphereApplet::cursor_countdown`
     is defined at `HemisphereApplet.cpp:9`, and **this Makefile's `FW_SRCS`
     does not list that file**, so the sim link has no definition for it while
     `ClockSetup` still references it. Purely a gap in *this* manifest: the
