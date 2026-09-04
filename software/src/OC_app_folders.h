@@ -99,6 +99,7 @@ static const DefaultEntry kDefaults[] = {
   { TWOCCS("WA"), FOLDER_AUDIO },    // Wave editor
   { TWOCCS("SP"), FOLDER_AUDIO },    // Scope
   { TWOCCS("DL"), FOLDER_AUDIO },    // Delay, standalone full-screen effect
+  { TWOCCS("RV"), FOLDER_AUDIO },    // Reverb, standalone full-screen effect
 
   // The instrument looking after itself, and its doors to the outside world.
   { TWOCCS("SE"), FOLDER_SYSTEM },   // Setup/About
