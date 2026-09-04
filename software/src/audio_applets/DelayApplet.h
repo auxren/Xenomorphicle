@@ -400,10 +400,27 @@ protected:
   }
 
 private:
-  // 512K samples: with PSRAM, 2MB (float32) per channel for just under 12 secs
-  // of delay time. Without PSRAM the buffer falls back to the RAM2 heap, so
-  // divide by 32 (vs int16's /16) to keep the same byte footprint (64KB/ch,
-  // ~0.37s max delay).
+  // 512K float32 samples = 2 MB of PSRAM per channel (4 MB for the stereo
+  // instance), giving MAX_DELAY_SECS = (524288-1)/48000 = ~10.9 s. Not the
+  // "just under 12 s" this comment used to claim -- that was the 44.1 kHz
+  // figure, and the core runs at 48 kHz.
+  //
+  // THIS DELAY REQUIRES PSRAM. There is no RAM2 fallback, whatever the /32
+  // below looks like: `ExtAudioBuffer::Acquire()` (Audio/AudioBuffer.h:145-150)
+  // only ever calls `extmem_calloc`. On a board with no PSRAM chip the buffer
+  // stays nullptr and the smaller size buys nothing -- so the failure mode is
+  // NOT "a shorter delay", it is NO DELAY. The wet path goes silent; only the
+  // dry leg through wet_dry_mixer's WD_DRY_CH survives, which means at Wet=100%
+  // the applet is silent outright.
+  //
+  // It does at least fail safely rather than crashing: AudioDelayExtF32's
+  // update() early-returns on `!buffer.IsReady()`
+  // (Audio/AudioDelayExtF32.h:83). What is missing is any acknowledgement at
+  // the applet level -- unlike Freeverb/Samverb, which check their allocation
+  // and force dry to unity (FreeverbApplet.h:39-41, SamverbApplet.h:39-42),
+  // this applet never asks whether it got its buffer and never says so on
+  // screen. Left as-is deliberately: RAM2 is the scarce resource here and the
+  // last thing this file should grow is a competitor for it.
   static const size_t DELAY_LENGTH = 1024 * 512;
   using DelayStream = AudioDelayExtF32<9>;
 
