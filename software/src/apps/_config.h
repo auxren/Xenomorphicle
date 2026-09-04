@@ -67,6 +67,9 @@ namespace menu = OC::menu;
 #ifdef ENABLE_APP_REVERB
 #include "ReverbApp.h"
 #endif
+#ifdef ENABLE_APP_BUNGVERB
+#include "BungverbApp.h"
+#endif
 #ifdef ENABLE_APP_USBDRIVE
 #include "UsbDriveApp.h"
 #endif
@@ -182,6 +185,9 @@ static DMAMEM AppContainer<void // this space intentionally left blank
 #endif
 #ifdef ENABLE_APP_REVERB
   , AppReverb
+#endif
+#ifdef ENABLE_APP_BUNGVERB
+  , AppBungverb
 #endif
 #ifdef ENABLE_APP_USBDRIVE
   , AppUsbDrive

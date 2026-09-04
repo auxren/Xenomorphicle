@@ -295,6 +295,10 @@ static const ChordGloss kChordGloss[] = {
   // UsbDriveApp.h:254-255 -- holding B on the USB Drive item arms it.
   { TWOCCS("UD"), nullptr, nullptr, "B-hold: USB Drive" },
 #endif
+#ifdef ENABLE_APP_BUNGVERB
+  // BungverbApp.h -- same family, same one control missing from the footers.
+  { TWOCCS("BV"), nullptr, nullptr, "Hold X: fine adjust" },
+#endif
 #ifdef ENABLE_APP_REVERB
   // ReverbApp.h -- same family, same one control missing from the footers.
   { TWOCCS("RV"), nullptr, nullptr, "Hold X: fine adjust" },
