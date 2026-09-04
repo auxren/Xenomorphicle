@@ -1427,24 +1427,35 @@ $SIM --keys "$ENTER,l-down,step600,l-up,step3000" 2>&1 | grep -q 'PresetEngine: 
   && ok "the release-first rule leaves the hold-sampled STORE working" \
   || bad "the release-first rule broke the 500ms STORE hold"
 
-echo "hold A reveals the chord list"
+echo "hold Z reveals the chord list"
 
 # Every global gesture here is an unlabelled chord, which is fine once and
 # unguessable the first time. Holding the modifier alone now lists them.
 # kChordHintDelayTicks is 700 UI ticks: long enough that the first half of a
 # real chord never flashes a card at you, short enough to find by accident.
+#
+# Z ONLY. A used to raise this card too, which cost every app the whole of A's
+# hold: an app binding A on long-press got the card painted over its own
+# response. A is an ordinary app button now, and the checks below assert that
+# in both directions -- Z still reveals, A never does.
 hint_rows() { $SIM "$@" --dump-fb 2>/dev/null | python3 fbtext.py -; }
 
-hint_rows --keys "a-down,step400" | grep -q 'HOLD A' \
+hint_rows --keys "z-down,step400" | grep -q 'HOLD Z' \
   && bad "the chord list appeared 400ms in, inside its own 700-tick delay" \
-  || ok "holding A for 400ms shows nothing -- the delay is real"
-hint_rows --keys "a-down,step900" | grep -q 'HOLD A' \
-  && ok "holding A past the delay reveals the chord list" \
-  || bad "holding A for 900ms revealed no chord list"
+  || ok "holding Z for 400ms shows nothing -- the delay is real"
+hint_rows --keys "z-down,step900" | grep -q 'HOLD Z' \
+  && ok "holding Z past the delay reveals the chord list" \
+  || bad "holding Z for 900ms revealed no chord list"
+
+# The half of the change that frees A: holding it must draw NOTHING, however
+# long it is held, so an app is free to bind A on long-press.
+hint_rows --keys "a-down,step900" | grep -qE 'HOLD [AZ]' \
+  && bad "holding A still raises a chord card -- A is not free for apps" \
+  || ok "holding A raises no card at all -- A belongs to the app"
 
 # It is a hint, not a mode. Releasing without a second press must do nothing at
 # all -- not switch app, not open anything, not leave a mark.
-$SIM --keys "a-down,step900,a-up,step300" --dump-fb 2>/dev/null > "$TMP/afterhint.hex"
+$SIM --keys "z-down,step900,z-up,step300" --dump-fb 2>/dev/null > "$TMP/afterhint.hex"
 $SIM --keys "step1200" --dump-fb 2>/dev/null > "$TMP/nohint.hex"
 cmp -s "$TMP/afterhint.hex" "$TMP/nohint.hex" \
   && ok "releasing the hold without a second press does nothing at all" \
@@ -1452,7 +1463,7 @@ cmp -s "$TMP/afterhint.hex" "$TMP/nohint.hex" \
 
 # ...and the chords still work THROUGH it: the overlay must not eat the second
 # press it exists to advertise.
-$SIM --keys "a-down,step900,r-down,step60,r-up,step60,a-up,step200" 2>&1 \
+$SIM --keys "z-down,step900,r-down,step60,r-up,step60,z-up,step200" 2>&1 \
   | grep -q '^  menu ' \
   && ok "a chord completed through the revealed list still works" \
   || bad "the chord list swallowed the chord it was advertising"

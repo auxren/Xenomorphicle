@@ -141,14 +141,15 @@ struct ChordGloss {
   const char *tip;       // null: nothing to add beyond a_plus_b/z_alone
 };
 
-// Row budget, not decoration: DrawChordHint's `rows[5]` is sized for the
-// worst case (both A-branch optional rows, or both Z-branch optional rows)
-// and DrawChordCard's height is derived from row_count, so a 6th row would
-// push card_h past the 64px panel. `tip` therefore only ever takes the slot
-// its own branch's specific row (a_plus_b for HOLD A, z_alone for HOLD Z)
-// would otherwise leave empty -- see DrawChordHint. An app with both
-// a_plus_b and z_alone set (the three clock apps below) already fills both
-// slots with real content, so it has no room for `tip` and does not need it.
+// Row budget, not decoration: DrawChordHint's `rows[5]` is a hard cap --
+// DrawChordCard derives its height from row_count, so a 6th row would push
+// card_h past the 64px panel. Since A stopped raising a card of its own,
+// there is ONE card carrying what used to be spread over two, and the budget
+// is spent in priority order: the two global encoder chords always, then
+// z_alone, then a_plus_b, then "Z+A: Screensaver" only if the app left room.
+// `tip` therefore only appears for an app that binds neither chord -- an app
+// with both (the clock apps below) already fills both slots with content
+// specific to it, so it has no room for `tip` and does not need it.
 // Every entry is guarded by the same #ifdef its app is registered under in
 // _config.h's app_container, so the table never claims content for an app a
 // given build doesn't have. (TWOCCS() alone can't cause a build break either
@@ -392,38 +393,40 @@ FLASHMEM static void DrawChordHint(uint16_t app_id, bool io_settings_allowed)
   HintRow rows[5];
   int n = 0;
 
-  if (CONTROL_BUTTON_A == chord_hint_modifier) {
-    rows[n++] = { "A+encR: Switch App", nullptr };
-    // Offered only where EditIOSettings() will actually open something. It
-    // refuses in silence for any app that overrides io_settings_allowed(), and
-    // a row promising a screen that never arrives is how a working gesture gets
-    // learned as a broken one. No app in this tree overrides it today (the base
-    // returns true and nothing else defines it), so as things stand this row
-    // always appears -- the test is here so the card stays honest the moment
-    // one does, not because it is filtering anything now.
-    if (io_settings_allowed) rows[n++] = { "A+encL: I/O Cfg", nullptr };
-    // This slot is A+B's row when the app binds one; otherwise it is the
-    // app's general tip, so every app gets a useful row here rather than
-    // just the apps that happen to bind A+B -- see the ChordGloss comment.
-    if (gloss && gloss->a_plus_b) rows[n++] = { "A+B: ", gloss->a_plus_b };
-    else if (gloss && gloss->tip) rows[n++] = { gloss->tip, nullptr };
-    rows[n++] = { "encL+encR: Presets", nullptr };
-    if (z_button_present()) rows[n++] = { "Z+A: Screensaver", nullptr };
-    DrawChordCard("HOLD A", rows, n);
-  } else {
-    rows[n++] = { "Z+encR: Switch App", nullptr };
-    if (io_settings_allowed) rows[n++] = { "Z+encL: I/O Cfg", nullptr };
-    rows[n++] = { "Z+A: Screensaver", nullptr };
-    // Z is the one row here that can fire on RELEASE (Quadrants.h:1873 toggles
-    // the clock on either release), so naming what it does is not decoration:
-    // it is the difference between letting go and being surprised. Same
-    // either/or as the A-branch above: bare-Z meaning if the app binds one,
-    // else the app's general tip.
-    if (gloss && gloss->z_alone) rows[n++] = { "Z: ", gloss->z_alone };
-    else if (gloss && gloss->tip) rows[n++] = { gloss->tip, nullptr };
-    rows[n++] = { "encL+encR: Presets", nullptr };
-    DrawChordCard("HOLD Z", rows, n);
-  }
+  // Z is the only modifier that raises this card (see ArmChordHint), so there
+  // is one card, not two -- and it is now the ONLY discovery surface in the
+  // firmware, since holding A draws nothing. What used to be split across two
+  // cards has to fit on this one, inside the same hard rows[5] budget.
+  rows[n++] = { "Z+encR: Switch App", nullptr };
+  // Offered only where EditIOSettings() will actually open something. It
+  // refuses in silence for any app that overrides io_settings_allowed(), and
+  // a row promising a screen that never arrives is how a working gesture gets
+  // learned as a broken one. No app in this tree overrides it today (the base
+  // returns true and nothing else defines it), so as things stand this row
+  // always appears -- the test is here so the card stays honest the moment
+  // one does, not because it is filtering anything now.
+  if (io_settings_allowed) rows[n++] = { "Z+encL: I/O Cfg", nullptr };
+
+  // App-specific rows, most contextual first. Z is the one row that can fire
+  // on RELEASE (Quadrants.h:1873 toggles the clock on either release), so
+  // naming it is the difference between letting go and being surprised. A+B
+  // follows because it no longer has a card of its own: an app that binds it
+  // (the clock apps, CaptainMIDI's router, SETTINGS' screen flip) would
+  // otherwise be entirely undiscoverable now that HOLD A draws nothing.
+  // `tip` fills the slot only when the app binds neither, so every app still
+  // gets one useful row.
+  int app_rows = 0;
+  if (gloss && gloss->z_alone)  { rows[n++] = { "Z: ", gloss->z_alone };   ++app_rows; }
+  if (gloss && gloss->a_plus_b) { rows[n++] = { "A+B: ", gloss->a_plus_b }; ++app_rows; }
+  if (!app_rows && gloss && gloss->tip) rows[n++] = { gloss->tip, nullptr };
+
+  // Lowest priority: it is a global gesture, true in every app, so it yields
+  // to app-specific content rather than crowding it out. n<4 leaves exactly
+  // one slot for the Presets row below, keeping the worst case at rows[5].
+  if (n < 4) rows[n++] = { "Z+A: Screensaver", nullptr };
+
+  rows[n++] = { "encL+encR: Presets", nullptr };
+  DrawChordCard("HOLD Z", rows, n);
 }
 
 // Arms the card on a modifier pressed ALONE, disarms it the moment anything
@@ -443,9 +446,15 @@ FLASHMEM static void DrawChordHint(uint16_t app_id, bool io_settings_allowed)
 // DispatchAppEvent and EditIOSettings each of them ends in.
 static void ArmChordHint(const UI::Event &event)
 {
+  // Z ONLY. A used to raise this card too, which cost every app the whole of
+  // A's hold -- an app binding A on long-press got the card painted over its
+  // own response, so A read as a system button in all 31 apps to buy
+  // discoverability for two chords that also answer to Z. Z is the dedicated
+  // system modifier and carries the card alone; A is an ordinary app button.
+  // A+encR / A+encL still work (OC_ui.cpp's hotkey block accepts either
+  // modifier) -- they are simply documented on Z's card now, not A's.
   if (UI::EVENT_BUTTON_DOWN == event.type &&
-      (CONTROL_BUTTON_A == event.control ||
-       (CONTROL_BUTTON_Z == event.control && z_button_present())) &&
+      CONTROL_BUTTON_Z == event.control && z_button_present() &&
       event.control == event.mask) {
     chord_hint_modifier = static_cast<UiControl>(event.control);
     chord_hint_ticks = ui.ticks();
