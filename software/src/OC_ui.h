@@ -90,7 +90,12 @@ public:
   // against it; the consumer (DispatchEvents) is loop context like the
   // console and cannot interleave. Callers send a tap as DOWN then PRESS,
   // the way the panel reports one.
-  void Inject(UI::EventType type, uint16_t control, int16_t value);
+  // `held` names buttons to report as still down in the event's mask, which
+  // is how every global chord is recognised (see z_hold/a_hold in
+  // OC_ui.cpp). Injecting a chord needs it; injecting a plain press does
+  // not, so it defaults to none and existing callers are unchanged.
+  void Inject(UI::EventType type, uint16_t control, int16_t value,
+              uint16_t held = 0);
 
   void Poll();
   void Poke();

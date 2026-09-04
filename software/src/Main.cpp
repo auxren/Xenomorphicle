@@ -321,6 +321,40 @@ static uint32_t *stack_paint_hi = nullptr;
 // had no remote form, so the scan path could not be exercised from a
 // headless bench at all.
 #if defined(__IMXRT1062__)
+// The button bit a console press character names, or 0. Shared by
+// ConsolePress and ConsoleChord so the two can never drift apart.
+FLASHMEM static uint16_t ConsoleButtonBit(char which) {
+  switch (which) {
+    case 'l': case 'L': return OC::CONTROL_BUTTON_L;
+    case 'r': case 'R': return OC::CONTROL_BUTTON_R;
+    case 'a': case 'A': return OC::CONTROL_BUTTON_A;
+    case 'b': case 'B': return OC::CONTROL_BUTTON_B;
+    case 'z': case 'Z': return OC::CONTROL_BUTTON_Z;
+    case 'x': case 'X': return OC::CONTROL_BUTTON_X;
+    case 'y': case 'Y': return OC::CONTROL_BUTTON_Y;
+    default: return 0;
+  }
+}
+
+// Press one control WHILE another is held: the shape of every global gesture
+// on this panel (hold A, push encR for the app switcher, and so on). Injection
+// could not express it before, so no chord-opened screen could be reached from
+// the console -- which meant the app switcher, the I/O menus, the preset-bus
+// overlay and the screensaver had no bench route at all, and every check of
+// them had to be run in the simulator instead, against a build with six apps
+// and no Hemisphere.
+FLASHMEM static void ConsoleChord(char mod, char which) {
+  const uint16_t held = ConsoleButtonBit(mod);
+  const uint16_t button = ConsoleButtonBit(which);
+  if (!held || !button) {
+    Serial.println("chord: cancelled (two of l r a b z x y: modifier then key)");
+    return;
+  }
+  OC::ui.Inject(UI::EVENT_BUTTON_DOWN, button, 0, held);
+  OC::ui.Inject(UI::EVENT_BUTTON_PRESS, button, 0);
+  Serial.printf("chord: %c held, %c pressed\n", mod, which);
+}
+
 FLASHMEM static void ConsolePress(char which) {
   uint16_t button = 0;
   int16_t detent = 0;
@@ -1098,6 +1132,8 @@ FLASHMEM __attribute__((noinline)) void loop() {
       // 'j' bench trigger: one more character names the control to press.
       // See ConsolePress().
       static bool press_pending = false;
+      static uint8_t chord_digits = 0;   // 0 = idle, 1 = waiting for the key
+      static char chord_mod = 0;
 #endif
       static bool recall_slot_pending = false;
       static uint8_t recall_slot_digits = 0;
@@ -1160,6 +1196,12 @@ FLASHMEM __attribute__((noinline)) void loop() {
         if (press_pending) {
           press_pending = false;
           ConsolePress((char)cmd);
+          continue;
+        }
+        if (chord_digits) {
+          if (1 == chord_digits) { chord_mod = (char)cmd; chord_digits = 2; continue; }
+          chord_digits = 0;
+          ConsoleChord(chord_mod, (char)cmd);
           continue;
         }
 #endif
@@ -1586,6 +1628,11 @@ FLASHMEM __attribute__((noinline)) void loop() {
           case 'j':  // press the panel: one more character names the control
             Serial.println("press: l r a b z x y tap, capitals hold, [ ] encL, - + encR");
             press_pending = true;
+            break;
+          case 'o':  // press a chord: two more characters, modifier then key
+            Serial.println("chord: two of l r a b z x y -- modifier then key "
+                           "(ar = hold A, push encR: the app switcher)");
+            chord_digits = 1;
             break;
           case 'A':  // switch to any app by container index (2 decimal digits)
             Serial.println("app switch: type 2 decimal digits for the index");

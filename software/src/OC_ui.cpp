@@ -164,11 +164,21 @@ void FASTRUN Ui::Poll() {
   button_state_ = button_state;
 }
 
-FLASHMEM void Ui::Inject(UI::EventType type, uint16_t control, int16_t value) {
+FLASHMEM void Ui::Inject(UI::EventType type, uint16_t control, int16_t value,
+                         uint16_t held) {
   // Only the DOWN of a tap carries its button in the mask, as the raw pin
-  // would; by the PRESS the pin is high again. No chord is ever synthesized:
-  // the both-encoder and A/Z gestures open screens that run their own loops.
-  const uint16_t mask = (type == UI::EVENT_BUTTON_DOWN) ? control : 0;
+  // would; by the PRESS the pin is high again.
+  //
+  // `held` adds modifier buttons to that mask, which is what lets a chord be
+  // injected at all -- every global gesture is recognised by testing
+  // event.mask for A or Z on another control's DOWN. Nothing is synthesized
+  // implicitly: a caller asking for a chord has to name the modifier.
+  //
+  // The screens these chords open arm IgnoreUntilRelease() on the whole chord.
+  // A modifier that was never physically down is simply "already up" to that
+  // guard, so it swallows one release that never arrives and costs nothing --
+  // the injected press that follows is delivered normally.
+  const uint16_t mask = ((type == UI::EVENT_BUTTON_DOWN) ? control : 0) | held;
   noInterrupts();
   PushEvent(type, control, value, mask);
   interrupts();
