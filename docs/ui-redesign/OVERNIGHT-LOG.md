@@ -304,3 +304,82 @@ The Time bar's range is 0..10,921 ms, so a 500 ms delay fills **2 pixels of
 in the bottom 10% of that bar. The arithmetic is right and the display is
 useless, which is a scale choice, not a bug. A log or dual-rate scale would fix
 it. Not changed unattended because it is a design decision.
+
+## Reverb standalone app, and Delay re-verified: hardware QA of `e664198a`
+
+Built and flashed from a CLEAN tree so the binary under test corresponds to a
+commit. That matters here: `pio run -t upload` builds from the WORKING TREE,
+not from HEAD, so an uncommitted edit is silently compiled into the binary and
+the QA result then describes a build that exists in no commit and cannot be
+bisected to. The first Delay QA pass was against `d85d556d` and did NOT contain
+the `AudioNoInterrupts` bracket or the screen refactor, so it was re-run rather
+than assumed to carry.
+
+**Delay, re-verified after `502e5c79` moved its draw code.** All three pages,
+geometry identical to the pre-refactor pass (labels x=4, Time x=97, Fdbk x=115,
+Wet x=109, header and footer x=1), `edgecheck.py` clean on all three. The "pure
+code move" claim now rests on measurement rather than on reading.
+
+**Reverb.** AUDIO folder, TWOCCS `RV`. Two pages, MAIN -> CV -> MAIN, and
+correctly no MODE page -- it has no time unit, clock source or modulation type
+to put on one, and a page that would be empty does not exist.
+
+| Check | Result |
+| --- | --- |
+| MAIN renders full-width | PASS |
+| `Cut :` value at x=97 | PASS, exactly as predicted |
+| Size / Damp / Mix values at x=109 | PASS |
+| CV page values at x=103 | PASS |
+| Footer `A:byp  R:cv` / `A:byp  Y:src  R:main` | PASS |
+| encR press cycles MAIN <-> CV | PASS |
+| encL press returns to MAIN | PASS |
+| A toggles bypass | PASS, `BYPASSED - A:active` |
+| `edgecheck.py`, both pages | PASS, no clipping |
+| L-06: one inverted region | PASS, cursor band only |
+| Does not strand the instrument | PASS, z+r opens the switcher from Reverb |
+
+**Two predictions confirmed end to end, which is stronger than "it looks
+right":**
+
+- The CV page reads **100%**, confirming the attenuversion arithmetic:
+  `Atten(60) = 10*60*60/36 = 1000 tenths = 100%`.
+- `Cut` renders **`15.0k`**, not `15000Hz`. The applet's own `%5dHz` is 7
+  characters and would have collided with the bar's right edge at x=87;
+  kHz-with-one-decimal is 5 and starts at x=97. That is finding M-6, fixed and
+  measured.
+
+**The roster stamp fired a second time.** Roster went 16 -> 17, the stamp
+changed, and the arrangement was refused and re-seeded again. Two flashes in a
+row where HIGH 2 did its job unprompted.
+
+### How far the abstraction actually generalised -- the honest version
+
+`git show e664198a -- software/src/AudioAppletHost.h` is **zero lines**, and so
+is `AudioEffectScreen.h`. A MONO applet with no clock, no `DigitalInputMap` and
+no `HS::` dependency went onto a host built around a STEREO applet with all
+three, unchanged.
+
+That is only true because of `502e5c79`, which came first and was not free.
+Writing Reverb is what revealed that nine pieces of screen grammar were sitting
+private inside `DelayApp.h` about to be copied. So the accurate claim is:
+
+> The **lifecycle** host generalised untouched. The **screen** did not
+> generalise until it was made to, and making it took one commit plus a
+> refactor of an already-hardware-verified file. A third cost neither shared
+> file absorbs: each applet needs a public accessor block before it can be
+> hosted -- 41 lines for Freeverb, similar for Delay. That is per-effect work
+> that does not shrink.
+
+Two of three layers are shared; the third is a fixed per-effect cost of known
+size.
+
+### THE GAP THAT MATTERS: nobody has heard any of this
+
+Delay, Reverb and the A2 decay-time change are **all** unheard. Every audio
+claim in this series is arithmetic that reproduces on a framebuffer. The bench
+can drive the panel and read the screen; it has no ear on the jacks.
+
+Specifically unverified: whether either app reaches the codec at all, whether
+claiming `kOutputRouteEffectSlot` disconnects the previous holder as designed,
+whether Reverb (the first MONO applet through the host's summed-to-both path)
+is audible on both channels, Delay's CLOCK unit, and its ~10.9 s maximum.
