@@ -294,6 +294,13 @@ static const ChordGloss kChordGloss[] = {
   // UsbDriveApp.h:254-255 -- holding B on the USB Drive item arms it.
   { TWOCCS("UD"), nullptr, nullptr, "B-hold: USB Drive" },
 #endif
+#ifdef ENABLE_APP_DELAY
+  // DelayApp.h -- A, B, encL and encR are all in the footer legend on every
+  // page. X-held-fine is the one control that is NOT, because the footers are
+  // already 18-20 of their 21 characters, so it is exactly what `tip` is for:
+  // one control, the least guessable one.
+  { TWOCCS("DL"), nullptr, nullptr, "Hold X: fine adjust" },
+#endif
   // ScaleEditor.h:138-144 -- Up/Down switch which scale is being edited.
   // AppScaleEditor has no #ifdef in _config.h -- always in the container.
   { TWOCCS("SC"), nullptr, nullptr, "Up/Dn: Switch Scale" },
