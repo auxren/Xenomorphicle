@@ -37,6 +37,64 @@ The recommended global fix, status **DEFERRED, still open**:
 cannot invent a different inversion convention without becoming the seventh
 meaning.**
 
+### The gap L-06 does not cover, and how it is resolved
+
+L-06 as written governs what the right encoder **changes** — what it *turns*.
+It says nothing about rows where `encL` chooses between entries and `encR`
+**presses to fire** the chosen one. That is not an edge case: it is every
+confirm, arm and commit row in the instrument — the 200e arm/confirm carve-out,
+`ConfirmReset`, the bootloader arm, the recovery prompt.
+
+This was found the hard way. L-06 step 1 was implemented across seven sites,
+built in both envs, and then **reverted** (`e8ddb898`), partly because the row it
+failed on was the recovery prompt — reached by being told your module is
+damaged, where one of the two entries rewrites 63,120 bytes. Converting that
+from a filled inversion to a thin outline made *the dangerous selection
+quieter*.
+
+**Resolution: L-06 extends to what the right encoder will ACT on, not only what
+it turns.** A press-to-fire row keeps its inversion.
+
+The reasoning, in order of weight:
+
+1. **Safety.** Inversion is the loudest mark a 1-bit panel has. On a row where
+   the wrong choice is destructive, the selected entry is exactly the thing that
+   should be loud. A rule that makes destructive selections quieter than
+   ordinary ones is the wrong rule, whatever its symmetry.
+2. **It keeps the rule to one sentence and one mark.** The alternative — a third
+   convention for press-to-fire rows, neither inversion nor a leading `>` —
+   *adds* a meaning. L-06 exists to reduce the number of things inversion can
+   mean, from six to one. Solving its gap by inventing a seventh mark would
+   defeat the point.
+3. **It matches the reference implementation.** `PresetBusUI.cpp` is the one
+   screen that already honours L-06, and its own arm/confirm rows invert the
+   entry `encR` will fire. The rule is being extended to describe what its
+   exemplar already does, not to license something new.
+4. **It shrinks the migration**, which is a consequence rather than a reason —
+   but a real one.
+
+So the full rule reads: **invert exactly what the right encoder will act on —
+turn or press. Cursors that `encL` moves and `encR` does not act on get a
+leading `>`. State gets a suffix or bracket. Banners get a drawn box.**
+
+> Recorded 2026-09-04 as the working resolution so the migration can resume
+> against a settled rule. Oren has not ratified it; it is reversible and
+> nothing has been migrated under it. The alternative he may prefer is the
+> strict reading — `encR` *turns* only — which requires designing a third mark
+> for press-to-fire rows before any confirm screen can be converted.
+
+### A prerequisite the migration plan did not account for
+
+`selfcheck.sh` identifies a cursor by extracting the **inverted run** from
+`fbtext.py`, and a drawn frame is invisible to a glyph decoder. So converting a
+cursor from inversion to a frame does not break a wording assertion — it removes
+the harness's **only way of seeing that cursor**. Every step of this migration
+has that property.
+
+`framecheck.py` — a pixel probe that can assert a drawn rectangle — is therefore
+a hard prerequisite, and check conversion must land in the **same commit** as
+the code it covers.
+
 > **This is a live problem for [CORDLESS](CORDLESS.md).** That proposal leans
 > hard on visual state — filled/hollow/blinking jack glyphs, live meters on
 > every picker row, an occupied-jack render, a carried-cord indicator. Its
