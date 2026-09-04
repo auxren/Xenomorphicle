@@ -70,6 +70,7 @@
 // ---------------------------------------------------------------------------
 
 #include "../AudioAppletHost.h"
+#include "../AudioEffectScreen.h"
 #include "../HSApplication.h"
 #include "../audio_applets/DelayApplet.h"
 #include "../applets/ClockSetupT4.h"
@@ -84,48 +85,6 @@ enum { D_UNIT, D_CLK, D_MOD, D_COUNT };
 enum { C_TIME, C_FDBK, C_WET, C_COUNT };
 
 static constexpr uint8_t kRowCount[PAGE_COUNT] = { M_COUNT, D_COUNT, C_COUNT };
-
-// Four rows, never five. The body is y=12..53 = 42px; 4 x 10px = 40, so the
-// last cursor band ends at y=50 and clears the footer rule at y=54 with 3px to
-// spare. An 8px pitch would fit five rows with zero leading and cursor bands
-// touching their neighbours' ink on a 1-bit panel.
-static constexpr int kRowY[M_COUNT] = { 12, 22, 32, 42 };
-static constexpr int kRowH = 10;
-static constexpr int kLabelX = 4;
-static constexpr int kBarX = 34;
-static constexpr int kBarW = 54;
-static constexpr int kBarH = 8;
-// CV page columns: source name, then a narrower live-input bar.
-static constexpr int kCvSrcX = 40;
-static constexpr int kCvBarX = 64;
-static constexpr int kCvBarW = 24;
-
-// Track + fill, generalising Tweighty's DrawBar (TweightyApp.h:528-534), which
-// hard-codes h=8. frac is clamped here so no caller needs its own bounds check.
-inline void DrawBar(int x, int y, int w, int h, float frac) {
-  graphics.drawFrame(x, y, w, h);
-  if (frac < 0.0f) frac = 0.0f;
-  else if (frac > 1.0f) frac = 1.0f;
-  const int fillw = (int)((w - 2) * frac + 0.5f);
-  if (fillw > 0) graphics.drawRect(x + 1, y + 1, fillw, h - 2);
-}
-
-// Signed parameters: same frame, plus a zero datum down the centre column, and
-// the fill grows left or right from it. Without the datum a bipolar bar at 0%
-// and a unipolar bar at 0% are the same picture.
-inline void DrawBipolarBar(int x, int y, int w, int h, float frac) {
-  graphics.drawFrame(x, y, w, h);
-  if (frac < -1.0f) frac = -1.0f;
-  else if (frac > 1.0f) frac = 1.0f;
-  const int mid = x + w / 2;
-  graphics.drawVLine(mid, y + 1, h - 2);
-  const int half = (w - 2) / 2;
-  const int fillw = (int)(half * (frac < 0 ? -frac : frac) + 0.5f);
-  if (fillw > 0) {
-    if (frac >= 0.0f) graphics.drawRect(mid + 1, y + 1, fillw, h - 2);
-    else graphics.drawRect(mid - fillw, y + 1, fillw, h - 2);
-  }
-}
 
 }  // namespace DelayAppNS
 
@@ -179,9 +138,6 @@ private:
   uint8_t cursor_[DelayAppNS::PAGE_COUNT] = { 0, 0, 0 };
   bool bypassed_ = false;
 
-  int FineStep(int coarse, int fine) const {
-    return OC::ui.read_immediate(OC::CONTROL_BUTTON_X) ? fine : coarse;
-  }
   uint8_t Cursor() const { return cursor_[page_]; }
 
   void AdjustRow(int dir);
@@ -189,9 +145,6 @@ private:
   void DrawMain() const;
   void DrawMode() const;
   void DrawCv() const;
-  void DrawRowFrame(int row, const char *label) const;
-  void DrawValue(int row, const char *text) const;
-  static void DrawNoRam();
 };
 
 // ---------------------------------------------------------------------------
@@ -257,80 +210,57 @@ void AppDelay::Process(OC::IOFrame *ioframe) { BaseController(ioframe); }
 
 // --- draw ------------------------------------------------------------------
 
-FLASHMEM void AppDelay::DrawRowFrame(int row, const char *label) const {
-  graphics.setPrintPos(DelayAppNS::kLabelX, DelayAppNS::kRowY[row]);
-  graphics.print(label);
-}
-
-FLASHMEM void AppDelay::DrawValue(int row, const char *text) const {
-  graphics.setPrintPos(127, DelayAppNS::kRowY[row]);
-  graphics.print_right(text);
-}
-
-// A drawn box, never an inverted band -- L-06 is explicit that banners get a
-// frame. 16 characters at x=19 end at x=114, inside the frame's interior
-// (x=11..116).
-FLASHMEM void AppDelay::DrawNoRam() {
-  graphics.drawFrame(10, 22, 108, 20);
-  graphics.setPrintPos(19, 26);
-  graphics.print("NO RAM: DRY ONLY");
-}
-
 FLASHMEM void AppDelay::DrawMain() const {
   using namespace DelayAppNS;
+  namespace S = AudioEffectScreen;
   char buf[16];
 
-  // --- Time, whose units and therefore whose whole row change with MODE.
-  DrawRowFrame(M_TIME, "Time:");
+  // --- Time, whose units and therefore whose whole row change with MODE. It is
+  // the one row in this family whose bar TYPE changes, so it is the one row
+  // that cannot use a single ParamRow call.
   switch (delay_applet.GetTimeUnits()) {
     case DelayApplet<STEREO>::CLOCK: {
       const int r = delay_applet.GetRatio();
-      DrawBipolarBar(kBarX, kRowY[M_TIME], kBarW, kBarH, (float)r / 127.0f);
       snprintf(buf, sizeof(buf), r < 0 ? "x%d" : "/%d", r < 0 ? -r + 1 : r + 1);
+      S::BipolarParamRow(M_TIME, "Time:", (float)r / 127.0f, buf);
       break;
     }
     case DelayApplet<STEREO>::HZ: {
       const int lo = delay_applet.MinPitch(), hi = delay_applet.MaxPitch();
       const float span = (float)(hi - lo);
-      DrawBar(kBarX, kRowY[M_TIME], kBarW, kBarH,
-              span > 0.0f ? (float)(delay_applet.GetPitch() - lo) / span : 0.0f);
       snprintf(buf, sizeof(buf), "%d.%01d", SPLIT_INT_DEC(delay_applet.GetHz(), 10));
+      S::ParamRow(M_TIME, "Time:",
+                  span > 0.0f ? (float)(delay_applet.GetPitch() - lo) / span : 0.0f,
+                  buf);
       break;
     }
     default: {
       const int lo = delay_applet.MinDelayMs(), hi = delay_applet.MaxDelayMs();
       const int ms = delay_applet.GetDelayMs();
       const float span = (float)(hi - lo);
-      DrawBar(kBarX, kRowY[M_TIME], kBarW, kBarH,
-              span > 0.0f ? (float)(ms - lo) / span : 0.0f);
       // Same %d.%02ds Tweighty uses for its own Time field (:626), so the two
       // screens read a delay time the same way.
       snprintf(buf, sizeof(buf), "%d.%02ds", ms / 1000, (ms % 1000) / 10);
+      S::ParamRow(M_TIME, "Time:", span > 0.0f ? (float)(ms - lo) / span : 0.0f,
+                  buf);
       break;
     }
   }
-  DrawValue(M_TIME, buf);
 
   // --- Taps. Same (n-1)/(max-1) fraction Tweighty uses (:630).
-  DrawRowFrame(M_TAPS, "Taps:");
-  DrawBar(kBarX, kRowY[M_TAPS], kBarW, kBarH,
-          (float)(delay_applet.GetTaps() - 1) / 7.0f);
   snprintf(buf, sizeof(buf), "%d", delay_applet.GetTaps());
-  DrawValue(M_TAPS, buf);
+  S::ParamRow(M_TAPS, "Taps:", (float)(delay_applet.GetTaps() - 1) / 7.0f, buf);
 
   // --- Feedback. Bipolar on the stereo instance, where negative feedback is a
   // real and different sound, so the bar has to show a sign.
-  DrawRowFrame(M_FDBK, "Fdbk:");
   const int fb = delay_applet.GetFeedback();
-  DrawBipolarBar(kBarX, kRowY[M_FDBK], kBarW, kBarH, (float)fb / 100.0f);
   snprintf(buf, sizeof(buf), "%d%%", fb);
-  DrawValue(M_FDBK, buf);
+  S::BipolarParamRow(M_FDBK, "Fdbk:", (float)fb / 100.0f, buf);
 
   // --- Wet, or Send. The label flip IS the feedback for the B button.
-  DrawRowFrame(M_WET, delay_applet.SendMode() ? "Snd :" : "Wet :");
-  DrawBar(kBarX, kRowY[M_WET], kBarW, kBarH, (float)delay_applet.GetWet() / 100.0f);
   snprintf(buf, sizeof(buf), "%d%%", delay_applet.GetWet());
-  DrawValue(M_WET, buf);
+  S::ParamRow(M_WET, delay_applet.SendMode() ? "Snd :" : "Wet :",
+              (float)delay_applet.GetWet() / 100.0f, buf);
 }
 
 // The MODE page exists to AVOID a bug, not to hold spare parameters. In the
@@ -347,16 +277,18 @@ FLASHMEM void AppDelay::DrawMain() const {
 // change to the quarter-screen layout, which is not what this app is.
 FLASHMEM void AppDelay::DrawMode() const {
   using namespace DelayAppNS;
+  namespace S = AudioEffectScreen;
   char buf[16];
 
-  DrawRowFrame(D_UNIT, "Unit:");
+  // No bars on this page: every row is an enumerated setting, and a bar would
+  // imply a quantity that is not there.
   switch (delay_applet.GetTimeUnits()) {
-    case DelayApplet<STEREO>::CLOCK: DrawValue(D_UNIT, "clk"); break;
-    case DelayApplet<STEREO>::HZ:    DrawValue(D_UNIT, "Hz");  break;
-    default:                         DrawValue(D_UNIT, "ms");  break;
+    case DelayApplet<STEREO>::CLOCK: S::EnumRow(D_UNIT, "Unit:", "clk"); break;
+    case DelayApplet<STEREO>::HZ:    S::EnumRow(D_UNIT, "Unit:", "Hz");  break;
+    default:                         S::EnumRow(D_UNIT, "Unit:", "ms");  break;
   }
 
-  DrawRowFrame(D_CLK, "Clk :");
+  S::Label(D_CLK, "Clk :");
   auto &clk = delay_applet.ClockSource();
   // Filled while the gate is high, hollow otherwise, in the bar gutter. NOT
   // the shipped gfxPrint(DigitalInputMap&) behaviour, which uses gfxInvert to
@@ -364,21 +296,20 @@ FLASHMEM void AppDelay::DrawMode() const {
   // meaning of inversion on top of the six the panel audit counted, and this
   // screen is not adding one. Same filled/hollow presence idiom as the bypass
   // box above it.
-  if (clk.Gate()) graphics.drawRect(kBarX, kRowY[D_CLK], 8, 8);
-  else graphics.drawFrame(kBarX, kRowY[D_CLK], 8, 8);
+  if (clk.Gate()) graphics.drawRect(S::kBarX, S::kRowY[D_CLK], 8, 8);
+  else graphics.drawFrame(S::kBarX, S::kRowY[D_CLK], 8, 8);
   const int steps = clk.div_mult.steps;
   snprintf(buf, sizeof(buf), "%s %c%d", clk.InputName(),
            steps > 0 ? '/' : 'x', steps > 0 ? steps : -steps);
-  DrawValue(D_CLK, buf);
+  S::Value(D_CLK, buf);
 
-  DrawRowFrame(D_MOD, "Mod :");
   // The applet's own strings are "Crossfade"/"Stretch" (:239), 9 characters,
   // which does not fit a value field that starts at x>=91. Abbreviated, and
   // the abbreviation is the same length either way so the column does not
   // jitter as you turn.
-  DrawValue(D_MOD,
-            delay_applet.GetModType() == DelayApplet<STEREO>::CROSSFADE ? "Xfade"
-                                                                       : "Strch");
+  S::EnumRow(D_MOD, "Mod :",
+             delay_applet.GetModType() == DelayApplet<STEREO>::CROSSFADE
+               ? "Xfade" : "Strch");
 }
 
 // One row per CV destination: where it comes from, how much is arriving right
@@ -394,7 +325,6 @@ FLASHMEM void AppDelay::DrawMode() const {
 // line would bleed through the two rows above it.
 FLASHMEM void AppDelay::DrawCv() const {
   using namespace DelayAppNS;
-  char buf[16];
 
   static const char *const kLabels[C_COUNT] = { "Time", "Fdbk", "Wet " };
   CVInputMap *maps[C_COUNT] = { &delay_applet.TimeCV(), &delay_applet.FeedbackCV(),
@@ -403,33 +333,16 @@ FLASHMEM void AppDelay::DrawCv() const {
   for (int row = 0; row < C_COUNT; ++row) {
     // Row 2 tracks the B button the same way MAIN's Wet row does, so send mode
     // is visible on this page too and B does not need a footer slot here.
-    const char *label
-      = (row == C_WET && delay_applet.SendMode()) ? "Snd " : kLabels[row];
-    DrawRowFrame(row, label);
-
-    graphics.setPrintPos(kCvSrcX, kRowY[row]);
-    graphics.print(maps[row]->InputName());
-
-    DrawBipolarBar(kCvBarX, kRowY[row], kCvBarW, kBarH,
-                   (float)maps[row]->InRescaled(12) / 12.0f);
-
-    // Atten() returns tenths of a percent (util_math.h:55). Whole percent is
-    // what fits, and a tenth of a percent of attenuversion is not a thing
-    // anybody sets by ear.
-    snprintf(buf, sizeof(buf), "%d%%", Atten(maps[row]->attenuversion) / 10);
-    DrawValue(row, buf);
+    AudioEffectScreen::CvRow(
+      row, (row == C_WET && delay_applet.SendMode()) ? "Snd " : kLabels[row],
+      *maps[row]);
   }
 }
 
 FLASHMEM void AppDelay::DrawMenu() const {
   using namespace DelayAppNS;
 
-  gfxHeader("D E L A Y");
-  // Filled = the effect is reaching the output bus. Hollow = bypassed. Same
-  // x, same 8x8 geometry and the same filled-means-live semantics as
-  // Tweighty's transport box (TweightyApp.h:556-557).
-  if (host_.Live()) graphics.drawRect(118, 1, 8, 8);
-  else graphics.drawFrame(118, 1, 8, 8);
+  AudioEffectScreen::Header("D E L A Y", host_.Live());
 
   // Before the first RESUME there is no buffer, no MIN/MAX_DELAY_SECS and
   // nothing true to draw. It should not be reachable -- RESUME precedes the
@@ -445,7 +358,11 @@ FLASHMEM void AppDelay::DrawMenu() const {
     // survives, so at Wet=100% this app is silent. Say so, with the
     // consequence, rather than letting it be discovered by ear. There is no
     // remedy from the panel -- a fact stated plainly beats an invented one.
-    DrawNoRam();
+    AudioEffectScreen::RefusalBox("NO RAM: DRY ONLY");
+    // Worded for THIS app's actual cause. Delay's buffer comes only from
+    // extmem_calloc (Audio/AudioBuffer.h:145-150), so the failure is a missing
+    // PSRAM chip and a reboot frees nothing -- unlike the reverbs, whose arena
+    // comes off the RAM2 heap where a reboot genuinely does help.
     gfxFooter("no PSRAM fitted - dry");
     return;
   }
@@ -457,7 +374,7 @@ FLASHMEM void AppDelay::DrawMenu() const {
   }
 
   // One inversion, on the row encR will change. See this file's header.
-  graphics.invertRect(0, kRowY[Cursor()] - 1, 128, kRowH);
+  AudioEffectScreen::CursorBand(Cursor());
 
   if (bypassed_) {
     // While bypassed the legend is replaced ENTIRELY: fact plus remedy in one
@@ -505,20 +422,20 @@ FLASHMEM void AppDelay::AdjustRow(int dir) {
           case DelayApplet<STEREO>::HZ:
             // Pitch steps are eighths of a semitone; coarse is a whole
             // semitone, fine is the eighth. Both land on the grid.
-            delay_applet.NudgePitch(dir * FineStep(8, 1));
+            delay_applet.NudgePitch(dir * AudioEffectScreen::Step(8, 1));
             break;
           default:
             // 50ms coarse puts the ~10.9s range in ~218 detents; 5ms fine is
             // finer than anyone dials a delay by ear. The applet's own 1ms
             // step needed 10,900 detents to cross the range, which is about
             // two minutes of turning and is why it had an acceleration hack.
-            delay_applet.NudgeDelayMs(dir * FineStep(50, 5));
+            delay_applet.NudgeDelayMs(dir * AudioEffectScreen::Step(50, 5));
             break;
         }
         break;
       case M_TAPS: delay_applet.NudgeTaps(dir); break;
-      case M_FDBK: delay_applet.NudgeFeedback(dir * FineStep(2, 1)); break;
-      case M_WET:  delay_applet.NudgeWet(dir * FineStep(2, 1)); break;
+      case M_FDBK: delay_applet.NudgeFeedback(dir * AudioEffectScreen::Step(2, 1)); break;
+      case M_WET:  delay_applet.NudgeWet(dir * AudioEffectScreen::Step(2, 1)); break;
       default: break;
     }
     return;
@@ -543,7 +460,7 @@ FLASHMEM void AppDelay::AdjustRow(int dir) {
   CVInputMap *maps[C_COUNT] = { &delay_applet.TimeCV(), &delay_applet.FeedbackCV(),
                                 &delay_applet.WetCV() };
   int8_t &att = maps[Cursor()]->attenuversion;
-  att = constrain(att + dir * FineStep(4, 1), -127, 127);
+  att = constrain(att + dir * AudioEffectScreen::Step(4, 1), -127, 127);
 }
 
 FLASHMEM void AppDelay::CycleSource() {
