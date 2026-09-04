@@ -112,3 +112,40 @@ Rewiring happens inside `AudioNoInterrupts()` brackets, which
 **Inversion.** These screens obey L-06: inversion means "the right encoder
 changes this", full stop. Cursors get a leading `>`, state gets a suffix or
 bracket, banners get a drawn box.
+
+## Folder data-integrity fixes, verified on hardware (`5f4c7b69`)
+
+The two HIGH findings against `887b6ba2` were re-verified against source, fixed,
+and then checked on the module rather than asserted.
+
+**Method.** Flash `T41_console`, then in one `hwctl.py` session: open the
+switcher, press X to move Tweighty out of AUDIO, and leave with `encL` -- a
+plain cancel, deliberately NOT the long press that saves everything. The screen
+followed the app to SYSTEM and the footer read `moved to SYSTEM`. Then reflash
+to force a real boot, and look at AUDIO again.
+
+**Result.** AUDIO came back holding only Scope, Sampler and Wave-Edit. Tweighty
+was still filed under SYSTEM.
+
+That is both fixes at once:
+
+- **MEDIUM 4** -- the move survived an exit that never saved anything before.
+- **HIGH 1** -- the arrangement survived the boot recall. Before the fix this is
+  exactly where it was overwritten with compiled defaults, so the pre-fix
+  outcome would have been Tweighty back in AUDIO.
+
+The module's Setup/About page reported build `64dcbe7b`, confirming the binary
+under test was the one carrying the fix.
+
+## Bench-harness behaviour worth knowing
+
+- **Use `z+r`, not `a+r`,** to reach the app switcher. `A` belongs to the app
+  (shipped design), so `A+encR` does nothing in apps that use A -- confirmed in
+  Tuner, where `a+r` fell through to the app and `z+r` opened the switcher.
+- **The chord needs ~800 ms of settle** before the following key. At 600 ms the
+  chord was intermittently missed and the key went to the app instead. Several
+  confusing captures came from this before it was pinned down.
+- **The switcher activates the app under the cursor as the cursor moves**, so
+  walking folders walks the instrument through apps, and a script that turns the
+  folder has changed the running app by the time it captures. Flagged for UX
+  review; not changed here.
