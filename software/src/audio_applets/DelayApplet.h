@@ -3,6 +3,21 @@
 // F32-native: the delay buffer and every feedback pass stay float32 inside the
 // applet (no int16 truncation per recirculation); the chain still sees int16
 // via the HemisphereAudioAppletF32 edge adapters.
+//
+// FREEZE IS GONE. `frozen` was fully implemented in Controller() and totally
+// unreachable: its only writer was commented out, and the FREEZE cursor entry
+// that would have selected it was commented out too. Deleted rather than
+// wired, for the reason Audio-Apps-Screens.md cut 10 gives -- TWEIGHTY IS the
+// freeze/recirculate app, that is its whole thesis (apps/TweightyApp.h:1-21),
+// and a second weaker one dilutes both. Behaviour is unchanged by the removal:
+// `frozen` was false for every block this applet has ever processed, so only
+// the branch nobody took is gone.
+//
+// This applet is used two ways: as a quarter-screen tile in Quadrants (View()
+// / OnEncoderMove() below), and as a standalone full-screen app
+// (apps/DelayApp.h) which draws its own 128px screen and reaches the
+// parameters through the accessor block near the bottom of the class. Both
+// share ONE copy of the state, which is this file's.
 
 #include "../HemisphereAudioAppletF32.h"
 #include "../extern/f32/AudioMixer_F32.h"
@@ -70,8 +85,6 @@ public:
       clock_count = 0;
     }
 
-    // if (Clock(1)) frozen = !frozen;
-
     float d;
     switch (time_units) {
       case HZ:
@@ -115,17 +128,8 @@ public:
     float fb = constrain(total_feedback, 0.0, 2.0f) / taps;
 
     for (auto& ch : channels) {
-      if (frozen) {
-        ch.input_mixer.gain(0, 0.0f);
-        ch.delaystream.feedback(8, 1.0f);
-        for (int tap = 0; tap < 8; tap++) {
-          ch.delaystream.feedback(tap, 0.0f);
-        }
-      } else {
-        //ch.input_mixer.gain(0, 1.0f);
-        for (int tap = 0; tap < 9; tap++) {
-          ch.delaystream.feedback(tap, tap < taps ? fb : 0.0f);
-        }
+      for (int tap = 0; tap < 9; tap++) {
+        ch.delaystream.feedback(tap, tap < taps ? fb : 0.0f);
       }
     }
 
@@ -225,10 +229,6 @@ public:
     gfxPrint(feedback_cv);
     gfxEndCursor(cursor == FEEDBACK_CV, false, feedback_cv.InputName());
 
-    // gfxIcon(54, 25, LOOP_ICON);
-    // if (frozen) gfxInvert(54, 25, 8, 8);
-    // if (cursor == FREEZE) gfxCursor(54, 32, 8);
-
     gfxPrint(1, 35, send_mode?"Snd:":"Wet:");
     gfxStartCursor(param_right_x - 4 * 6, 35);
     graphics.printf("%3d%%", wet);
@@ -250,9 +250,22 @@ public:
     gfxDisplayInputMapEditor();
   }
 
+  // Was `if (cursor == WET) send_mode ^= 1; CancelEdit();` -- a press that did
+  // nothing at all, and said nothing about it, on nine of the ten cursor rows.
+  // That is the "unlabeled button with four pixels of feedback" hazard the
+  // panel audit calls out, and Audio-Apps-Screens.md logs it as finding M-3.
+  //
+  // Now it has a meaning on every row: cancel an edit if there is one to
+  // cancel (the base class's own default, HemisphereApplet.h:118, and what X/Y
+  // means everywhere else in Quadrants), otherwise toggle send mode. The
+  // toggle is never silent -- the WET row's label flips Wet:/Snd: (:224) and
+  // in the standalone app the same flip happens on two pages.
   FLASHMEM void AuxButton() override {
-    if (cursor == WET) send_mode ^= 1;
-    CancelEdit();
+    if (EditMode() || Base::IsEditingInputMap()) {
+      CancelEdit();
+      return;
+    }
+    send_mode ^= 1;
   }
   FLASHMEM void OnButtonPress() override {
     if (CheckEditInputMapPress(
@@ -415,13 +428,15 @@ private:
   //
   // It does at least fail safely rather than crashing: AudioDelayExtF32's
   // update() early-returns on `!buffer.IsReady()`
-  // (Audio/AudioDelayExtF32.h:83). What is missing is any acknowledgement at
-  // the applet level -- unlike Freeverb/Samverb, which check their allocation
-  // and force dry to unity (FreeverbApplet.h:39-41, SamverbApplet.h:39-42),
-  // this applet never asks whether it got its buffer and never says so on
-  // screen. Left as-is deliberately: RAM2 is the scarce resource here and the
-  // last thing this file should grow is a competitor for it.
+  // (Audio/AudioDelayExtF32.h:83). Ask BufferReady() and say so on screen --
+  // the standalone app does; the quarter-screen View() below still does not,
+  // because it has no room to and Quadrants has no other way to say it.
   static const size_t DELAY_LENGTH = 1024 * 512;
+  // Nine taps for eight audible ones: the 9th was the freeze head, and freeze
+  // is gone (see the header comment). Narrowing this to <8> is a change to the
+  // DSP object's shape rather than to this applet, and it is not worth folding
+  // into a UI commit that cannot be tested on hardware -- the spare tap costs
+  // struct size only, never per-block work, since update() loops to taps_.
   using DelayStream = AudioDelayExtF32<9>;
 
   enum Cursor {
@@ -431,7 +446,6 @@ private:
     TIME_CV,
     FEEDBACK,
     FEEDBACK_CV,
-    // FREEZE,
     WET,
     WET_CV,
     TAPS,
@@ -439,6 +453,7 @@ private:
     CURSOR_LENGTH,
   };
 
+public:
   enum TimeUnits {
     SECS,
     CLOCK,
@@ -451,9 +466,92 @@ private:
     STRETCH,
   };
 
+  // --- Standalone full-screen host interface (apps/DelayApp.h) --------------
+  //
+  // Narrow, semantic accessors so a host app can RENDER and EDIT these values
+  // without ever holding a copy of them. The applet stays the single owner of
+  // every parameter -- two writers of the same state, kept in sync by hand, is
+  // the Tweighty background-pump bug UI-Redesign-Constraints.md section 1
+  // records as a real shipped defect, and it is not worth repeating for the
+  // sake of a screen.
+  //
+  // Accessors rather than a friend declaration or a shared parameter struct,
+  // deliberately: both of those make the APPLET know about the HOST, and the
+  // same host has to serve Freeverb and Samverb next. The dependency has to
+  // point one way.
+  //
+  // Every setter clamps, so the caller never has to know a range -- which is
+  // also why the ranges are not exposed except where the screen needs them for
+  // a bar fraction.
+
+  uint8_t GetTimeUnits() const { return time_units; }
+  void SetTimeUnits(int u) { time_units = constrain(u, 0, TIME_REP_LENGTH - 1); }
+
+  // SECS mode. delay_time is milliseconds here.
+  int MinDelayMs() const { return static_cast<int>(MIN_DELAY_SECS * 1000); }
+  int MaxDelayMs() const { return static_cast<int>(MAX_DELAY_SECS * 1000) - 1; }
+  int GetDelayMs() const { return delay_time; }
+  void NudgeDelayMs(int delta) {
+    delay_time = constrain(delay_time + delta, MinDelayMs(), MaxDelayMs());
+  }
+
+  // HZ mode. Same storage, read as a pitch. The 1/16 dance is the applet's own
+  // (:290-292): pitch is 128ths of a semitone, so a step of 1 here is 1/8 of a
+  // semitone and the value always lands on that grid.
+  int MinPitch() const { return static_cast<int>(PitchFromDelaySecs(1.0f)); }
+  int MaxPitch() const {
+    return static_cast<int>(PitchFromDelaySecs(MIN_DELAY_SECS)) - 1;
+  }
+  int GetPitch() const { return delay_time; }
+  void NudgePitch(int eighth_semitones) {
+    int t = delay_time / 16 + eighth_semitones;
+    delay_time = constrain(t * 16, MinPitch(), MaxPitch());
+  }
+  float GetHz() { return 1.0f / DelaySecsFromPitch(delay_time); }
+
+  // CLOCK mode.
+  int GetRatio() const { return ratio; }
+  void NudgeRatio(int delta) { ratio = constrain(ratio + delta, -127, 127); }
+
+  int GetTaps() const { return taps; }
+  void NudgeTaps(int delta) { set_taps(taps + delta); }
+
+  int MinFeedback() const { return Channels == STEREO ? -100 : 0; }
+  int GetFeedback() const { return feedback; }
+  void NudgeFeedback(int delta) {
+    feedback = constrain(feedback + delta, MinFeedback(), 100);
+  }
+
+  int GetWet() const { return wet; }
+  void NudgeWet(int delta) { wet = constrain(wet + delta, 0, 100); }
+
+  bool SendMode() const { return send_mode; }
+  void ToggleSendMode() { send_mode = !send_mode; }
+
+  int GetModType() const { return delay_mod_type; }
+  void NudgeModType(int delta) {
+    delay_mod_type = constrain(delay_mod_type + delta, 0, 1);
+  }
+
+  HS::DigitalInputMap& ClockSource() { return clock_source; }
+  CVInputMap& TimeCV() { return delay_time_cv; }
+  CVInputMap& FeedbackCV() { return feedback_cv; }
+  CVInputMap& WetCV() { return wet_cv; }
+
+  // False on a board with no PSRAM: there is no wet signal at all, not a
+  // shorter one. See the DELAY_LENGTH comment above.
+  bool BufferReady() const { return channels[0].delaystream.BufferReady(); }
+
+private:
+
   int cursor = TIME;
 
-  float MAX_DELAY_SECS, MIN_DELAY_SECS;
+  // Real values arrive in Start(), from the stream. Zero-initialised
+  // explicitly so the window before Start() is defined rather than
+  // accidentally-zero: the standalone host holds this applet in DMAMEM, which
+  // Main.cpp zeroes at boot, and the Quadrants registry callocs it -- both give
+  // zeros today, and neither is a promise this file should be leaning on.
+  float MAX_DELAY_SECS = 0.0f, MIN_DELAY_SECS = 0.0f;
 
   int16_t delay_time = 500;
   CVInputMap delay_time_cv;
@@ -481,7 +579,6 @@ private:
   float clock_base_secs = 0.0f;
 
   bool send_mode = false;
-  bool frozen = false;
 
   int16_t knob_accel = 0;
   elapsedMillis millis_since_turn;

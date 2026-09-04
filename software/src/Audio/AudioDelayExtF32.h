@@ -78,6 +78,15 @@ public:
     taps_ = num;
   }
 
+  // Did Acquire() actually get the buffer? It comes from extmem_calloc and
+  // nowhere else (AudioBuffer.h:145-150), so on a board with no PSRAM this is
+  // false forever and update() below produces nothing at all. update()'s own
+  // `!buffer.IsReady()` guard keeps that from crashing; this lets an applet
+  // or an app SAY so instead of going quietly silent.
+  bool BufferReady() const {
+    return buffer.IsReady();
+  }
+
   void feedback(size_t tap, float fb) {
     this->fb[tap] = fb;
   }
