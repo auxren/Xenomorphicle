@@ -492,7 +492,20 @@ FLASHMEM void AppSampler::DrawMenu() const {
     if (s == slot_) graphics.drawFrame(x - 2, kRingY - 2, 12, 10);
   }
 
-  gfxFooter("A:play B:field L/R:sel/adj");
+  // 21 columns is the whole row (gfxFooter prints at x=1, and 1 + 21*6 = 127).
+  // This used to read "A:play B:field L/R:sel/adj" -- 26 characters, so five
+  // of them were never drawn and the panel showed "...L/R:se", which reads as
+  // a typo rather than as a truncation.
+  //
+  // edgecheck.py does NOT catch this. It looks for a PARTIALLY drawn glyph in
+  // columns 126-127; characters clipped away entirely leave no partial glyph
+  // behind, so an over-long string passes it silently. Count footer strings.
+  //
+  // "R:adj" is the right thing to drop rather than abbreviating everything:
+  // the inverted row already means "the right encoder changes this" (L-06), so
+  // labelling encR's TURN restates the grammar. Delay and Reverb label encR's
+  // PRESS only, for the same reason.
+  gfxFooter("A:play B:field L:slot");
 }
 
 FLASHMEM void AppSampler::DrawScreensaver() const {
