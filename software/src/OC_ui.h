@@ -258,6 +258,10 @@ public:
     IgnoreUntilRelease(control);
   }
 
+  // True once the module has idled past kDisplaySleepMs. AppBase::Draw() draws
+  // nothing at all while this holds, which is what stops the panel ageing.
+  bool display_asleep() const { return display_asleep_; }
+
   uint32_t screensaver_timeout() const {
     return screensaver_timeout_;
   }

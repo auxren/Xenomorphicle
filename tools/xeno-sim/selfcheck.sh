@@ -1606,8 +1606,16 @@ echo "nothing on screen is clipped at the right edge"
 # "LIVE 105s ago  wire 29" -- 22 columns, one over -- and the '9' was cut off,
 # leaving the well-formed and entirely wrong "wire 2". A 1-digit slot fits and
 # proves nothing.
+# The trailing `z,step200` is a WAKE. The panel sleeps after ten minutes idle
+# and AppBase::Draw() then draws nothing, so a capture past 600 s reads empty --
+# and 600 s is also this row's own last format threshold, so the two collide
+# exactly. Pressing a key first is what a person does: you walk up to a module
+# that has been sitting and touch it. Z is the right key because it is inert
+# here -- Bus200eApp leaves it unbound (Panel-Binding-Matrix.md:98) and a bare
+# Z tap does nothing globally either, since every Z chord needs a partner or a
+# 700 ms hold. A is NOT usable: it is this app's whole-bank Write ARM.
 age_row() {  # keys, label
-  $SIM --app "200e Modules" --keys "$1" --dump-fb 2>/dev/null > "$TMP/age.hex"
+  $SIM --app "200e Modules" --keys "$1,z,step200" --dump-fb 2>/dev/null > "$TMP/age.hex"
   said=$(python3 fbtext.py "$TMP/age.hex" | grep '^y=46' | sed 's/^y=46 *x=0 *//')
   case "$said" in
     "LIVE "*" ago") : ;;

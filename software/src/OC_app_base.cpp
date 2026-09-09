@@ -501,6 +501,17 @@ size_t AppBase::Restore(util::StreamBufferReader &stream_buffer)
 
 FLASHMEM void AppBase::Draw(UiMode ui_mode) const
 {
+  // Panel asleep: draw nothing, and draw nothing over it either -- no chord
+  // hint, no popup. An OLED ages the pixels it LIGHTS, so an empty frame is
+  // what actually stops burn-in; the panel's drive is deliberately left alone
+  // (see Ui::DispatchEvents for why touching SPI from here wedged a module).
+  //
+  // Returning before the popup draw is intentional. A popup is worth waking
+  // for or it is not; painting one onto a screen nobody is looking at, for
+  // however many hours the module is left running, is exactly the static
+  // image this exists to prevent.
+  if (ui.display_asleep()) return;
+
   if (UI_MODE_MENU == ui_mode) {
     if (!io_settings_menu.active())
       DrawMenu();

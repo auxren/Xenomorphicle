@@ -276,19 +276,29 @@ UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
   // Panel sleep, evaluated from idle_time() every pass rather than latched on
   // an edge: idle_time() is millis() - last_event_time_, so it is already reset
   // by ANY event from ANY control (ui_event_queue.h). Deriving the state
-  // instead of hooking a wake-up path means there is no gesture that can turn
-  // the panel off and no path back on that can be missed -- if the module is
-  // being touched, the display is on, by construction.
+  // instead of hooking a wake-up path means there is no gesture that can leave
+  // the panel dark and no path back that can be missed -- if the module is
+  // being touched, the display is drawing, by construction.
   //
-  // The SPI command only goes out on a transition, so the steady state costs
-  // one comparison per pass. The framebuffer keeps flushing while asleep, which
-  // is harmless (the panel accepts data with its drive off) and is what lets it
-  // come back showing the current screen rather than a stale one.
-  const bool should_sleep = idle_time() > kDisplaySleepMs;
-  if (should_sleep != display_asleep_) {
-    display_asleep_ = should_sleep;
-    display::SetDisplayOn(!should_sleep);
-  }
+  // THIS DELIBERATELY DOES NOT SEND 0xAE, AND MUST NOT.
+  //
+  // The first version of this called display::SetDisplayOn(), which does an
+  // SPI.beginTransaction()/transfer()/endTransaction() from LOOP context. On
+  // Teensy 4.1 that LPSPI bus is SHARED WITH THE DAC: the page transfer is
+  // chained onto the DAC's completion interrupt (see spi_sendpage_isr and
+  // SendPage's `sendpage_state` guard), and the core ISR writes the DAC every
+  // 60us. Reconfiguring LPSPI4_TCR from loop, unsynchronised, races that ISR.
+  // It is a race rather than a certainty, which is the worst kind: it survived
+  // a bench pass, then hung a module hard enough to drop it off USB entirely,
+  // where it stayed until the program button was pressed. SetInverted() has
+  // the same shape and has simply been lucky, being rare and user-initiated.
+  //
+  // Blanking costs nothing and buys the same thing. OLED pixels age when they
+  // are LIT; an all-black frame lights none of them, so the burn-in this
+  // exists to prevent is prevented either way. True display-off would save a
+  // little power on top of that, and it is not worth touching a bus the audio
+  // ISR is using.
+  display_asleep_ = idle_time() > kDisplaySleepMs;
 
   if (screensaver_) {
     return UI_MODE_SCREENSAVER;

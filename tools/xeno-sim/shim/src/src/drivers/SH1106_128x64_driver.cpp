@@ -72,4 +72,3 @@ void SH1106_128x64_Driver::ChangeSpeed(uint32_t) {}
 void SH1106_128x64_Driver::SetFlipMode(bool flip180) { g_flipped = flip180; }
 void SH1106_128x64_Driver::SetContrast(uint8_t contrast) { g_contrast = contrast; }
 void SH1106_128x64_Driver::SetInverted(bool inverted) { g_inverted = inverted; }
-void SH1106_128x64_Driver::SetDisplayOn(bool on) { g_display_on = on; }
