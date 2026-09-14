@@ -680,6 +680,6 @@ Requests are one line each: `key <token>`, `btn <a|b|x|y|z|l|r> <down|up>`,
 ## Not part of the firmware build
 
 No `platformio.ini` env references this directory and no file under
-`software/src/` was modified for it. `pio run -e T41_console -e T41_audio -e T40`
+`software/src/` was modified for it. `pio run -e T41_console -e T41_audio`
 is unaffected, `make` on its own produces a headless `build/xeno-sim`, and the
 server is a separate python3 script that is never built, imported or shipped.

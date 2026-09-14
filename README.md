@@ -59,10 +59,9 @@ Where to start:
   app; `T41` links to slot 1 and **will not boot on its own**.
   `software/flash.sh` builds locally and then flashes over ssh to a bench rig,
   refusing any image not linked for slot 0 and verifying by USB enumeration
-  afterwards. The `nlm*` environments target the older, T3.2/T40-based NLM 4U
-  hardware line (a separate product from the Xenomorpher) and add
-  `-DNORTHERNLIGHT`, which among other things changes the factory-erase
-  gesture at the splash screen.
+  afterwards. `T41_console` is the same image with a USB serial console in
+  place of USB audio, for bench work; `T41_MTP` is the slot-2 recovery
+  image (hold Z then X at boot) that mounts the filesystem over USB.
 * **The bus** — `-DPRESET_BUS` turns it on; `-DENABLE_APP_BUS200E` adds the
   _200e Modules_ app on top of it. See
   [200e conformance](docs/200e-conformance.md) for how coexistence with a
@@ -122,10 +121,11 @@ host MIDI. That's the only shield/MCU combination this fork's `T41_audio`
 build targets or is tested against.
 
 Upstream Phazerville also supports the original 4ch **o_C** shield (Teensy
-3.2/4.0, DAC and OLED sharing one SPI bus) and older Teensy generations —
-see `platformio.ini`'s `T32`/`T40`/`nlm*` environments if you're building for
-that hardware instead; none of it is exercised by anything in this fork's
-own work.
+3.2/4.0, DAC and OLED sharing one SPI bus) and older Teensy generations.
+This fork no longer carries build environments for any of that hardware:
+it was hard-forked for the Xenomorpher in September 2026, and the older
+environments were deleted rather than left unbuilt. Use djphazer's tree
+for other hardware.
 
 ## Stolen Ornaments
 
@@ -150,9 +150,9 @@ or use `software/flash.sh` to build and flash a bench rig over ssh (see the
 flags inside `software/src/OC_options.h`, or per-environment in
 `platformio.ini`.
 
-`platformio.ini` also carries `T32`/`T40`/`nlm*` environments and an
-Arduino-IDE path (`software/src/src.ino`) for hardware outside this fork's
-scope — not exercised by anything here.
+`platformio.ini` carries only the Xenomorpher environments (`T41_audio`,
+`T41_console`, `T41_audio_dbg`, `T41`, `T41_MTP`); the header comment in
+that file says what each one is for.
 
 _**Pro-tip**_: If you decide to fork the project, and enable GitHub Actions on your own repo, GitHub will build the files for you... ;)
 

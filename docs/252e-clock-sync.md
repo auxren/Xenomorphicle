@@ -51,8 +51,7 @@ never coalesces realtime (`MidiTxRing::is_continuous`) for the same reason.
 
 - Framing + gating: host-tested (`test_bus200e` 88 checks, `test_miditxring`
   12584 checks); green on every CI build environment (`T41`, `T41_audio`,
-  `T41_audio_dbg`, `T41_console` — all T4.1/Xenomorpher; CI no longer
-  builds T40 or other older-hardware environments on this fork).
+  `T41_audio_dbg`, `T41_console` — the only environments this fork has).
 - **Unverified on hardware:** whether 252Ev302 actually follows bus MIDI
   clock, and in which dialect. Only the .hex exists locally (Buchla_FW);
   no source. Live test: run a clock, watch console `b` (`midi_tx`

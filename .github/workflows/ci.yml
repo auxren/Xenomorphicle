@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [preset-bus, main, hoc-midi]
+    branches: [preset-bus, main, hoc-midi, xeno-instrument]
   pull_request:
 
 jobs:
@@ -87,11 +87,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # T40/antihem/nlm_hoc_midi (T3.2/T4.0/older-NLM reduced builds) dropped
-        # from CI: this fork only targets Xenomorpher (T4.1/O.R.N.8) hardware
-        # from here on. They previously caught breaks from a call fenced behind
-        # __IMXRT1062__ or a full app set (96d33a89) -- watch for that class of
-        # bug manually if touching code shared with those configs.
+        # This fork builds for the Xenomorpher (T4.1/O.R.N.8) only. The
+        # T3.2/T4.0/older-NLM environments were deleted from platformio.ini
+        # in the 2026-09-13 hard fork; there is nothing left to build for
+        # them. T41_MTP (the slot-2 recovery image) is deliberately outside
+        # the matrix: build it by hand when it changes.
         env: [T41, T41_audio, T41_audio_dbg, T41_console]
     steps:
       - uses: actions/checkout@v4

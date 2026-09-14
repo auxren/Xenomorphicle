@@ -5,29 +5,36 @@ nav_order: 3
 
 # Build Choices
 
-_Pay attention!_ There are several different hardware variants, each requiring a different firmware binary, indicated in the filename:
-* **T32** - for standard O_C hardware with Teensy 3.2
-* **T32+VOR** - for **Plum Audio** 1uO_C / OCP / OCP X hardware with Variable Output Range (VOR)
-* **T40** - for standard O_C hardware with Teensy 4.0 (or 4.1, uncommon)
-* **NLM+cardOC** - for the Northern Light Modular Easel card module with Teensy 4.0
-* **T41** - for all new O_CT4.1 aka **ORN8** hardware with 8-channel I/O
+This fork builds for one piece of hardware: the Northern Light Modular
+**Xenomorpher** (Teensy 4.1 on the O.R.N.8 shield, 8 CV in, 8 CV out, I2S
+audio, USB host and device MIDI, 200e bus header). The upstream Phazerville
+variants for Teensy 3.2, Teensy 4.0, VOR hardware and the older NLM 4U
+modules were removed in September 2026; use
+[djphazer's tree](https://github.com/djphazer/O_C-Phazerville) for those.
 
-[Release builds](https://github.com/djphazer/O_C-Phazerville/releases) typically include **Hemispheres** + all the Applets, and a variety of other Apps (check the release notes for details)
+There is no hardware selection to make. The choice is which image to flash:
 
-Roll your own! Generate a [custom O_C firmware](https://github.com/djphazer/O_C-BenisphereSuite/discussions/38) for Teensy 3.2 with your choice of Apps! (Read and leave a comment on the Discussion, and a robot will build it for you.)
+| Environment | What it is |
+|---|---|
+| `T41_audio` | The image the module runs. Boots standalone (slot 0), USB audio and MIDI, every audio app. |
+| `T41_console` | `T41_audio` with a USB serial console in place of USB audio, for bench work. Same apps. |
+| `T41_audio_dbg` | `T41_audio` plus USB serial and boot trace. Tight on DTCM; see the comment on the env in `platformio.ini`. |
+| `T41` | The slot-1 payload the boot menu jumps to (hold Z then B). Does not boot on its own. |
+| `T41_MTP` | The slot-2 recovery image (hold Z then X at boot). Mounts the module's filesystem over USB as an MTP disk so a bad file can be pulled or deleted without a reflash. |
 
-Teensy 4.0 releases for O_C hardware include almost all of the available Apps.
+Build and flash from `software/`:
 
-Teensy 4.1 releases for ORN8 hardware currently exclude most legacy Apps to prioritize [**Quadrants**](Quadrants) and the new Audio DSP subsystem. All legacy Apps can still run, but you'll have to modify the build config flags and compile it yourself. (Check the README for tips)
+```
+pio run -e T41_audio -t upload
+```
 
-### VOR
-
-Files with "**+VOR**" are only for **Plum Audio / 4ROBOTS** hardware variants equipped with a _Variable Output Range_ circuit - O&C Plus, 1uO_c, & OCP X. These modules can also use the standard T32 firmware if VOR is disabled via the jumper (set to 'NV').
-
-Other standard 8HP uO_C, After Later uO_C 1U, or full-size 14HP O_C modules should be installed _without_ VOR - your outputs will behave strangely otherwise!
+See [Installation](Installation) for the toolchain and
+[bench flashing](bench-flashing) for flashing a rig over ssh.
 
 ### Flipped Operation
 
-As of v1.8.3, flipping the screen/controls is a calibration option. No need for a special "_flipped" build!
-
-In [Setup/About](Setup-About), you'll see two arrows in the title bar. Up/Down indicates screen flip; Left/Right indicates controls & IO reversal. If you need to change either, dual-press the UP+DOWN buttons to cycle through. Return to main menu and it will save; power cycle to take effect.
+Flipping the screen and controls is a calibration option, not a build. In
+[Setup/About](Setup-About) the two arrows in the title bar show screen
+flip (up/down) and controls-and-IO reversal (left/right); dual-press
+UP+DOWN to cycle. Return to the main menu to save; power cycle to take
+effect.
