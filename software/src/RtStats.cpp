@@ -59,10 +59,10 @@ FLASHMEM static void print_hist(const char *label, const Hist8 &h) {
 FLASHMEM void Report(bool reset_after) {
   const Counters &c = stats;
   Serial.println("=== rt budget ===");
-  Serial.printf("audio out: xrun=%lu run_max=%lu half=%lu alloc_fail=%lu in_window=%lu\n",
+  Serial.printf("audio out: xrun=%lu run_max=%lu half=%lu alloc_fail=%lu len_mismatch=%lu in_window=%lu\n",
                 (unsigned long)c.audio_out.count, (unsigned long)c.audio_out.run_max,
                 (unsigned long)c.audio_out_half, (unsigned long)c.audio_out_alloc_fail,
-                (unsigned long)c.audio_out_in_window);
+                (unsigned long)c.audio_out_len_mismatch, (unsigned long)c.audio_out_in_window);
   Serial.printf("audio in:  xrun=%lu alloc_fail=%lu in_window=%lu   f32 alloc_fail=%lu\n",
                 (unsigned long)c.audio_in_xrun, (unsigned long)c.audio_in_alloc_fail,
                 (unsigned long)c.audio_in_in_window, (unsigned long)c.f32_alloc_fail);

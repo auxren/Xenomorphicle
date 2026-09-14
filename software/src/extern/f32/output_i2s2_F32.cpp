@@ -233,10 +233,8 @@ void AudioOutputI2S2_F32::update(void)
 	{
 		if (block_f32->length != audio_block_samples)
 		{
-			Serial.print("AudioOutputI2S2_F32: *** WARNING ***: audio_block says len = ");
-			Serial.print(block_f32->length);
-			Serial.print(", but I2S settings want it to be = ");
-			Serial.println(audio_block_samples);
+			// counted, not printed: update() runs in the audio software ISR
+			OC::RT::stats.audio_out_len_mismatch++;
 		}
 
 		scale_float_to_int32range(block_f32->data, block_f32_scaled->data, audio_block_samples);

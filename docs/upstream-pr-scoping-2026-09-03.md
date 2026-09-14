@@ -1,5 +1,9 @@
 # Upstream PR scoping — 200e preset bus → djphazer/O_C-Phazerville
 
+> **SUPERSEDED (2026-09-13).** The fork was hard-forked for the Xenomorpher;
+> the Layer A/B analysis below stays accurate as history, but nothing here
+> is maintained for upstream any more. See `docs/upstream-prs.md`'s header.
+
 Scoping pass run 2026-09-03. Supersedes the stale strategy in
 `docs/upstream-prs.md` (last touched 2026-08-19) where the two disagree.
 

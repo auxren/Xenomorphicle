@@ -1,5 +1,11 @@
 # Upstream PR packages for djphazer/O_C-Phazerville
 
+> **SUPERSEDED (2026-09-13).** This fork was hard-forked for the Xenomorpher
+> on 2026-09-13 (see `docs/Build-Choices.md` and the `xeno-instrument`
+> branch). The PR stack below was offered as-is; no further upstream sync
+> is planned and the pr/* branches are not maintained. Kept as a record of
+> what was verified and how.
+
 Three stacked branches on `auxren/Xenomorphicle`, each building green against
 upstream `main` (9a5b15e6, v2.0.1). Open them in order — each depends on the
 previous. Draft PR text below; edit freely.

@@ -83,14 +83,6 @@ audio_block_f32_t * AudioStream_F32::allocate_f32(void)
   p = f32_memory_pool_available_mask;
 
 
-/*
-  if(millis() > 1200) {
-       Serial.print("AudioStream_F32 ");
-       Serial.println((uint32_t)*p, BIN);  // Just first of 6
-     }
- */
-
-
   // PRIMASK save/restore, not a bare __enable_irq(): a caller inside its
   // own critical section (a masked flash write, an ISR) must not have it
   // silently ended here. src/Audio/USB_F32.cpp names the bare form as the

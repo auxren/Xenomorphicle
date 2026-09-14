@@ -89,6 +89,7 @@ struct Counters {
   XrunRun audio_out;               // output ISR had no block for either channel
   uint32_t audio_out_half;         // one channel's block missing
   uint32_t audio_out_alloc_fail;   // output update() could not get scratch blocks
+  uint32_t audio_out_len_mismatch; // a block arrived with the wrong sample count
   uint32_t audio_out_in_window;    // of audio_out.count, attributed to a declared window
   uint32_t audio_in_xrun;          // input ISR had nowhere to put half a block
   uint32_t audio_in_in_window;
@@ -113,6 +114,7 @@ struct Counters {
     defer_dropped = defer_hiwater = 0;
     audio_out.reset();
     audio_out_half = audio_out_alloc_fail = audio_out_in_window = 0;
+    audio_out_len_mismatch = 0;
     audio_in_xrun = audio_in_in_window = audio_in_alloc_fail = 0;
     f32_alloc_fail = 0;
     core_missed_ticks = core_missed_in_window = core_gap_max_us = core_isr_hiwater_us = 0;
