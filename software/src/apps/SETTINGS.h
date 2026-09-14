@@ -56,7 +56,7 @@ public:
   // factory reset unlabelled. It is a held gesture now (encL long-press), and
   // it latches nothing.
   // RETURN TO NORMAL MODE only exists in the T41_MTP build (-DUSB_MTPDISK):
-  // it is the only way back from USB Drive mode (see UsbDriveApp.h) that
+  // it is the only way back from MTP recovery mode (slot 2) that
   // does not need a host reflash, since bootchoice is sticky across power
   // cycles and T41_MTP has none of Main.cpp's MULTIBOOT dispatcher code to
   // read it back down to 0 on its own. Gated out of every other build so the
@@ -749,7 +749,7 @@ public:
     }
 
 #if defined(USB_MTPDISK)
-    // The other half of UsbDriveApp.h's EnterUsbDriveMode(): set bootchoice
+    // The other half of the MTP recovery entry: set bootchoice
     // back to 0 (T41_audio, the normal image), persist it the same way
     // set_bootchoice() is always persisted (OC::calibration_save(), the same
     // call BootMenu() makes after its own set_bootchoice() in Main.cpp), then
@@ -964,7 +964,7 @@ FLASHMEM void AppSettings::View() const {
         // one row this screen would otherwise spend on the project URL goes
         // to the exit gesture instead. Deliberately always-on, not tucked
         // behind a hold: see the "err on the side of obvious" reasoning in
-        // UsbDriveApp.h.
+        // the MTP recovery image.
         gfxPrint(10, 45, "hold B: normal mode");
 #else
         // This fork's own project, not upstream's: the build on this screen

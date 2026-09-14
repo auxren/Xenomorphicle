@@ -10,9 +10,8 @@
 namespace OC {
 namespace RT {
 
-Counters stats;
-volatile bool window_open = false;
-volatile bool window_seen = false;
+// stats / window_open / window_seen are inline variables in RtStats.h so the
+// host test binaries and the simulator get them without this file.
 
 void LoopPass() {
   static uint32_t last_cycles = 0;

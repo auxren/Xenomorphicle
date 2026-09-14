@@ -96,7 +96,6 @@ static const DefaultEntry kDefaults[] = {
   { TWOCCS("TW"), FOLDER_AUDIO },    // Tweighty, delay loop
   { TWOCCS("SM"), FOLDER_AUDIO },    // Sampler
   { TWOCCS("BY"), FOLDER_AUDIO },    // Viznutcracker, bytebeats
-  { TWOCCS("WA"), FOLDER_AUDIO },    // Wave editor
   { TWOCCS("SP"), FOLDER_AUDIO },    // Scope
   { TWOCCS("DL"), FOLDER_AUDIO },    // Delay, standalone full-screen effect
   { TWOCCS("RV"), FOLDER_AUDIO },    // Reverb, standalone full-screen effect
@@ -108,12 +107,9 @@ static const DefaultEntry kDefaults[] = {
   { TWOCCS("BU"), FOLDER_SYSTEM },   // Back It Up!
   { TWOCCS("MI"), FOLDER_SYSTEM },   // Captain MIDI
   { TWOCCS("2E"), FOLDER_SYSTEM },   // 200e Modules
-  { TWOCCS("UD"), FOLDER_SYSTEM },   // USB Drive
   { TWOCCS("RF"), FOLDER_SYSTEM },   // References, voltages
-  { TWOCCS("SX"), FOLDER_SYSTEM },   // Scenery, scenes
 
   // Starts out of the way, one turn from being brought back.
-  { TWOCCS("PO"), FOLDER_HIDDEN },   // Pong
 };
 
 // An app this table does not name lands in SYSTEM rather than in HIDDEN: an

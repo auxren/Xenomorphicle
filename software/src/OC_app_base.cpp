@@ -178,11 +178,6 @@ static const ChordGloss kChordGloss[] = {
   // pixel invert on a solo UP press -- a different, still-useful control.
   // AppSettings has no #ifdef in _config.h -- it is always in the container.
   { TWOCCS("SE"), "Flip Screen",  nullptr,      "Up: Invert Pixels" },
-#ifdef ENABLE_APP_SCENES
-  // Scenery.h:717-718 -- Z jumps to a random scene (ZapButton); X/Y
-  // (Scenery.h:719-722) step to the previous/next saved scene.
-  { TWOCCS("SX"), nullptr,        "Random Scene", "X/Y: Change Scene" },
-#endif
 
   // Everything below binds neither A+B nor a bare Z, so both fields stay
   // null and `tip` is the whole entry.
@@ -258,11 +253,6 @@ static const ChordGloss kChordGloss[] = {
   // References.h:836-839 -- R on the Autotune row opens the autotuner.
   { TWOCCS("RF"), nullptr, nullptr, "R: Open Autotuner" },
 #endif
-#ifdef ENABLE_APP_PONG
-  // PongGame.h:478-484 -- L/R toggle each paddle between encoder and analog
-  // (CV) input.
-  { TWOCCS("PO"), nullptr, nullptr, "L/R: Analog/Digital" },
-#endif
 #ifdef ENABLE_APP_TUNER
   // TunerApp.h:314-318 -- R locks the strobe to the currently displayed note.
   { TWOCCS("TU"), nullptr, nullptr, "R: Lock Strobe" },
@@ -285,10 +275,6 @@ static const ChordGloss kChordGloss[] = {
   // SamplerApp.h:387-389 -- A manually previews/triggers the selected slot.
   { TWOCCS("SM"), nullptr, nullptr, "A: Preview Slot" },
 #endif
-#ifdef ENABLE_APP_USBDRIVE
-  // UsbDriveApp.h:254-255 -- holding B on the USB Drive item arms it.
-  { TWOCCS("UD"), nullptr, nullptr, "B-hold: USB Drive" },
-#endif
 #ifdef ENABLE_APP_BUNGVERB
   // BungverbApp.h -- same family, same one control missing from the footers.
   { TWOCCS("BV"), nullptr, nullptr, "Hold X: fine adjust" },
@@ -307,11 +293,6 @@ static const ChordGloss kChordGloss[] = {
   // ScaleEditor.h:138-144 -- Up/Down switch which scale is being edited.
   // AppScaleEditor has no #ifdef in _config.h -- always in the container.
   { TWOCCS("SC"), nullptr, nullptr, "Up/Dn: Switch Scale" },
-#ifndef NO_HEMISPHERE
-  // WaveformEditor.h:164-174 -- Up/Down switch which waveform is being
-  // edited.
-  { TWOCCS("WA"), nullptr, nullptr, "Up/Dn: Switch Wave" },
-#endif
   // Backup.h:112-123 -- L arms Restore (then B commits), R sends the backup.
   // AppBackup has no #ifdef in _config.h -- always in the container.
   { TWOCCS("BU"), nullptr, nullptr, "L: Restore R: Send" },

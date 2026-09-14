@@ -44,10 +44,8 @@
 /* files to prevent them from taking up space.                                                         */
 
 // #define ENABLE_APP_CALIBR8OR
-// #define ENABLE_APP_SCENES
 // #define ENABLE_APP_ENIGMA
 // #define ENABLE_APP_MIDI
-// #define ENABLE_APP_PONG
 // #define ENABLE_APP_PIQUED
 // #define ENABLE_APP_POLYLFO
 // #define ENABLE_APP_H1200

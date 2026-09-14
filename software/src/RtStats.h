@@ -191,6 +191,14 @@ inline bool xrun_count_consistent(uint32_t counted, uint32_t stall_ms) {
   return d * 10 <= e;
 }
 
+// The one instance, as a C++17 inline variable so that the firmware, the
+// host test binaries and the simulator all get exactly one without any of
+// them needing to compile RtStats.cpp. The audio and bus sources are shared
+// between all three and increment it unconditionally.
+inline Counters stats;
+inline volatile bool window_open = false;
+inline volatile bool window_seen = false;
+
 #ifdef ARDUINO
 #include <Arduino.h>   // F_CPU_ACTUAL, ARM_DWT_CYCCNT
 // ---- firmware side (RtStats.cpp) ----------------------------------------
@@ -198,9 +206,6 @@ inline bool xrun_count_consistent(uint32_t counted, uint32_t stall_ms) {
 // flash. `window_open` is raised by a declared persistence window (Track C)
 // so drops inside it are attributed, not counted against the budget;
 // `window_seen` tells the loop-pass timer to skip the pass that held one.
-extern Counters stats;
-extern volatile bool window_open;
-extern volatile bool window_seen;
 
 inline uint32_t cycles_to_us(uint32_t cycles) {
   return cycles / (F_CPU_ACTUAL / 1000000u);

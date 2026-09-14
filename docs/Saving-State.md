@@ -25,7 +25,7 @@ This will save the state of all applications in the module, as well as the activ
 
 ## Teensy 4.0 & 4.1
 
-Several Apps have been updated to store settings in binary files on T4 hardware instead of using emulated EEPROM. This includes: **Hemispheres**/**Quadrants**, **Scenery**, **Calibr8or**, **Captain MIDI**.
+Several Apps have been updated to store settings in binary files on T4 hardware instead of using emulated EEPROM. This includes: **Quadrants**, **Calibr8or**, **Captain MIDI**.
 
 Settings are typically saved when you store a Preset, which happens automatically in some cases. Global settings like custom Scales and Vector Waveforms are stored in a separate config file, only when you invoke it with a R-Enc-Long-Press on the Main Menu.
 
@@ -64,7 +64,7 @@ megabyte free. Each container holds up to six sections in one file:
 | `C` | a copy of `CAPTAIN.DAT` |
 
 `SCENERY.DAT` and `CAPTAIN.DAT` are read from and written back to internal
-flash explicitly, because Scenery and Captain MIDI themselves call PhzConfig
+flash explicitly, because Captain MIDI itself calls PhzConfig
 with no filesystem argument — which defaults to internal flash. Quadrants bank
 files are the one thing that still follows the card, because that is where
 Quadrants looks for them.

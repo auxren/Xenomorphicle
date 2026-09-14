@@ -509,6 +509,13 @@ bool BroadcastQueued() { return false; }   // the shim never waits for a wire
 // the module is not the one holding the presets.
 bool WpmPresent() { return false; }
 
+// Nor are there any 200e modules to answer a broadcast with a poll reply, so
+// nothing ever followed and the overlay's banner shows no "+N" suffix.
+// Inventing followers would put a number on the panel that no simulated
+// module produced.
+bool LoadAckSeenSince(uint8_t, uint32_t) { return false; }
+int LoadAckCountSince(uint32_t) { return 0; }
+
 // The I2C slave's counters. Every one of them is a count of something that
 // happens on a real wire -- ISR entries, arbitration losses, ring overflows --
 // so all of them are zero here, and the Setup app's bus statistics page is

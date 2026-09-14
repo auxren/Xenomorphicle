@@ -6,11 +6,17 @@
 
 // The Teensy core has no CMSIS __get_PRIMASK(); this is the core's own
 // idiom (EventResponder.h). Non-zero = interrupts were already masked.
+// The simulator compiles this file for the host while claiming the chip's
+// macros, and a host has neither the register nor any interrupts to mask.
+#ifdef XENO_SIM
+static inline uint32_t read_primask() { return 0; }
+#else
 static inline uint32_t read_primask() {
   uint32_t primask;
   __asm__ volatile("mrs %0, primask\n" : "=r"(primask)::);
   return primask;
 }
+#endif
 
 audio_block_f32_t * AudioStream_F32::f32_memory_pool;
 uint32_t AudioStream_F32::f32_memory_pool_available_mask[6];

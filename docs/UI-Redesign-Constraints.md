@@ -93,9 +93,9 @@ documentation. 148/148 sim checks pass, including a new assertion that A raises
 no card.
 
 Quadrants alone claims A+B, X+Y, A+X, B+Y, A+Y, X+B, encL+A, encL+B. **X and Y
-are the largest free reservoir** outside Quadrants/Hemisphere/Scenery — with the
-caveat that they do not exist on non-T4.1 hardware, which is acceptable for a
-Xenomorpher-only fork.
+are the largest free reservoir** outside Quadrants. Since the hard fork this
+is a Xenomorpher-only firmware, so they are simply part of the panel rather
+than an optional extra.
 
 Quadrants' `CheckButtonCombo()` is an **exact mask match**
 (`mask == combo && mask != last_mask`), not a subset test, so `Z+X` / `Z+Y`
@@ -115,13 +115,14 @@ the case**, and two simpler fixes were each proven wrong by a live incident.
 decode (`fbtext.py`) and right-edge clip detection (`edgecheck.py`). It already
 regression-tests the chord-guard property directly.
 
-**But it builds only 6 apps:** Setup/About, 200e Modules, Scenery, Pong,
-Tweighty, Back It Up!. It **cannot build Hemisphere or Quadrants at all** — the
-largest part of the UI. Captain MIDI (the default boot app), Calibr8or and Scale
-Editor are blocked from simulation by a small const-correctness bug (a const
-draw path calling a non-const member; `arm-none-eabi-g++` accepts it, Apple
-clang rejects it). Fixing that is cheap and is arguably a **prerequisite to any
-large gesture refactor**, since otherwise the refactor cannot be regression
+**But it builds only 4 apps:** Setup/About, 200e Modules, Tweighty, Back It
+Up! (Scenery and Pong were in that list until the hard fork deleted them). It
+**cannot build Quadrants at all** — the largest part of the UI. Captain MIDI
+and Calibr8or pull in `ClockSetup`, which needs `HemisphereApplet.cpp`, whose
+`BaseView() const` calls the non-const `View()` that 93 applets override.
+Unpicking that is a project rather than a shim, and is arguably a
+**prerequisite to any large gesture refactor**, since otherwise the refactor
+cannot be regression
 tested across most of the UI.
 
 `edgecheck.py` can false-positive on Setup/About: the decorative icon at x=120

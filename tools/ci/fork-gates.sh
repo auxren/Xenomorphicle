@@ -39,7 +39,7 @@ gate "deleted-hardware-flags" "a #if tests a hardware flag no environment define
 #    HemisphereApplet.h is the applet base, not the deleted host).
 hits=$(grep -rnE '\b(AppPong|AppScenery|AppUsbDrive|AppWaveformEditor|AppHemisphere)\b|(PongGame|Scenery|UsbDriveApp|WaveformEditor|Hemisphere)\.h\b' \
   "$SRC" software/platformio.ini tools/xeno-sim/Makefile tools/xeno-sim/shim 2>/dev/null \
-  | grep -v 'HemisphereApplet\.h')
+  | grep -v 'HemisphereApplet\.h' | code_lines)
 gate "deleted-apps" "a deleted app or its header is referenced again" "$hits"
 
 # 3. No vestigial build environments in platformio.ini.

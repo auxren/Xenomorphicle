@@ -790,21 +790,15 @@ $SIM --state-in "$IMG/bad2" --keys "$ENTER,r-down,step300,r-up,step3000,b,step50
   && ok "the refused recall leaves an app drawing" \
   || bad "nothing drawn after the refused recall"
 
-# The file-backed sections (B/S/C) used to be checksummed only as they were
-# streamed out to their live files in step 4 -- after validation, with the
-# app world frozen -- and a failure there was silent: the recall reported
-# "done" with the previous slot's file still in place. Scenery gives the sim
-# a slot with an S section to damage. Control first, again.
-$SIM --app Scenery --state-out "$IMG/goodS" --keys "$ENTER,l-down,step600,l-up,step4000" >/dev/null 2>&1
-$SIM --app Scenery --state-in "$IMG/goodS" --keys "$ENTER,r-down,step300,r-up,step3000" 2>&1 \
-  | grep -q 'recall slot 0 done' \
-  && ok "the undamaged Scenery slot recalls (control)" \
-  || bad "the undamaged Scenery slot did not recall"
-python3 corrupt_slot.py "$IMG/goodS" "$IMG/badS" 0 S
-$SIM --app Scenery --state-in "$IMG/badS" --keys "$ENTER,r-down,step300,r-up,step3000" 2>&1 \
-  | grep -q 'refused (BAD PRESET)' \
-  && ok "a flipped bit in a file-backed (S) section is refused before anything is applied" \
-  || bad "a damaged S section was recalled as done"
+# NOT COVERED HERE ANY MORE: a flipped bit in a file-backed section (B/S/C).
+# Scenery was the only app in this build that wrote one, and it was deleted
+# with the 2026-09-13 hard fork; the bank and Captain sections come from apps
+# this build cannot compile (see README.md, "Apps that are not simulated").
+# The G-section checks above still cover the container's own validation. The
+# firmware side of the file-backed path also moved under that fork -- a
+# recall now stages those sections in RAM and checksums them in
+# stage_section() before registering -- so re-establishing this check means
+# writing it against the staging path, not restoring these two lines.
 
 echo "the pre-write bank snapshot"
 
@@ -1259,25 +1253,24 @@ echo "a power cycle comes back in the app that was on screen"
 # as a side effect of saving every app's data. So the boot app was whatever
 # had last been long-press-saved, however many switches ago.
 #
-# Slot 0 stored from Pong; then a plain-press switch to Scenery (encR twice
-# up the list from Pong); then power. The recall must still run (the slot is
-# the module's state) and the screen must still be Scenery. The switches
-# below sit for 4 s first: the app is written down with the slot, ~3 s after
-# the last change, one cheap EEPROM program -- not a GLOBALS.CFG block erase
-# in the middle of a recall.
-# Navigating to Scenery takes two encL turns and one encR detent now that the
-# switcher has folders: Pong starts in HIDDEN on its own, so the old
-# 'encr-,encr-' walked a one-app list and never left Pong. encL skips the
-# empty folders, so +2 from HIDDEN lands on SYSTEM, where Scenery is second.
+# Slot 0 stored from Tweighty; then a plain-press switch to the 200e Modules
+# app; then power. The recall must still run (the slot is the module's state)
+# and the screen must still be 200e Modules. The switches below sit for 4 s
+# first: the app is written down with the slot, ~3 s after the last change,
+# one cheap EEPROM program -- not a GLOBALS.CFG block erase in the middle of
+# a recall.
+# The walk crosses a folder, which is the point: Tweighty is this build's
+# only AUDIO app, so one encL turn leaves that folder for SYSTEM (encL skips
+# empty folders) and one encR detent steps from Setup/About to 200e Modules.
 rm -f "$IMG/keepapp"
-$SIM --app "Pong 2.0" --state-out "$IMG/keepapp" \
-     --keys "$ENTER,l-down,step600,l-up,step4000,$MENU,encl+,encl+,encr+,step100,r,step4000" \
+$SIM --app Tweighty --state-out "$IMG/keepapp" \
+     --keys "$ENTER,l-down,step600,l-up,step4000,$MENU,encl+,encr+,step100,r,step4000" \
      >/dev/null 2>&1
 $SIM --state-in "$IMG/keepapp" --keys "step2000" > "$TMP/keepapp" 2>&1
 keep_app=$(sed -n 's/^  [a-z][a-z]*  *app=\(.*\)  held=.*/\1/p' "$TMP/keepapp" | tail -1)
 if ! grep -q 'boot recall slot 0' "$TMP/keepapp"; then
   bad "the power-up recall of slot 0 did not run (app came up as '$keep_app')"
-elif [ "$keep_app" = "Scenery" ]; then
+elif [ "$keep_app" = "200e Modules" ]; then
   ok "power-up recalls the slot but keeps the app that was on screen (plain-press switch)"
 else
   bad "power-up switched to the preset's app instead of the one on screen ('$keep_app')"
@@ -1285,13 +1278,14 @@ fi
 
 # The same rule from the other side: a bus recall that lands in another app
 # has changed what is on screen, so THAT is what the next power-up shows.
-# From the Scenery image above, recall slot 0 (Pong) through the overlay.
+# From the 200e Modules image above, recall slot 0 (Tweighty) through the
+# overlay.
 cp "$IMG/keepapp" "$IMG/keepapp2"
 $SIM --state "$IMG/keepapp2" --keys "step2000,$ENTER,r-down,step300,r-up,step4000" \
      >/dev/null 2>&1
-$SIM --state-in "$IMG/keepapp2" --keys "step2000" 2>&1 | grep -Eq '^  [a-z]+ +app=Pong 2.0' \
+$SIM --state-in "$IMG/keepapp2" --keys "step2000" 2>&1 | grep -Eq '^  [a-z]+ +app=Tweighty' \
   && ok "a bus recall into another app is what the next power-up comes back in" \
-  || bad "after a bus recall into Pong, power-up came back somewhere else"
+  || bad "after a bus recall into Tweighty, power-up came back somewhere else"
 
 # ...and the console's remote switch (SwitchToApp, which --app goes through):
 # the Orin's 'a' has to stick the way a menu pick does.
@@ -1411,7 +1405,7 @@ absorbs "the preset overlay (both encoders, encR held)" preset \
         "l-down,step20,r-down,step80,l-up,step900,r-up,step60"
 absorbs "the IO settings screen (A+encL, encL held)" - \
         "a-down,step60,l-down,step60,l-up,step60,a-up,step900" \
-        "a-down,step60,l-down,step60,a-up,step900,l-up,step60" --app Scenery
+        "a-down,step60,l-down,step60,a-up,step900,l-up,step60" --app Tweighty
 
 # The rule is "until released", not "for a while", so a press AFTER the release
 # must work normally. Without this pair the guard could be a permanent mute and
@@ -1460,8 +1454,17 @@ sw_rows --app "Tweighty" --keys "$SW,encl+,step200" | grep -q 'SYSTEM' \
   && ok "turning the folder skips the empty ones" \
   || bad "turning encL landed on an empty folder"
 
-# HIDDEN is an ordinary folder, reachable by turning, not a special mode.
-sw_rows --app "Tweighty" --keys "$SW,encl-,step200" | grep -q 'HIDDEN' \
+# HIDDEN is an ordinary folder, reachable by turning, not a special mode --
+# once there is something in it. Nothing is filed there at first boot any
+# more: Pong was the only app that started hidden and it was deleted with the
+# 2026-09-13 hard fork, and encL skips empty folders. So the app is moved
+# there first (X walks it AUDIO -> SYSTEM -> HIDDEN), and then turning away
+# and back has to find it again.
+sw_rows --app "Tweighty" --keys "$SW,x,x,step200" | grep -q 'HIDDEN' \
+  && ok "an app can be moved into HIDDEN, and the screen follows it there" \
+  || bad "moving an app twice did not reach HIDDEN"
+sw_rows --app "Tweighty" --keys "$SW,x,x,step100,encl+,step100,encl-,step200" \
+  | grep -q 'HIDDEN' \
   && ok "HIDDEN is reachable by turning, like any other folder" \
   || bad "HIDDEN was not reachable by turning encL"
 
@@ -1512,12 +1515,12 @@ echo "the panel sleeps when the module is left alone"
 panel_state() { $SIM "$@" 2>&1 | grep -oE 'panel=[a-z]+' | tail -1; }
 
 # A press well inside the window leaves it lit.
-[ "$(panel_state --app Scenery --keys 'a-down,step20,a-up,step400000')" = "panel=on" ] \
+[ "$(panel_state --app Tweighty --keys 'a-down,step20,a-up,step400000')" = "panel=on" ] \
   && ok "the panel stays lit while the module is in use" \
   || bad "the panel slept while still inside the idle window"
 
 # Left alone past ten minutes, the drive goes off.
-[ "$(panel_state --app Scenery --keys 'a-down,step20,a-up,step700000')" = "panel=asleep" ] \
+[ "$(panel_state --app Tweighty --keys 'a-down,step20,a-up,step700000')" = "panel=asleep" ] \
   && ok "the panel sleeps after ten minutes idle" \
   || bad "the panel was still lit after ten minutes idle"
 
@@ -1525,14 +1528,14 @@ panel_state() { $SIM "$@" 2>&1 | grep -oE 'panel=[a-z]+' | tail -1; }
 # to a wake path, so there is no control that can be forgotten -- assert that
 # for a button and for BOTH encoders rather than trusting the argument.
 for k in a z encr+ encl+ encr- encl-; do
-  [ "$(panel_state --app Scenery --keys "a-down,step20,a-up,step700000,$k,step200")" = "panel=on" ] \
+  [ "$(panel_state --app Tweighty --keys "a-down,step20,a-up,step700000,$k,step200")" = "panel=on" ] \
     && ok "'$k' wakes the sleeping panel" \
     || bad "'$k' did not wake the sleeping panel"
 done
 
 # And it wakes showing the live screen, not a stale or empty one: the firmware
 # keeps flushing to a sleeping panel, which is exactly what makes this true.
-$SIM --app Scenery --keys "a-down,step20,a-up,step700000,a,step200" --dump-fb 2>/dev/null \
+$SIM --app Tweighty --keys "a-down,step20,a-up,step700000,a,step200" --dump-fb 2>/dev/null \
   | grep -qE '[1-9a-fA-F]' \
   && ok "the woken panel shows a drawn screen, not a blank one" \
   || bad "the panel woke to an empty frame"
@@ -1662,7 +1665,7 @@ sweep 200e-recovery-row --app "200e Modules" --write-fault ignore --keys "$W251"
 sweep 200e-undo-confirm --app "200e Modules" --write-fault ignore \
       --keys "$W251,],step100,r,step10"
 sweep setup --app "Setup/About"
-sweep scenery --app Scenery
+sweep tweighty --app Tweighty
 sweep screensaver --keys "z-down,step60,a-down,step60,a-up,step60,z-up,step300"
 echo
 

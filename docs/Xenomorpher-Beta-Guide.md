@@ -13,6 +13,20 @@ they're installed, see [Xenomorpher Presets](Xenomorpher-Presets) and
 [200e Modules App](200e-Modules-App) instead — this page is the "am I set
 up correctly, and what am I actually testing" guide.
 
+## What changed on update
+
+**Four apps were removed:** Pong, Scenery, USB Drive and the Waveform
+Editor. If your module was last left in one of them it comes up in Captain
+MIDI instead, and the app-switcher's folder layout resets to its defaults
+once, because the app list changed. Nothing else about your presets moves:
+they are stored by app id, so every slot still recalls what it held. The
+MTP recovery image is unaffected and is still reached by holding Z then X
+at boot.
+
+The firmware also no longer builds for any hardware other than the
+Xenomorpher. If you were building your own images, see
+[Build Choices](Build-Choices) for the environments that remain.
+
 ## What's new in this beta
 
 The Xenomorpher now talks natively to a Buchla 200e case's preset bus:

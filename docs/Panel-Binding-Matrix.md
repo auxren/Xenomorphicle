@@ -93,16 +93,13 @@ inverting the actual behaviour.
 | **CaptainMIDI** `:2366-2724` | p: SwitchSetup(+1) | p: SwitchSetup(−1); lp: ToggleCopyMode | - | - | - | ToggleDisplay; **lp: Panic() (all-notes-off)**; turn | ToggleCursor; turn: port scroll / param edit | **A+B: Clock Router overlay** |
 | **Hemisphere** `:1711-1774` | p/dn: applet select (double-click → full-screen help) | same, right side; **lp: ToggleConfigMenu** | - | - | dn: ToggleClockRun | push; **ld: ToggleClockRun**; turn | push; **ld: JumpToMenu()**; turn | **A+B: Clock Setup** |
 | **Quadrants** `:1727-1899` | p/dn: applet select NW | NE | SW | SE | p or ld: ToggleClockRun; lp: reserved | push (or ClockSetup); turn | same | **A+B** Clock Setup · **X+Y** Audio Setup · **A+X** Preset Selector · **B+Y** Input Mapping · **A+Y / X+B** Overview · **encL+A / encL+B** swap view slot |
-| **Scenery** `:710-756` | p: SwitchEditChannel(down) | p: SwitchEditChannel(up); lp: handler | dn: PreviousScene | dn: NextScene | dn: ZapButton (random scene) | press / long / turn | press / turn | `X/Y: Change Scene`, `Z: Random Scene` |
 | **SETTINGS** `:508-…,1073-1078` | dn solo: toggle pixel-invert | - | edit 200e bus addr (held while turning encR) | - | - | p: StartCalibration; **lp: arm bootloader** | **p: arm factory-reset prompt** | **A+B (dn): flip screen 180°** |
 | **Bus200eApp** `:2589-2860` | p: **arm whole-bank Write** (module home) / toggle loop point / octave nudge (edit) | p: cycle sequence A-D | p: octave down (edit) | p: octave up (edit) | - | back / cancel (context-dependent) | **confirm/commit after dead-window**; turn: scroll | arm(A) and confirm(encR) are deliberately different buttons |
 | **TweightyApp** `:473-524` | p: transport toggle | p: envelope out on/off | **held**: redirects encR to FEEDBACK instead of MIX | - | - | back home; turn: cursor / select tap | cycle HOME→EDIT→MIXER; turn: adjust | - |
 | **ScopeApp** `:334-357` | p: **freeze/pause** | p: reset gain to 1.0× | unbound | unbound | - | toggle live-trace screensaver; turn: select channel | turn: gain | - |
 | **SamplerApp** `:384-402` | p: preview/trigger slot | p: cycle focused field | unbound | unbound | - | turn: select slot | turn: adjust field | - |
-| **UsbDriveApp** `:235-259` | - | p (RECOVER item): run recovery; **lp (USBDRIVE item): arm USB-drive mode** | - | - | - | turn: flip cursor | - | - |
 | **Backup** `:321-329` | context | context | - | - | - | arms Restore | sends backup | `L: Restore  R: Send` |
 | **TunerApp** `:313-326` | - | - | - | - | - | toggle MIDI-out passthrough | lock/unlock strobe; turn: A4 Hz | - |
-| **PongGame** `:464-497` | p: toggle P1, reset scores | p: toggle P2, reset scores | - | - | - | toggle P1 analog/digital; turn: paddle 1 | toggle P2 analog/digital; turn: paddle 2 | - |
 
 ---
 
@@ -110,14 +107,14 @@ inverting the actual behaviour.
 
 **Same control, different meanings.**
 `A`/`B` as "coarse adjust ±" is octave in QQ/DQ/H1200/References, but ±32 raw
-in Piqued/Lorenz/Viznutcracker/BBGEN, scene/channel select in Scenery, MIDI
+in Piqued/Lorenz/Viznutcracker/BBGEN, MIDI
 setup ± in CaptainMIDI, applet select in Hemisphere/Quadrants (meaning varies
 *again* per applet). **ASR is asymmetric** — B is freeze-S&H, not octave.
 **Chords overloads A/B with menu-page navigation** on top of octave.
 A naive "A/B always means octave" pass would silently delete both.
 
 `Z` is clock run/stop in Hemisphere/Quadrants/Calibr8or, random-scene in
-Scenery, and unbound in most other apps.
+and unbound in most other apps.
 
 **`encL` long-press means six different things**, all confirmed:
 copy-scale-to-channels (`QQ.h:1484-1493`, `DQ.h:1393`), bootloader arm
@@ -130,9 +127,9 @@ but **A** in ScopeApp. "Next screen/page" is B in Bus200eApp, encR in
 Tweighty, A/B in CaptainMIDI, B in Chords.
 
 **Free real estate.** `X` and `Y` are unbound in most apps outside
-Quadrants/Hemisphere/Scenery/Bus200e/Tweighty — the largest reservoir for new
-gestures. They do not exist on non-T4.1 hardware, which is acceptable for a
-Xenomorpher-only fork.
+Quadrants/Bus200e/Tweighty — the largest reservoir for new gestures. Since
+the hard fork this is a Xenomorpher-only firmware, so X and Y are simply
+part of the panel rather than an optional extra.
 
 **Must not be re-bound.** The 200e app's arm(A)/confirm(encR) split is a
 hardened carve-out: a fumbled `A+encR` is also the global app-switcher chord,
@@ -148,12 +145,13 @@ is deliberately inert (`Bus200eApp.h:242-246, 421`).
 decode (`fbtext.py`) and right-edge clip detection (`edgecheck.py`). It already
 regression-tests the chord-guard property directly.
 
-It builds **six apps**: Setup/About, 200e Modules, Scenery, Pong, Tweighty,
-Back It Up!. It **cannot build Hemisphere or Quadrants at all**. Captain MIDI
-(the default boot app), Calibr8or and Scale Editor are blocked by a
-const-correctness bug — a non-const member called from a const draw path, which
-`arm-none-eabi-g++` accepts and Apple clang rejects
-(`CaptainMIDI.h:393-394`, `Calibr8or.h:755,757`, `ScaleEditor.h:192-213`).
+It builds **four apps**: Setup/About, 200e Modules, Tweighty, Back It Up!
+(Scenery and Pong were in that list until the hard fork deleted them). It
+**cannot build Quadrants at all**, and anything that pulls in `ClockSetup` —
+Captain MIDI, Calibr8or — needs `HemisphereApplet.cpp`, whose
+`BaseView() const` calls the non-const `View()` that 93 applets override.
+That is a project, not a shim; the per-app const bugs that used to be listed
+here are already fixed.
 Fixing that is small, named, and is the cheapest way to widen automated
 coverage before any module-wide gesture change.
 

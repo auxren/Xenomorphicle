@@ -30,12 +30,12 @@ splash screen, app restore. Every screen below is drawn by firmware.
 | **app switcher** | hold **A** (or **Z**), press the **right encoder** | `--keys "a-down,step60,r-down,step60,r-up,step60,a-up,step200"` |
 | **preset-bus overlay** | press **both encoder buttons** | `--keys "l-down,step20,r-down,step80,l-up,r-up,step200"` |
 | **screensaver** | hold **Z**, press **A** | `--keys "z-down,step60,a-down,step60,a-up,step60,z-up,step300"` |
-| **IO settings** | hold **A** (or **Z**), press the **left encoder** | `--app Scenery --keys "a-down,step60,l-down,step60,l-up,step60,a-up,step300"` |
+| **IO settings** | hold **A** (or **Z**), press the **left encoder** | `--app Tweighty --keys "a-down,step60,l-down,step60,l-up,step60,a-up,step300"` |
 | **EEPROM reset prompt** | hold **A** and **B** through the splash | `--reset-settings` |
 | **Setup/About**, and its calibration wizard | app switcher → *Setup/About* | `--app "Setup/About"` |
 
 The IO settings screen is offered per app: the 200e app declines it
-(`io_settings_allowed()`), so reach it from Scenery or Pong.
+(`io_settings_allowed()`), so reach it from Tweighty.
 
 Inside the app switcher the **right** encoder scrolls, a click switches app, and
 a long click switches and saves. The **left** encoder cancels on a press and
@@ -246,16 +246,21 @@ success.
 ## Apps
 
 `app_container` is the real one, and the app switcher lists exactly what is in
-it. This build carries six apps:
+it. This build carries four apps:
 
 | app | what the shims cost it |
 |---|---|
 | **Setup/About** | The calibration wizard runs and its pages navigate, but every measurement it takes reads a **fixed, silent ADC**, so no step converges on anything and the numbers are meaningless. The bus statistics page is all zeros (see *the bus*, below). The invert-display toggle on `A` **does** work — the panel shim honours the inversion command. |
 | **200e Modules** | The most faithful app here: the bus master FSM, the codecs, the write guard and the bank data are real (see *the simulated bus*). Writes go nowhere. |
-| **Scenery** | Scene state and the UI are real; the CV that would drive a scene is a fixed value, so nothing modulates. |
-| **Pong 2.0** | Plays. Its pace comes from the loop rather than an audio-rate ISR, so speed is not representative. |
 | **Tweighty** | The UI, the persisted settings, and `AudioTweightyF32::Acquire()`/`Release()`/`IsReady()` are real — app-switching into and out of Tweighty genuinely allocates and frees the engine's delay buffer (via `SetActive()`, control-rate, exactly as on target), and `RequestTransportToggle()`/the WRITE↔RECIRC state shown on screen is the real transport state machine. What is **not** real: any actual audio. `AudioTweightyF32::update()` — the DSP itself, and every field the home screen reads off it (`transport_state_`, `meter_level_`, `crossfade_active_`, `active_tap_mask_`) as an audio-ISR-hot mirror — never runs here, because **this simulator has no audio-rate callback at all** (see *the shims*, `arduino/Audio.h`), so those fields just sit at their static default values. The stock int16 `AudioStream`/`AudioConnection` pair Tweighty derives its F32 engine from is not part of `software/src` at all (it ships in the `framework-arduinoteensy` git dependency, not vendored in this repo) — `shim/arduino/AudioStream.h` is this build's stand-in for it, written from scratch rather than mirrored. `AUDIO_INTERFACE` is never defined in this build, so `WireAudio()`/`SetActive()`'s actual `AudioConnection`/`AudioConnection_F32` wiring (the `#ifdef AUDIO_INTERFACE` blocks in `TweightyApp.h`) never runs either — only the `Acquire()`/`Release()` bracket around it does. |
 | **Back It Up!** | Runs against the RAM-backed file system, so a "backup" is written to a file that dies with the process. |
+
+Scenery and Pong were in this manifest until the 2026-09-13 hard fork
+deleted them from the firmware. Two things went with them: Scenery was the
+only app here that wrote a **file-backed (S) preset section**, so the
+self-check no longer covers a flipped bit in one, and Pong was the only app
+filed under **HIDDEN**, so that folder now starts empty and the switcher
+test moves an app into it first.
 
 ### Apps that are **not** simulated, and why
 
