@@ -32,21 +32,32 @@ is no third category.
 - CORE ISR period: 60 us (`OC_CORE_TIMER_RATE`), 36,000 cycles at 600 MHz.
 - Audio block: 128 samples at 44117.647 Hz = 2.902 ms. The DMA half-buffer
   interrupt fires every 1.451 ms; `update_all()` runs every 2.902 ms.
-- A stall of S ms therefore drops S / 2.902 output blocks and misses
-  S / 0.060 CORE ticks. The measured 2748 ms preset save is ~947 blocks and
-  ~45,800 ticks.
+- A stall of S ms misses S / 0.060 CORE ticks.
+
+**A masked stall does not show up as dropped audio blocks, and expecting
+that was wrong.** With interrupts masked the audio ISR does not run at all,
+so it is never in a position to notice a missing block; the DMA simply
+replays its buffer, and the pending interrupt coalesces into a single call
+when interrupts return. Measured 2026-09-14: a 193 ms save produced
+**0 output xruns and 2971 missed CORE ticks**. Missed ticks are therefore
+the measure of a masked stall. Output xruns measure the other failure --
+the audio graph starving while interrupts are live.
 
 ## Detector self-check
 
 New counters are not trusted until they reproduce a known stall:
 
-1. `T` at idle: `xrun=0`, `missed=0`, `loop pass max` under 2 ms, every
-   row PASS.
-2. `(` (save slot 0 locally), then `T`: expect `xrun` within 10% of
-   wall / 2.902, `missed` within 10% of wall / 0.060, `loop pass max` about
-   the save's wall time (the DWT figure the save prints, not `millis()`).
-3. If the counts disagree by more than 10%, the detector is wrong. Fix it
-   before believing any later number.
+1. `T` at idle: every row PASS. Measured 2026-09-14 after 25 s idle:
+   `xrun=0`, `missed=0`, core ISR max 8 us, `gap_max` 60 us (exactly one
+   period), loop pass max 162 us, p95 under 100 us.
+2. `(` (save slot 0 locally), then `T`. The save prints its own wall time
+   in DWT cycles. Expect `core missed` within 10% of wall / 0.060, and
+   every one of those ticks attributed `in_window`. Measured: a 193 ms save
+   gave 2971 missed against 3216 expected, 8% low, with 2971 of 2971
+   in_window.
+3. If missed ticks disagree by more than 10%, or any are not attributed to
+   the window, the detector is wrong. Fix it before believing any later
+   number.
 
 `test/test_rtstats.cpp` holds the same arithmetic as host checks.
 
@@ -91,8 +102,15 @@ both ends is what separates it from a straight line.
   high-water, never reset except by `T`).
 - loop pass: DWT delta between consecutive passes, max and histogram; the
   pass that held a declared window is skipped.
+- windows: DWT cycles, not `millis()`. Systick is masked along with
+  everything else while the flash programs, so `millis()` under-reports
+  exactly the part the number exists to measure: the 193 ms save above
+  reported 25 ms by `millis()` before this was fixed.
 - MIDI: Captain's existing poll cadence meter feeds the histogram and the
-  violation counter; `t` no longer resets the violation count.
+  violation counter; `t` no longer resets the violation count. The first
+  poll after a declared window measures the window rather than a cadence
+  failure -- polling is loop-bound and a window stops the loop on purpose --
+  so it goes in the histogram but not against the violation ceiling.
 - deferred calls: the ISR-to-loop ring (`src/DeferRing.h`) reports what it
   had to drop, which is a realtime MIDI byte that never went out.
 - recall staging: how many of a recall's files are still waiting for the

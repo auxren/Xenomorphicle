@@ -47,6 +47,15 @@ void LoopPass() {
 }
 
 void MidiGap(uint32_t us) {
+  // The first poll after a declared window measures the window, not a
+  // cadence failure: Captain's polling is loop-bound and a window stops the
+  // loop on purpose. Counted in the histogram either way, so the shape of
+  // the distribution stays honest, but not against the violation ceiling.
+  if (midi_window_seen) {
+    midi_window_seen = false;
+    stats.midi_hist.add(us);
+    return;
+  }
   stats.midi_hist.add(us);
   if (us > stats.midi_gap_max_us) stats.midi_gap_max_us = us;
   if (us > Budget::kMidiGapBudgetUs) stats.midi_gap_violations++;
@@ -113,12 +122,18 @@ PersistenceWindow::PersistenceWindow(const char *reason, uint32_t declared_max_m
   window_depth++;
   window_open = true;
   window_seen = true;
-  start_ms_ = millis();
+  midi_window_seen = true;
+  // DWT cycles, not millis(): systick is masked along with everything else
+  // while the flash programs, so millis() under-reports exactly the part
+  // this number exists to measure. Measured on hardware 2026-09-14: a save
+  // that took 193 ms wall reported 25 ms by millis(). One lap is enough --
+  // the counter wraps at ~7 s and a window this long is already a failure.
+  start_cycles_ = ARM_DWT_CYCCNT;
   stats.window_count++;
 }
 
 PersistenceWindow::~PersistenceWindow() {
-  const uint32_t ms = millis() - start_ms_;
+  const uint32_t ms = (ARM_DWT_CYCCNT - start_cycles_) / (F_CPU_ACTUAL / 1000);
   if (window_depth) window_depth--;
   if (!window_depth) window_open = false;
   if (ms > stats.window_max_ms) stats.window_max_ms = ms;

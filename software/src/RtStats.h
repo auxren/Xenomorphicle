@@ -198,6 +198,7 @@ inline bool xrun_count_consistent(uint32_t counted, uint32_t stall_ms) {
 inline Counters stats;
 inline volatile bool window_open = false;
 inline volatile bool window_seen = false;
+inline volatile bool midi_window_seen = false;
 
 // ---- the declared persistence window ------------------------------------
 // Some writes to the program flash cannot be avoided and cannot be made
@@ -229,7 +230,7 @@ class PersistenceWindow {
  private:
   const char *reason_;
   uint32_t declared_max_ms_;
-  uint32_t start_ms_;
+  uint32_t start_cycles_;
   // Whether this window actually took the audio down. False when it was
   // constructed somewhere a fade cannot run (interrupts already masked, or
   // inside another window), so the destructor knows not to fade back up
@@ -242,7 +243,7 @@ class PersistenceWindow {
 // to stall on, but they do run this code, so the bookkeeping stays real and
 // the fade is simply absent.
 inline PersistenceWindow::PersistenceWindow(const char *reason, uint32_t declared_max_ms)
-    : reason_(reason), declared_max_ms_(declared_max_ms), start_ms_(0), faded_(false) {
+    : reason_(reason), declared_max_ms_(declared_max_ms), start_cycles_(0), faded_(false) {
   window_open = true;
   window_seen = true;
   stats.window_count++;
@@ -253,7 +254,7 @@ inline PersistenceWindow::~PersistenceWindow() {
   // the compiler can see they are ignored on purpose.
   (void)reason_;
   (void)declared_max_ms_;
-  (void)start_ms_;
+  (void)start_cycles_;
   (void)faded_;
   window_open = false;
 }
