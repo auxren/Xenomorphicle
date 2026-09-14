@@ -38,6 +38,9 @@ jobs:
           g++ -std=c++17 -Wall -Werror -O2 -o build/test_rtstats \
               test_rtstats.cpp
           ./build/test_rtstats
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_defer_ring \
+              test_defer_ring.cpp
+          ./build/test_defer_ring
           g++ -std=c++17 -Wall -Werror -O2 -I host_stubs \
               -o build/test_buchla251e_slot_codec \
               test_buchla251e_slot_codec.cpp ../src/Buchla251eSlotCodec.cpp \

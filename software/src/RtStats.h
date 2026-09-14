@@ -106,8 +106,11 @@ struct Counters {
   uint32_t window_count;
   uint32_t window_max_ms;
   uint32_t window_violations;      // windows that ran past their declared max
+  uint32_t defer_dropped;          // ISR->loop deferred calls refused (ring full)
+  uint32_t defer_hiwater;          // deepest deferred-call backlog seen
 
   void reset() {
+    defer_dropped = defer_hiwater = 0;
     audio_out.reset();
     audio_out_half = audio_out_alloc_fail = audio_out_in_window = 0;
     audio_in_xrun = audio_in_in_window = audio_in_alloc_fail = 0;
@@ -124,7 +127,7 @@ struct Counters {
 struct Verdict {
   enum Row {
     AUDIO_OUT, AUDIO_IN, CORE_ISR_US, CORE_MISSED, LOOP_P100, LOOP_P95,
-    MIDI_P95, MIDI_P100, ALLOC, WINDOW_MS, kRows
+    MIDI_P95, MIDI_P100, ALLOC, WINDOW_MS, DEFER, kRows
   };
   bool pass[kRows];
   int failures;
@@ -136,6 +139,7 @@ struct Verdict {
       "loop pass max us", "loop pass p95 us",
       "midi gap p95 us", "midi gap violations",
       "audio alloc failures", "persistence window max ms",
+      "deferred calls dropped",
     };
     return kNames[row];
   }
@@ -154,6 +158,7 @@ inline Verdict Evaluate(const Counters &c) {
   v.pass[Verdict::ALLOC] =
       c.f32_alloc_fail + c.audio_out_alloc_fail + c.audio_in_alloc_fail == 0;
   v.pass[Verdict::WINDOW_MS] = c.window_max_ms <= Budget::kWindowMs;
+  v.pass[Verdict::DEFER] = c.defer_dropped == 0;
   v.failures = 0;
   for (int i = 0; i < Verdict::kRows; ++i) if (!v.pass[i]) v.failures++;
   return v;

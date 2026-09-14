@@ -9,10 +9,6 @@
 #include "OC_menus.h"
 #include "util/util_debugpins.h"
 #include "src/drivers/display.h"
-#include <functional>
-#include <queue>
-
-using Task = std::function<void()>;
 
 namespace OC {
   namespace CORE {
@@ -23,7 +19,12 @@ namespace OC {
 
     static constexpr int RAM2_HEADROOM = 10240;
 
-    void DeferTask(Task func);
+    // Queue a call from ISR context to run in loop() at the next
+    // FlushTasks(). Plain function pointers only (a capture-less lambda
+    // converts): the ring behind this (DeferRing.h) never allocates. A
+    // full ring drops the newest call and counts it; see the `T` report.
+    void DeferTask(void (*fn)());
+    void DeferTask(void (*fn)(void *), void *ctx);
     void FlushTasks();
     int FreeRam();
   }; // namespace CORE

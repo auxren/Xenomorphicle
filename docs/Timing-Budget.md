@@ -25,6 +25,7 @@ is no third category.
 | MIDI poll-to-poll gap, p95 | <= 1 ms | `midi` histogram |
 | MIDI poll-to-poll gap, any | <= 5 ms | `midi poll violations` |
 | F32 and i16 audio pool allocation failures | 0 per hour | `alloc_fail` |
+| ISR-to-loop deferred calls dropped (a missed realtime MIDI byte) | 0 | `defer dropped` |
 
 ## Arithmetic behind the numbers
 

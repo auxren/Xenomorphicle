@@ -78,6 +78,8 @@ FLASHMEM void Report(bool reset_after) {
   Serial.printf("windows:   count=%lu max=%lums violations=%lu\n",
                 (unsigned long)c.window_count, (unsigned long)c.window_max_ms,
                 (unsigned long)c.window_violations);
+  Serial.printf("defer:     dropped=%lu hiwater=%lu (ring of %u)\n",
+                (unsigned long)c.defer_dropped, (unsigned long)c.defer_hiwater, 16u);
   const Verdict v = Evaluate(c);
   for (int i = 0; i < Verdict::kRows; ++i)
     Serial.printf("  %s  %s\n", v.pass[i] ? "PASS" : "FAIL", Verdict::name(i));

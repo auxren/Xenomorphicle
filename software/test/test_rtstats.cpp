@@ -152,6 +152,18 @@ static void test_loop_and_midi_percentile_rows() {
   CHECK(!v.pass[Verdict::MIDI_P100]);
 }
 
+static void test_deferred_call_drop_fails_its_row() {
+  // A dropped deferred call is a MIDI clock tick that never went out.
+  Counters c = clean_counters();
+  c.defer_hiwater = 3;   // depth alone is fine
+  Verdict v = Evaluate(c);
+  CHECK(v.pass[Verdict::DEFER]);
+  c.defer_dropped = 1;
+  v = Evaluate(c);
+  CHECK(!v.pass[Verdict::DEFER]);
+  CHECK(v.failures == 1);
+}
+
 static void test_alloc_failures_and_window_length() {
   Counters c = clean_counters();
   c.f32_alloc_fail = 1;
@@ -175,6 +187,7 @@ int main() {
   test_xrun_inside_declared_window_is_allowed();
   test_core_isr_ceilings();
   test_loop_and_midi_percentile_rows();
+  test_deferred_call_drop_fails_its_row();
   test_alloc_failures_and_window_length();
   printf("test_rtstats: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
