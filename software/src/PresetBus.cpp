@@ -913,7 +913,19 @@ bool ReadMidiRx(uint8_t &status, uint8_t &d1, uint8_t &d2) {
 FLASHMEM static void pump_midi_tx() {
   uint8_t sent = 0;
   uint32_t v = 0;
-  while (midi_tx.peek(v) && sent < 4) {
+  for (;;) {
+    // Clock first. Every frame ahead of a tick costs about a millisecond of
+    // quiet-gated bus, so a burst of notes or controllers queued before it
+    // arrives delays the tick by that many milliseconds -- and a tick's
+    // whole value is when it lands. IRQ-masked because QueueMidiTx runs in
+    // ISR context and its coalescing writes into the same ring body; the
+    // unconditional re-enable is fine here for the reason QueueMidiTx
+    // gives, this is loop context.
+    __disable_irq();
+    midi_tx.promote_realtime();
+    __enable_irq();
+
+    if (!midi_tx.peek(v) || sent >= 4) return;
     if (!tx_gate_open()) return;
 
     // [08][00][22][0F][status|mask][00][d1][d2][00] -- 2WIRELESS long format
@@ -1161,6 +1173,8 @@ FLASHMEM void DebugDump() {
                 stats.ring_hw, kRingSize, stats.midi_rx_hw, kMidiRingRx,
                 stats.midi_tx_hw, kMidiRingTx, stats.bus_stuck,
                 stats.bus_recovered);
+  Serial.printf("midi tx ring: merged=%lu promoted=%lu dropped=%lu\n",
+                midi_tx.merged, midi_tx.promoted, midi_tx.dropped);
   const Bus200eStats *ps = Bus200eGetStats();
   Serial.printf("frames=%lu dropped=%lu query_tx=%lu query_retry=%lu\n",
                 ps->frames, ps->dropped, stats.query_replies, stats.query_retries);

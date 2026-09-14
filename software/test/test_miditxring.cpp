@@ -185,7 +185,91 @@ static void test_drain_order_after_merge() {
   CHECK(ring.pending() == 0);
 }
 
+// ---- realtime priority: clock never waits behind a controller backlog ----
+
+static const uint8_t START = 0xFA;
+
+static void test_promote_brings_oldest_realtime_to_head() {
+  ring.reset();
+  ring.push(CC_A, 1, 10);
+  ring.push(CC_B, 2, 20);
+  ring.push(CLOCK, 0, 0);
+  CHECK(ring.promote_realtime());
+  uint32_t v = 0;
+  ring.peek(v); CHECK((v & 0xFF) == CLOCK); ring.pop();
+  ring.peek(v); CHECK((v & 0xFF) == CC_A);  ring.pop();   // passed entries keep
+  ring.peek(v); CHECK((v & 0xFF) == CC_B);  ring.pop();   // their relative order
+  CHECK(ring.pending() == 0);
+  CHECK(ring.promoted == 1);
+}
+
+static void test_promote_preserves_note_on_off_order() {
+  // A swap instead of a rotation would put note-off before note-on: a
+  // stuck note. The entries the clock passes must stay in order.
+  ring.reset();
+  ring.push(NOTEON, 60, 100);
+  ring.push(NOTEOFF, 60, 0);
+  ring.push(CLOCK, 0, 0);
+  CHECK(ring.promote_realtime());
+  uint32_t v = 0;
+  ring.peek(v); CHECK((v & 0xFF) == CLOCK);   ring.pop();
+  ring.peek(v); CHECK((v & 0xFF) == NOTEON);  ring.pop();
+  ring.peek(v); CHECK((v & 0xFF) == NOTEOFF); ring.pop();
+}
+
+static void test_promote_keeps_realtime_in_order() {
+  ring.reset();
+  ring.push(CC_A, 1, 1);
+  ring.push(START, 0, 0);
+  ring.push(CC_A, 2, 2);
+  ring.push(CLOCK, 0, 0);
+  CHECK(ring.promote_realtime());
+  uint32_t v = 0;
+  ring.peek(v); CHECK((v & 0xFF) == START); ring.pop();   // the older one first
+  CHECK(ring.promote_realtime());
+  ring.peek(v); CHECK((v & 0xFF) == CLOCK); ring.pop();
+  ring.peek(v); CHECK((v & 0xFF) == CC_A && ((v >> 8) & 0xFF) == 1); ring.pop();
+  ring.peek(v); CHECK((v & 0xFF) == CC_A && ((v >> 8) & 0xFF) == 2); ring.pop();
+}
+
+static void test_promote_is_a_no_op_without_realtime() {
+  ring.reset();
+  CHECK(!ring.promote_realtime());        // empty
+  ring.push(CC_A, 1, 1);
+  ring.push(NOTEON, 60, 100);
+  CHECK(!ring.promote_realtime());        // nothing to bring forward
+  uint32_t v = 0;
+  ring.peek(v); CHECK((v & 0xFF) == CC_A);
+  CHECK(ring.promoted == 0);
+  ring.push(CLOCK, 0, 0);
+  ring.pop(); ring.pop();
+  CHECK(ring.promote_realtime());         // already at the head: true, no move
+  CHECK(ring.promoted == 0);
+}
+
+static void test_promote_across_wraparound() {
+  ring.reset();
+  // walk the indices near the wrap point, then queue a backlog that spans it
+  for (int i = 0; i < MidiTxRing::kSize - 2; ++i) { ring.push(NOTEON, 1, 1); ring.pop(); }
+  ring.push(PROG, 7, 0);
+  ring.push(NOTEON, 61, 1);
+  ring.push(NOTEOFF, 61, 0);
+  ring.push(CLOCK, 0, 0);
+  CHECK(ring.promote_realtime());
+  uint32_t v = 0;
+  ring.peek(v); CHECK((v & 0xFF) == CLOCK);   ring.pop();
+  ring.peek(v); CHECK((v & 0xFF) == PROG);    ring.pop();
+  ring.peek(v); CHECK((v & 0xFF) == NOTEON);  ring.pop();
+  ring.peek(v); CHECK((v & 0xFF) == NOTEOFF); ring.pop();
+  CHECK(ring.pending() == 0);
+}
+
 int main() {
+  test_promote_brings_oldest_realtime_to_head();
+  test_promote_preserves_note_on_off_order();
+  test_promote_keeps_realtime_in_order();
+  test_promote_is_a_no_op_without_realtime();
+  test_promote_across_wraparound();
   test_basic_queue();
   test_events_never_merge();
   test_aftertouch_coalesces();
