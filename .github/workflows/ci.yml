@@ -85,6 +85,9 @@ jobs:
               test_tweighty_tap_phase.cpp ../src/TweightyTapPhase.cpp
           ./build/test_tweighty_tap_phase
 
+      - name: Fork gates
+        run: tools/ci/fork-gates.sh
+
   firmware:
     runs-on: ubuntu-latest
     strategy:
