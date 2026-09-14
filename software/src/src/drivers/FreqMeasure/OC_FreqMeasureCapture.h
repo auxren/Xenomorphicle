@@ -29,13 +29,6 @@
   #define CAPTURE_USE_TIMER1       // ICP1 is pin 8
 
 // Teensy 3.1
-#elif defined(__MK20DX256__) || defined(__MK64FX512__) || defined(__MK66FX1M0__)
-  #define CAPTURE_USE_FTM1_CH0 3    // FTM1 CH0 is pin 3
-  //#define CAPTURE_USE_FTM1_CH1 4  // FTM1 CH1 is pin 4
-  //#define CAPTURE_USE_FTM2_CH0 32 // FTM2 CH0 is pin 32
-  //#define CAPTURE_USE_FTM2_CH1 25 // FTM2 CH1 is pin 25
-
-// Teensy 3.0
 #elif defined(__MK20DX128__)
   #define CAPTURE_USE_FTM1_CH0 3    // FTM1 CH0 is pin 3
   //#define CAPTURE_USE_FTM1_CH1 4  // FTM1 CH1 is pin 4

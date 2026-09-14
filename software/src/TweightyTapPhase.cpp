@@ -1,6 +1,6 @@
 // Pure 8-tap phase-ring math for the Tweighty app. See the header for
 // why this is split out from the transport state machine.
-#if defined(__IMXRT1062__) || defined(__MK20DX256__)
+#if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define TW_TAPPHASE_CODE FLASHMEM
 #else

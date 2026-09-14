@@ -19,10 +19,6 @@
 #include "PresetBusUI.h"
 #include "BootWeasel.h"
 
-#ifdef VOR
-#include "VBiasManager.h"
-VBiasManager *VBiasManager::instance = 0;
-#endif
 
 extern uint_fast8_t MENU_REDRAW;
 
@@ -35,9 +31,7 @@ void Ui::Init() {
   ticks_ = 0;
   set_screensaver_timeout(SCREENSAVER_TIMEOUT_S);
 
-#if defined(VOR)
-  static const int button_pins[] = { but_top, but_bot, butL, butR, but_mid };
-#elif defined(ARDUINO_TEENSY41)
+#if   defined(ARDUINO_TEENSY41)
   static const int button_pins[] = { but_top, but_bot, butL, butR, but_mid, but_top2, but_bot2 };
 #else
   static const int button_pins[] = { but_top, but_bot, butL, butR };
@@ -254,7 +248,7 @@ UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
         app->EditIOSettings();
         continue;
       }
-      // Hold Z and push A for screensaver (not available on O_C without VOR button)
+      // Hold Z and push A for screensaver
       if (CONTROL_BUTTON_A == event.control && z_hold) {
         IgnoreUntilRelease(CONTROL_BUTTON_A | CONTROL_BUTTON_Z);
         screensaver_ = true;

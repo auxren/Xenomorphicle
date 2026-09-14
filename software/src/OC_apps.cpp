@@ -55,7 +55,6 @@
 #include "util/util_pagestorage.h"
 #include "src/drivers/EEPROMStorage.h"
 #include "PhzConfig.h"
-#include "VBiasManager.h"
 #include "HSClockManager.h"
 
 #ifndef NO_HEMISPHERE
@@ -615,10 +614,6 @@ void AppSwitcher::set_current_app(size_t index)
 {
   current_app_ = app_container[index];
   global_settings.current_app_id = current_app_.id();
-  #ifdef VOR
-  VBiasManager *vbias_m = vbias_m->get();
-  vbias_m->SetStateForApp(current_app_);
-  #endif
 }
 
 // Factory defaults for the global settings themselves. One definition shared
@@ -1103,10 +1098,6 @@ bool Ui::AppSettings(bool drawmenu) {
       // habit. "L:fldr" is its turn; the press keeps working unannounced.
       graphics.print("L:fldr R:pick X:move");
 
-#ifdef VOR
-    VBiasManager *vbias_m = vbias_m->get();
-    vbias_m->DrawPopupPerhaps();
-#endif
 
     return true;
   }
@@ -1189,13 +1180,6 @@ bool Ui::AppSettings(bool drawmenu) {
             ui.DebugStats();
         break;
       case CONTROL_BUTTON_UP:
-#ifdef VOR
-        // VBias menu for units without Range button
-        if (UI::EVENT_BUTTON_LONG_PRESS == event.type || UI::EVENT_BUTTON_DOWN == event.type) {
-          VBiasManager *vbias_m = vbias_m->get();
-          vbias_m->AdvanceBias();
-        }
-#endif
         break;
       case CONTROL_BUTTON_DOWN:
         // B is the button directly below the A you are holding to be in this

@@ -25,71 +25,7 @@ static constexpr uint32_t DIGITAL_INPUT_2_MASK = DIGITAL_INPUT_MASK(DIGITAL_INPU
 static constexpr uint32_t DIGITAL_INPUT_3_MASK = DIGITAL_INPUT_MASK(DIGITAL_INPUT_3);
 static constexpr uint32_t DIGITAL_INPUT_4_MASK = DIGITAL_INPUT_MASK(DIGITAL_INPUT_4);
 
-#if defined(__MK20DX256__) // Teensy 3.2
-
-void FASTRUN tr1_ISR();
-void FASTRUN tr2_ISR();
-void FASTRUN tr3_ISR();
-void FASTRUN tr4_ISR();
-
-class DigitalInputs {
-public:
-
-  static void Init();
-  static void reInit() { Init(); }
-  static void Scan();
-
-  // @return mask of all pins cloked since last call
-  static inline uint32_t rising_edges() {
-    return rising_edges_;
-  }
-
-  // @return mask of all pins that are raised (at last Scan)
-  static inline uint32_t raised_mask() {
-    return raised_mask_;
-  }
-
-  template <DigitalInput input> static inline bool read_immediate() {
-    return !digitalReadFast(InputPinMap(input));
-  }
-
-  static inline bool read_immediate(DigitalInput input) {
-    return !digitalReadFast(InputPinMap(input));
-  }
-
-  template <DigitalInput input> static inline void capture() {
-    captures_[input] = 1;
-  }
-
-private:
-
-  inline static int InputPinMap(DigitalInput input) {
-    switch (input) {
-      case DIGITAL_INPUT_1: return TR1;
-      case DIGITAL_INPUT_2: return TR2;
-      case DIGITAL_INPUT_3: return TR3;
-      case DIGITAL_INPUT_4: return TR4;
-      default: break;
-    }
-    return 0;
-  }
-
-  static uint32_t rising_edges_;
-  static uint32_t raised_mask_;
-  static volatile uint32_t captures_[DIGITAL_INPUT_LAST];
-
-  template <DigitalInput input>
-  static uint32_t ScanInput() {
-    if (captures_[input]) {
-      captures_[input] = 0;
-      return DIGITAL_INPUT_MASK(input);
-    } else {
-      return 0;
-    }
-  }
-};
-
-#elif defined(__IMXRT1062__) // Teensy 4.0 or 4.1
+#if   defined(__IMXRT1062__) // Teensy 4.0 or 4.1
 
 class DigitalInputs {
 public:

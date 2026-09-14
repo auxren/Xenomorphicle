@@ -30,11 +30,7 @@
 
 extern uint_fast8_t MENU_REDRAW;
 
-#ifdef NORTHERNLIGHT
- #define DQ_OFFSET_X 22
-#else
  #define DQ_OFFSET_X 47
-#endif
 
 // TODO namespace DQ?
 

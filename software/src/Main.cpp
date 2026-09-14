@@ -44,7 +44,6 @@
 #include "src/drivers/display.h"
 #include "src/drivers/ADC/OC_util_ADC.h"
 #include "util/util_debugpins.h"
-#include "VBiasManager.h"
 #include "HSMIDI.h"
 
 #include "PhzConfig.h"
@@ -517,9 +516,6 @@ FLASHMEM void setup() {
   #if defined(ARDUINO_TEENSY41)
   OC::Pinout_Detect();
   #endif
-#if defined(__MK20DX256__)
-  NVIC_SET_PRIORITY(IRQ_PORTB, 0); // TR1 = 0 = PTB16
-#endif
   SPI_init();
   SERIAL_PRINTLN("* O&C BOOTING...");
   SERIAL_PRINTLN("* %s", OC::Strings::VERSION);
@@ -682,10 +678,6 @@ FLASHMEM void setup() {
   }
   OC::ui.set_screensaver_timeout(OC::calibration_data.screensaver_timeout);
 
-#ifdef VOR
-  VBiasManager *vbias_m = vbias_m->get();
-  vbias_m->SetState(VBiasManager::BI);
-#endif
 
   bool firstrun = false;
 #ifdef __IMXRT1062__
@@ -1025,12 +1017,6 @@ FLASHMEM __attribute__((noinline)) void loop() {
         OC_DEBUG_PROFILE_SCOPE(DEBUG::MENU_draw_cycles);
         app_switcher.current_app()->Draw(ui_mode);
         ++menu_draw_count;
-#ifdef VOR
-        // TODO: move this into AppBase
-        // only if not screensaver
-        VBiasManager *vbias_m = vbias_m->get();
-        vbias_m->DrawPopupPerhaps();
-#endif
       }
 
       MENU_REDRAW = 0;

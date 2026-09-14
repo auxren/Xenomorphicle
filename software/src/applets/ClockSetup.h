@@ -289,11 +289,6 @@ public:
         //Pack(data, PackLocation { 2, 2 }, HS::screensaver_mode);
         Pack(data, PackLocation { 4, 7 }, HS::trig_length);
 
-#ifdef VOR
-        // remember Vbias per preset
-        VBiasManager *v = v->get();
-        Pack(data, PackLocation { 11, 2 }, v->GetState());
-#endif
 
         Pack(data, PackLocation{13, 1}, (clock_m.IsRunning() || clock_m.IsPaused()));
         return data;
@@ -304,11 +299,6 @@ public:
         //HS::screensaver_mode = Unpack(data, PackLocation { 2, 2 });
         HS::trig_length = constrain( Unpack(data, PackLocation { 4, 7 }), 1, 127);
 
-#ifdef VOR
-        VBiasManager *v = v->get();
-        VBiasManager::VState bias_state = (VBiasManager::VState)Unpack(data, PackLocation { 11, 2 });
-        v->SetState( bias_state );
-#endif
 
         if (Unpack(data, PackLocation{13, 1}) && !clock_m.IsRunning())
           clock_m.Start(true);

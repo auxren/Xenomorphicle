@@ -9,7 +9,7 @@
 #include <string.h>
 
 // On target, keep this cold code out of ITCM; host builds compile it bare.
-#if defined(__IMXRT1062__) || defined(__MK20DX256__)
+#if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define BUS_CODE FLASHMEM
 #else
@@ -176,9 +176,11 @@ BUS_CODE static void parse_frame(void) {
   // The reply command byte is 0x1C. Traced off real hardware at the bench: a
   // Buchla 251e at 0x5C answered [04 5C 22 1A FF] with [04 22 5C 1C FF], and
   // the module at 0x28 answered identically bar its own address. 0x13 is
-  // accepted alongside it because that is what this firmware itself replied
-  // with before the capture (invented here, never seen on a real bus), so a
-  // Xenomorpher running older firmware is still understood.
+  // accepted alongside it for two reasons: it is what this firmware itself
+  // replied with before the capture, so an older Xenomorpher is still
+  // understood, and it is a real opcode in its own right -- the module
+  // firmware-display frame both module firmwares build and the WPM decodes
+  // (see the note on BUS200E_QUERY_FRAME_LEN). A QUERY just never draws it.
   //
   // Checked BEFORE the long/PRIMO branch, but guarded with f[2] != 0x22 so a
   // command frame (srcAddr 0x22) can never be stolen from that branch no

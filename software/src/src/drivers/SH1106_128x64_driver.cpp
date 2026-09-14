@@ -35,19 +35,7 @@
 #include "../../util/util_SPIFIFO.h"
 
 // NOTE: Don't disable DMA unless you absolutely know what you're doing. It will hurt you.
-#if defined(__MK20DX256__)
-#define DMA_PAGE_TRANSFER
-#ifdef DMA_PAGE_TRANSFER
-#include <DMAChannel.h>
-static DMAChannel page_dma;
-static bool page_dma_active = false;
-#endif
-#ifndef SPI_SR_RXCTR
-#define SPI_SR_RXCTR 0XF0
-#endif
-
-// Teensy 4.1 has large SPI FIFO, so FIFO and interrupt is used rather than DMA
-#elif defined(__IMXRT1062__)
+#if   defined(__IMXRT1062__)
 static void spi_sendpage_isr();
 static volatile int sendpage_state; // 0: inactive, 1..4: active
 static int sendpage_count;
@@ -74,13 +62,8 @@ static uint8_t SH1106_init_seq[] = {
   0x08d, 0x014,   /* [2] charge pump setting (p62): 0x014 enable, 0x010 disable */
 
   0x020, 0x000,   /* 2012-05-27: page addressing mode */ // PLD: Seems to work in conjuction with lower 4 bits of column data?
-  #ifdef FLIP_180
-  0x0a0,          /* segment remap a0/a1*/
-  0x0c0,          /* c0: scan dir normal, c8: reverse */
-  #else
   0x0a1,          /* segment remap a0/a1*/
   0x0c8,          /* c0: scan dir normal, c8: reverse */
-  #endif
   0x0da, 0x012,   /* com pin HW config, sequential com pin config (bit 4), disable left/right remap (bit 5) */
   // Lower contrast compresses per-pixel brightness differences — matters
   // for INVERT_DISPLAY builds where a mostly-lit panel shows streaking.
@@ -145,17 +128,7 @@ void SH1106_128x64_Driver::Init() {
   digitalWriteFast(OLED_CS, OLED_CS_INACTIVE); // U8G_ESC_CS(0),             /* disable chip */
   delayMicroseconds(1);
 
-#if defined(__MK20DX256__)
-#ifdef DMA_PAGE_TRANSFER
-  page_dma.destination((volatile uint8_t&)SPI0_PUSHR);
-  page_dma.transferSize(1);
-  page_dma.transferCount(kPageSize);
-  page_dma.disableOnCompletion();
-  page_dma.triggerAtHardwareEvent(DMAMUX_SOURCE_SPI0_TX);
-  page_dma.disable();
-#endif // DMA_PAGE_TRANSFER
-
-#elif defined(__IMXRT1062__)
+#if   defined(__IMXRT1062__)
   #if defined(ARDUINO_TEENSY41)
     if (OLED_Uses_SPI1) {
       LPSPI3_IER = 0;
@@ -196,21 +169,6 @@ void SH1106_128x64_Driver::Flush() {
   // would be pulled high too soon. Why this effect is more pronounced with
   // gcc >= 5.4.1 is a different mystery.
 
-#if defined(__MK20DX256__)
-  if (page_dma_active) {
-    while (!page_dma.complete()) { }
-    while (0 != (SPI0_SR & 0x0000f000)); // SPIx_SR TXCTR
-    while (!(SPI0_SR & SPI_SR_TCF));
-    page_dma_active = false;
-
-    digitalWriteFast(OLED_CS, OLED_CS_INACTIVE); // U8G_ESC_CS(0)
-    page_dma.clearComplete();
-    page_dma.disable();
-    // DmaSpi.h::post_finishCurrentTransfer_impl
-    SPI0_RSER = 0;
-    SPI0_SR = 0xFF0F0000;
-  }
-#endif // __MK20DX256__
 #elif defined(__IMXRT1062__)
   // The same scenario as above can occur with the ISR-driven transfer
   if (sendpage_state) { 
@@ -242,32 +200,7 @@ void SH1106_128x64_Driver::Clear() {
   digitalWriteFast(OLED_CS, OLED_CS_INACTIVE);
 }
 
-#if defined(__MK20DX256__)
-/*static*/
-bool SH1106_128x64_Driver::SendPage(uint_fast8_t index, const uint8_t *data) {
-  SH1106_data_start_seq[2] = 0xb0 | index;
-
-  digitalWriteFast(OLED_DC, LOW); // U8G_ESC_ADR(0),           /* instruction mode */
-  digitalWriteFast(OLED_CS, OLED_CS_ACTIVE); // U8G_ESC_CS(1),             /* enable chip */
-  SPI_send(SH1106_data_start_seq, sizeof(SH1106_data_start_seq)); // u8g_WriteEscSeqP(u8g, dev, u8g_dev_ssd1306_128x64_data_start);
-  digitalWriteFast(OLED_DC, HIGH); // /* data mode */
-
-#ifdef DMA_PAGE_TRANSFER
-  // DmaSpi.h::pre_cs_impl()
-  SPI0_SR = 0xFF0F0000;
-  SPI0_RSER = SPI_RSER_RFDF_RE | SPI_RSER_RFDF_DIRS | SPI_RSER_TFFF_RE | SPI_RSER_TFFF_DIRS;
-
-  page_dma.sourceBuffer(data, kPageSize);
-  page_dma.enable(); // go
-  page_dma_active = true;
-#else // not DMA_PAGE_TRANSFER
-  SPI_send(data, kPageSize);
-  digitalWriteFast(OLED_CS, OLED_CS_INACTIVE); // U8G_ESC_CS(0)
-#endif
-  return true;
-}
-
-#elif defined(__IMXRT1062__)
+#if   defined(__IMXRT1062__)
 /*static*/
 bool SH1106_128x64_Driver::SendPage(uint_fast8_t index, const uint8_t *data) {
   if (sendpage_state) return false; // don't interrupt others
@@ -355,51 +288,7 @@ static void spi_sendpage_isr() {
 }
 #endif // __IMXRT1062__
 
-#if defined(__MK20DX256__)
-void SH1106_128x64_Driver::SPI_send(void *bufr, size_t n) {
-
-  // adapted from https://github.com/xxxajk/spi4teensy3
-  int i;
-  int nf;
-  uint8_t *buf = (uint8_t *)bufr;
-
-  if (n & 1) {
-    uint8_t b = *buf++;
-    // clear any data in RX/TX FIFOs, and be certain we are in master mode.
-    SPI0_MCR = SPI_MCR_MSTR | SPI_MCR_CLR_RXF | SPI_MCR_CLR_TXF | SPI_MCR_PCSIS(0x1F);
-    SPI0_SR = SPI_SR_TCF;
-    SPI0_PUSHR = SPI_PUSHR_CONT | b;
-    while (!(SPI0_SR & SPI_SR_TCF));
-    n--;
-  }
-  // clear any data in RX/TX FIFOs, and be certain we are in master mode.
-  SPI0_MCR = SPI_MCR_MSTR | SPI_MCR_CLR_RXF | SPI_MCR_CLR_TXF | SPI_MCR_PCSIS(0x1F);
-  // initial number of words to push into TX FIFO
-  nf = n / 2 < 3 ? n / 2 : 3;
-  // limit for pushing data into TX FIFO
-  uint8_t* limit = buf + n;
-  for (i = 0; i < nf; i++) {
-    uint16_t w = (*buf++) << 8;
-    w |= *buf++;
-    SPI0_PUSHR = SPI_PUSHR_CONT | SPI_PUSHR_CTAS(1) | w;
-  }
-  // write data to TX FIFO
-  while (buf < limit) {
-          uint16_t w = *buf++ << 8;
-          w |= *buf++;
-          while (!(SPI0_SR & SPI_SR_RXCTR));
-          SPI0_PUSHR = SPI_PUSHR_CONT | SPI_PUSHR_CTAS(1) | w;
-          SPI0_POPR;
-  }
-  // wait for data to be sent
-  while (nf) {
-          while (!(SPI0_SR & SPI_SR_RXCTR));
-          SPI0_POPR;
-          nf--;
-  }
-}
-
-#elif defined(__IMXRT1062__)
+#if   defined(__IMXRT1062__)
 void SH1106_128x64_Driver::SPI_send(void *bufr, size_t n) {
   #if defined(ARDUINO_TEENSY41)
     if (OLED_Uses_SPI1) {
@@ -462,13 +351,3 @@ void SH1106_128x64_Driver::SetInverted(bool inverted) {
   digitalWriteFast(OLED_CS, OLED_CS_INACTIVE);
 }
 
-#if defined(__MK20DX256__)
-/*static*/
-void SH1106_128x64_Driver::ChangeSpeed(uint32_t speed) {
-	uint32_t ctar = speed;
-	ctar = speed;
-	ctar |= (ctar & 0x0F) << 12;
-	KINETISK_SPI0.CTAR0 = ctar | SPI_CTAR_FMSZ(7);
-	KINETISK_SPI0.CTAR1 = ctar | SPI_CTAR_FMSZ(15);
-}
-#endif

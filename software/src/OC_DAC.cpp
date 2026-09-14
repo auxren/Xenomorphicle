@@ -50,7 +50,7 @@ DAC_CHANNEL DAC_CHANNEL_E=4, DAC_CHANNEL_F=5, DAC_CHANNEL_G=6, DAC_CHANNEL_H=7;
 
 namespace OC {
 
-#if defined(ARDUINO_TEENSY41) || defined(VOR)
+#if defined(ARDUINO_TEENSY41)
 int DAC::kOctaveZero = 3;
 #endif
 
@@ -82,32 +82,25 @@ void DAC::Init(const CalibrationData *calibration_data, const AutotuneCalibratio
   // set up DAC pins 
   pinMode(DAC_CS, OUTPUT);
 
-  // set Vbias, using onboard DAC - does nothing on non-VOR hardware
+  // Vbias was the Plum Audio VOR bias rail; that hardware is gone from
+  // this fork and these two calls are now no-ops kept for pin-state parity.
   init_Vbias();
   set_Vbias(2760); // default to Asymmetric
   delay(10);
   
-#ifndef VOR
-  // VOR button uses the same pin as DAC_RST
+  // DAC_RST shares its pin with what used to be the VOR bias button
   pinMode(DAC_RST,OUTPUT);
   #ifdef DAC8564 // A0 = 0, A1 = 0
     digitalWrite(DAC_RST, LOW); 
   #else  // default to DAC8565 - pull RST high 
     digitalWrite(DAC_RST, HIGH);
   #endif
-#endif
 
   history_tail_ = 0;
   memset(history_, 0, sizeof(uint16_t) * kHistoryDepth * DAC_CHANNEL_COUNT);
 
-#if defined(__MK20DX256__)
-  if (F_BUS == 60000000 || F_BUS == 48000000) 
-    SPIFIFO.begin(DAC_CS, SPICLOCK_30MHz, SPI_MODE0);  
-
-#elif defined(__IMXRT1062__)
-  #if defined(ARDUINO_TEENSY40)
-  IOMUXC_SW_MUX_CTL_PAD_GPIO_B0_00 = 3; // DAC CS pin controlled by SPI
-  #elif defined(ARDUINO_TEENSY41)
+#if   defined(__IMXRT1062__)
+  #if   defined(ARDUINO_TEENSY41)
   if (DAC8568_Uses_SPI) {
     // Assume DAC8568_Vref_enable() already called by  main program startup,
     // so we don't need to do any more hardware init, and calling SPI.begin()
@@ -128,20 +121,7 @@ void DAC::Init(const CalibrationData *calibration_data, const AutotuneCalibratio
   Update();
 }
 
-#if defined(__MK20DX256__)
-/*static*/ 
-void DAC::init_Vbias() {
-  /* using MK20 DAC0 for Vbias*/
-  VREF_TRM = 0x60; VREF_SC = 0xE1; // enable 1v2 reference
-  SIM_SCGC2 |= SIM_SCGC2_DAC0; // DAC clock
-  DAC0_C0 = DAC_C0_DACEN; // enable module + use internal 1v2 reference
-}
-/*static*/ 
-void DAC::set_Vbias(uint32_t data) {
-  *(volatile int16_t *)&(DAC0_DAT0L) = data;
-}
-
-#elif defined(__IMXRT1062__)
+#if   defined(__IMXRT1062__)
 void DAC::init_Vbias() {
   // TODO Teensy 4.1
 }
@@ -169,17 +149,9 @@ volatile size_t DAC::history_tail_;
 } // namespace OC
 
 void DAC8565::Write(uint32_t cmd, uint32_t data) {
-#if defined(NORTHERNLIGHT) && !defined(NLM_DIY)
-#else
   data = kMaxValue - data;
-#endif
 
-#if defined(__MK20DX256__)
-  SPIFIFO.write(cmd, SPI_CONTINUE);
-  SPIFIFO.write16(data);
-  SPIFIFO.read();
-  SPIFIFO.read();
-#elif defined(__IMXRT1062__) // Teensy 4.x
+#if   defined(__IMXRT1062__) // Teensy 4.x
   data = (cmd << 16) | (data & 0xFFFF);
   LPSPI4_TDR = data;
 #endif // __IMXRT1062__
@@ -188,41 +160,7 @@ void DAC8565::Write(uint32_t cmd, uint32_t data) {
 
 // adapted from https://github.com/xxxajk/spi4teensy3 (MISO disabled) : 
 
-#if defined(__MK20DX256__)
-void SPI_init() {
-
-  uint32_t ctar0, ctar1;
-
-  SIM_SCGC6 |= SIM_SCGC6_SPI0;
-  CORE_PIN11_CONFIG = PORT_PCR_DSE | PORT_PCR_MUX(2);
-  CORE_PIN13_CONFIG = PORT_PCR_DSE | PORT_PCR_MUX(2);
-  
-  ctar0 = SPI_CTAR_DBR; // default
-  #if   F_BUS == 60000000
-      ctar0 = (SPI_CTAR_PBR(0) | SPI_CTAR_BR(0) | SPI_CTAR_DBR); //(60 / 2) * ((1+1)/2) = 30 MHz
-  #elif F_BUS == 48000000
-      ctar0 = (SPI_CTAR_PBR(0) | SPI_CTAR_BR(0) | SPI_CTAR_DBR); //(48 / 2) * ((1+1)/2) = 24 MHz          
-  #endif
-  ctar1 = ctar0;
-  ctar0 |= SPI_CTAR_FMSZ(7);
-  ctar1 |= SPI_CTAR_FMSZ(15);
-  SPI0_MCR = SPI_MCR_MSTR | SPI_MCR_PCSIS(0x1F);
-  SPI0_MCR |= SPI_MCR_CLR_RXF | SPI_MCR_CLR_TXF;
-
-  // update ctars
-  uint32_t mcr = SPI0_MCR;
-  if (mcr & SPI_MCR_MDIS) {
-    SPI0_CTAR0 = ctar0;
-    SPI0_CTAR1 = ctar1;
-  } else {
-    SPI0_MCR = mcr | SPI_MCR_MDIS | SPI_MCR_HALT;
-    SPI0_CTAR0 = ctar0;
-    SPI0_CTAR1 = ctar1;
-    SPI0_MCR = mcr;
-  }
-}
-
-#elif defined(__IMXRT1062__)
+#if   defined(__IMXRT1062__)
 void SPI_init() {
   SPI.begin();
   if (OLED_Uses_SPI1) {

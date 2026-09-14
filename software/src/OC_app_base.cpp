@@ -31,7 +31,6 @@
 #include "OC_io_settings_menu.h"
 #include "OC_calibration.h"
 #include "OC_gpio.h"  // but_mid: whether this pin map has the grey Z button at all
-#include "VBiasManager.h"
 
 namespace OC {
 
@@ -92,17 +91,13 @@ static UiControl chord_hint_modifier = static_cast<UiControl>(0);
 static uint32_t chord_hint_ticks = 0;
 
 // The grey Z button only exists on some pin maps. CONTROL_BUTTON_M is bit 4,
-// and Ui::Poll() only scans CONTROL_BUTTON_LAST buttons -- which is 4 on the
-// Teensy 3.2 (antihem) and Teensy 4.0 builds, so bit 4 can never appear in an
-// event mask there and every Z row on this card would be a lie. On VOR the
-// middle button is the bias control (see DispatchEvent below), not Z.
+// and Ui::Poll() only scans CONTROL_BUTTON_LAST buttons. The hardware that
+// had no fifth button (Teensy 3.2, Teensy 4.0, and the VOR variants whose
+// middle button was a bias control) is gone from this fork, so the question
+// is now only whether the pin was detected.
 static inline bool z_button_present()
 {
-#if defined(VOR) || !defined(ARDUINO_TEENSY41)
-  return false;
-#else
   return but_mid != 0xFF;
-#endif
 }
 
 namespace {
@@ -573,26 +568,10 @@ UiMode AppBase::DispatchEvent(const UI::Event &event)
         break;
 
       case UI::EVENT_BUTTON_PRESS:
-#ifdef VOR
-        if (OC::CONTROL_BUTTON_M == event.control) {
-            VBiasManager *vbias_m = vbias_m->get();
-            vbias_m->AdvanceBias();
-        } else
-#endif
         HandleButtonEvent(event);
         break;
 
       case UI::EVENT_BUTTON_DOWN:
-#ifdef VOR
-        // dual encoder press
-        if ( ((OC::CONTROL_BUTTON_L | OC::CONTROL_BUTTON_R) == event.mask) )
-        {
-            VBiasManager *vbias_m = vbias_m->get();
-            vbias_m->AdvanceBias();
-            ui.SetButtonIgnoreMask(); // ignore release and long-press
-            break;
-        }
-#endif
         HandleButtonEvent(event);
         break;
 

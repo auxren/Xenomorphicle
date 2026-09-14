@@ -53,7 +53,7 @@ namespace HS {
   int next_ch = -1;
   int8_t next_octave, next_root_note;
 
-#if defined(ARDUINO_TEENSY41) || defined(VOR)
+#if defined(ARDUINO_TEENSY41)
   int octave_max = 6;
 #endif
 

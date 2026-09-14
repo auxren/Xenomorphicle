@@ -43,11 +43,7 @@ using simfloat = int32_t;
 #define HSAPPLICATION_3V 4608
 #define HSAPPLICATION_CHANGE_THRESHOLD 32
 
-#if defined(NORTHERNLIGHT) || defined(VOR)
-#define HSAPP_PULSE_VOLTAGE 9
-#else
 #define HSAPP_PULSE_VOLTAGE 5
-#endif
 
 using namespace HS;
 

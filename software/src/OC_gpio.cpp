@@ -18,7 +18,7 @@ bool ADC33131D_Uses_FlexIO=false;
 bool OLED_Uses_SPI1=false;
 bool Large_OLED=false;
 bool DAC8568_Uses_SPI=false;
-#if !defined(NORTHERNLIGHT) && defined(ARDUINO_TEENSY41)
+#if defined(ARDUINO_TEENSY41)
 bool NorthernLightModular=false;
 #endif
 bool I2S2_Audio_ADC=false;
@@ -71,13 +71,8 @@ void OC::SetFlipMode(bool flip_180) {
       TR1 = 22;
     } else {
       // old hardware
-#ifdef NLM_hOC
-      but_top = 5;
-      but_bot = 4;
-#else
       but_top = 4;
       but_bot = 5;
-#endif
 
       encR2 = 22;
       encR1 = 21;
@@ -117,13 +112,8 @@ void OC::SetFlipMode(bool flip_180) {
       TR4 = 22;
     } else {
       // old hardware
-#ifdef NLM_hOC
-      but_top = 4;
-      but_bot = 5;
-#else
       but_top = 5;
       but_bot = 4;
-#endif
 
       encL1 = 22;
       encL2 = 21;

@@ -35,9 +35,7 @@ static constexpr bool DAC_is_inverted = false;
 static constexpr bool NLMSerge = false;
 #endif
 
-#ifdef NORTHERNLIGHT
-static constexpr bool NorthernLightModular = true;
-#elif !defined(ARDUINO_TEENSY41)
+#if   !defined(ARDUINO_TEENSY41)
 static constexpr bool NorthernLightModular = false;
 #else
 extern bool NorthernLightModular;

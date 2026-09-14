@@ -24,13 +24,8 @@ enum UiControl : uint16_t {
   /* Reverse the left and right buttons if Hemisphere Suite is installed on the left-hand
    * side of a Northern Light 2OC 4U module.
    */
-#ifdef NORTHERNLIGHT_2OC_LEFTSIDE
-  CONTROL_BUTTON_L    = 1 << 3,
-  CONTROL_BUTTON_R    = 1 << 2,
-#else
   CONTROL_BUTTON_L    = 1 << 2,
   CONTROL_BUTTON_R    = 1 << 3,
-#endif
 
   // not all of these are present on all hardware...
   // but it probably doesn't hurt to include in the enum
@@ -41,9 +36,7 @@ enum UiControl : uint16_t {
   CONTROL_ENCODER_L   = 1 << 8,
   CONTROL_ENCODER_R   = 1 << 9,
 
-#if defined(VOR)
-  CONTROL_BUTTON_LAST = 5,
-#elif defined(ARDUINO_TEENSY41)
+#if   defined(ARDUINO_TEENSY41)
   CONTROL_BUTTON_LAST = 7,
 #else
   CONTROL_BUTTON_LAST = 4,
@@ -316,13 +309,8 @@ private:
   /* Reverse the left and right encoders if Hemisphere Suite is installed on the left-hand
    * side of a Northern Light 2OC 4U module.
    */
-#ifdef NORTHERNLIGHT_2OC_LEFTSIDE
-  UI::Encoder<encR1, encR2> encoder_left_;
-  UI::Encoder<encL1, encL2> encoder_right_;
-#else
   UI::Encoder<encR1, encR2> encoder_right_;
   UI::Encoder<encL1, encL2> encoder_left_;
-#endif
 
   UI::EventQueue<kEventQueueDepth> event_queue_;
 

@@ -8,7 +8,7 @@
 // is a no-op on host builds (see test/host_stubs/Arduino.h). Direct reads
 // work on both -- flash is memory-mapped on this core, so no pgm_read_*
 // accessor is needed.
-#if defined(__IMXRT1062__) || defined(__MK20DX256__)
+#if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define B200E_TABLE_DATA PROGMEM
 #define B200E_TABLE_CODE FLASHMEM

@@ -226,20 +226,8 @@ public:
           current_octave = next_step->index;
           calstate.encoder_value =
               OC::calibration_data.dac.calibrated_octaves[chan][current_octave];
-            #ifdef VOR
-            /* set 0V @ unipolar range */
-            DAC::set_Vbias(DAC::VBiasUnipolar);
-            #endif
           break;
 
-        #ifdef VOR
-        case CALIBRATE_VBIAS_BIPOLAR:
-          calstate.encoder_value = (0xFFFF & OC::calibration_data.v_bias); // bipolar = lower 2 bytes
-        break;
-        case CALIBRATE_VBIAS_ASYMMETRIC:
-          calstate.encoder_value = (OC::calibration_data.v_bias >> 16);  // asymmetric = upper 2 bytes
-        break;
-        #endif
 
         case CALIBRATE_ADC_OFFSET: // set ADC zero-point offset
           if (calstate.used_defaults) { // start fresh? auto-cal
@@ -248,9 +236,6 @@ public:
             }
           }
 
-          #ifdef VOR
-          DAC::set_Vbias(DAC::VBiasUnipolar);
-          #endif
           break;
         case CALIBRATE_DISPLAY:
           calstate.encoder_value = OC::calibration_data.display_offset;
@@ -329,20 +314,6 @@ public:
             calstate.encoder_value;
           set_all_octave((current_octave - DAC::kOctaveZero)*(1+DAC_20Vpp));
           break;
-        #ifdef VOR
-        case CALIBRATE_VBIAS_BIPOLAR:
-          /* set 0V @ bipolar range */
-          set_all_octave(5);
-          OC::calibration_data.v_bias = (OC::calibration_data.v_bias & 0xFFFF0000) | calstate.encoder_value;
-          DAC::set_Vbias(0xFFFF & OC::calibration_data.v_bias);
-          break;
-        case CALIBRATE_VBIAS_ASYMMETRIC:
-          /* set 0V @ asym. range */
-          set_all_octave(3);
-          OC::calibration_data.v_bias = (OC::calibration_data.v_bias & 0xFFFF) | (calstate.encoder_value << 16);
-          DAC::set_Vbias(OC::calibration_data.v_bias >> 16);
-        break;
-        #endif
         case CALIBRATE_ADC_OFFSET:
           set_all_octave(0);
           break;
@@ -410,10 +381,6 @@ public:
       }
 
       case CALIBRATE_SCREENSAVER:
-      #ifdef VOR
-      case CALIBRATE_VBIAS_BIPOLAR:
-      case CALIBRATE_VBIAS_ASYMMETRIC:
-      #endif
         graphics.print(step->message);
         gfxPos(kValueX, y + 2);
         graphics.print((int)calstate.encoder_value, 5);
@@ -719,12 +686,6 @@ public:
         tick_count.Init();
 
         OC::ui.encoder_enable_acceleration(OC::CONTROL_ENCODER_R, true);
-        #ifdef VOR
-        {
-          VBiasManager *vb = vb->get();
-          vb->SetState(VBiasManager::UNI);
-        }
-        #endif
 
         calibration_complete = false;
         calibration_mode = true;
@@ -948,10 +909,7 @@ FLASHMEM void AppSettings::View() const {
       gfxIcon(80, 0, OC::calibration_data.flipscreen() ? DOWN_ICON : UP_ICON);
       gfxIcon(90, 0, OC::calibration_data.flipcontrols() ? LEFT_ICON : RIGHT_ICON);
 
-      #if defined(ARDUINO_TEENSY40)
-      gfxPrint(100, 0, "T4.0");
-      //gfxPrint(0, 45, "E2END="); gfxPrint(E2END);
-      #elif defined(ARDUINO_TEENSY41)
+      #if   defined(ARDUINO_TEENSY41)
       gfxPrint(100, 0, "T4.1");
       #else
       gfxPrint(100, 0, "T3.2");

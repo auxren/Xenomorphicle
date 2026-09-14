@@ -138,9 +138,6 @@ void PatternEditor<Owner>::Draw() const {
   }
 
   x += 3 + (w >> 0x1) - (num_slots << 0x2); y += 40;
-  #ifdef NORTHERNLIGHT
-    y += 16;
-  #endif
 
   uint8_t clock_pos= owner_->get_clock_cnt();
   bool _draw_clock = (owner_->get_current_sequence() == edit_this_sequence_) && owner_->draw_clock();
@@ -291,11 +288,7 @@ void PatternEditor<Owner>::HandleEncoderEvent(const UI::Event &event) {
        pitch += delta; // fine
       else
         pitch += (delta << 7); // semitone
-      #ifdef NORTHERNLIGHT
-        CONSTRAIN(pitch, 0x0, 8 * (12 << 7)  - 128);
-      #else
         CONSTRAIN(pitch, -3 * (12 << 7), 5 * (12 << 7)  - 128);
-      #endif
       owner_->set_pitch_at_step(edit_this_sequence_, cursor_pos_, pitch);
 
     }

@@ -2,7 +2,7 @@
 // live outside the app class. No hardware, no Arduino.
 #include "Buchla200eUiGate.h"
 
-#if defined(__IMXRT1062__) || defined(__MK20DX256__)
+#if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define B200E_GATE_CODE FLASHMEM
 #else

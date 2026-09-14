@@ -1,5 +1,5 @@
 // Pure logic for the Scope app. See the header for why this is split out.
-#if defined(__IMXRT1062__) || defined(__MK20DX256__)
+#if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define SCOPE_MATH_CODE FLASHMEM
 #else

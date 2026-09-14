@@ -21,13 +21,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// On Teensy 3.2 units, Tuner can only work in the right hemisphere because the
-// frequency input is on TR4. However, when the screen is flipped, Tuner can
-// only work in the left hemisphere.
-// So there are various checks for the FLIP_180 compile-time option in this code.
-
-// Teensy 4.x can use any of the trigger inputs for FreqMeasure, but 4.0 on old
-// hardware only works with TR1 or TR2...
+// The Xenomorpher can use any of the trigger inputs for FreqMeasure. The old
+// hemisphere-and-screen-flip restrictions belonged to Teensy 3.2 units, where
+// the frequency input was fixed to TR4; that hardware and the FLIP_180
+// compile-time option are both gone from this fork.
 
 #include "../src/drivers/FreqMeasure/OC_FreqMeasure.h"
 
@@ -37,8 +34,6 @@
 // TR2 on left, TR4 on right
 #define TUNER_PIN (hemisphere == 0 ? 1 : 22)
 
-#elif defined(ARDUINO_TEENSY40)
-#define TUNER_ENABLED (hemisphere == OC::calibration_data.flipcontrols())
 #else
 #define TUNER_ENABLED (hemisphere == 1 - OC::calibration_data.flipcontrols())
 #endif
@@ -120,11 +115,7 @@ protected:
       help[HELP_OUT2]     = "";
       if (TUNER_ENABLED) {
         //                    "-------" <-- Label size guide
-#ifdef ARDUINO_TEENSY40
-        if (!OC::calibration_data.flipcontrols()) {
-#else
         if (OC::calibration_data.flipcontrols()) {
-#endif
           help[HELP_DIGITAL1] = "Input";
           help[HELP_DIGITAL2] = "";
         } else {
@@ -210,11 +201,7 @@ private:
     }
 
     FLASHMEM void DrawWarning() {
-#ifdef ARDUINO_TEENSY40
-      if (!OC::calibration_data.flipcontrols()) {
-#else
       if (OC::calibration_data.flipcontrols()) {
-#endif
         gfxPrint(1, 15, "Tuner goes");
         gfxPrint(1, 25, "in left");
         gfxPrint(1, 35, "hemisphere");
