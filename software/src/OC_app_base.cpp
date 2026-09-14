@@ -67,8 +67,8 @@ static IOSettingsMenu io_settings_menu;
 // The FLOOR is Ui::kLongPressTicks (500), and it is a hard floor rather than a
 // preference. Below it, letting go after reading the card emits
 // EVENT_BUTTON_PRESS for A -- and a plain A press is a live control in most
-// apps: Captain MIDI changes setup (CaptainMIDI.h:2336), Hemisphere moves the
-// applet selection (Hemisphere.h:1753), Setup/About inverts the whole display
+// apps: Captain MIDI changes setup (CaptainMIDI.h:2336), Quadrants moves the
+// applet selection, Setup/About inverts the whole display
 // (SETTINGS.h:568). Past 500 ticks the release is an EVENT_BUTTON_LONG_RELEASE
 // instead, and nothing in the tree binds A on long press or on long release:
 // the only two A-long-press handlers, AppDualSequencer::HandleUpButtonLong()
@@ -159,11 +159,10 @@ struct ChordGloss {
 // still be a lie sitting in flash, matched against an app_id that binary
 // can never hand DrawChordHint. Not compiled in, not in the table.)
 static const ChordGloss kChordGloss[] = {
-  // Quadrants (Quadrants.h:615 / :1873) and Hemisphere (Hemisphere.h:980 /
-  // :1714) are the same two-encoder-plus-four-button UI on two different
-  // pin maps -- _config.h picks exactly one per build via ARDUINO_TEENSY41 --
-  // and Calibr8or (Calibr8or.h:568 / :919) makes the same two gestures do the
-  // same thing. All three open the clock-setup overlay on A+B and toggle the
+  // Quadrants (Quadrants.h:615 / :1873) and Calibr8or (Calibr8or.h:568 /
+  // :919) make the same two gestures do the same thing. (The 2-up
+  // Hemisphere host that shared this UI on the older pin map was deleted in
+  // the hard fork.) Both open the clock-setup overlay on A+B and toggle the
   // internal clock on Z.
 #ifndef NO_HEMISPHERE
 #ifdef ARDUINO_TEENSY41
@@ -538,7 +537,7 @@ FLASHMEM void AppBase::Draw(UiMode ui_mode) const
   // failures that can happen under any app.
   //
   // But HS::DrawPopup() was only ever called from Quadrants.h:1699,
-  // CaptainMIDI.h:457, Hemisphere.h:887 and Calibr8or.h:503. In Tweighty,
+  // CaptainMIDI.h:457, the deleted Hemisphere host and Calibr8or.h:503. In Tweighty,
   // Sampler, Scope, Delay, Reverb, the 200e app, Setup/About, the Wave editor,
   // Tuner and Back It Up!, every one of those messages was raised into a
   // variable and never put on the glass. A save that hit "Disk full !!" looked

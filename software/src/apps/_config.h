@@ -5,14 +5,11 @@ namespace menu = OC::menu;
 // file before OC_app_folders.h, so the assert cannot wait for that one.
 #include "../OC_app_folders.h"
 
+// Quadrants is the applet host on this hardware. The 2-up Hemisphere host
+// (apps/Hemisphere.h) was deleted in the 2026-09-13 hard fork: it only ever
+// built for non-T4.1 targets this fork no longer has.
 #ifndef NO_HEMISPHERE
-
-#ifdef ARDUINO_TEENSY41
 #include "Quadrants.h"
-#else
-#include "Hemisphere.h"
-#endif
-
 #endif
 
 #include "Calibr8or.h"
@@ -96,11 +93,7 @@ namespace OC {
 static DMAMEM AppContainer<void // this space intentionally left blank
   , AppSettings
 #ifndef NO_HEMISPHERE
-  #ifdef ARDUINO_TEENSY41
   , AppQuadrants
-  #else
-  , AppHemisphere
-  #endif
 #endif
 #ifdef ENABLE_APP_CALIBR8OR
   , AppCalibr8or

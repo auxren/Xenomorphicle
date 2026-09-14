@@ -706,7 +706,7 @@ namespace HS {
   }
 
 #ifndef NO_HEMISPHERE
-  // Defined by Hemisphere.h; a NO_HEMISPHERE build has no applet registry,
+  // Defined by the applet registry (applets/_config.h); a NO_HEMISPHERE build has none,
   // and FLASHMEM (externally_visible under LTO) keeps this function alive,
   // so it cannot lean on dead-stripping the way it used to.
   bool applet_is_hidden(const int& index);
