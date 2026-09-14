@@ -52,15 +52,28 @@ New counters are not trusted until they reproduce a known stall:
 
 ## Declared windows
 
-A persistence window is the one sanctioned way to stall: a user-initiated
-save fades audio out, holds CV, sends note-offs, writes, and fades back in.
-Drops attributed to an open window (`in_window`) do not count against the
-audio rows; the window's own length counts against `windows max`. A
-background write (the debounced current-slot record, the card image flush)
-is never allowed a window: it waits for an idle gap instead.
+A persistence window is the one sanctioned way to stall. `OC::RT::
+PersistenceWindow`, constructed around an unavoidable write in loop
+context, fades the audio to silence over 15 ms while the audio interrupt
+is still running, zeroes both halves of the DMA buffer so nothing is
+replayed, writes, and fades back over 25 ms when it goes out of scope. The
+CV outputs hold by themselves: their only writer is the core timer
+interrupt, which is simply not running. `SaveSlot` holds one.
 
-Until the window helper lands (Track C of the plan), every stall counts.
-That is intended: the counters exist to show what the fixes remove.
+Drops attributed to an open window (`in_window`) do not count against the
+audio rows; the window's own length counts against `windows max`, and a
+window that runs past its declared maximum is reported on the console and
+counted in `windows violations`.
+
+**Only a write the player asked for may fade.** A background write, the
+debounced current-slot record or the card image flush, has to wait for an
+idle gap instead. Taking the audio away for something nobody asked for is
+worse than the stall it hides.
+
+The fade is a raised cosine with exact endpoints (`src/Fade.h`). A fade
+that only nearly reaches zero leaves a DC step for the buffer-zeroing to
+turn into the very click the fade exists to avoid, and the zero slope at
+both ends is what separates it from a straight line.
 
 ## Where each counter is taken
 
@@ -80,6 +93,11 @@ That is intended: the counters exist to show what the fixes remove.
   pass that held a declared window is skipped.
 - MIDI: Captain's existing poll cadence meter feeds the histogram and the
   violation counter; `t` no longer resets the violation count.
+- deferred calls: the ISR-to-loop ring (`src/DeferRing.h`) reports what it
+  had to drop, which is a realtime MIDI byte that never went out.
+- recall staging: how many of a recall's files are still waiting for the
+  idle sync to put them on disk, plus the images it refused or superseded
+  (`src/PresetStage.h`).
 
 ## Reading `T`
 
