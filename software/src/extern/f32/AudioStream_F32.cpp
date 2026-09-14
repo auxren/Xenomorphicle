@@ -2,6 +2,15 @@
 #ifdef ARDUINO_TEENSY41
 
 #include "AudioStream_F32.h"
+#include "../../RtStats.h"
+
+// The Teensy core has no CMSIS __get_PRIMASK(); this is the core's own
+// idiom (EventResponder.h). Non-zero = interrupts were already masked.
+static inline uint32_t read_primask() {
+  uint32_t primask;
+  __asm__ volatile("mrs %0, primask\n" : "=r"(primask)::);
+  return primask;
+}
 
 audio_block_f32_t * AudioStream_F32::f32_memory_pool;
 uint32_t AudioStream_F32::f32_memory_pool_available_mask[6];
@@ -82,6 +91,11 @@ audio_block_f32_t * AudioStream_F32::allocate_f32(void)
  */
 
 
+  // PRIMASK save/restore, not a bare __enable_irq(): a caller inside its
+  // own critical section (a masked flash write, an ISR) must not have it
+  // silently ended here. src/Audio/USB_F32.cpp names the bare form as the
+  // enabler of a real crash.
+  const uint32_t primask = read_primask();
   __disable_irq();
   do {
     avail = *p; if (avail) break;
@@ -90,15 +104,15 @@ audio_block_f32_t * AudioStream_F32::allocate_f32(void)
     p++; avail = *p; if (avail) break;
     p++; avail = *p; if (avail) break;
     p++; avail = *p; if (avail) break;
-    __enable_irq();
-    // Serial.println("alloc_f32:null");
+    if (!primask) __enable_irq();
+    OC::RT::stats.f32_alloc_fail++;
     return NULL;
   } while (0);
   n = __builtin_clz(avail);
   *p = avail & ~(0x80000000 >> n);
   used = f32_memory_used + 1;
   f32_memory_used = used;
-  __enable_irq();
+  if (!primask) __enable_irq();
   index = p - f32_memory_pool_available_mask;
   block = f32_memory_pool + ((index << 5) + (31 - n));
   block->ref_count = 1;
@@ -116,15 +130,15 @@ void AudioStream_F32::release(audio_block_f32_t *block)
   uint32_t mask = (0x80000000 >> (31 - (block->memory_pool_index & 0x1F)));
   uint32_t index = block->memory_pool_index >> 5;
 
+  const uint32_t primask = read_primask();
   __disable_irq();
   if (block->ref_count > 1) {
     block->ref_count--;
   } else {
-//Serial.print("release_f32:"); Serial.println((uint32_t)block, HEX);
     f32_memory_pool_available_mask[index] |= mask;
     f32_memory_used--;
   }
-  __enable_irq();
+  if (!primask) __enable_irq();
 }
 
 // Transmit an audio data block

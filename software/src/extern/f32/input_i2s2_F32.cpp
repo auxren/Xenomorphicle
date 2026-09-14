@@ -39,6 +39,7 @@
 #include "input_i2s2_F32.h"
 #include "output_i2s2_F32.h"
 #include "basic_DSPutils.h"
+#include "../../RtStats.h"
 #include <arm_math.h>
 
 // DMAMEM __attribute__((aligned(32)))
@@ -134,6 +135,17 @@ void AudioInputI2S2_F32::isr(void)
 				*dest_right_f32++ = (float32_t)*src++;
 			} while (src < end);
 		}
+		else
+		{
+			// the block is already full: update() has not run to swap in a
+			// fresh one, so this half of the capture is lost
+			OC::RT::AudioInDropped();
+		}
+	}
+	else
+	{
+		// no block to receive into (out of memory, or update() starved)
+		OC::RT::AudioInDropped();
 	}
 }
 // --------------------------------------------------------------------------------
@@ -164,8 +176,10 @@ void AudioInputI2S2_F32::update(void)
 		new_left = NULL;
 		new_right = NULL;
 		flag_out_of_memory = 1;
+		// counted, never printed: this runs in the audio software ISR and a
+		// Serial.println here reads a flash-resident string from ISR context
 		if (flag_beenSuccessfullOnce)
-			Serial.println("Input_I2S_F32: update(): WARNING!!! Out of Memory.");
+			OC::RT::stats.audio_in_alloc_fail++;
 	}
 	else {flag_beenSuccessfullOnce = true; }
 

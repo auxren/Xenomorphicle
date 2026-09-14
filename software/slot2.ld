@@ -108,7 +108,8 @@ SECTIONS
 	_ebss = ADDR(.bss) + SIZEOF(.bss);
 
 	_heap_start = ADDR(.bss.dma) + SIZEOF(.bss.dma);
-	_heap_end = ORIGIN(RAM) + LENGTH(RAM);
+	/* last 128 bytes of RAM2 hold the CrashReport breadcrumbs (0x2027FFC0), kept out of malloc */
+	_heap_end = ORIGIN(RAM) + LENGTH(RAM) - 128;
 
 	_extram_start = ADDR(.bss.extram);
 	_extram_end = ADDR(.bss.extram) + SIZEOF(.bss.extram);

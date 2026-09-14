@@ -38,6 +38,7 @@
 
 #include "output_i2s2_F32.h"
 #include "basic_DSPutils.h"
+#include "../../RtStats.h"
 
 
 audio_block_f32_t *AudioOutputI2S2_F32::block_left_1st = NULL;
@@ -131,6 +132,7 @@ void AudioOutputI2S2_F32::isr(void)
 	int32_t *d = dest;
 	if (blockL && blockR)
 	{
+		OC::RT::stats.audio_out.ok();
 		float32_t *pL = blockL->data + offsetL;
 		float32_t *pR = blockR->data + offsetR;
 		for (int i = 0; i < audio_block_samples / 2; i++)
@@ -143,6 +145,7 @@ void AudioOutputI2S2_F32::isr(void)
 	}
 	else if (blockL)
 	{
+		OC::RT::stats.audio_out_half++;
 		// zero the half first: the untouched right slots would otherwise
 		// replay stale cache/RAM data (same class as the silence-path bug)
 		memset(dest, 0, audio_block_samples * 4);
@@ -155,6 +158,7 @@ void AudioOutputI2S2_F32::isr(void)
 	}
 	else if (blockR)
 	{
+		OC::RT::stats.audio_out_half++;
 		memset(dest, 0, audio_block_samples * 4);
 		float32_t *pR = blockR->data + offsetR;
 		for (int i = 0; i < audio_block_samples; i += 2)
@@ -167,6 +171,10 @@ void AudioOutputI2S2_F32::isr(void)
 	}
 	else
 	{
+		// no block for either channel: this IS a dropped output block
+		// (the xrun the budget counts), whether the graph starved or a
+		// masked-interrupt stall kept update_all() from running
+		OC::RT::AudioOutDropped();
 		memset(dest, 0, audio_block_samples * 4);
 		// The zeros must reach RAM: without this flush the DMA keeps
 		// replaying the stale cache-shadowed buffer - a frozen 128-sample
@@ -214,6 +222,7 @@ void AudioOutputI2S2_F32::update(void)
 	if ((!block_f32_scaled) || (!block2_f32_scaled))
 	{
 		// couldn't get some working memory.  Return.
+		OC::RT::stats.audio_out_alloc_fail++;
 		if (block_f32_scaled)  AudioStream_F32::release(block_f32_scaled);
 		if (block2_f32_scaled) AudioStream_F32::release(block2_f32_scaled);
 		return;

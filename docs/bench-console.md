@@ -22,6 +22,7 @@ stray typing is harmless but will spew capture bytes.
 |---|---|
 | `z` | print this key map with live toggle states |
 | `t` | selftest — one-shot health report (see below) |
+| `T` | real-time budget report: every counter with PASS/FAIL per ceiling (docs/Timing-Budget.md); `T` again within 3 s resets the counters |
 | `a` | activate Captain MIDI (suspend/switch/resume, same path as the app menu; for headless benches where boot recall restored a different app) |
 | `A` | list the app table (index, id, name), then type 2 decimal digits to switch to one by index — same path as `a`, any app. This is how a cross-app preset slot gets made from a headless bench |
 | `I` | toggle app ISR |

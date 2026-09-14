@@ -31,6 +31,7 @@
 #include "OC_apps.h"
 #include "OC_DAC.h"
 #include "OC_debug.h"
+#include "RtStats.h"
 #include "OC_gpio.h"
 #include "OC_global_settings.h"
 #include "OC_ADC.h"
@@ -129,6 +130,11 @@ volatile uint32_t OC::CORE::ticks = 0;
 void FASTRUN CORE_timer_ISR() {
   DEBUG_PIN_SCOPE(OC_GPIO_DEBUG_PIN2);
   OC_DEBUG_PROFILE_SCOPE(OC::DEBUG::ISR_cycles);
+  // budget bookkeeping: DWT, because it keeps counting while interrupts
+  // are masked (a stalled ISR shows up as one late entry) and the
+  // profiler's max above is wiped every 16384 ticks
+  const uint32_t rt_entry = ARM_DWT_CYCCNT;
+  OC::RT::CoreIsrEntry(rt_entry);
 
   using namespace OC;
 
@@ -153,6 +159,7 @@ void FASTRUN CORE_timer_ISR() {
   }
 
   OC_DEBUG_RESET_CYCLES(OC::CORE::ticks, 16384, OC::DEBUG::ISR_cycles);
+  OC::RT::CoreIsrExit(rt_entry);
 }
 
 /*       ---------------------------------------------------------         */
@@ -949,6 +956,7 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
 #if defined(ARDUINO_TEENSY41)
   CaptainMidiHealth();
 #endif
+  OC::RT::Summary();
   Serial.println("=== selftest done ===");
 }
 #endif
@@ -963,6 +971,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
 
   while (true) {
     ++loop_counter;
+    RT::LoopPass();   // pass length into the budget histogram
 #if defined(__IMXRT1062__)
     watchdog_feed();  // a wedged loop() now reboots instead of bricking
 #endif
@@ -1635,6 +1644,14 @@ FLASHMEM __attribute__((noinline)) void loop() {
             }
             break;
           case 't': SelfTest(); break;  // one-shot system health report
+          case 'T': {  // real-time budget report; 'T' again within 3s resets
+            static uint32_t last_T_ms = 0;
+            const uint32_t now = millis();
+            const bool reset = last_T_ms && now - last_T_ms < 3000;
+            OC::RT::Report(reset);
+            last_T_ms = reset ? 0 : now;
+            break;
+          }
           case 'K': ButtonWatch(); break;  // name the physical buttons
           case 'a': OC::SwitchToDefaultApp(); break;  // remote: activate Captain
           case 'j':  // press the panel: one more character names the control
