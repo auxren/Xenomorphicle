@@ -242,7 +242,15 @@ inline PersistenceWindow::PersistenceWindow(const char *reason, uint32_t declare
   window_seen = true;
   stats.window_count++;
 }
-inline PersistenceWindow::~PersistenceWindow() { window_open = false; }
+inline PersistenceWindow::~PersistenceWindow() {
+  // The reason string, the declared maximum and the start time are all
+  // about reporting a stall that a host build does not have. Named here so
+  // the compiler can see they are ignored on purpose.
+  (void)reason_;
+  (void)declared_max_ms_;
+  (void)start_ms_;
+  window_open = false;
+}
 #endif
 
 #ifdef ARDUINO
