@@ -13,6 +13,7 @@
 #include "PresetBus.h"
 #include "PresetBus200e.h"
 #include "PresetBusCard.h"
+#include "CardSectors.h"
 #include "PresetEngine.h"
 #include "OC_gpio.h"
 #include "OC_core.h"
@@ -484,6 +485,9 @@ FLASHMEM static void slave_reconfig(bool serve, uint8_t addr7 = BUS200E_CARD_BAS
 // CRC-32 of what PBCARD.BIN holds, as of the last load or successful flush.
 // 0 = unknown (never loaded, or the last flush failed): always write.
 static uint32_t card_file_crc = 0;
+// ...and the same question per 4 KB sector, which is the granularity the
+// cost is actually paid in. See CardSectors.h.
+static CardSectors card_sectors;
 
 // Dirty means "a slave write landed", not "the bytes changed": a 251e BACKUP
 // writes the bank in whether or not it differs from the last one, and most
@@ -519,16 +523,55 @@ FLASHMEM static void card_image_flush(const char *why) {
   // the flash programs, so millis() under-reports exactly the costly part.
   // One lap is fine here -- the counter wraps at ~7 s and a flush is ~1 s.
   const uint32_t c0 = ARM_DWT_CYCCNT;
-  File f = PhzConfig::myfs.open(kCardFile, FILE_WRITE_BEGIN);
-  bool ok = false;
-  if (f) {
-    ok = f.write(card_image, BUSCARD_SIZE) == BUSCARD_SIZE;
-    f.close();
+
+  // Only the sectors that actually moved. A 259e's 990-byte bank touches one
+  // of the sixteen; writing all of them cost 1088 ms with interrupts masked
+  // for fifteen sectors of unchanged bytes. The whole-image path stays for
+  // the cases where partial writing is not sound: nothing known about the
+  // file yet, or a file that is not exactly BUSCARD_SIZE (a short or absent
+  // one cannot be seeked into).
+  const CardSectors::Plan plan = card_sectors.plan(card_image, Buchla200eCrc32);
+  bool whole = plan.whole_image;
+  if (!whole) {
+    File probe = PhzConfig::myfs.open(kCardFile, FILE_READ);
+    const bool sized = probe && probe.size() == BUSCARD_SIZE;
+    if (probe) probe.close();
+    if (!sized) whole = true;
   }
+
+  bool ok = false;
+  int wrote = 0;
+  if (whole) {
+    File f = PhzConfig::myfs.open(kCardFile, FILE_WRITE_BEGIN);
+    if (f) {
+      ok = f.write(card_image, BUSCARD_SIZE) == BUSCARD_SIZE;
+      f.close();
+    }
+    wrote = CardSectors::kSectors;
+  } else if (plan.count == 0) {
+    ok = true;   // the per-sector view agrees with the file; nothing to do
+  } else {
+    File f = PhzConfig::myfs.open(kCardFile, FILE_WRITE);
+    if (f) {
+      ok = true;
+      for (int i = 0; i < CardSectors::kSectors && ok; ++i) {
+        if (!plan.dirty[i]) continue;
+        const uint32_t off = CardSectors::offset_of(i);
+        ok = f.seek(off) &&
+             f.write(card_image + off, CardSectors::kSectorBytes) ==
+                 CardSectors::kSectorBytes;
+        ++wrote;
+      }
+      f.close();
+    }
+  }
+
   if (ok) BusCardClearDirty();
   card_file_crc = ok ? crc : 0;
-  Serial.printf("PresetBus: card image %s in %lu ms wall (%s)\n",
-                ok ? "saved" : "SAVE FAILED",
+  if (ok) card_sectors.adopt(card_image, Buchla200eCrc32);
+  else card_sectors.forget();
+  Serial.printf("PresetBus: card image %s, %d of %d sectors in %lu ms wall (%s)\n",
+                ok ? "saved" : "SAVE FAILED", wrote, (int)CardSectors::kSectors,
                 (unsigned long)((ARM_DWT_CYCCNT - c0) / (F_CPU_ACTUAL / 1000)), why);
 }
 
@@ -583,6 +626,8 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   // Only a whole file is known to match the image; a short or missing one
   // leaves the CRC unknown so the first flush always writes.
   card_file_crc = (got == BUSCARD_SIZE) ? Buchla200eCrc32(card_image, BUSCARD_SIZE) : 0;
+  if (got == BUSCARD_SIZE) card_sectors.adopt(card_image, Buchla200eCrc32);
+  else card_sectors.forget();
   BusCardInit(card_image, BUSCARD_SIZE);
   card_seen_writes = 0;
   card_seen_reads = 0;
