@@ -70,18 +70,42 @@ FLASHMEM static void run_ramp(const Fade::Ramp &r) {
 }
 #endif
 
+// The Teensy core has no CMSIS __get_PRIMASK(); this is the core's own
+// idiom (EventResponder.h). Non-zero = interrupts are already masked.
+static inline uint32_t window_primask() {
+  uint32_t primask;
+  __asm__ volatile("mrs %0, primask\n" : "=r"(primask)::);
+  return primask;
+}
+
+// Windows never legitimately nest -- SaveSlot is the only holder and it
+// cannot re-enter -- but counting means a nested one could not close the
+// outer one's attribution early.
+static uint8_t window_depth = 0;
+
 PersistenceWindow::PersistenceWindow(const char *reason, uint32_t declared_max_ms)
     : reason_(reason), declared_max_ms_(declared_max_ms) {
+  // The fade needs the audio ISR to keep running while the gain steps, and
+  // delay() to advance the clock. Neither is true with interrupts already
+  // masked or from inside an interrupt, so in that case the window does its
+  // bookkeeping and skips the fade rather than hanging. This class is
+  // documented as loop-context-only; this is what makes a mistake harmless
+  // instead of a lockup.
+  faded_ = false;
 #ifdef AUDIO_INTERFACE
-  Fade::Ramp out;
-  out.start(kFadeOutMs, true);
-  run_ramp(out);
-  // The gain is zero now, but the buffer the DMA is playing still holds the
-  // last non-silent block. Zero it, or the stall replays that.
-  AudioOutputI2S2_F32::silence_now();
+  if (!window_primask() && window_depth == 0) {
+    Fade::Ramp out;
+    out.start(kFadeOutMs, true);
+    run_ramp(out);
+    // The gain is zero now, but the buffer the DMA is playing still holds
+    // the last non-silent block. Zero it, or the stall replays that.
+    AudioOutputI2S2_F32::silence_now();
+    faded_ = true;
+  }
 #endif
   // The stall is about to start. Everything from here to the destructor is
   // attributed to this window rather than counted as a budget violation.
+  window_depth++;
   window_open = true;
   window_seen = true;
   start_ms_ = millis();
@@ -90,7 +114,8 @@ PersistenceWindow::PersistenceWindow(const char *reason, uint32_t declared_max_m
 
 PersistenceWindow::~PersistenceWindow() {
   const uint32_t ms = millis() - start_ms_;
-  window_open = false;
+  if (window_depth) window_depth--;
+  if (!window_depth) window_open = false;
   if (ms > stats.window_max_ms) stats.window_max_ms = ms;
   if (ms > declared_max_ms_) {
     stats.window_violations++;
@@ -98,10 +123,12 @@ PersistenceWindow::~PersistenceWindow() {
                   (unsigned long)ms, (unsigned long)declared_max_ms_);
   }
 #ifdef AUDIO_INTERFACE
-  Fade::Ramp in;
-  in.start(kFadeInMs, false);
-  run_ramp(in);
-  AudioOutputI2S2_F32::master_gain = 1.0f;   // exactly unity, not nearly
+  if (faded_) {
+    Fade::Ramp in;
+    in.start(kFadeInMs, false);
+    run_ramp(in);
+    AudioOutputI2S2_F32::master_gain = 1.0f;   // exactly unity, not nearly
+  }
 #endif
 }
 

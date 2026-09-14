@@ -230,6 +230,11 @@ class PersistenceWindow {
   const char *reason_;
   uint32_t declared_max_ms_;
   uint32_t start_ms_;
+  // Whether this window actually took the audio down. False when it was
+  // constructed somewhere a fade cannot run (interrupts already masked, or
+  // inside another window), so the destructor knows not to fade back up
+  // from a gain it never changed.
+  bool faded_;
 };
 
 #ifndef ARDUINO
@@ -237,7 +242,7 @@ class PersistenceWindow {
 // to stall on, but they do run this code, so the bookkeeping stays real and
 // the fade is simply absent.
 inline PersistenceWindow::PersistenceWindow(const char *reason, uint32_t declared_max_ms)
-    : reason_(reason), declared_max_ms_(declared_max_ms), start_ms_(0) {
+    : reason_(reason), declared_max_ms_(declared_max_ms), start_ms_(0), faded_(false) {
   window_open = true;
   window_seen = true;
   stats.window_count++;
@@ -249,6 +254,7 @@ inline PersistenceWindow::~PersistenceWindow() {
   (void)reason_;
   (void)declared_max_ms_;
   (void)start_ms_;
+  (void)faded_;
   window_open = false;
 }
 #endif
