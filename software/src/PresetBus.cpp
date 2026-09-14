@@ -482,11 +482,13 @@ FLASHMEM static void slave_reconfig(bool serve, uint8_t addr7 = BUS200E_CARD_BAS
   LPI2C1_SCR = LPI2C_SCR_SEN | LPI2C_SCR_FILTEN;
 }
 
-// CRC-32 of what PBCARD.BIN holds, as of the last load or successful flush.
-// 0 = unknown (never loaded, or the last flush failed): always write.
-static uint32_t card_file_crc = 0;
-// ...and the same question per 4 KB sector, which is the granularity the
-// cost is actually paid in. See CardSectors.h.
+// What PBCARD.BIN holds, as of the last load or successful flush, tracked
+// per 4 KB sector -- the granularity the write cost is actually paid in.
+// This subsumes the whole-image CRC it replaced: "no sector changed" is
+// the same answer as "the image is unchanged", for one pass over the 64 KB
+// instead of two. Measured 2026-09-14: the two passes put a loop iteration
+// at 5.25 ms, over the 5 ms budget, when a backup enabled card serving.
+// See CardSectors.h.
 static CardSectors card_sectors;
 
 // Dirty means "a slave write landed", not "the bytes changed": a 251e BACKUP
@@ -513,8 +515,8 @@ FLASHMEM static void card_image_flush(const char *why) {
     Serial.printf("PresetBus: card image kept in RAM, PBCARD.BIN untouched (%s)\n", why);
     return;
   }
-  const uint32_t crc = Buchla200eCrc32(card_image, BUSCARD_SIZE);
-  if (card_file_crc && crc == card_file_crc) {
+  const CardSectors::Plan plan = card_sectors.plan(card_image, Buchla200eCrc32);
+  if (!plan.whole_image && plan.count == 0) {
     BusCardClearDirty();
     Serial.printf("PresetBus: card image unchanged, not rewritten (%s)\n", why);
     return;
@@ -530,7 +532,6 @@ FLASHMEM static void card_image_flush(const char *why) {
   // the cases where partial writing is not sound: nothing known about the
   // file yet, or a file that is not exactly BUSCARD_SIZE (a short or absent
   // one cannot be seeked into).
-  const CardSectors::Plan plan = card_sectors.plan(card_image, Buchla200eCrc32);
   bool whole = plan.whole_image;
   if (!whole) {
     File probe = PhzConfig::myfs.open(kCardFile, FILE_READ);
@@ -566,10 +567,12 @@ FLASHMEM static void card_image_flush(const char *why) {
     }
   }
 
-  if (ok) BusCardClearDirty();
-  card_file_crc = ok ? crc : 0;
-  if (ok) card_sectors.adopt(card_image, Buchla200eCrc32);
-  else card_sectors.forget();
+  if (ok) {
+    BusCardClearDirty();
+    card_sectors.adopt(card_image, Buchla200eCrc32);
+  } else {
+    card_sectors.forget();
+  }
   Serial.printf("PresetBus: card image %s, %d of %d sectors in %lu ms wall (%s)\n",
                 ok ? "saved" : "SAVE FAILED", wrote, (int)CardSectors::kSectors,
                 (unsigned long)((ARM_DWT_CYCCNT - c0) / (F_CPU_ACTUAL / 1000)), why);
@@ -625,7 +628,8 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   }
   // Only a whole file is known to match the image; a short or missing one
   // leaves the CRC unknown so the first flush always writes.
-  card_file_crc = (got == BUSCARD_SIZE) ? Buchla200eCrc32(card_image, BUSCARD_SIZE) : 0;
+  // One pass over the image, not two: adopt() computes the per-sector CRCs
+  // and that is the whole record of what the file holds.
   if (got == BUSCARD_SIZE) card_sectors.adopt(card_image, Buchla200eCrc32);
   else card_sectors.forget();
   BusCardInit(card_image, BUSCARD_SIZE);
