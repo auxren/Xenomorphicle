@@ -388,8 +388,15 @@ says() {  # description, fault, expected
   [ "$got" = "$3" ] && ok "$1" || bad "$1 (said: '$got')"
 }
 
+# The byte counts below (18) are the size of the edit $W251 performs: it
+# changes Seq A's end stage, which rewrites several stage records, not one
+# field. The number is a property of THAT key sequence, so it has to be
+# re-derived whenever the macro or the generator changes -- it was 6 when
+# this was written and went stale when the arm/confirm rework changed which
+# control the sequence lands on. That the count itself is trustworthy is
+# proved separately by the flip-first case below, which must say exactly 1.
 says "a good write reads back and says VERIFIED" none "WROTE + VERIFIED"
-says "a module that stored nothing is caught" ignore "[inv] BAD: 6 bytes wrong"
+says "a module that stored nothing is caught" ignore "[inv] BAD: 18 bytes wrong"
 says "one wrong byte in the edited slot is caught" \
      flip-first "[inv] BAD: 1 byte wrong"
 says "a byte changed in ANOTHER preset is caught" \
@@ -455,7 +462,7 @@ rearm_says() {  # fault, screen row
        --dump-fb 2>/dev/null | python3 fbtext.py - | grep "^y=$2" \
     | sed "s/^y=$2 *x=0 *//"
 }
-[ "$(rearm_says ignore 26)" = "6 bytes change" ] \
+[ "$(rearm_says ignore 26)" = "18 bytes change" ] \
   && ok "a failed write keeps the edit, ready to retry" \
   || bad "a failed write lost the edit (re-arm said: '$(rearm_says ignore 26)')"
 [ "$(rearm_says none 36)" = "No changes to write" ] \
@@ -491,7 +498,7 @@ row_at() {  # y, then simulator args
 # write_state_ used to outrank everything on the status row and nothing ever
 # cleared it, so WROTE + VERIFIED stayed up for the rest of the session: the
 # screen asserted a verified match against the module while arming Save
-# simultaneously reported "6 bytes change". It also froze the staleness clock,
+# simultaneously reported the edit size as a change. It also froze the staleness clock,
 # so LIVE Ns ago never came back after the first write. Editing after a write
 # is the normal loop in this app, not a corner.
 edit_after_write=$(row_at 46 --keys "$W251,[,step50,[,step50,r,step10,r,step10,l,step200")
@@ -541,7 +548,7 @@ $SIM --app "200e Modules" --keys "$W251_EDIT,.,step200" --dump-fb 2>/dev/null \
   && ok "a refused slot turn leaves the slot where it was" \
   || bad "a refused slot turn moved the slot anyway"
 survived=$(row_at 26 --keys "$W251_EDIT,.,step200,],],a,step10")
-[ "$survived" = "6 bytes change" ] \
+[ "$survived" = "18 bytes change" ] \
   && ok "the working buffer survives the refusal, with the edit still in it" \
   || bad "the edit did not survive a refused slot turn (Save said: '$survived')"
 
@@ -840,7 +847,7 @@ snap_bytes=$(snap_line --keys "$W251" | awk '{print $4}')
 # module that behaves), UNDO, then re-Read and build the SAME edit again:
 #
 #   snapshot = the bank BEFORE the write  ->  the edit is once more a change
-#                                             ("6 bytes change")
+#                                             ("18 bytes change")
 #   snapshot = the bank AFTER the write   ->  the edit is already in the module
 #                                             ("No changes to write")
 #
@@ -857,7 +864,7 @@ REDO='{,r,step3000,],],r,step10,r,step10,l,step10,],],a,step400'  # re-Read, sam
 undone=$($SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
               --keys "$W251,$UNDO_ARM,$REDO" --dump-fb 2>/dev/null \
          | python3 fbtext.py - | grep '^y=26' | sed 's/^y=26 *x=0 *//')
-[ "$undone" = "6 bytes change" ] \
+[ "$undone" = "18 bytes change" ] \
   && ok "the snapshot holds the bank from BEFORE the write, so an undo really undoes" \
   || bad "after an undo the same edit was not a change again (said: '$undone')"
 
