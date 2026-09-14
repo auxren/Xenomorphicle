@@ -140,14 +140,26 @@ Measured on hardware: Captain → Quadrants **11 ms** the first time (the bank
 section written to the SD card) and Quadrants → Captain **5 ms**; recalling
 the same slot again costs the compare only.
 
-When a section does differ, the write costs what a write costs. The bank
-goes where Quadrants reads it: the **SD card when one is fitted**, a few
-milliseconds; internal flash otherwise. `SCENERY.DAT` and `CAPTAIN.DAT`
-always live on internal flash, so a slot whose Scenery or Captain section
-differs from the live file costs **one 64 KB block erase, 250–295 ms with
-interrupts off** — the same price as a save, and for the same reason.
-Measured on hardware, a Captain section that differs cost **523 ms**: the
-file rewrite itself plus a LittleFS metadata compaction, two erases.
+When a section does differ, the recall still does not write it. Since the
+2026-09-13 hardening the file-backed sections are copied into a RAM
+staging area and served from there: when the app asks PhzConfig for
+`BANK_255.DAT` or `CAPTAIN.DAT`, it gets the recalled bytes straight from
+RAM, and the recall finishes in the same few milliseconds whether the
+section differs or not. Before that change a differing Captain section
+cost **523 ms with interrupts off** (a 64 KB block erase plus a LittleFS
+metadata compaction), audio, USB and the bus all dead for the duration.
+
+The disk catches up on its own. Three seconds after the recall, once no
+other request or bus transfer is in flight, the engine writes one staged
+file per pass to where the app reads it (the bank to the **SD card when
+one is fitted**, internal flash otherwise; Captain always to internal
+flash), skipping any file that already holds the bytes. That deferred
+write still masks interrupts for its duration, but it happens after the
+recall gesture, not inside it, and the console `T` report counts it. An
+app that saves its own file in the meantime wins: the staged copy is
+dropped, because the disk is then newer. Switching apps away and back
+before the sync has run loads the recalled bank from RAM, not the stale
+file.
 
 The outgoing app's own suspend adds nothing. Quadrants and Scenery honour
 their auto-save on the way out of the app menu and into the screensaver,
