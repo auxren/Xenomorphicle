@@ -5,6 +5,7 @@
 #include <CrashReport.h>
 
 #include "RtStats.h"
+#include "PresetStage.h"
 
 namespace OC {
 namespace RT {
@@ -80,6 +81,9 @@ FLASHMEM void Report(bool reset_after) {
                 (unsigned long)c.window_violations);
   Serial.printf("defer:     dropped=%lu hiwater=%lu (ring of %u)\n",
                 (unsigned long)c.defer_dropped, (unsigned long)c.defer_hiwater, 16u);
+  Serial.printf("stage:     pending=%d refused=%lu superseded=%lu (recall images awaiting disk sync)\n",
+                RecallStage().pending(), (unsigned long)RecallStage().refused,
+                (unsigned long)RecallStage().superseded);
   const Verdict v = Evaluate(c);
   for (int i = 0; i < Verdict::kRows; ++i)
     Serial.printf("  %s  %s\n", v.pass[i] ? "PASS" : "FAIL", Verdict::name(i));
