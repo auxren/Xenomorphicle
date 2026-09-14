@@ -199,6 +199,52 @@ inline Counters stats;
 inline volatile bool window_open = false;
 inline volatile bool window_seen = false;
 
+// ---- the declared persistence window ------------------------------------
+// Some writes to the program flash cannot be avoided and cannot be made
+// quick: the core masks interrupts for the whole erase/program because code
+// runs from the same chip, so audio, USB, the display and the bus slave all
+// stop. Left alone the DAC replays its last buffer, heard as a click into a
+// frozen tone; the CV outputs hold, which for a control voltage is right.
+//
+// A window makes that stall declared rather than accidental. Construct one
+// around the write, IN LOOP CONTEXT ONLY, and it fades the audio to true
+// silence first, zeroes the DMA buffer so nothing is replayed, and fades
+// back in afterwards. Drops attributed to an open window do not count
+// against the audio rows of the budget; the window's own length counts
+// against the window row.
+//
+// Only a write the player asked for may fade: a fade is the instrument
+// saying "you pressed STORE". A background write (the debounced current-slot
+// record, the card image flush) must instead wait for an idle gap -- fading
+// the audio for something nobody asked for is worse than the stall.
+class PersistenceWindow {
+ public:
+  // `reason` is for the console; it is not copied, so pass a literal.
+  explicit PersistenceWindow(const char *reason, uint32_t declared_max_ms = Budget::kWindowMs);
+  ~PersistenceWindow();
+
+  PersistenceWindow(const PersistenceWindow &) = delete;
+  PersistenceWindow &operator=(const PersistenceWindow &) = delete;
+
+ private:
+  const char *reason_;
+  uint32_t declared_max_ms_;
+  uint32_t start_ms_;
+};
+
+#ifndef ARDUINO
+// Host builds (the tests, the simulator) have no audio to fade and no flash
+// to stall on, but they do run this code, so the bookkeeping stays real and
+// the fade is simply absent.
+inline PersistenceWindow::PersistenceWindow(const char *reason, uint32_t declared_max_ms)
+    : reason_(reason), declared_max_ms_(declared_max_ms), start_ms_(0) {
+  window_open = true;
+  window_seen = true;
+  stats.window_count++;
+}
+inline PersistenceWindow::~PersistenceWindow() { window_open = false; }
+#endif
+
 #ifdef ARDUINO
 #include <Arduino.h>   // F_CPU_ACTUAL, ARM_DWT_CYCCNT
 // ---- firmware side (RtStats.cpp) ----------------------------------------

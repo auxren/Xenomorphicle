@@ -47,6 +47,9 @@ jobs:
           g++ -std=c++17 -Wall -Werror -O2 -o build/test_card_sectors \
               test_card_sectors.cpp
           ./build/test_card_sectors
+          g++ -std=c++17 -Wall -Werror -O2 -o build/test_fade \
+              test_fade.cpp
+          ./build/test_fade
           g++ -std=c++17 -Wall -Werror -O2 -I host_stubs \
               -o build/test_buchla251e_slot_codec \
               test_buchla251e_slot_codec.cpp ../src/Buchla251eSlotCodec.cpp \

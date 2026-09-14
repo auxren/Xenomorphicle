@@ -41,6 +41,11 @@
 #include "../../RtStats.h"
 
 
+// Master output gain, 1.0f except during a persistence window's fade. Read
+// from the audio ISR, written from loop context; a 32-bit store is atomic on
+// this core, so the fade needs no lock.
+volatile float AudioOutputI2S2_F32::master_gain = 1.0f;
+
 audio_block_f32_t *AudioOutputI2S2_F32::block_left_1st = NULL;
 audio_block_f32_t *AudioOutputI2S2_F32::block_right_1st = NULL;
 audio_block_f32_t *AudioOutputI2S2_F32::block_left_2nd = NULL;
@@ -102,6 +107,19 @@ void AudioOutputI2S2_F32::begin(bool mclk_enable)
 	enabled = 1;
 }
 //  --------------------------------------------------------------------------------
+// Put true silence in front of the DMA, for a caller about to mask
+// interrupts for longer than a block. Both halves, because which one the
+// DMA is playing is a race the caller cannot win, and the flush is what
+// makes the zeros reach RAM -- without it the DMA keeps replaying the
+// cache-shadowed buffer, which is the frozen-tone bug the silence path
+// below documents.
+void AudioOutputI2S2_F32::silence_now(void)
+{
+	memset(i2s2_tx_buffer, 0, sizeof(i2s2_tx_buffer));
+	arm_dcache_flush_delete(i2s2_tx_buffer, sizeof(i2s2_tx_buffer));
+}
+
+//  --------------------------------------------------------------------------------
 void AudioOutputI2S2_F32::isr(void)
 {
 	int32_t *dest;
@@ -135,10 +153,26 @@ void AudioOutputI2S2_F32::isr(void)
 		OC::RT::stats.audio_out.ok();
 		float32_t *pL = blockL->data + offsetL;
 		float32_t *pR = blockR->data + offsetR;
-		for (int i = 0; i < audio_block_samples / 2; i++)
+		// One branch per half-block, not per sample: master_gain is 1.0f at
+		// every moment except inside a declared persistence window's fade
+		// (OC::RT::PersistenceWindow), so the ordinary path below is the
+		// same code it always was.
+		const float32_t g = AudioOutputI2S2_F32::master_gain;
+		if (g >= 1.0f)
 		{
-			*d++ = (int32_t)*pL++;
-			*d++ = (int32_t)*pR++; // interleave
+			for (int i = 0; i < audio_block_samples / 2; i++)
+			{
+				*d++ = (int32_t)*pL++;
+				*d++ = (int32_t)*pR++; // interleave
+			}
+		}
+		else
+		{
+			for (int i = 0; i < audio_block_samples / 2; i++)
+			{
+				*d++ = (int32_t)(*pL++ * g);
+				*d++ = (int32_t)(*pR++ * g); // interleave
+			}
 		}
 		offsetL += audio_block_samples / 2;
 		offsetR += audio_block_samples / 2;

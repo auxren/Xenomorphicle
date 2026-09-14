@@ -20,6 +20,7 @@
 
 #include "PresetEngine.h"
 #include "PresetStage.h"
+#include "RtStats.h"
 #include "OC_apps.h"
 #include "OC_app_switcher.h"
 #include "OC_storage.h"
@@ -903,6 +904,17 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   busy = true;
   bus_slot = (int8_t)slot;
   serial_printf("PresetEngine: save slot %d\n", slot);
+
+  // A save cannot avoid writing flash, and a flash write on this part masks
+  // interrupts for the whole erase/program: audio, USB, the display and the
+  // bus slave all stop. That is declared here rather than suffered, so the
+  // stall is heard as a short dip the player caused by pressing STORE
+  // instead of a click into a frozen tone. The window fades out on the way
+  // in and back in when it goes out of scope, at every return below.
+  //
+  // A save is the right place for this and a background write is not: only a
+  // write the player asked for may take the audio away.
+  const OC::RT::PersistenceWindow window("save");
 
   // Free-space guard. UNCONDITIONAL now: presets always land on internal
   // flash, so there is no longer an "SD is effectively unbounded" case to

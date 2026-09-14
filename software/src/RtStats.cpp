@@ -6,6 +6,10 @@
 
 #include "RtStats.h"
 #include "PresetStage.h"
+#include "Fade.h"
+#ifdef AUDIO_INTERFACE
+#include "extern/f32/output_i2s2_F32.h"
+#endif
 
 namespace OC {
 namespace RT {
@@ -41,6 +45,64 @@ void MidiGap(uint32_t us) {
   stats.midi_hist.add(us);
   if (us > stats.midi_gap_max_us) stats.midi_gap_max_us = us;
   if (us > Budget::kMidiGapBudgetUs) stats.midi_gap_violations++;
+}
+
+// ---- the declared persistence window ------------------------------------
+
+// How long each side of the dip takes. Out is shorter than in: leaving is a
+// decision the player already made by pressing STORE, arriving is the
+// instrument coming back and wants to be gentler. Both are far longer than
+// one 2.902 ms audio block, so the ramp is actually heard as a ramp.
+static constexpr uint32_t kFadeOutMs = 15;
+static constexpr uint32_t kFadeInMs = 25;
+
+#ifdef AUDIO_INTERFACE
+// Step the master gain from loop context while the audio ISR is still
+// running and producing blocks. delay(1) advances the clock and lets the
+// ISR run, which is the whole point: a fade written in one go would just be
+// a jump.
+FLASHMEM static void run_ramp(const Fade::Ramp &r) {
+  for (uint32_t ms = 0; ; ++ms) {
+    AudioOutputI2S2_F32::master_gain = r.gain_at(ms);
+    if (r.done(ms)) break;
+    delay(1);
+  }
+}
+#endif
+
+PersistenceWindow::PersistenceWindow(const char *reason, uint32_t declared_max_ms)
+    : reason_(reason), declared_max_ms_(declared_max_ms) {
+#ifdef AUDIO_INTERFACE
+  Fade::Ramp out;
+  out.start(kFadeOutMs, true);
+  run_ramp(out);
+  // The gain is zero now, but the buffer the DMA is playing still holds the
+  // last non-silent block. Zero it, or the stall replays that.
+  AudioOutputI2S2_F32::silence_now();
+#endif
+  // The stall is about to start. Everything from here to the destructor is
+  // attributed to this window rather than counted as a budget violation.
+  window_open = true;
+  window_seen = true;
+  start_ms_ = millis();
+  stats.window_count++;
+}
+
+PersistenceWindow::~PersistenceWindow() {
+  const uint32_t ms = millis() - start_ms_;
+  window_open = false;
+  if (ms > stats.window_max_ms) stats.window_max_ms = ms;
+  if (ms > declared_max_ms_) {
+    stats.window_violations++;
+    Serial.printf("rt: window '%s' ran %lu ms, declared %lu\n", reason_,
+                  (unsigned long)ms, (unsigned long)declared_max_ms_);
+  }
+#ifdef AUDIO_INTERFACE
+  Fade::Ramp in;
+  in.start(kFadeInMs, false);
+  run_ramp(in);
+  AudioOutputI2S2_F32::master_gain = 1.0f;   // exactly unity, not nearly
+#endif
 }
 
 FLASHMEM static void print_hist(const char *label, const Hist8 &h) {
