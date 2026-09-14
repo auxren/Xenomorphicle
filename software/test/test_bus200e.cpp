@@ -90,9 +90,13 @@ static int n_xdone = 0;
 static uint8_t xdone_from;
 static void f_xfer_done(uint8_t from_addr) { xdone_from = from_addr; n_xdone++; }
 
+static int n_lack = 0;
+static uint8_t lack_from;
+static void f_load_ack(uint8_t from_addr) { lack_from = from_addr; n_lack++; }
+
 static const Bus200eOps fake_ops = {
   f_save, f_recall, kRecSize, f_slot_read, f_slot_write, f_card_write, f_card_read,
-  f_midi, f_query_reply, f_xfer_done,
+  f_midi, f_query_reply, f_xfer_done, f_load_ack,
 };
 
 static void reset(const Bus200eOps *ops) {
@@ -104,6 +108,8 @@ static void reset(const Bus200eOps *ops) {
   qreply_len = 0;
   n_xdone = 0;
   xdone_from = 0;
+  n_lack = 0;
+  lack_from = 0;
   memset(qreply_ver, 0, sizeof(qreply_ver));
   fail_card_write = 0;
   reject_odd_writes = 0;
@@ -662,6 +668,61 @@ static void test_xfer_done_parse(void) {
   CHECK(n_xdone == 0);
 }
 
+// The poll reply a module masters after it loads a preset: [04 22 addr 03 xx].
+// Decoded from the 259e firmware (builder 0x9179, payload 0xFF) and confirmed
+// live 2026-09-10, one frame per module per preset load -- a 259e at 0x28 and
+// a 210e at 0x20 both answered a panel recall. The 251e's builder never writes
+// the payload byte (it ships uninitialised stack, observed as 0x00), so the
+// address is the only field worth trusting.
+static void test_load_ack_parse(void) {
+  printf("test_load_ack_parse\n");
+  reset(&fake_ops);
+  FRAME(0x04, 0x22, 0x28, 0x03, 0xFF);
+  CHECK(last_op() == BUS200E_OP_LOAD_ACK);
+  CHECK(n_lack == 1 && lack_from == 0x28);
+  {
+    Bus200eCmd c;
+    CHECK(Bus200eLogRead(0, &c));
+    CHECK(c.mod_addr == 0x28);
+    CHECK(c.arg == 0xFF);   // diagnostic only: the 251e ships garbage here
+  }
+  CHECK(Bus200eGetStats()->frames_long == 1);
+
+  // the 251e's form, with its uninitialised payload byte
+  FRAME(0x04, 0x22, 0x5C, 0x03, 0x00);
+  CHECK(last_op() == BUS200E_OP_LOAD_ACK);
+  CHECK(n_lack == 2 && lack_from == 0x5C);
+
+  // a command frame (src 0x22) stays a command, whatever the command byte
+  FRAME(0x04, 0x00, 0x22, 0x03, 0x05);
+  CHECK(last_op() != BUS200E_OP_LOAD_ACK);
+  CHECK(n_lack == 2);
+
+  // an ordinary broadcast RECALL is untouched by the new branch
+  FRAME(0x04, 0x00, 0x22, 0x01, 9);
+  CHECK(last_op() == BUS200E_OP_RECALL);
+  CHECK(n_recall == 1 && recall_calls[0] == 9);
+  CHECK(n_lack == 2);
+
+  // not addressed to the manager: undecoded
+  FRAME(0x04, 0x00, 0x28, 0x03, 0xFF);
+  CHECK(last_op() != BUS200E_OP_LOAD_ACK);
+  CHECK(n_lack == 2);
+
+  // wrong length byte for the frame: undecoded
+  FRAME(0x05, 0x22, 0x28, 0x03, 0xFF);
+  CHECK(last_op() != BUS200E_OP_LOAD_ACK);
+  CHECK(n_lack == 2);
+
+  // log-only when the hook is absent
+  Bus200eOps no_la = fake_ops;
+  no_la.load_ack = 0;
+  reset(&no_la);
+  FRAME(0x04, 0x22, 0x20, 0x03, 0xFF);
+  CHECK(last_op() == BUS200E_OP_LOAD_ACK);
+  CHECK(n_lack == 0);
+}
+
 static void test_query_reply_does_not_shadow_commands(void) {
   printf("test_query_reply_does_not_shadow_commands\n");
   reset(&fake_ops);
@@ -737,6 +798,7 @@ int main() {
   test_build_query_frame_round_trips_through_parser();
   test_query_reply_parse();
   test_xfer_done_parse();
+  test_load_ack_parse();
   test_query_reply_does_not_shadow_commands();
 
   printf("\ntest_bus200e: %d checks, %d failures\n", checks, fails);

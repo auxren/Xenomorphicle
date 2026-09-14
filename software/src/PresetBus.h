@@ -198,6 +198,15 @@ void QueueMidiTx(uint8_t type, uint8_t channel, uint8_t d1, uint8_t d2);
 // RX: drain one received bus MIDI message (status keeps the 200e bus mask
 // in its low nibble). Call from the active app's MIDI poll context.
 bool ReadMidiRx(uint8_t &status, uint8_t &d1, uint8_t &d2);
+// Which 200e modules confirmed a preset load. A module in polling mode
+// masters a poll reply once per load, so these answer "did the case follow
+// our broadcast, and who": LoadAckSeenSince(addr, ms_ago) for one module,
+// LoadAckCountSince(stamp) for how many distinct addresses have answered
+// since a millis() stamp (0 = never stamped, returns 0). A module that is
+// not in polling mode never answers, so a zero count is not proof of a
+// module ignoring the bus.
+bool LoadAckSeenSince(uint8_t addr, uint32_t ms_ago);
+int LoadAckCountSince(uint32_t since_ms);
 const Stats &GetStats();
 void DebugDump();          // print status + decoded-command ring to Serial
 void SetVerbose(bool on);
@@ -236,6 +245,8 @@ inline Bus200eMasterError MasterQueryError() { return BUS200E_MASTER_ERR_NONE; }
 inline void MasterQueryReset() {}
 inline void MasterQuerySetQuiet(bool) {}
 inline bool MasterQueryQuiet() { return false; }
+inline bool LoadAckSeenSince(uint8_t, uint32_t) { return false; }
+inline int LoadAckCountSince(uint32_t) { return 0; }
 inline const Stats &GetStats() { static Stats s = {}; return s; }
 inline void DebugDump() {}
 inline void SetVerbose(bool) {}

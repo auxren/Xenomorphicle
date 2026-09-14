@@ -211,12 +211,58 @@ static void cb_xfer_done(uint8_t from_addr) {
   if (verbose) Serial.printf("PresetBus: transfer done from %02X\n", from_addr);
 }
 
+// Which modules answered a preset load, and when. A module in polling mode
+// masters [04 22 addr 03 xx] once per preset load; that is the only positive
+// confirmation this bus offers that a broadcast RECALL was acted on. The
+// table is small and last-wins by address: what a caller ever asks is "which
+// addresses answered in the last N ms", never a history.
+static constexpr int kLoadAckSlots = 12;
+static struct { uint8_t addr; uint32_t ms; } load_ack[kLoadAckSlots];
+
+static void cb_load_ack(uint8_t from_addr) {
+  const uint32_t now = millis() ? millis() : 1;
+  int free_slot = -1;
+  for (int i = 0; i < kLoadAckSlots; ++i) {
+    if (load_ack[i].ms && load_ack[i].addr == from_addr) {
+      load_ack[i].ms = now;
+      if (verbose) Serial.printf("PresetBus: %02X followed the recall\n", from_addr);
+      return;
+    }
+    if (!load_ack[i].ms && free_slot < 0) free_slot = i;
+  }
+  if (free_slot < 0) {  // full: take the stalest entry
+    free_slot = 0;
+    for (int i = 1; i < kLoadAckSlots; ++i)
+      if (load_ack[i].ms < load_ack[free_slot].ms) free_slot = i;
+  }
+  load_ack[free_slot].addr = from_addr;
+  load_ack[free_slot].ms = now;
+  if (verbose) Serial.printf("PresetBus: %02X followed the recall\n", from_addr);
+}
+
+bool LoadAckSeenSince(uint8_t addr, uint32_t ms_ago) {
+  const uint32_t now = millis();
+  for (int i = 0; i < kLoadAckSlots; ++i)
+    if (load_ack[i].ms && load_ack[i].addr == addr && now - load_ack[i].ms <= ms_ago)
+      return true;
+  return false;
+}
+
+int LoadAckCountSince(uint32_t since_ms) {
+  if (!since_ms) return 0;
+  int n = 0;
+  for (int i = 0; i < kLoadAckSlots; ++i)
+    if (load_ack[i].ms && (int32_t)(load_ack[i].ms - since_ms) >= 0) ++n;
+  return n;
+}
+
 static const Bus200eOps kOps = {
   cb_save, cb_recall,
   0, nullptr, nullptr, nullptr, nullptr,  // card transfers: phase 2
   cb_midi,
   cb_query_reply,
   cb_xfer_done,
+  cb_load_ack,
 };
 
 static bool tx_gate_open();  // defined with Task() below
@@ -1223,7 +1269,7 @@ FLASHMEM void DebugDump() {
   static const char *const opnames[] = {
     "none", "RECALL", "SAVE", "REMOTE_EN", "REMOTE_DIS", "POLL_DONE",
     "QUERY", "BACKUP", "RESTORE", "MIDI", "CLOCK", "UNKNOWN", "DROPPED",
-    "QRY_REPLY", "XFER_DONE",
+    "QRY_REPLY", "XFER_DONE", "LOAD_ACK",
   };
   const uint32_t total = Bus200eLogTotal();
   Serial.printf("decoded commands (%lu total, newest first):\n", total);

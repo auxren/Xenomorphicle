@@ -80,6 +80,12 @@ typedef enum {
   // manager form, see parse_frame()). mod_addr = the module; arg = the one
   // payload byte (its own address, on the only module seen so far).
   BUS200E_OP_XFER_DONE,
+  // A module's poll reply after it loads a preset (cmd 0x03, module ->
+  // manager form). Proof that the named module acted on a RECALL. mod_addr
+  // = the module; arg = the payload byte, DIAGNOSTIC ONLY -- the 259e writes
+  // 0xFF there and the 251e ships uninitialised stack. Appended at the end,
+  // like the two ops above, so no existing op code shifts meaning.
+  BUS200E_OP_LOAD_ACK,
 } Bus200eOp;
 
 typedef struct {
@@ -123,6 +129,10 @@ typedef struct {
   // writing to (BACKUP) or reading from (RESTORE, presumed) a card. NULL =
   // log-only. Appended at the end of the struct, as query_reply was.
   void (*xfer_done)(uint8_t from_addr);
+  // A module reporting that it has loaded a preset (cmd 0x03, see
+  // BUS200E_OP_LOAD_ACK). `from_addr` is the module that followed. NULL =
+  // log-only. Appended at the end of the struct, as the two above were.
+  void (*load_ack)(uint8_t from_addr);
 } Bus200eOps;
 
 typedef struct {

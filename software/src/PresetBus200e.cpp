@@ -223,6 +223,31 @@ BUS_CODE static void parse_frame(void) {
     return;
   }
 
+  // LOAD ACK: [04 22 addr 03 xx] -- a module's poll reply, mastered once per
+  // preset load, in the same module->manager form the QUERY reply and the
+  // transfer announcement use. Decoded from the 259e firmware (builder at
+  // 0x9179, payload 0xFF, sent when polling mode is on and the module is
+  // remote-enabled; the latch that arms it is cleared on every preset load
+  // and save) and confirmed on the bench 2026-09-10: a panel recall of slot
+  // 1 drew [04 22 28 03 FF] from the 259e and [04 22 20 03 FF] from the
+  // 210e, one frame each. The 251e's builder (0x80008920) never writes
+  // frame[4] and ships uninitialised stack there -- observed as 0x00 -- so
+  // the payload is logged and otherwise ignored.
+  //
+  // This is the only positive confirmation the bus offers that a broadcast
+  // RECALL was acted on: PresetBus counts the distinct addresses that answer
+  // within a window of our own broadcast. Guarded like the branches above so
+  // a command frame (srcAddr 0x22) can never be stolen from the long branch.
+  if (n == 5 && f[0] == 4 && f[1] == 0x22 && f[2] != 0x22 && f[3] == 0x03) {
+    stats.frames_long++;
+    c.op = BUS200E_OP_LOAD_ACK;
+    c.mod_addr = f[2];
+    c.arg = f[4];   // not meaningful; kept for the debug ring
+    if (bus_ops && bus_ops->load_ack) bus_ops->load_ack(f[2]);
+    dispatch(&c);
+    return;
+  }
+
   // LONG / PRIMO framing: [nBytes, destAddr, srcAddr=0x22, cmd, args...],
   // where nBytes counts the bytes that follow it. No short command collides
   // with this shape.
