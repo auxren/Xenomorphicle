@@ -98,7 +98,7 @@
 #include "../HSUtils.h"
 #include "../OC_ADC.h"
 #include "../SamplerMath.h"
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
 #include <TeensyVariablePlayback.h>
 #include "../Audio/AudioMixer.h"
 #include "../AudioIO.h"
@@ -156,7 +156,7 @@ private:
   bool need_reload_[SamplerMath::kSlotCount] = {};
   bool file_loaded_[SamplerMath::kSlotCount] = {};
 
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   AudioPlaySdResmp players_[SamplerMath::kSlotCount];
   AudioSummingRoute<OC::AudioIO::kOutputRouteChannels, (uint8_t)SamplerMath::kSlotCount> slot_mix_;
   AudioConnection *conn_player_l_[SamplerMath::kSlotCount] = {};
@@ -195,7 +195,7 @@ private:
 
 FLASHMEM void AppSampler::WireAudio() {
   if (audio_wired_) return;
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   for (int i = 0; i < SamplerMath::kSlotCount; ++i) {
     players_[i].enableInterpolation(true);
     players_[i].setBufferInPSRAM(false);  // prefer RAM2; see class comment's risk note
@@ -283,7 +283,7 @@ FLASHMEM void AppSampler::HandleAppEvent(OC::AppEvent event) {
 }
 
 FLASHMEM void AppSampler::LoadSlotFile(int i) {
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   if (!SDcard_Ready) {
     file_loaded_[i] = false;
     need_reload_[i] = false;
@@ -302,7 +302,7 @@ FLASHMEM void AppSampler::LoadSlotFile(int i) {
 }
 
 FLASHMEM void AppSampler::StartSlot(int i) {
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   if (need_reload_[i]) LoadSlotFile(i);
   if (!file_loaded_[i]) return;
   players_[i].setLoopType(LoopOn(i) ? looptype_repeat : looptype_none);
@@ -315,7 +315,7 @@ FLASHMEM void AppSampler::StartSlot(int i) {
 }
 
 FLASHMEM void AppSampler::StopSlot(int i) {
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   players_[i].stop();
 #endif
 }
@@ -338,7 +338,7 @@ FLASHMEM void AppSampler::PollSlots() {
       StopSlot(i);
     }
 
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
     if (file_loaded_[i]) {
       const float rate = ComputeRateMultiplier((int)rate_pct_[i], raw);
       players_[i].setPlaybackRate(rate);
@@ -368,7 +368,7 @@ FLASHMEM void AppSampler::AdjustFocused(int delta) {
     case SamplerAppNS::FOCUS_LOOP:
       if (delta != 0) {
         SetLoopOn(i, !LoopOn(i));
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
         players_[i].setLoopType(LoopOn(i) ? looptype_repeat : looptype_none);
 #endif
       }
@@ -422,7 +422,7 @@ FLASHMEM void AppSampler::DrawMenu() const {
   graphics.print("Slot ");
   graphics.print(i + 1);
   graphics.print("/8");
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   if (file_loaded_[i] && players_[i].isPlaying()) {
     graphics.setPrintPos(100, 12);
     graphics.print("PLAY");
@@ -463,7 +463,7 @@ FLASHMEM void AppSampler::DrawMenu() const {
   static constexpr int kRingY = 58;
   for (int s = 0; s < SamplerMath::kSlotCount; ++s) {
     const int x = s * 16 + 4;
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
     const bool playing = file_loaded_[s] && players_[s].isPlaying();
     if (playing) {
       // Solid box with a hollow core. NOT drawRect-then-invertRect over the
@@ -528,7 +528,7 @@ FLASHMEM void AppSampler::DrawDebugInfo() const {
   graphics.setPrintPos(2, 12);
   graphics.print("slot ");
   graphics.print((int)slot_);
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   graphics.setPrintPos(2, 22);
   graphics.print("loaded ");
   int n = 0;

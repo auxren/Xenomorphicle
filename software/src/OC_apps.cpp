@@ -46,6 +46,14 @@
 #include "OC_input_maps.h"
 #include "OC_pitch_utils.h"
 #include "OC_euclidean_mask_draw.h"
+#ifdef XENO_CODEC_AUDIO
+// For AudioNoInterrupts/AudioInterrupts around the app-switch teardown below.
+// This used to arrive by accident, pulled in transitively by whichever audio
+// app header a given build happened to include, and the call sites were
+// guarded on AUDIO_INTERFACE so the accident held. It does not hold for a
+// build with the codec but no audio apps (T41_MTP), so name the dependency.
+#include "AudioIO.h"
+#endif
 #include "OC_trigger_delays.h"
 
 #include "OC_calibration.h"
@@ -60,7 +68,7 @@
 #ifndef NO_HEMISPHERE
 // applets
 #include "applets/_config.h"
-#ifdef ARDUINO_TEENSY41
+#ifdef XENO_CODEC_AUDIO
 #include "audio_applets/_config.h"
 #endif
 #endif
@@ -1332,7 +1340,7 @@ FLASHMEM void SwitchToApp(size_t index) {
   delay(1);
   FreqMeasure.end();
   DigitalInputs::reInit();
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   AudioNoInterrupts();
 #endif
   app_switcher.set_current_app(index);
@@ -1342,7 +1350,7 @@ FLASHMEM void SwitchToApp(size_t index) {
   // last recalled.
   PresetEngine::NoteAppOnScreen();
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   AudioInterrupts();
 #endif
   CORE::app_isr_enabled = true;
@@ -1372,7 +1380,7 @@ FLASHMEM void ReinitApps(bool reset_settings) {
   delay(1);
   FreqMeasure.end();
   DigitalInputs::reInit();
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   AudioNoInterrupts();
 #endif
   app_switcher.Init(reset_settings);
@@ -1380,7 +1388,7 @@ FLASHMEM void ReinitApps(bool reset_settings) {
   // names now describes presets that no longer exist.
   if (reset_settings) PresetEngine::Init();
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   AudioInterrupts();
 #endif
   CORE::app_isr_enabled = true;

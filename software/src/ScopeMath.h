@@ -13,7 +13,7 @@
 // Channel layout is a single flat 0..19 index so a persisted channel byte
 // means the same thing across builds: 0-7 CV IN 1-8, 8-15 CV OUT 1-8, 16-19
 // AUDIO IN L/R, AUDIO OUT L/R. The audio slice only makes sense on a build
-// with AUDIO_INTERFACE (real hardware audio taps); ScopeApp is the one that
+// with the I2S2 codec (real hardware audio taps); ScopeApp is the one that
 // keeps the encoder cursor off 16-19 when that's not available -- this
 // table itself has no opinion on that, so it stays testable on the host
 // with no #ifdef of its own.

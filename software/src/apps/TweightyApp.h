@@ -348,7 +348,7 @@ FLASHMEM size_t AppTweighty::RestoreAppData(util::StreamBufferReader &stream_buf
 // input for analysis).
 FLASHMEM void AppTweighty::WireAudio() {
   if (audio_wired_) return;
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   conn_in_l_ = new AudioConnection(OC::AudioIO::InputStream(0), 0, in_adapter_, 0);
   conn_in_r_ = new AudioConnection(OC::AudioIO::InputStream(0), 1, in_adapter_, 1);
   conn_f32_in_l_ = new AudioConnection_F32(in_adapter_, 0, engine_, 0);
@@ -404,7 +404,7 @@ FLASHMEM void AppTweighty::ActivateOnce() {
   AudioNoInterrupts();
   engine_.Acquire();
   engine_acquired_ = true;
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   if (conn_in_l_) conn_in_l_->connect();
   if (conn_in_r_) conn_in_r_->connect();
   // AudioConnection_F32's no-arg connect() is protected (unlike the int16

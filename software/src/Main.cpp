@@ -717,12 +717,17 @@ FLASHMEM void setup() {
 
   // initialize apps (on T3.x firstrun is detected by the EEPROM load inside)
   firstrun |= !OC::app_switcher.Init(reset_settings || firstrun);
-#if defined(ARDUINO_TEENSY41) && defined(AUDIO_INTERFACE)
+#if defined(XENO_CODEC_AUDIO)
   // Force the audio output path (I2S codec out + host-playback monitor mix)
   // into existence. It is lazily built and was only ever constructed when an
   // audio applet wired up the chain - an appletless boot had DEAD panel outs
   // and no USB monitoring. Called here so it is created after every other
   // stream (its documented ordering requirement).
+  //
+  // XENO_CODEC_AUDIO, not AUDIO_INTERFACE: the panel outputs are the I2S2
+  // codec's, which runs on every build of this board. Gating this on the USB
+  // descriptor left T41_console -- the bench build -- booting with no output
+  // path at all, which is the one build most likely to be measured.
   OC::AudioIO::OutputStream();
 #endif
 
@@ -768,11 +773,10 @@ FLASHMEM void setup() {
 // flash instead of burning ~4KB of ITCM (it gets inlined into main()).
 #if defined(__IMXRT1062__)
 // console 't': one-shot system health report
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
 #include "extern/f32/AudioStream_F32.h"
-#ifdef ARDUINO_TEENSY41
+// Self-guarding: USB_F32.h compiles to nothing without a USB audio descriptor.
 #include "Audio/USB_F32.h"
-#endif
 #endif
 // TEMPORARY bench diagnostic: name the physical buttons. The pin tables in
 // OC_gpio.cpp branch on the hardware ID voltage and the variants disagree
@@ -878,7 +882,7 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
   }
   Serial.printf("heap free: %lu bytes (RAM2)\n",
                 (unsigned long)(_heap_end - __brkval));
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   // integer tenths: %f would drag the float-printf tables into DTCM
   Serial.printf("audio i16 pool: %u now / %u max   cpu: %lu.%lu%% now / %lu.%lu%% max\n",
                 AudioMemoryUsage(), AudioMemoryUsageMax(),
@@ -895,7 +899,7 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
       Serial.printf("tweighty: acquired=%d ready=%d meter=%d\n",
                     tw_acquired, tw_ready, (int)(tw_meter * 1000));
   }
-#ifdef ARDUINO_TEENSY41
+#ifdef AUDIO_INTERFACE  // USB: these counters exist only in a USB audio build
   // All four must stay 0. Non-zero = the USB audio transport handed an ISR
   // callback a ring index or block pointer it had already invalidated, which
   // is what used to hard-fault inside copy_to_buffers after a preset Store.

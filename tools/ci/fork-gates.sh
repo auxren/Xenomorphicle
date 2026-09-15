@@ -59,6 +59,22 @@ gate "no-serial-in-audio-isr" "Serial output inside an audio ISR path (use a cou
 hits=$(grep -nE 'std::(function|queue)' "$SRC"/OC_core.h "$SRC"/OC_core.cpp "$SRC"/DeferRing.h 2>/dev/null | code_lines)
 gate "defer-path-allocation-free" "the ISR->loop defer path must not allocate" "$hits"
 
+# 6. AUDIO_INTERFACE means "USB audio is in the descriptor", NOT "this build
+#    has audio". It comes from the core's usb_desc.h and is a USB *interface
+#    number*. The codec audio engine is guarded on XENO_CODEC_AUDIO
+#    (platformio.ini) and is linked into every environment here, USB audio or
+#    not. Testing the wrong one compiles the codec feature out of T41_console
+#    silently: the Tuner heard nothing for exactly this reason, the persistence
+#    fade before it, and the panel outputs were left unbuilt at boot. Only
+#    files that genuinely reason about the USB side may name it.
+#    Elsewhere, a genuine USB use may opt out by naming itself on the line:
+#    append a "// USB: <why>" comment to the directive.
+audio_iface_allow='software/src/Audio/USB_F32\.(h|cpp)|software/src/AudioIO\.cpp|software/src/OC_debug\.cpp|software/src/audio_applets/(InputApplet\.h|_config\.h)'
+hits=$(grep -rnE '^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)\b.*\bAUDIO_INTERFACE\b' "$SRC" 2>/dev/null \
+  | grep -vE "^($audio_iface_allow):" \
+  | grep -vE '//[[:space:]]*USB:')
+gate "audio-interface-is-usb-only" "AUDIO_INTERFACE (a USB descriptor number) used to mean 'has audio'; use XENO_CODEC_AUDIO" "$hits"
+
 echo
 if [ "$fails" -ne 0 ]; then
   echo "fork gates: $fails FAILED"

@@ -76,6 +76,26 @@ jobs:
               -o build/test_buchla200e_uigate \
               test_buchla200e_uigate.cpp ../src/Buchla200eUiGate.cpp
           ./build/test_buchla200e_uigate
+          # These four suites existed in the tree but were never run here:
+          # ScopeApp and SamplerApp both shipped a guard bug this job could
+          # not have caught, and their math tests were sitting right next to
+          # it, green and unexecuted.
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_scope_math \
+              test_scope_math.cpp ../src/ScopeMath.cpp
+          ./build/test_scope_math
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_sampler_math \
+              test_sampler_math.cpp ../src/SamplerMath.cpp
+          ./build/test_sampler_math
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_sample_convert \
+              test_sample_convert.cpp
+          ./build/test_sample_convert
+          g++ -std=c++17 -Wall -Werror -O2 \
+              -o build/test_preset_op_queue \
+              test_preset_op_queue.cpp
+          ./build/test_preset_op_queue
           g++ -std=c++17 -Wall -Werror -O2 -I host_stubs \
               -o build/test_buchla251e_editgenrec \
               test_buchla251e_editgenrec.cpp ../src/Buchla251eSlotCodec.cpp \

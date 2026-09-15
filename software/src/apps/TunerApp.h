@@ -109,16 +109,16 @@ private:
 // analyzer would cost CPU in every other app.
 FLASHMEM void AppTuner::WireAudio() {
   if (audio_wired_) return;
-  // ARDUINO_TEENSY41, not AUDIO_INTERFACE. The latter is a USB descriptor
-  // interface number from usb_desc.h that exists only when USB audio is
-  // compiled in, while the thing the tuner listens to is the I2S2 codec
-  // input, which AudioIO wires unconditionally on this hardware. Guarding
+  // XENO_CODEC_AUDIO (platformio.ini), not AUDIO_INTERFACE. The latter is a
+  // USB descriptor interface number from usb_desc.h that exists only when USB
+  // audio is compiled in, while the thing the tuner listens to is the I2S2
+  // codec input, which AudioIO wires unconditionally on this hardware. Guarding
   // on it left the tuner's taps unbuilt on every build without USB audio --
   // T41_console, the bench image -- so the tuner sat there reading silence
   // and saying "no sig" while the codec was handing the graph a signal at
   // -7 dBFS. Found on the bench 2026-09-14, with the new audio-in peak
   // meter as the thing that told them apart.
-#ifdef ARDUINO_TEENSY41
+#ifdef XENO_CODEC_AUDIO
   conn_strobe_ = new AudioConnection(OC::AudioIO::InputStream(0), 0, strobe_, 0);
   conn_notefreq_ = new AudioConnection(OC::AudioIO::InputStream(0), 0, notefreq_, 0);
   if (conn_strobe_) conn_strobe_->disconnect();
