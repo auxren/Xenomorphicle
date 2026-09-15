@@ -17,9 +17,19 @@ static int log_[64];
 static int log_n = 0;
 static void reset_log() { log_n = 0; }
 
-static void fn_a() { log_[log_n++] = 1; }
-static void fn_b() { log_[log_n++] = 2; }
-static void fn_ctx(void *ctx) { log_[log_n++] = *(int *)ctx; }
+// log_n keeps counting past the end so the callers can still assert on how
+// many calls happened; only the WRITE is bounded. test_indices_wrap_past_
+// the_array makes 80 calls into these 64 slots on purpose, and without this
+// guard it ran off the end of the array -- which GCC's -O2 static layout
+// turned into a clobbered `checks` counter (174 checks became 26), while
+// clang's layout hid it entirely. The array is the scratchpad; overrunning
+// it was the test corrupting its own bookkeeping, not the ring misbehaving.
+static const int kLogMax = (int)(sizeof log_ / sizeof log_[0]);
+static void log_put(int v) { if (log_n < kLogMax) log_[log_n] = v; ++log_n; }
+
+static void fn_a() { log_put(1); }
+static void fn_b() { log_put(2); }
+static void fn_ctx(void *ctx) { log_put(*(int *)ctx); }
 
 static DeferRing ring;
 
