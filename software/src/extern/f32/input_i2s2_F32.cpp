@@ -129,11 +129,25 @@ void AudioInputI2S2_F32::isr(void)
 			dest_left_f32 = &(left_f32->data[offset]);
 			dest_right_f32 = &(right_f32->data[offset]);
 			AudioInputI2S2_F32::block_offset = offset + audio_block_samples / 2;
+			// Peak of what the codec is actually handing us, tracked here
+			// because "is anything reaching the audio input at all" is a
+			// question the bench keeps asking and nothing could answer: a
+			// silent jack and a mis-configured ADC look identical from every
+			// counter we had. Two compares per sample pair, in a loop that is
+			// already touching every sample.
+			int32_t peak = (int32_t)OC::RT::stats.audio_in_peak;
 			do
 			{
-				*dest_left_f32++ = (float32_t)*src++;
-				*dest_right_f32++ = (float32_t)*src++;
+				const int32_t l = *src++;
+				const int32_t r = *src++;
+				const int32_t al = l < 0 ? -l : l;
+				const int32_t ar = r < 0 ? -r : r;
+				if (al > peak) peak = al;
+				if (ar > peak) peak = ar;
+				*dest_left_f32++ = (float32_t)l;
+				*dest_right_f32++ = (float32_t)r;
 			} while (src < end);
+			OC::RT::stats.audio_in_peak = (uint32_t)peak;
 		}
 		else
 		{

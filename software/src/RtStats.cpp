@@ -172,6 +172,11 @@ FLASHMEM void Report(bool reset_after) {
                 (unsigned long)c.audio_out.count, (unsigned long)c.audio_out.run_max,
                 (unsigned long)c.audio_out_half, (unsigned long)c.audio_out_alloc_fail,
                 (unsigned long)c.audio_out_len_mismatch, (unsigned long)c.audio_out_in_window);
+  // The codec hands us LEFT-JUSTIFIED 32-bit words (I32_TO_F32_NORM_FACTOR
+  // in basic_DSPutils.h is 1/(2^31 - 1)), so full scale is 2^31, not 2^24.
+  Serial.printf("audio in peak: %lu (%ld%% of full scale)\n",
+                (unsigned long)c.audio_in_peak,
+                (long)((uint64_t)c.audio_in_peak * 100 / 2147483648u));
   Serial.printf("audio in:  xrun=%lu alloc_fail=%lu in_window=%lu   f32 alloc_fail=%lu\n",
                 (unsigned long)c.audio_in_xrun, (unsigned long)c.audio_in_alloc_fail,
                 (unsigned long)c.audio_in_in_window, (unsigned long)c.f32_alloc_fail);

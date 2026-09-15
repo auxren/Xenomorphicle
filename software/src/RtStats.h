@@ -94,6 +94,11 @@ struct Counters {
   uint32_t audio_in_xrun;          // input ISR had nowhere to put half a block
   uint32_t audio_in_in_window;
   uint32_t audio_in_alloc_fail;
+  // Largest absolute sample the codec has handed us since the last reset.
+  // Not a budget row -- there is no "correct" input level -- but it is the
+  // only thing that distinguishes a silent patch cable from an input path
+  // that is not running at all.
+  uint32_t audio_in_peak;
   uint32_t f32_alloc_fail;
   uint32_t core_missed_ticks;      // CORE ISR entries that arrived >= 1.5 periods late
   uint32_t core_missed_in_window;
@@ -116,6 +121,7 @@ struct Counters {
     audio_out_half = audio_out_alloc_fail = audio_out_in_window = 0;
     audio_out_len_mismatch = 0;
     audio_in_xrun = audio_in_in_window = audio_in_alloc_fail = 0;
+    audio_in_peak = 0;
     f32_alloc_fail = 0;
     core_missed_ticks = core_missed_in_window = core_gap_max_us = core_isr_hiwater_us = 0;
     loop_pass_max_us = 0;
