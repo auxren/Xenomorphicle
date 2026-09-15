@@ -16,7 +16,7 @@ is no third category.
 |---|---|---|
 | Audio output blocks dropped, outside a declared window | 0 per hour | `audio out xrun` |
 | Audio input blocks lost, outside a declared window | 0 per hour | `audio in xrun` |
-| Declared persistence window | <= 250 ms, at most 1 per user gesture | `windows max` |
+| Declared persistence window | <= 300 ms, at most 1 per user gesture (see "The save window, measured") | `windows max` |
 | Background-write windows (not user-initiated) | 0: background writes defer to idle | `windows count` by reason |
 | CORE ISR duration, worst ever | <= 40 us of the 60 us period | `core isr max` |
 | CORE ISR missed ticks, outside a declared window | 0 | `core isr missed` |

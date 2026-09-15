@@ -60,10 +60,17 @@ megabyte free. Each container holds up to six sections in one file:
 | `G` | global settings + the slot manifest, in PhzConfig format |
 | `A` | the per-app chunk stream (`OC::AppData` serialization) |
 | `B` | the active Quadrants bank, extracted from its bank file |
-| `S` | a copy of `SCENERY.DAT` |
+| `S` | a copy of `SCENERY.DAT` — legacy, see below |
 | `C` | a copy of `CAPTAIN.DAT` |
 
-`SCENERY.DAT` and `CAPTAIN.DAT` are read from and written back to internal
+**The `S` section is legacy.** Scenery was deleted in the 2026-09-13 hard
+fork, so nothing writes an `S` section any more: the save still asks for
+`SCENERY.DAT`, finds no such file, and plans no section. The read side stays
+because presets saved before the fork still carry one, and a recall that
+silently dropped a section it did not understand would make those presets
+quietly lossy. It restores the file; nothing reads it.
+
+`CAPTAIN.DAT` is read from and written back to internal
 flash explicitly, because Captain MIDI itself calls PhzConfig
 with no filesystem argument — which defaults to internal flash. Quadrants bank
 files are the one thing that still follows the card, because that is where

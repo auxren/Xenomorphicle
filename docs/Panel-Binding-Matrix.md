@@ -77,7 +77,6 @@ inverting the actual behaviour.
 | App | Confirmed inversion | Notes |
 |---|---|---|
 | **NeuralNetwork** `NeuralNetwork.h:657-678` | yes | tip: `Up/Dn: Setup 1-4` |
-| **WaveformEditor** `WaveformEditor.h:414-436` | yes | tip: `Up/Dn: Switch Wave` |
 | **ScaleEditor** `ScaleEditor.h:380-402` | yes | popup, used inside ASR/QQ/DQ/Chords/Passencore/Sequins |
 | **Enigma** `Enigma.h:1244-1265` | no | encL cycles LIBRARY→ASSIGN→SONG→PLAY |
 | **TheDarkestTimeline** `TheDarkestTimeline.h:585-606` | no | tip: `Up/Dn: Arm Rec Trk` |

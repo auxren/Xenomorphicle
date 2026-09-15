@@ -25,8 +25,15 @@ One file per slot, `PB_NN.PBS`, containing up to five sections:
 | `G` | global settings and the slot manifest |
 | `A` | every app's serialized state |
 | `B` | the active Quadrants preset, extracted from its bank |
-| `S` | Scenery |
+| `S` | legacy, `SCENERY.DAT` — read, never written (see below) |
 | `C` | Captain MIDI |
+
+**The `S` section is legacy.** Scenery was deleted in the 2026-09-13 hard
+fork, so nothing writes an `S` section any more: the save still asks for
+`SCENERY.DAT`, finds no such file, and plans no section. The read side stays
+because presets saved before the fork still carry one, and a recall that
+silently dropped a section it did not understand would make those presets
+quietly lossy. It restores the file; nothing reads it.
 
 **Calibration is never in a preset.** It belongs to the physical module, not to
 a scene, so recalling somebody else's preset cannot untune your outputs.
@@ -161,8 +168,8 @@ dropped, because the disk is then newer. Switching apps away and back
 before the sync has run loads the recalled bank from RAM, not the stale
 file.
 
-The outgoing app's own suspend adds nothing. Quadrants and Scenery honour
-their auto-save on the way out of the app menu and into the screensaver,
+The outgoing app's own suspend adds nothing. Quadrants honours its
+auto-save on the way out of the app menu and into the screensaver,
 and Captain stores edits it has not yet settled; but on a recall the
 engine tells the outgoing app which file the slot is about to replace
 (`PresetEngine::RecallReplacing()`), and the app skips a save whose bytes
@@ -171,7 +178,7 @@ gone — that is what a recall means on a 200e — and the erase they used to
 buy (250 ms of frozen audio on every cross-app recall with edits pending)
 is gone with them. Measured: a SysEx edit to Captain followed at once by a
 bus recall shows `suspend 0` and no `Saving Config`. Recalling between
-slots that share Scenery and Captain sections — the common case, where the
+slots that share their Captain section — the common case, where the
 slots differ in the app or its bank — never touches internal flash at all.
 
 The only other write is deferred: three seconds after the last recall the
