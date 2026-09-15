@@ -123,16 +123,39 @@ FLASHMEM void AppTuner::WireAudio() {
   conn_notefreq_ = new AudioConnection(OC::AudioIO::InputStream(0), 0, notefreq_, 0);
   if (conn_strobe_) conn_strobe_->disconnect();
   if (conn_notefreq_) conn_notefreq_->disconnect();
+  // ONCE, here -- never again on resume. See SetActive() for why.
+  notefreq_.begin(0.15f);
 #endif
   audio_wired_ = true;
 }
 
+// Connect/disconnect only. begin() is NOT called here, and calling it here is
+// what used to kill the audio engine.
+//
+// AudioAnalyzeNoteFrequency::update() parks each incoming block in a 24-slot
+// list and releases the whole list only once it fills (analyze_notefreq.cpp).
+// begin() resets that index to zero and does not release what is parked, so
+// every call abandons however many blocks were mid-window -- on average about
+// half of 24. This ran on every APP_EVENT_RESUME, and a preset save is a
+// suspend/resume, so each save leaked ~11 int16 blocks of the 252-block pool.
+// About a dozen saves exhausted it; after that nothing in the instrument can
+// allocate an audio block and the codec output goes permanently silent until
+// a reboot. Measured on the bench 2026-09-14: 17 -> 35 -> 56 -> 78 -> 102.
+//
+// The library offers no end() to flush with (djphazer's framework package has
+// no such method, whatever TuneTrackerApplet::Unload thinks -- that Unload is
+// never instantiated, so its call to it has never been compiled). Calling
+// begin() exactly once is the fix that works with the library as it is: while
+// we are disconnected no blocks arrive, the parked ones stay parked rather
+// than leaking, and the list resumes filling on reconnect.
+//
+// Costs one imprecise reading on re-entry, from a window straddling the gap.
+// It self-corrects within 24 blocks, about 70 ms, faster than the display.
 FLASHMEM void AppTuner::SetActive(bool on) {
   WireAudio();
   if (on) {
     if (conn_strobe_) conn_strobe_->connect();
     if (conn_notefreq_) conn_notefreq_->connect();
-    notefreq_.begin(0.15f);
   } else {
     if (conn_strobe_) conn_strobe_->disconnect();
     if (conn_notefreq_) conn_notefreq_->disconnect();
