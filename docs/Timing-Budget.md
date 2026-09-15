@@ -124,3 +124,36 @@ the failure count. Pressing `T` again within 3 s resets every counter.
 `t` prints a one-line summary. The six breadcrumbs (audio out xruns, core
 missed ticks, loop pass max, allocation failures, window max, MIDI
 violations) are refreshed once a second and appear with the crash report.
+
+## What the budget has retired
+
+Two pieces of planned work were dropped because the counters above said
+there was nothing to fix. Both had looked obviously worth doing.
+
+**A load-shedding governor**, to drop applet `Controller()` calls when the
+CORE ISR ran long. Measured with Quadrants and its applets running, the ISR
+peaks at 31 us of its 60 us period. There is no overrun to shed, and
+skipping a `Controller()` is a wrong note.
+
+**Removing the per-tick `AudioNoInterrupts`.** `AudioAppletSubapp::
+Controller()` and `AudioAppletHost::Tick()` mask the audio interrupt around
+each applet's `Controller()`, every CORE tick, so that a parameter written
+as two stores cannot be read half-updated by `update()`. Replacing that with
+a generation counter or seqlock was scoped at three days and would have
+touched every audio applet -- the largest regression risk anywhere in the
+plan. Measured on hardware 2026-09-14, T41_console:
+
+| app | audio xrun | missed ticks | CORE gap max | CORE ISR max |
+|---|---|---|---|---|
+| Delay | 0 | 0 | 60 us | 24 us |
+| Reverb | 0 | 0 | 60 us | 25 us |
+| Bungverb | 0 | 0 | 60 us | 25 us |
+| Quadrants | 0 | 0 | 60 us | 29 us |
+| Delay, 120 encoder steps sweeping a parameter | 0 | 0 | 60 us | 27 us |
+
+A `gap_max` of exactly 60 us is one period: the ISR never ran late once. The
+sweep is the case the brackets exist for, and it costs nothing measurable.
+
+Revisit either only if a row here starts failing. The point of writing the
+ceilings down first was to be able to decide this with a number instead of
+an intuition, and in both cases the intuition was wrong.
