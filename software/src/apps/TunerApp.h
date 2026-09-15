@@ -18,7 +18,10 @@
 
 #include "../Audio/AudioAnalyzeStrobe.h"
 #include "../AudioIO.h"
-#include <analyze_notefreq.h>
+// The fork's own analyzer, not the stock <analyze_notefreq.h>. It has the
+// end() the stock class lacks, plus a low-pass pre-filter, confidence
+// hysteresis and octave-down guards. See SetActive() and Init().
+#include "../src/Audio/SafeNoteFrequencyAnalyzer.h"
 
 namespace TunerAppNS {
 
@@ -56,10 +59,12 @@ public:
 private:
   bool midi_out_ = true;   // pass MIDI through to the CV outs while tuning
   AudioAnalyzeStrobe strobe_;
-  AudioAnalyzeNoteFrequency notefreq_;
+  SafeNoteFrequencyAnalyzer notefreq_;
   AudioConnection *conn_strobe_ = nullptr;
   AudioConnection *conn_notefreq_ = nullptr;
   bool audio_wired_ = false;
+  // begin() allocates and end() frees, so the pair must not be run twice.
+  bool analyzer_running_ = false;
 
   // settings (persisted)
   uint16_t a4_hz_ = 440;
@@ -123,42 +128,41 @@ FLASHMEM void AppTuner::WireAudio() {
   conn_notefreq_ = new AudioConnection(OC::AudioIO::InputStream(0), 0, notefreq_, 0);
   if (conn_strobe_) conn_strobe_->disconnect();
   if (conn_notefreq_) conn_notefreq_->disconnect();
-  // ONCE, here -- never again on resume. See SetActive() for why.
-  notefreq_.begin(0.15f);
 #endif
   audio_wired_ = true;
 }
 
-// Connect/disconnect only. begin() is NOT called here, and calling it here is
-// what used to kill the audio engine.
+// begin() and end() are symmetric here, and the guard matters: begin()
+// heap-allocates the 6 KB analysis buffer and end() frees it, so an unpaired
+// second begin() would strand the first buffer.
 //
-// AudioAnalyzeNoteFrequency::update() parks each incoming block in a 24-slot
-// list and releases the whole list only once it fills (analyze_notefreq.cpp).
-// begin() resets that index to zero and does not release what is parked, so
-// every call abandons however many blocks were mid-window -- on average about
-// half of 24. This ran on every APP_EVENT_RESUME, and a preset save is a
-// suspend/resume, so each save leaked ~11 int16 blocks of the 252-block pool.
-// About a dozen saves exhausted it; after that nothing in the instrument can
-// allocate an audio block and the codec output goes permanently silent until
-// a reboot. Measured on the bench 2026-09-14: 17 -> 35 -> 56 -> 78 -> 102.
-//
-// The library offers no end() to flush with (djphazer's framework package has
-// no such method, whatever TuneTrackerApplet::Unload thinks -- that Unload is
-// never instantiated, so its call to it has never been compiled). Calling
-// begin() exactly once is the fix that works with the library as it is: while
-// we are disconnected no blocks arrive, the parked ones stay parked rather
-// than leaking, and the list resumes filling on reconnect.
-//
-// Costs one imprecise reading on re-entry, from a window straddling the gap.
-// It self-corrects within 24 blocks, about 70 ms, faster than the display.
+// The stock AudioAnalyzeNoteFrequency could not do this. Its update() parks
+// blocks in a 24-slot list and releases them only when the list fills, and
+// its begin() zeroes that index without releasing what is parked -- so
+// begin()-on-resume abandoned ~11 audio blocks of the 252-block pool on every
+// preset save, and a dozen saves silenced the codec for good (e111679b).
+// SafeNoteFrequencyAnalyzer::end() drains the input queue, releases both
+// blocklists and frees the buffer, so the Tuner can now give its blocks and
+// its 6 KB back whenever it leaves the screen instead of parking them.
 FLASHMEM void AppTuner::SetActive(bool on) {
   WireAudio();
   if (on) {
     if (conn_strobe_) conn_strobe_->connect();
     if (conn_notefreq_) conn_notefreq_->connect();
+    if (!analyzer_running_) {
+      // 7 kHz is well above the top of the range this tuner reads and takes
+      // the converter hash off the signal before YIN sees it; the same cutoff
+      // TuneTrackerApplet uses.
+      notefreq_.begin(0.15f, 7000.0f);
+      analyzer_running_ = true;
+    }
   } else {
     if (conn_strobe_) conn_strobe_->disconnect();
     if (conn_notefreq_) conn_notefreq_->disconnect();
+    if (analyzer_running_) {
+      notefreq_.end();
+      analyzer_running_ = false;
+    }
   }
   strobe_.setActive(on);
 }
