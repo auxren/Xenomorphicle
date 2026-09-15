@@ -59,7 +59,13 @@
 #include "PresetBus200e.h"  // BUS200E_OP_BACKUP / BUS200E_OP_RESTORE
 
 // FSM states, exposed for status reporting (UI, USB bridge, tests).
-typedef enum {
+//
+// Fixed underlying type on purpose. Without one an enum's valid range stops
+// at the smallest bit-field holding its largest enumerator -- 0..7 here -- so
+// merely LOADING a value past that is undefined, and the tests that prove no
+// state can strand the caller do exactly that by design. uint8_t makes every
+// value they can pass a legal one. (Caught by UBSan, 2026-09-14.)
+typedef enum : uint8_t {
   BUS200E_MASTER_IDLE = 0,
   BUS200E_MASTER_FINDING_CARD,   // probing candidate card addresses
   BUS200E_MASTER_SENDING,        // waiting for a quiet bus to master the cmd
@@ -234,7 +240,7 @@ void Bus200eMasterReset(void);
 // Consequence for callers: the "version string" a reply carries is, on real
 // hardware, one opaque byte. A DONE query means "that address is occupied
 // and answering"; it does not identify the module.
-typedef enum {
+typedef enum : uint8_t {   // fixed underlying type, see Bus200eMasterState
   BUS200E_QUERY_IDLE = 0,
   BUS200E_QUERY_SENDING,   // waiting for a quiet bus to master the request
   BUS200E_QUERY_WAITING,   // request sent; waiting for the module's reply

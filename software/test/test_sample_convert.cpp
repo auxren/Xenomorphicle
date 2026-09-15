@@ -80,7 +80,9 @@ int main() {
   //     decode to the same float (int16<<8 == same amplitude in 24-bit) ---
   {
     for (int32_t s = -32768; s <= 32767; s += 127) {
-      int32_t v = s << 8;
+      // * 256, not << 8: s goes negative and left-shifting a negative
+      // value is undefined before C++20. Same arithmetic, defined.
+      int32_t v = s * 256;
       uint8_t b[3] = {
         (uint8_t)(v & 255), (uint8_t)((v >> 8) & 255), (uint8_t)((v >> 16) & 255)
       };
