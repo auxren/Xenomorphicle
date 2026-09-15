@@ -88,7 +88,11 @@ struct DeferRing {
     e.ctx = ctx;
     barrier();
     w = (uint8_t)(w + 1);
-    if (depth + 1 > high_water) high_water = depth + 1;
+    // depth is uint8_t, so depth + 1 promotes to int and comparing that
+    // against a uint32_t is a sign-compare. Harmless at these values, but
+    // GCC puts -Wsign-compare in -Wall for C++ and CI builds -Werror.
+    const uint32_t depth_now = (uint32_t)depth + 1u;
+    if (depth_now > high_water) high_water = depth_now;
     return true;
   }
 };
