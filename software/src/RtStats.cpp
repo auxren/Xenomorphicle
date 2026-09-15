@@ -133,9 +133,10 @@ PersistenceWindow::PersistenceWindow(const char *reason, uint32_t declared_max_m
 }
 
 PersistenceWindow::~PersistenceWindow() {
+  // Measured to HERE: the stall is over, and the reported number should be
+  // the stall, not the stall plus the ramp back.
   const uint32_t ms = (ARM_DWT_CYCCNT - start_cycles_) / (F_CPU_ACTUAL / 1000);
   if (window_depth) window_depth--;
-  if (!window_depth) window_open = false;
   if (ms > stats.window_max_ms) stats.window_max_ms = ms;
   if (ms > declared_max_ms_) {
     stats.window_violations++;
@@ -150,6 +151,15 @@ PersistenceWindow::~PersistenceWindow() {
     AudioOutputI2S2_F32::master_gain = 1.0f;   // exactly unity, not nearly
   }
 #endif
+  // Closed only NOW, after the ramp. update_all() has not run for the whole
+  // stall, so the first few block periods of the fade-in can still come up
+  // empty while the graph refills -- that is the stall's recovery, not normal
+  // operation, and counting it as an out-of-window xrun failed a budget row
+  // for doing exactly what the design intends. Measured before this: 12 saves
+  // produced 7 output and 2 input drops attributed outside any window, all in
+  // runs of 1-2 blocks, with every missed CORE tick correctly inside one.
+  // Same mistake as the first MIDI poll after a window, fixed earlier.
+  if (!window_depth) window_open = false;
 }
 
 FLASHMEM static void print_hist(const char *label, const Hist8 &h) {

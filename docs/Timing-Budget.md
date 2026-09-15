@@ -157,3 +157,47 @@ sweep is the case the brackets exist for, and it costs nothing measurable.
 Revisit either only if a row here starts failing. The point of writing the
 ceilings down first was to be able to decide this with a number instead of
 an intuition, and in both cases the intuition was wrong.
+
+## The save window, measured
+
+The declared persistence window ceiling is 300 ms. It started at 250, set
+before anything had been measured, against a documented save cost of 2748 ms.
+Neither number survived contact with the bench.
+
+32 consecutive saves of slot 0, T41_console, 2026-09-14:
+
+| | wall |
+|---|---|
+| four saves in five | 129-139 ms |
+| every fifth save | 192-259 ms |
+
+The fifth-save step is deterministic, not noise: 6 spikes in 6, at saves 5,
+10, 15, 20, 25 and 30.
+
+The save is one phase. Of a 130 ms save, `cw_commit` is 126; capture, flush,
+bank, files, globals, appdata, verify and resume are 0 or 1 ms each. That
+phase writes a 4940-byte container across two 4 KB flash blocks, and the
+erase is the floor -- roughly 43 ms per block on this part. No amount of code
+makes writing those bytes faster.
+
+The periodic step on top is LittleFS compacting the directory metadata pair.
+Each save spends several metadata commits: the temp file is removed, created,
+written, verified and renamed, and the Teensy wrapper additionally writes a
+creation and a modified timestamp attribute on every open for write. Those
+fill a 4 KB metadata block after about five saves, and compacting it costs
+another erase.
+
+**Why it is not reduced.** The obvious cheap win -- dropping the `remove()`
+before the truncating open in `cw_commit` -- is not available: the wrapper
+opens with `LFS_O_RDWR | LFS_O_CREAT` and no `LFS_O_TRUNC`, so that remove is
+load-bearing and without it a shorter container would keep the previous one's
+tail. Moving the compaction to an idle gap would need `lfs_fs_gc`, which
+arrived after the LittleFS 2.4 this framework ships. Writing less would mean
+the container referencing its sections instead of copying them, which trades
+the one property that makes a preset safe -- that it is a self-contained
+snapshot -- for about 40 ms.
+
+So the window is bounded by flash physics and a filesystem that cannot be
+asked to tidy up early. A 250 ms line failed a budget row every fifth save on
+behaviour that is correct and unimprovable. 300 reflects what the hardware
+does and still catches a regression.

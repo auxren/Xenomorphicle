@@ -127,10 +127,14 @@ static void test_xrun_inside_declared_window_is_allowed() {
 
 static void test_core_isr_ceilings() {
   Counters c = clean_counters();
-  c.core_isr_hiwater_us = 41;
+  // Off the constants, never a literal: these tests assert that a counter
+  // one past the ceiling fails, which is true whatever the ceiling is. A
+  // hardcoded 251 silently stopped testing anything the moment the window
+  // ceiling moved to 300.
+  c.core_isr_hiwater_us = Budget::kCoreIsrUs + 1;
   Verdict v = Evaluate(c);
   CHECK(!v.pass[Verdict::CORE_ISR_US]);
-  c.core_isr_hiwater_us = 40;
+  c.core_isr_hiwater_us = Budget::kCoreIsrUs;
   c.core_missed_ticks = 1;
   v = Evaluate(c);
   CHECK(v.pass[Verdict::CORE_ISR_US]);
@@ -139,7 +143,7 @@ static void test_core_isr_ceilings() {
 
 static void test_loop_and_midi_percentile_rows() {
   Counters c = clean_counters();
-  c.loop_pass_max_us = 5001;
+  c.loop_pass_max_us = Budget::kLoopP100Us + 1;
   for (int i = 0; i < 100; ++i) c.loop_hist.add(150);   // p95 bound 200: pass
   for (int i = 0; i < 100; ++i) c.midi_hist.add(1500);  // p95 bound 2000: fail
   Verdict v = Evaluate(c);
@@ -167,7 +171,7 @@ static void test_deferred_call_drop_fails_its_row() {
 static void test_alloc_failures_and_window_length() {
   Counters c = clean_counters();
   c.f32_alloc_fail = 1;
-  c.window_max_ms = 251;
+  c.window_max_ms = Budget::kWindowMs + 1;
   Verdict v = Evaluate(c);
   CHECK(!v.pass[Verdict::ALLOC]);
   CHECK(!v.pass[Verdict::WINDOW_MS]);

@@ -82,7 +82,19 @@ struct Budget {
   static constexpr uint32_t kLoopP95Us = 200;
   static constexpr uint32_t kMidiP95Us = 1000;
   static constexpr uint32_t kMidiGapBudgetUs = 5000;  // p100: any gap above counts
-  static constexpr uint32_t kWindowMs = 250;
+  // 300, not the 250 this started at. Measured over 32 consecutive saves on
+  // T41_console (2026-09-14): 129-139 ms for four saves in five, then
+  // 192-259 ms on every fifth, deterministically -- 6 spikes in 6 at saves 5,
+  // 10, 15, 20, 25, 30. The save is 98% one phase, cw_commit, writing a
+  // 4940-byte container across two 4 KB flash blocks; that erase time is the
+  // floor and no amount of code makes it smaller. The periodic step on top is
+  // LittleFS compacting its directory metadata pair, which fills after about
+  // five saves' worth of commits. LittleFS 2.4 is what ships here and it has
+  // no lfs_fs_gc, so there is no way to make that happen at idle instead.
+  // A 250 ms line cried wolf every fifth save on behaviour that is correct
+  // and unimprovable; 300 still catches a real regression. See
+  // docs/Timing-Budget.md.
+  static constexpr uint32_t kWindowMs = 300;
 };
 
 struct Counters {
