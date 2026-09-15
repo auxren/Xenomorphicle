@@ -46,6 +46,14 @@
 #include "OC_input_maps.h"
 #include "OC_pitch_utils.h"
 #include "OC_euclidean_mask_draw.h"
+#ifdef XENO_CODEC_AUDIO
+// For AudioNoInterrupts/AudioInterrupts around the app-switch teardown below.
+// This used to arrive by accident, pulled in transitively by whichever audio
+// app header a given build happened to include, and the call sites were
+// guarded on AUDIO_INTERFACE so the accident held. It does not hold for a
+// build with the codec but no audio apps (T41_MTP), so name the dependency.
+#include "AudioIO.h"
+#endif
 #include "OC_trigger_delays.h"
 
 #include "OC_calibration.h"
@@ -55,13 +63,12 @@
 #include "util/util_pagestorage.h"
 #include "src/drivers/EEPROMStorage.h"
 #include "PhzConfig.h"
-#include "VBiasManager.h"
 #include "HSClockManager.h"
 
 #ifndef NO_HEMISPHERE
 // applets
 #include "applets/_config.h"
-#ifdef ARDUINO_TEENSY41
+#ifdef XENO_CODEC_AUDIO
 #include "audio_applets/_config.h"
 #endif
 #endif
@@ -79,6 +86,7 @@
 
 // actual apps are included and instantiated here
 #include "apps/_config.h"
+#include "OC_app_folders.h"
 
 namespace OC {
 
@@ -104,12 +112,61 @@ enum GlobalSettingsDataKeys : uint16_t {
   WAVEFORMS_KEY       = 6 << 8,
   AUTOCAL_KEY         = 7 << 8,
   PRESETBUS_KEY       = 8 << 8, // preset-bus module addr + slot manifests
+  APPFOLDER_KEY       = 11 << 8, // app-switcher folder assignments
+                                 // (9 is CaptainMIDI's DEVICE_PROFILE_KEY,
+                                 // apps/CaptainMIDI.h -- it lives in this same
+                                 // GLOBALS.CFG and is NOT free; 10 is
+                                 // HSUtils' clock routing)
 
   // lower 8 bits of key
   SCALE_METADATA = 0xff,
   SCALE_NOTEDATA = 0,
 };
 #endif
+
+// Which folder each app sits in, for the app switcher. Position-indexed, 4
+// bits per app, mirroring HS::hidden_applets[2]. See OC_app_folders.h.
+static OC::AppFolders::State app_folders;
+
+// Put every app in the folder OC_app_folders.h's table names for it. Keyed by
+// app ID, so this is correct for whatever roster the running build has.
+//
+// Note what this does NOT buy: it only runs when there is no stored
+// arrangement to apply. Once anything has written one, the stored words are
+// position-indexed and win, which is what the roster stamp below exists to
+// police.
+FLASHMEM
+static void SeedAppFolderDefaults() {
+  const size_t n = app_container.num_apps();
+  for (size_t i = 0; i < n && i < OC::AppFolders::kMaxApps; ++i)
+    app_folders.Set(i, OC::AppFolders::DefaultFor(app_container[i].id()));
+}
+
+// Identifies the app roster a stored, POSITION-indexed folder arrangement was
+// written against: the app count, plus an FNV-1a hash of every app id in
+// container order. Any insertion, removal or reordering changes it.
+//
+// Without this the arrangement is silently reinterpreted after the single most
+// common real-world transition. Flashing T41 (10 apps) and then T41_audio (15)
+// inserts AppTuner at position 6 and shifts everything after it, so Tuner comes
+// up under SYSTEM, the 200e app under PITCH, and the whole tail under APPLETS
+// because those nibbles were never written. Nothing becomes unreachable -- Of()
+// clamps and the switcher's turn skips empty folders -- but the taxonomy is
+// gone, which is the entire point of the feature.
+//
+// apps/Bus200eApp.h stamps its scan bitmap with the module-table size for
+// exactly this reason: refuse a set built against a different table rather than
+// read old bits as new meanings.
+FLASHMEM
+static uint64_t AppFolderRosterStamp() {
+  const size_t n = app_container.num_apps();
+  uint64_t h = 1469598103934665603ull;   // FNV-1a offset basis
+  for (size_t i = 0; i < n; ++i) {
+    h ^= app_container[i].id();
+    h *= 1099511628211ull;
+  }
+  return (h & ~0xffffull) | (uint64_t)(n & 0xffff);
+}
 
 #ifdef __IMXRT1062__
 // Write the global-settings key/values into the *currently loaded* PhzConfig
@@ -126,6 +183,12 @@ void BuildGlobalSettingsValues() {
   Pack(data, PackLocation{17, 1}, 1); // v2.0 first-run validation
   Pack(data, PackLocation{18, 1}, global_settings.invert_display);
   PhzConfig::setValue(METADATA_KEY, data);
+
+  // App-switcher folders, stamped with the roster they are indexed against.
+  // The words are position-indexed, so they are meaningless without it.
+  PhzConfig::setValue(APPFOLDER_KEY | 0, app_folders.bits[0]);
+  PhzConfig::setValue(APPFOLDER_KEY | 1, app_folders.bits[1]);
+  PhzConfig::setValue(APPFOLDER_KEY | 2, AppFolderRosterStamp());
 
   // User Scales
   for (size_t i = 0; i < Scales::SCALE_USER_COUNT; ++i) {
@@ -441,6 +504,39 @@ FLASHMEM
 void RestoreGlobalSettingsFromConfig(uint8_t scala_loaded_mask) {
   uint64_t data = 0;
 
+  // App-switcher folders. Deliberately NOT seeded before the read, unlike the
+  // first version of this: an absent key means "leave the live value alone"
+  // here, exactly as it does for scales, patterns, chords, Turing machines and
+  // waveforms below.
+  //
+  // Seeding first destroyed user data on every power-up. This function's other
+  // caller is a preset recall (PresetEngine.cpp), where the resident map is a
+  // preset CONTAINER's G section, not GLOBALS.CFG -- and any container captured
+  // before folders existed has no APPFOLDER_KEY at all. Boot enqueues
+  // REQ_BOOT_RECALL whenever the slot is used (Main.cpp), so the arrangement,
+  // including one deliberately saved to GLOBALS.CFG, was overwritten with
+  // compiled defaults a second or two after every boot. Deterministic, not a
+  // race. Boot seeds these in SeedGlobalSettingsDefaults() instead, on both
+  // branches, before this runs.
+  {
+    uint64_t w0 = 0, w1 = 0, stamp = 0;
+    const bool have_w0 = PhzConfig::getValue(APPFOLDER_KEY | 0, w0);
+    const bool have_w1 = PhzConfig::getValue(APPFOLDER_KEY | 1, w1);
+    const bool have_stamp = PhzConfig::getValue(APPFOLDER_KEY | 2, stamp);
+    if (have_w0 || have_w1) {
+      if (have_stamp && stamp == AppFolderRosterStamp()) {
+        app_folders.bits[0] = w0;
+        app_folders.bits[1] = w1;
+      } else {
+        // Written against a different app roster (or by a build that predates
+        // the stamp), so the nibbles no longer name the apps they did. Refuse
+        // the set and fall back to the ID-keyed defaults, which are correct for
+        // whatever roster is running now.
+        SeedAppFolderDefaults();
+      }
+    }
+  }
+
   // User Scales
   for (size_t i = 0; i < Scales::SCALE_USER_COUNT; ++i) {
     if ((scala_loaded_mask & (1 << i)) ||
@@ -526,10 +622,6 @@ void AppSwitcher::set_current_app(size_t index)
 {
   current_app_ = app_container[index];
   global_settings.current_app_id = current_app_.id();
-  #ifdef VOR
-  VBiasManager *vbias_m = vbias_m->get();
-  vbias_m->SetStateForApp(current_app_);
-  #endif
 }
 
 // Factory defaults for the global settings themselves. One definition shared
@@ -543,6 +635,7 @@ static void SeedGlobalSettingsDefaults() {
   global_settings.reserved1 = false;
   global_settings.reserved2 = 0U;
   global_settings.current_app_id = DEFAULT_APP_ID;
+  SeedAppFolderDefaults();
 }
 
 // True once Init() has completed. It tells the boot call (nothing is live
@@ -861,7 +954,19 @@ void draw_save_message(uint8_t c) {
 
 FLASHMEM
 bool Ui::AppSettings(bool drawmenu) {
-  static menu::ScreenCursor<5> cursor;
+  // Four rows, not five: the folder header takes the top of the screen. A
+  // folder holds a handful of apps rather than all thirty-two, so the window
+  // lost a row and the scrolling got shorter anyway.
+  static menu::ScreenCursor<4> cursor;
+  static int folder_tab = 0;
+  static uint8_t visible_apps[OC::AppFolders::kMaxApps];
+  static int visible_count = 0;
+  static bool move_notice = false;
+  static uint8_t move_notice_folder = 0;
+  static elapsedMillis move_notice_time;
+  // X/Y mutate the arrangement in RAM. Nothing else on this screen persists
+  // it, so it needs flushing on the way out -- see the exit block below.
+  static bool folders_dirty = false;
   static bool change_app = false;
   static bool save = false;
   static bool opened = false;
@@ -874,10 +979,33 @@ bool Ui::AppSettings(bool drawmenu) {
   // that the legend it covers is back before the next thing you try.
   static constexpr uint32_t kAccelNoticeMs = 2000;
 
+  // Long enough to read a folder name, short enough to stay out of the way
+  // while walking an app across several folders with repeated presses.
+  static constexpr uint32_t kMoveNoticeMs = 1200;
+
+  // The apps in the folder on screen, in roster order. Rebuilt whenever the
+  // folder changes or an app leaves it, which is the only time it can change.
+  auto rebuild_visible = [&]() {
+    const size_t n = app_container.num_apps();
+    visible_count = 0;
+    for (size_t i = 0; i < n && i < OC::AppFolders::kMaxApps; ++i)
+      if (static_cast<int>(app_folders.Of(i)) == folder_tab)
+        visible_apps[visible_count++] = static_cast<uint8_t>(i);
+    cursor.Init(0, visible_count > 0 ? visible_count - 1 : 0);
+  };
+
   // --- state change: entering App Menu
   if (!opened) {
-    cursor.Init(0, app_container.num_apps() - 1);
-    cursor.Scroll(app_container.IndexOfAppByID(global_settings.current_app_id));
+    // Open on the folder holding the app you are in, never on folder 0. The
+    // switcher is the only route between apps, so it must always open showing
+    // you where you already are.
+    const int cur = app_container.IndexOfAppByID(global_settings.current_app_id);
+    folder_tab = (cur >= 0) ? static_cast<int>(app_folders.Of(cur)) : 0;
+    rebuild_visible();
+    for (int i = 0; i < visible_count; ++i) {
+      if (visible_apps[i] == cur) { cursor.Scroll(i); break; }
+    }
+    move_notice = false;
     opened = true;
   }
 
@@ -896,10 +1024,39 @@ bool Ui::AppSettings(bool drawmenu) {
     if (global_settings.encoders_enable_acceleration)
       graphics.drawBitmap8(120, 1, 4, bitmap_indicator_4x8);
 
-    weegfx::coord_t y = 0;
-    for (int current = max(cursor.first_visible(), 0);
-         current <= cursor.last_visible() && current < (int)app_container.num_apps();
-         ++current, y += kAppLineH) {
+    // The folder header. Chevrons rather than inversion, deliberately: L-06's
+    // rule is that inversion means "the RIGHT encoder changes this", and the
+    // right encoder does not change the folder -- the left one does. Inverting
+    // this row would make it the instrument's seventh meaning for inversion.
+    {
+      graphics.setPrintPos(2, 1);
+      graphics.print('<');
+      graphics.setPrintPos(14, 1);
+      graphics.print(OC::AppFolders::kFolderName[folder_tab]);
+      graphics.setPrintPos(92, 1);
+      graphics.print(folder_tab + 1);
+      graphics.print('/');
+      graphics.print((int)OC::AppFolders::FOLDER_COUNT);
+      graphics.setPrintPos(120, 1);
+      graphics.print('>');
+      graphics.drawHLine(0, 10, menu::kDisplayWidth);
+    }
+
+    // Defensive, and expected to be unreachable: the switcher opens on a
+    // folder that contains at least the running app, turning skips empty
+    // folders, and moving an app follows it. No path lands here. It stays
+    // because the alternative if one ever does is a blank screen, which reads
+    // as a hang rather than as a folder with nothing in it.
+    if (visible_count == 0) {
+      graphics.setPrintPos(kNameX, 12);
+      graphics.print("(empty)");
+    }
+
+    weegfx::coord_t y = 11;
+    for (int vi = max(cursor.first_visible(), 0);
+         vi <= cursor.last_visible() && vi < visible_count;
+         ++vi, y += kAppLineH) {
+      const int current = visible_apps[vi];
       // todo: make a secret button combo to switch to boring names
       // if (your_mom_is_boring)
       //   graphics.print(app_container[current]->boring_name());
@@ -910,7 +1067,7 @@ bool Ui::AppSettings(bool drawmenu) {
       if (global_settings.current_app_id == app_container[current].id())
         graphics.drawBitmap8(0, y + 1, 8, ZAP_ICON);
 
-      if (current == cursor.cursor_pos()) {
+      if (vi == cursor.cursor_pos()) {
         // The selection bar used to run to x=127 regardless: 118px of the
         // screen's brightest object for a name that needs 66, so nearly half of
         // it was blank. Hug the text instead -- the bar means "this one", and a
@@ -935,13 +1092,20 @@ bool Ui::AppSettings(bool drawmenu) {
                      ? "Encoder accel: ON" : "Encoder accel: OFF");
     else if (encoder_r_held)
       graphics.print("keep holding to save");
+    else if (move_notice && move_notice_time < kMoveNoticeMs) {
+      // Where it went, in words. A folder move is invisible otherwise: the app
+      // simply leaves the screen, which on its own reads as having deleted it.
+      graphics.print("moved to ");
+      graphics.print(OC::AppFolders::kFolderName[move_notice_folder]);
+    }
     else
-      graphics.print("encR:pick  encL:back");
+      // Three controls, one 21-column row. encL's PRESS is still cancel, as it
+      // is everywhere else in the instrument, but its label lost the argument
+      // with X:move -- an unlabelled move gesture would be undiscoverable,
+      // where backing out is the one thing a player already reaches for by
+      // habit. "L:fldr" is its turn; the press keeps working unannounced.
+      graphics.print("L:fldr R:pick X:move");
 
-#ifdef VOR
-    VBiasManager *vbias_m = vbias_m->get();
-    vbias_m->DrawPopupPerhaps();
-#endif
 
     return true;
   }
@@ -957,6 +1121,53 @@ bool Ui::AppSettings(bool drawmenu) {
       case CONTROL_ENCODER_R:
         if (UI::EVENT_ENCODER == event.type)
           cursor.Scroll(event.value);
+        break;
+
+      case CONTROL_ENCODER_L:
+        // Turning encL changes folder. Its PRESS is still cancel, below --
+        // these are separate events and the turn was previously unbound here.
+        if (UI::EVENT_ENCODER == event.type && event.value != 0) {
+          const int dir = event.value > 0 ? 1 : -1;
+          // Skip folders with nothing in them, so emptying one does not leave
+          // a dead turn in the rotation. The loop is bounded by the folder
+          // count, so an all-empty roster (impossible: the apps are somewhere)
+          // would stop rather than spin.
+          for (int n = 0; n < OC::AppFolders::FOLDER_COUNT; ++n) {
+            folder_tab = (folder_tab + dir + OC::AppFolders::FOLDER_COUNT)
+                       % OC::AppFolders::FOLDER_COUNT;
+            rebuild_visible();
+            if (visible_count > 0) break;
+          }
+          move_notice = false;
+        }
+        break;
+
+      case CONTROL_BUTTON_UP2:    // X
+      case CONTROL_BUTTON_DOWN2:  // Y
+        // Move the app under the cursor one folder on, wrapping. Wrapping is
+        // what makes this safe to poke at: every press is one press from being
+        // undone, and no run of presses reaches a state that is not a folder.
+        if (UI::EVENT_BUTTON_PRESS == event.type && visible_count > 0) {
+          const int dir = (CONTROL_BUTTON_UP2 == event.control) ? 1 : -1;
+          const int pos = cursor.cursor_pos();
+          const size_t moved = visible_apps[pos];
+          app_folders.Nudge(moved, dir);
+          folders_dirty = true;
+          move_notice_folder = static_cast<uint8_t>(app_folders.Of(moved));
+          move_notice = true;
+          move_notice_time = 0;
+          // Follow the app to its new folder, always. The alternative --
+          // staying put so a run of apps can be filed without the screen
+          // moving -- makes X and Y stop being inverses the moment a folder
+          // empties, because an empty folder has no row under the cursor and
+          // so no way to move anything back. Watching the app travel is also
+          // simply the clearer model of what the button did.
+          folder_tab = move_notice_folder;
+          rebuild_visible();
+          for (int i = 0; i < visible_count; ++i) {
+            if (visible_apps[i] == moved) { cursor.Scroll(i); break; }
+          }
+        }
         break;
 
       case CONTROL_BUTTON_R:
@@ -977,13 +1188,6 @@ bool Ui::AppSettings(bool drawmenu) {
             ui.DebugStats();
         break;
       case CONTROL_BUTTON_UP:
-#ifdef VOR
-        // VBias menu for units without Range button
-        if (UI::EVENT_BUTTON_LONG_PRESS == event.type || UI::EVENT_BUTTON_DOWN == event.type) {
-          VBiasManager *vbias_m = vbias_m->get();
-          vbias_m->AdvanceBias();
-        }
-#endif
         break;
       case CONTROL_BUTTON_DOWN:
         // B is the button directly below the A you are holding to be in this
@@ -1014,6 +1218,7 @@ bool Ui::AppSettings(bool drawmenu) {
   cancel = false;
   encoder_r_held = false;
   accel_notice = false;
+  move_notice = false;
   event_queue_.Flush();
   event_queue_.Poke();
 
@@ -1022,7 +1227,9 @@ bool Ui::AppSettings(bool drawmenu) {
   delay(1);
 
   if (change_app) {
-    app_switcher.set_current_app(cursor.cursor_pos());
+    // cursor_pos() indexes the folder's list, not the roster.
+    if (visible_count > 0)
+      app_switcher.set_current_app(visible_apps[cursor.cursor_pos()]);
     FreqMeasure.end();
     OC::DigitalInputs::reInit();
     if (save) {
@@ -1043,6 +1250,29 @@ bool Ui::AppSettings(bool drawmenu) {
   }
 
   OC::ui.encoders_enable_acceleration(global_settings.encoders_enable_acceleration);
+
+#ifdef __IMXRT1062__
+  // Persist an X/Y move on ANY way out of this screen, not just the long-press
+  // that saves everything. The move was only ever written by SaveAppData()
+  // above, gated on a long press of encR, so a plain pick, an encL cancel or
+  // the timeout all discarded it -- while the legend says "X:move" and never
+  // says the move needs a hold to survive.
+  //
+  // The hidden_applets analogy this was built on fails exactly here: Quadrants
+  // auto-saves that on Suspend, and app_folders has no equivalent owner.
+  //
+  // Same three lines every other light-weight writer of GLOBALS.CFG uses
+  // (apps/SETTINGS.h's invert-display commit, Bus200eApp's scan persist): own
+  // the map, re-state all the global settings into it so a virgin module does
+  // not get a file with only these keys and no METADATA_KEY, then write it.
+  // Ordered before APP_EVENT_RESUME so the map is handed back first.
+  if (folders_dirty) {
+    PhzConfig::load_config();
+    BuildGlobalSettingsValues();
+    PhzConfig::save_config();
+    folders_dirty = false;
+  }
+#endif
 
   // Restore state
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
@@ -1110,7 +1340,7 @@ FLASHMEM void SwitchToApp(size_t index) {
   delay(1);
   FreqMeasure.end();
   DigitalInputs::reInit();
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   AudioNoInterrupts();
 #endif
   app_switcher.set_current_app(index);
@@ -1120,7 +1350,7 @@ FLASHMEM void SwitchToApp(size_t index) {
   // last recalled.
   PresetEngine::NoteAppOnScreen();
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   AudioInterrupts();
 #endif
   CORE::app_isr_enabled = true;
@@ -1150,7 +1380,7 @@ FLASHMEM void ReinitApps(bool reset_settings) {
   delay(1);
   FreqMeasure.end();
   DigitalInputs::reInit();
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   AudioNoInterrupts();
 #endif
   app_switcher.Init(reset_settings);
@@ -1158,7 +1388,7 @@ FLASHMEM void ReinitApps(bool reset_settings) {
   // names now describes presets that no longer exist.
   if (reset_settings) PresetEngine::Init();
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   AudioInterrupts();
 #endif
   CORE::app_isr_enabled = true;

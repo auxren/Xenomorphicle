@@ -311,13 +311,6 @@ public:
 
     // TODO[PLD] Scale range or offset?
     uint16_t b = bytebeat_.ProcessSingleSample(gate_state);
-/*
-    #ifdef NORTHERNLIGHT
-      uint32_t value = OC::DAC::get_zero_offset(channel) + b;
-    #else
-      uint32_t value = OC::DAC::get_zero_offset(channel) + (int16_t)b;
-    #endif
-*/
     ioframe->outputs.set_raw_value(channel, b);
 
     b >>= 8;

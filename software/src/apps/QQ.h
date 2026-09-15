@@ -29,11 +29,7 @@
 
 #include "../src/extern/peaks_bytebeat.h"
 
-#ifdef NORTHERNLIGHT
- #define QQ_OFFSET_X 20
-#else
  #define QQ_OFFSET_X 31
-#endif
 
 enum ChannelSetting : uint8_t {
   CHANNEL_SETTING_SCALE,

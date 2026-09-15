@@ -16,11 +16,7 @@
 namespace OC {
 
 static constexpr uint16_t _ADC_OFFSET_NLM = 4095; // 0V == maximum 12-bit ADC value
-#ifdef NORTHERNLIGHT
-static constexpr uint16_t _ADC_OFFSET = (uint16_t)((float)pow(2,OC::ADC::kAdcResolution)*1.0f);   // ADC offset @3.3V
-#else
 static constexpr uint16_t _ADC_OFFSET = (uint16_t)((float)pow(2,OC::ADC::kAdcResolution)*0.6666667f); // ADC offset @2.2V
-#endif
 
 static constexpr unsigned kCalibrationAdcSmoothing = 4;
 
@@ -28,13 +24,6 @@ enum CALIBRATION_STEP {
   HELLO,
   CENTER_DISPLAY,
 
-  #ifdef VOR
-  DAC_A_VOLT_MIN, DAC_A_VOLT_HIGH,
-  DAC_B_VOLT_MIN, DAC_B_VOLT_HIGH,
-  DAC_C_VOLT_MIN, DAC_C_VOLT_HIGH,
-  DAC_D_VOLT_MIN, DAC_D_VOLT_HIGH,
-  V_BIAS_BIPOLAR, V_BIAS_ASYMMETRIC,
-  #else
   DAC_A_VOLT_MIN, DAC_A_VOLT_HIGH,
   DAC_B_VOLT_MIN, DAC_B_VOLT_HIGH,
   DAC_C_VOLT_MIN, DAC_C_VOLT_HIGH,
@@ -45,7 +34,6 @@ enum CALIBRATION_STEP {
   DAC_G_VOLT_MIN, DAC_G_VOLT_HIGH,
   DAC_H_VOLT_MIN, DAC_H_VOLT_HIGH,
 #endif
-  #endif
 
   ADC_OFFSETS,
   ADC_PITCH_C2, ADC_PITCH_C4,
@@ -58,10 +46,6 @@ enum CALIBRATION_STEP {
 enum CALIBRATION_TYPE {
   CALIBRATE_NONE,
   CALIBRATE_OCTAVE,
-  #ifdef VOR
-  CALIBRATE_VBIAS_BIPOLAR,
-  CALIBRATE_VBIAS_ASYMMETRIC,
-  #endif
   CALIBRATE_ADC_OFFSET,
   CALIBRATE_ADC_1V,
   CALIBRATE_ADC_3V,
@@ -143,12 +127,7 @@ struct CalibrationData {
   uint32_t flags;
   uint8_t screensaver_timeout; // 0: default, else seconds
   uint8_t reserved0[3];
-#ifdef VOR
-  /* less complicated this way than adding it to DAC::CalibrationData... */
-  uint32_t v_bias;
-#else
   uint32_t reserved1;
-#endif
 
   void set_calstart(bool start = true) {
     if (start)

@@ -17,11 +17,8 @@
 #include "HSUtils.h"
 
 #include "PresetBusUI.h"
+#include "BootWeasel.h"
 
-#ifdef VOR
-#include "VBiasManager.h"
-VBiasManager *VBiasManager::instance = 0;
-#endif
 
 extern uint_fast8_t MENU_REDRAW;
 
@@ -34,9 +31,7 @@ void Ui::Init() {
   ticks_ = 0;
   set_screensaver_timeout(SCREENSAVER_TIMEOUT_S);
 
-#if defined(VOR)
-  static const int button_pins[] = { but_top, but_bot, butL, butR, but_mid };
-#elif defined(ARDUINO_TEENSY41)
+#if   defined(ARDUINO_TEENSY41)
   static const int button_pins[] = { but_top, but_bot, butL, butR, but_mid, but_top2, but_bot2 };
 #else
   static const int button_pins[] = { but_top, but_bot, butL, butR };
@@ -163,11 +158,21 @@ void FASTRUN Ui::Poll() {
   button_state_ = button_state;
 }
 
-FLASHMEM void Ui::Inject(UI::EventType type, uint16_t control, int16_t value) {
+FLASHMEM void Ui::Inject(UI::EventType type, uint16_t control, int16_t value,
+                         uint16_t held) {
   // Only the DOWN of a tap carries its button in the mask, as the raw pin
-  // would; by the PRESS the pin is high again. No chord is ever synthesized:
-  // the both-encoder and A/Z gestures open screens that run their own loops.
-  const uint16_t mask = (type == UI::EVENT_BUTTON_DOWN) ? control : 0;
+  // would; by the PRESS the pin is high again.
+  //
+  // `held` adds modifier buttons to that mask, which is what lets a chord be
+  // injected at all -- every global gesture is recognised by testing
+  // event.mask for A or Z on another control's DOWN. Nothing is synthesized
+  // implicitly: a caller asking for a chord has to name the modifier.
+  //
+  // The screens these chords open arm IgnoreUntilRelease() on the whole chord.
+  // A modifier that was never physically down is simply "already up" to that
+  // guard, so it swallows one release that never arrives and costs nothing --
+  // the injected press that follows is delivered normally.
+  const uint16_t mask = ((type == UI::EVENT_BUTTON_DOWN) ? control : 0) | held;
   noInterrupts();
   PushEvent(type, control, value, mask);
   interrupts();
@@ -243,7 +248,7 @@ UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
         app->EditIOSettings();
         continue;
       }
-      // Hold Z and push A for screensaver (not available on O_C without VOR button)
+      // Hold Z and push A for screensaver
       if (CONTROL_BUTTON_A == event.control && z_hold) {
         IgnoreUntilRelease(CONTROL_BUTTON_A | CONTROL_BUTTON_Z);
         screensaver_ = true;
@@ -261,6 +266,33 @@ UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
   // Turning screensaver seconds into screen-blanking minutes with the * 60 (chysn 9/2/2018)
   if (idle_time() > (screensaver_timeout() * 60) && !preempt_screensaver_)
     screensaver_ = true;
+
+  // Panel sleep, evaluated from idle_time() every pass rather than latched on
+  // an edge: idle_time() is millis() - last_event_time_, so it is already reset
+  // by ANY event from ANY control (ui_event_queue.h). Deriving the state
+  // instead of hooking a wake-up path means there is no gesture that can leave
+  // the panel dark and no path back that can be missed -- if the module is
+  // being touched, the display is drawing, by construction.
+  //
+  // THIS DELIBERATELY DOES NOT SEND 0xAE, AND MUST NOT.
+  //
+  // The first version of this called display::SetDisplayOn(), which does an
+  // SPI.beginTransaction()/transfer()/endTransaction() from LOOP context. On
+  // Teensy 4.1 that LPSPI bus is SHARED WITH THE DAC: the page transfer is
+  // chained onto the DAC's completion interrupt (see spi_sendpage_isr and
+  // SendPage's `sendpage_state` guard), and the core ISR writes the DAC every
+  // 60us. Reconfiguring LPSPI4_TCR from loop, unsynchronised, races that ISR.
+  // It is a race rather than a certainty, which is the worst kind: it survived
+  // a bench pass, then hung a module hard enough to drop it off USB entirely,
+  // where it stayed until the program button was pressed. SetInverted() has
+  // the same shape and has simply been lucky, being rare and user-initiated.
+  //
+  // Blanking costs nothing and buys the same thing. OLED pixels age when they
+  // are LIT; an all-black frame lights none of them, so the burn-in this
+  // exists to prevent is prevented either way. True display-off would save a
+  // little power on top of that, and it is not worth touching a bus the audio
+  // ISR is using.
+  display_asleep_ = idle_time() > kDisplaySleepMs;
 
   if (screensaver_) {
     return UI_MODE_SCREENSAVER;
@@ -331,26 +363,14 @@ UiMode Ui::Splashscreen(bool &reset_settings, uint8_t phase) {
       graphics.print(" ");
       graphics.print(OC::Strings::BUILD_TAG);
 
-      const uint8_t *iconroulette[] = {
-        PhzIcons::clockDivider, PhzIcons::clockSkip,
-        PhzIcons::clock_warp_A, PhzIcons::clock_warp_B,
-        PhzIcons::snowflakeB,
-        PhzIcons::snowflakeA
-      };
-
-      static int pick = 0;
-      if (timeout % 50 == 0) pick = random(6);
-      // pew pew?
-      for (int i = 0; i < 124; i+=8)
-        graphics.drawBitmap8(i, 56, 8, iconroulette[pick]);
-
-      // chargin mah lazerrrr
+      // Plain progress bar -- was a cycling row of clock/snowflake icons
+      // ("chargin mah lazerrrr"); the character animation below is where
+      // this splash's personality lives now, so this stays a simple,
+      // silent "still booting" indicator instead of competing with it.
       weegfx::coord_t w = timeout * 128 / SPLASHSCREEN_DELAY_MS;
       w %= 256;
       if (w > 128) w = 256 - w;
       graphics.invertRect(0, 56, w, 8);
-
-      ZapScreensaver();
 
       /* fixes spurious button presses when booting ? */
       while (event_queue_.available())
@@ -365,27 +385,33 @@ UiMode Ui::Splashscreen(bool &reset_settings, uint8_t phase) {
   default:
     do {
       GRAPHICS_BEGIN_FRAME(true);
-      /*
-      const uint8_t *flake_icon[] = { PhzIcons::snowflakeA, PhzIcons::snowflakeB, ZAP_ICON };
-      for (int i=0; i<128; ++i) {
-        graphics.drawBitmap8(i*8%128 + random(2), i/16*8 + random(2), 8, flake_icon[random(3)]);
-      }
-      */
-      ZapScreensaver();
 
-      graphics.clearRect(27, 22, 74, 22);
       if (reset_settings) {
+        // Safety-relevant confirmation text -- unchanged, no animation
+        // competing with it.
+        graphics.clearRect(27, 22, 74, 22);
         graphics.setPrintPos(28, 23);
         graphics.print("Time for a ");
         graphics.setPrintPos(28, 33);
         graphics.print("Fresh Start!");
       } else {
-        graphics.setPrintPos(28, 23);
-        graphics.print(" Welcome to");
-        graphics.setPrintPos(28, 33);
-        graphics.print("Phazerville!");
+        // The weasel slides in from off-screen right over the first 600ms
+        // of this ~1000ms phase (SPLASHSCREEN_DELAY_MS/2), then holds
+        // centered and waves (alternating BootWeasel's two frames every
+        // 150ms) for the remainder. See BootWeasel.h for the character
+        // itself -- an original mascot, not a reproduction of anything.
+        static constexpr int kSlideMs = 600;
+        static constexpr int kRestX = (128 - BootWeasel::kWidth) / 2;
+        static constexpr int kY = 8;
+        const uint32_t t = timeout;
+        const int x = (t < kSlideMs)
+            ? 128 - (128 - kRestX) * (int)t / kSlideMs
+            : kRestX;
+        const bool arm_up = ((t / 150) % 2) == 0;
+        const auto &frame = arm_up ? BootWeasel::kFrameUp : BootWeasel::kFrameDown;
+        for (int band = 0; band < BootWeasel::kBands; ++band)
+          graphics.drawBitmap8(x, kY + band * 8, BootWeasel::kWidth, frame[band]);
       }
-      //graphics.print(OC::Strings::RELEASE_NAME);
 
       while (event_queue_.available())
         (void)event_queue_.PullEvent();

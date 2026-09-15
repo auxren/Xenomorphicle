@@ -27,6 +27,7 @@
 #pragma once
 
 #include "PresetEngine.h"
+#include "RtStats.h"
 
 static constexpr int MIDI_SETUP_COUNT = 4;
 static constexpr int MIDI_PARAMETER_COUNT = 40;
@@ -172,7 +173,7 @@ struct CaptainMIDILog {
     int16_t data1;
     int16_t data2;
 
-    void DrawAt(int y) {
+    void DrawAt(int y) const {
         if (message == 5) {
             int app_code = static_cast<char>(data1);
             if (app_code > 0) {
@@ -1821,7 +1822,7 @@ private:
         }
     }
 
-    void DrawLogScreen() {
+    void DrawLogScreen() const {
         gfxHeader("IO Ch Type  Values");
         if (log_index) {
             for (int l = 0; l < 6; l++)
@@ -1842,7 +1843,7 @@ private:
         }
     }
 
-    void DrawCopyScreen() {
+    void DrawCopyScreen() const {
         gfxHeader("Copy");
 
         graphics.setPrintPos(8, 28);
@@ -2249,8 +2250,10 @@ FLASHMEM void AppCaptainMIDI::PollMidiSources() {
         // poll latency - skip them so the metric stays meaningful.
         const uint32_t now_us = micros();
         const uint32_t gap = now_us - poll_last_us;
-        if (poll_last_us && gap < 1000000 && gap > poll_gap_max_us)
-            poll_gap_max_us = gap;
+        if (poll_last_us && gap < 1000000) {
+            if (gap > poll_gap_max_us) poll_gap_max_us = gap;
+            OC::RT::MidiGap(gap);   // histogram + budget violations, never auto-reset
+        }
         poll_last_us = now_us;
     }
 

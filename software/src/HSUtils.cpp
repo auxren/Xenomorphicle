@@ -53,7 +53,7 @@ namespace HS {
   int next_ch = -1;
   int8_t next_octave, next_root_note;
 
-#if defined(ARDUINO_TEENSY41) || defined(VOR)
+#if defined(ARDUINO_TEENSY41)
   int octave_max = 6;
 #endif
 
@@ -706,7 +706,7 @@ namespace HS {
   }
 
 #ifndef NO_HEMISPHERE
-  // Defined by Hemisphere.h; a NO_HEMISPHERE build has no applet registry,
+  // Defined by the applet registry (applets/_config.h); a NO_HEMISPHERE build has none,
   // and FLASHMEM (externally_visible under LTO) keeps this function alive,
   // so it cannot lean on dead-stripping the way it used to.
   bool applet_is_hidden(const int& index);

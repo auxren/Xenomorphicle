@@ -18,7 +18,10 @@
 
 #include "../Audio/AudioAnalyzeStrobe.h"
 #include "../AudioIO.h"
-#include <analyze_notefreq.h>
+// The fork's own analyzer, not the stock <analyze_notefreq.h>. It has the
+// end() the stock class lacks, plus a low-pass pre-filter, confidence
+// hysteresis and octave-down guards. See SetActive() and Init().
+#include "../src/Audio/SafeNoteFrequencyAnalyzer.h"
 
 namespace TunerAppNS {
 
@@ -56,10 +59,12 @@ public:
 private:
   bool midi_out_ = true;   // pass MIDI through to the CV outs while tuning
   AudioAnalyzeStrobe strobe_;
-  AudioAnalyzeNoteFrequency notefreq_;
+  SafeNoteFrequencyAnalyzer notefreq_;
   AudioConnection *conn_strobe_ = nullptr;
   AudioConnection *conn_notefreq_ = nullptr;
   bool audio_wired_ = false;
+  // begin() allocates and end() frees, so the pair must not be run twice.
+  bool analyzer_running_ = false;
 
   // settings (persisted)
   uint16_t a4_hz_ = 440;
@@ -109,7 +114,16 @@ private:
 // analyzer would cost CPU in every other app.
 FLASHMEM void AppTuner::WireAudio() {
   if (audio_wired_) return;
-#ifdef AUDIO_INTERFACE
+  // XENO_CODEC_AUDIO (platformio.ini), not AUDIO_INTERFACE. The latter is a
+  // USB descriptor interface number from usb_desc.h that exists only when USB
+  // audio is compiled in, while the thing the tuner listens to is the I2S2
+  // codec input, which AudioIO wires unconditionally on this hardware. Guarding
+  // on it left the tuner's taps unbuilt on every build without USB audio --
+  // T41_console, the bench image -- so the tuner sat there reading silence
+  // and saying "no sig" while the codec was handing the graph a signal at
+  // -7 dBFS. Found on the bench 2026-09-14, with the new audio-in peak
+  // meter as the thing that told them apart.
+#ifdef XENO_CODEC_AUDIO
   conn_strobe_ = new AudioConnection(OC::AudioIO::InputStream(0), 0, strobe_, 0);
   conn_notefreq_ = new AudioConnection(OC::AudioIO::InputStream(0), 0, notefreq_, 0);
   if (conn_strobe_) conn_strobe_->disconnect();
@@ -118,15 +132,37 @@ FLASHMEM void AppTuner::WireAudio() {
   audio_wired_ = true;
 }
 
+// begin() and end() are symmetric here, and the guard matters: begin()
+// heap-allocates the 6 KB analysis buffer and end() frees it, so an unpaired
+// second begin() would strand the first buffer.
+//
+// The stock AudioAnalyzeNoteFrequency could not do this. Its update() parks
+// blocks in a 24-slot list and releases them only when the list fills, and
+// its begin() zeroes that index without releasing what is parked -- so
+// begin()-on-resume abandoned ~11 audio blocks of the 252-block pool on every
+// preset save, and a dozen saves silenced the codec for good (e111679b).
+// SafeNoteFrequencyAnalyzer::end() drains the input queue, releases both
+// blocklists and frees the buffer, so the Tuner can now give its blocks and
+// its 6 KB back whenever it leaves the screen instead of parking them.
 FLASHMEM void AppTuner::SetActive(bool on) {
   WireAudio();
   if (on) {
     if (conn_strobe_) conn_strobe_->connect();
     if (conn_notefreq_) conn_notefreq_->connect();
-    notefreq_.begin(0.15f);
+    if (!analyzer_running_) {
+      // 7 kHz is well above the top of the range this tuner reads and takes
+      // the converter hash off the signal before YIN sees it; the same cutoff
+      // TuneTrackerApplet uses.
+      notefreq_.begin(0.15f, 7000.0f);
+      analyzer_running_ = true;
+    }
   } else {
     if (conn_strobe_) conn_strobe_->disconnect();
     if (conn_notefreq_) conn_notefreq_->disconnect();
+    if (analyzer_running_) {
+      notefreq_.end();
+      analyzer_running_ = false;
+    }
   }
   strobe_.setActive(on);
 }

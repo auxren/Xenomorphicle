@@ -56,7 +56,7 @@ public:
   // factory reset unlabelled. It is a held gesture now (encL long-press), and
   // it latches nothing.
   // RETURN TO NORMAL MODE only exists in the T41_MTP build (-DUSB_MTPDISK):
-  // it is the only way back from USB Drive mode (see UsbDriveApp.h) that
+  // it is the only way back from MTP recovery mode (slot 2) that
   // does not need a host reflash, since bootchoice is sticky across power
   // cycles and T41_MTP has none of Main.cpp's MULTIBOOT dispatcher code to
   // read it back down to 0 on its own. Gated out of every other build so the
@@ -226,20 +226,8 @@ public:
           current_octave = next_step->index;
           calstate.encoder_value =
               OC::calibration_data.dac.calibrated_octaves[chan][current_octave];
-            #ifdef VOR
-            /* set 0V @ unipolar range */
-            DAC::set_Vbias(DAC::VBiasUnipolar);
-            #endif
           break;
 
-        #ifdef VOR
-        case CALIBRATE_VBIAS_BIPOLAR:
-          calstate.encoder_value = (0xFFFF & OC::calibration_data.v_bias); // bipolar = lower 2 bytes
-        break;
-        case CALIBRATE_VBIAS_ASYMMETRIC:
-          calstate.encoder_value = (OC::calibration_data.v_bias >> 16);  // asymmetric = upper 2 bytes
-        break;
-        #endif
 
         case CALIBRATE_ADC_OFFSET: // set ADC zero-point offset
           if (calstate.used_defaults) { // start fresh? auto-cal
@@ -248,9 +236,6 @@ public:
             }
           }
 
-          #ifdef VOR
-          DAC::set_Vbias(DAC::VBiasUnipolar);
-          #endif
           break;
         case CALIBRATE_DISPLAY:
           calstate.encoder_value = OC::calibration_data.display_offset;
@@ -329,20 +314,6 @@ public:
             calstate.encoder_value;
           set_all_octave((current_octave - DAC::kOctaveZero)*(1+DAC_20Vpp));
           break;
-        #ifdef VOR
-        case CALIBRATE_VBIAS_BIPOLAR:
-          /* set 0V @ bipolar range */
-          set_all_octave(5);
-          OC::calibration_data.v_bias = (OC::calibration_data.v_bias & 0xFFFF0000) | calstate.encoder_value;
-          DAC::set_Vbias(0xFFFF & OC::calibration_data.v_bias);
-          break;
-        case CALIBRATE_VBIAS_ASYMMETRIC:
-          /* set 0V @ asym. range */
-          set_all_octave(3);
-          OC::calibration_data.v_bias = (OC::calibration_data.v_bias & 0xFFFF) | (calstate.encoder_value << 16);
-          DAC::set_Vbias(OC::calibration_data.v_bias >> 16);
-        break;
-        #endif
         case CALIBRATE_ADC_OFFSET:
           set_all_octave(0);
           break;
@@ -410,10 +381,6 @@ public:
       }
 
       case CALIBRATE_SCREENSAVER:
-      #ifdef VOR
-      case CALIBRATE_VBIAS_BIPOLAR:
-      case CALIBRATE_VBIAS_ASYMMETRIC:
-      #endif
         graphics.print(step->message);
         gfxPos(kValueX, y + 2);
         graphics.print((int)calstate.encoder_value, 5);
@@ -719,12 +686,6 @@ public:
         tick_count.Init();
 
         OC::ui.encoder_enable_acceleration(OC::CONTROL_ENCODER_R, true);
-        #ifdef VOR
-        {
-          VBiasManager *vb = vb->get();
-          vb->SetState(VBiasManager::UNI);
-        }
-        #endif
 
         calibration_complete = false;
         calibration_mode = true;
@@ -788,7 +749,7 @@ public:
     }
 
 #if defined(USB_MTPDISK)
-    // The other half of UsbDriveApp.h's EnterUsbDriveMode(): set bootchoice
+    // The other half of the MTP recovery entry: set bootchoice
     // back to 0 (T41_audio, the normal image), persist it the same way
     // set_bootchoice() is always persisted (OC::calibration_save(), the same
     // call BootMenu() makes after its own set_bootchoice() in Main.cpp), then
@@ -948,10 +909,7 @@ FLASHMEM void AppSettings::View() const {
       gfxIcon(80, 0, OC::calibration_data.flipscreen() ? DOWN_ICON : UP_ICON);
       gfxIcon(90, 0, OC::calibration_data.flipcontrols() ? LEFT_ICON : RIGHT_ICON);
 
-      #if defined(ARDUINO_TEENSY40)
-      gfxPrint(100, 0, "T4.0");
-      //gfxPrint(0, 45, "E2END="); gfxPrint(E2END);
-      #elif defined(ARDUINO_TEENSY41)
+      #if   defined(ARDUINO_TEENSY41)
       gfxPrint(100, 0, "T4.1");
       #else
       gfxPrint(100, 0, "T3.2");
@@ -962,7 +920,11 @@ FLASHMEM void AppSettings::View() const {
       #ifdef PEWPEWPEW
       gfxPrint(21, 15, "PEW! PEW! PEW!");
       #else
-      gfxPrint(12, 15, OC::Strings::RELEASE_NAME);
+      // Centred between the two iconography slots (x=0 and x=120) rather than
+      // pinned at the old x=12, which was chosen for a 17-character name and
+      // left a 13-character one visibly hanging to the left of centre.
+      gfxPrint((128 - 6 * (int)strlen(OC::Strings::RELEASE_NAME)) / 2, 15,
+               OC::Strings::RELEASE_NAME);
       #endif
       gfxIcon(0, 25, PhzIcons::full_book);
       gfxPrint(10, 25, OC::Strings::VERSION);
@@ -1002,10 +964,14 @@ FLASHMEM void AppSettings::View() const {
         // one row this screen would otherwise spend on the project URL goes
         // to the exit gesture instead. Deliberately always-on, not tucked
         // behind a hold: see the "err on the side of obvious" reasoning in
-        // UsbDriveApp.h.
+        // the MTP recovery image.
         gfxPrint(10, 45, "hold B: normal mode");
 #else
-        gfxPrint(10, 45, "github.com/djphazer");
+        // This fork's own project, not upstream's: the build on this screen
+        // is not one djphazer's repository can produce, so sending a user
+        // there for it would be a dead end. 17 columns, inside the 21 the
+        // row allows.
+        gfxPrint(10, 45, "github.com/auxren");
 #endif
       }
       // 21 columns exactly, and it states its bindings rather than relying on

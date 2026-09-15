@@ -155,6 +155,47 @@ class ReverbApplet : public HemisphereAudioAppletF32<MONO> {
             }
         }
 
+        // --- Standalone full-screen host interface (apps/ReverbApp.h) -------
+        //
+        // Narrow, semantic accessors so a host app can render and edit these
+        // without holding a copy: this applet stays the single owner of every
+        // parameter. Same shape and same reasoning as DelayApplet's block --
+        // accessors rather than a friend declaration or a shared struct,
+        // because either of those makes the APPLET know about the HOST and one
+        // host serves all of these. Every setter clamps, so no caller has to
+        // know a range.
+        //
+        // The ranges below are this applet's own, unchanged: OnEncoderMove()
+        // clamps size/mix to 0..100, damp to 1..100 (not 0 -- see :136) and
+        // cutoff to 0..17500 (:142).
+        static constexpr int kMaxCutoff = 17500;
+
+        int GetSize() const { return size; }
+        void NudgeSize(int d) { size = constrain(size + d, 0, 100); }
+
+        int GetDamp() const { return damp; }
+        void NudgeDamp(int d) { damp = constrain(damp + d, 1, 100); }
+
+        int GetCutoff() const { return cutoff; }
+        void NudgeCutoff(int d) {
+          cutoff = constrain(cutoff + d, 0, kMaxCutoff);
+        }
+
+        int GetMix() const { return mix; }
+        void NudgeMix(int d) { mix = constrain(mix + d, 0, 100); }
+
+        CVInputMap& SizeCV() { return size_cv; }
+        CVInputMap& DampCV() { return damp_cv; }
+        CVInputMap& CutoffCV() { return cutoff_cv; }
+        CVInputMap& MixCV() { return mix_cv; }
+
+        // False when Factory::get() could not find ~50KB for the reverb arena,
+        // in RAM2 or in its PSRAM fallback (OC_core.h:57-73). Controller()
+        // already fails safe in that case -- it forces dry to unity and returns
+        // (:38-41) -- so the failure is "no effect", not "no signal". What was
+        // missing was a way for a host to SAY so.
+        bool ArenaReady() const { return reverb != nullptr; }
+
     protected:
         void SetHelp() override {}
 

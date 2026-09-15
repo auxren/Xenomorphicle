@@ -1,6 +1,6 @@
 // Records a live-played MIDI line into a Buchla251eSequence. Pure logic --
 // no hardware includes; see Buchla251eRecorder.h for the contract.
-#if defined(__IMXRT1062__) || defined(__MK20DX256__)
+#if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define B251E_REC_CODE FLASHMEM
 #else

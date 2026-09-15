@@ -77,10 +77,10 @@ Compiling the firmware with PlatformIO
 - Navigate to the `software/` directory in the source code. From there, you can use PlatformIO to Build the desired configuration and Upload via USB to your module.
 - For example, in the terminal, I type:
 ```
-pio run -e T32 -t upload
+pio run -e T41_audio -t upload
 ```
 - In VSCode or other IDE plugins, you'll see commands labeled "Build" and "Upload" under "General" for the various build targets.
-- Have a look inside `platformio.ini` for alternative build configurations - VOR, flipped screen, Teensy 4.x, etc. - and to customize various app flags.
+- Have a look inside `platformio.ini` for the other Xenomorpher configurations (`T41_console` for the bench console, `T41_MTP` for recovery) and to customize app flags. This fork builds for the Xenomorpher only.
 
 ## Calibrate
 

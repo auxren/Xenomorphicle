@@ -560,13 +560,7 @@ private:
 
   // EEPROM size: 11 bytes * 4 channels == 44 bytes
   SETTINGS_ARRAY_DECLARE() {{
-    #ifdef NORTHERNLIGHT
-    { 0, 0, 9, "Octave", nullptr, settings::STORAGE_TYPE_I8 },
-    #elif defined(VOR) 
-    { 0, -5, 10, "Octave", nullptr, settings::STORAGE_TYPE_I8 },
-    #else
     { 0, -3, 6, "Octave", nullptr, settings::STORAGE_TYPE_I8 },
-    #endif
     { 0, 0, 11, "Semitone", OC::Strings::note_names_unpadded, settings::STORAGE_TYPE_U8 },
     { 0, -3, 3, "Mod range oct", nullptr, settings::STORAGE_TYPE_U8 },
     { 0, 0, 30, "Mod rate (s)", nullptr, settings::STORAGE_TYPE_U8 },
@@ -806,11 +800,7 @@ void AppReferences::DrawScreensaver() const {
   int32_t freq_decicents_residual_ = ((freq_decicents_deviation_ - ((freq_octave_ - 1) * 12000)) % 1000) - 500;
 
   if (frequency_ > 0.0) {
-    #ifdef FLIP_180
-    graphics.printf("TR1 %7.3f Hz", frequency_);
-    #else
     graphics.printf("TR4 %7.3f Hz", frequency_);
-    #endif
     graphics.setPrintPos(2, 56);
     if (get_notes_or_bpm()) {
       graphics.printf("%7.2f bpm %2.0fppqn", bpm_, get_ppqn());

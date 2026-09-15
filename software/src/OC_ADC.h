@@ -150,11 +150,7 @@ private:
    *   CV1 (19) = A5 = 0x4C; CV2 (18) = A4 = 0x4D; CV3 (20) = A6 = 0x46; CV4 (17) = A3 = 0x49
    *   for some reason the IDs must be in order: CV2, CV3, CV4, CV1 resp. (when flipped) CV3, CV2, CV1, CV4
   */
-  #ifdef FLIP_180
-  static constexpr uint16_t SCA_CHANNEL_ID[DMA_NUM_CH] = { 0x46, 0x4D, 0x4C, 0x49 };
-  #else
   static constexpr uint16_t SCA_CHANNEL_ID[DMA_NUM_CH] = { 0x4D, 0x46, 0x49, 0x4C };
-  #endif
 };
 
 }; // namespace OC

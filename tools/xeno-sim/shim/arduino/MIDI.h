@@ -77,7 +77,14 @@ public:
   void sendPitchBend(int bend, uint8_t ch);
   void sendRealTime(uint8_t type);
   void sendSysEx(unsigned length, const uint8_t *data, bool hdr = false);
-  void send(uint8_t type, uint8_t d1, uint8_t d2, uint8_t ch);
+  // Teensyduino's usbMIDI::send() carries a fifth argument, the USB-MIDI
+  // CABLE number, and CaptainMIDI::midi_thru() passes it
+  // (apps/CaptainMIDI.h). USBHost_t36's MIDIDevice::send() takes the
+  // four-argument form, and the firmware calls that one too, so the cable
+  // is defaulted rather than required: both call sites compile against
+  // this one declaration. The simulator has a single virtual port and
+  // nothing downstream reads the cable, so it is accepted and ignored.
+  void send(uint8_t type, uint8_t d1, uint8_t d2, uint8_t ch, uint8_t cable = 0);
   void send_now() {}
   void begin(int = 1) {}
   void turnThruOn() {}

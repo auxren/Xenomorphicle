@@ -34,17 +34,7 @@
 #include <Arduino.h>
 
 // Easier names for the boards
-#if defined(__MK20DX256__) // Teensy 3.1
-#define ADC_TEENSY_3_1
-#elif defined(__MK20DX128__) // Teensy 3.0
-#define ADC_TEENSY_3_0
-#elif defined(__MKL26Z64__) // Teensy LC
-#define ADC_TEENSY_LC
-#elif defined(__MK64FX512__) // Teensy 3.4
-#define ADC_TEENSY_3_4
-#elif defined(__MK66FX1M0__) // Teensy 3.5
-#define ADC_TEENSY_3_5
-#elif defined(__IMXRT1062__) // Teensy 4.x (not really supported, but don't error)
+#if   defined(__IMXRT1062__) // Teensy 4.x (not really supported, but don't error)
 #define ADC_NUM_ADCS 1
 #define ADC_DIFF_PAIRS 0
 #else
@@ -597,66 +587,6 @@ public:
     //! Disable PGA
     void disablePGA();
 
-#if defined(__MK20DX256__)
-    //! Set continuous conversion mode
-    void continuousMode() __attribute__((always_inline)) {
-        setBit(ADC_SC3, ADC_SC3_ADCO_BIT);
-    }
-    //! Set single-shot conversion mode
-    void singleMode() __attribute__((always_inline)) {
-        clearBit(ADC_SC3, ADC_SC3_ADCO_BIT);
-    }
-
-    //! Use software to trigger the ADC, this is the most common setting
-    void setSoftwareTrigger() __attribute__((always_inline)) {
-        clearBit(ADC_SC2, ADC_SC2_ADTRG_BIT);
-    }
-
-    //! Use hardware to trigger the ADC
-    void setHardwareTrigger() __attribute__((always_inline)) {
-        setBit(ADC_SC2, ADC_SC2_ADTRG_BIT);
-    }
-
-
-    ////////////// INFORMATION ABOUT THE STATE OF THE ADC /////////////////
-
-    //! Is the ADC converting at the moment?
-    volatile bool isConverting() __attribute__((always_inline)) {
-        //return (*ADC_SC2_adact);
-        return getBit(ADC_SC2, ADC_SC2_ADACT_BIT);
-        //return ((*ADC_SC2) & ADC_SC2_ADACT) >> 7;
-    }
-
-    //! Is an ADC conversion ready?
-    /**
-    *  \return 1 if yes, 0 if not.
-    *  When a value is read this function returns 0 until a new value exists
-    *  So it only makes sense to call it before analogReadContinuous() or readSingle()
-    */
-    volatile bool isComplete() __attribute__((always_inline)) {
-        //return (*ADC_SC1A_coco);
-        return getBit(ADC_SC1A, ADC_SC1A_COCO_BIT);
-        //return ((*ADC_SC1A) & ADC_SC1_COCO) >> 7;
-    }
-
-    //! Is the ADC in differential mode?
-    volatile bool isDifferential() __attribute__((always_inline)) {
-        //return ((*ADC_SC1A) & ADC_SC1_DIFF) >> 5;
-        return getBit(ADC_SC1A, ADC_SC1_DIFF_BIT);
-    }
-
-    //! Is the ADC in continuous mode?
-    volatile bool isContinuous() __attribute__((always_inline)) {
-        //return (*ADC_SC3_adco);
-        return getBit(ADC_SC3, ADC_SC3_ADCO_BIT);
-        //return ((*ADC_SC3) & ADC_SC3_ADCO) >> 3;
-    }
-
-    //! Is the PGA function enabled?
-    volatile bool isPGAEnabled() __attribute__((always_inline)) {
-        return getBit(ADC_PGA, ADC_PGA_PGAEN_BIT);
-    }
-#endif
 
     //////////////// INFORMATION ABOUT VALID PINS //////////////////
 

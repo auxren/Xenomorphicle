@@ -7,10 +7,11 @@
 // the latest sample.
 //
 // CHANNEL MODEL: a flat 0..19 index (see ScopeMath.h for the exact layout
-// and why it is a fixed table rather than something computed from
-// AUDIO_INTERFACE). encL cycles it; the cursor is kept off the 4 audio
-// entries entirely on a build without AUDIO_INTERFACE (they would have
-// nothing behind them).
+// and why it is a fixed table rather than something computed). encL cycles
+// it; on a build without the codec the cursor is kept off the 4 audio
+// entries entirely (they would have nothing behind them). That condition is
+// XENO_CODEC_AUDIO (see platformio.ini) -- not AUDIO_INTERFACE, which is a USB
+// descriptor number and says nothing about whether the codec is running.
 //
 // SAMPLING: CV channels are sampled once per redraw, in Render() below --
 // non-ISR, no timer needed, since a screen redraw is already the natural
@@ -42,14 +43,14 @@
 #include "../OC_ADC.h"
 #include "../OC_DAC.h"
 #include "../ScopeMath.h"
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
 #include "../Audio/AudioScopeCapture.h"
 #include "../AudioIO.h"
 #endif
 
 namespace ScopeAppNS {
 
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
 static constexpr int kUsableChannels = ScopeMath::kChannelCount;       // 20
 #else
 static constexpr int kUsableChannels = ScopeMath::kCvChannelCount;     // 16
@@ -99,7 +100,7 @@ private:
   mutable uint8_t cv_head_ = 0;
   mutable int32_t last_raw_ = 0;
 
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   AudioScopeCapture scope_capture_;
   AudioConnection *conn_in_l_ = nullptr;
   AudioConnection *conn_in_r_ = nullptr;
@@ -126,7 +127,7 @@ private:
 
 FLASHMEM void AppScope::WireAudio() {
   if (audio_wired_) return;
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   // Wired permanently at Init(), per the class comment -- unlike
   // TunerApp/TweightyApp's own taps, there is no connect()/disconnect()
   // dance here: AudioScopeCapture's active_channel_ (default -1, "nothing
@@ -154,7 +155,7 @@ FLASHMEM void AppScope::SetChannel(int new_channel) {
   cv_head_ = 0;
   last_raw_ = 0;
   for (auto &v : cv_ring_) v = 0;
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   if (ScopeMath::ChannelKindOf(channel_) == ScopeMath::KIND_AUDIO) {
     const int sub = ScopeMath::ChannelSubIndex(channel_);
     scope_capture_.ResetRing(sub);
@@ -167,7 +168,7 @@ FLASHMEM void AppScope::SetChannel(int new_channel) {
 
 FLASHMEM void AppScope::SetFrozen(bool frozen) {
   frozen_ = frozen;
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   if (ScopeMath::ChannelKindOf(channel_) == ScopeMath::KIND_AUDIO) {
     const int sub = ScopeMath::ChannelSubIndex(channel_);
     scope_capture_.SetActiveChannel(frozen_ ? -1 : sub);
@@ -205,7 +206,7 @@ FLASHMEM size_t AppScope::RestoreAppData(util::StreamBufferReader &stream_buffer
 FLASHMEM void AppScope::HandleAppEvent(OC::AppEvent event) {
   switch (event) {
     case OC::APP_EVENT_RESUME:
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
       if (!frozen_ && ScopeMath::ChannelKindOf(channel_) == ScopeMath::KIND_AUDIO)
         scope_capture_.SetActiveChannel(ScopeMath::ChannelSubIndex(channel_));
 #endif
@@ -216,7 +217,7 @@ FLASHMEM void AppScope::HandleAppEvent(OC::AppEvent event) {
       // left to animate -- stop the audio tap from doing pointless work
       // meanwhile (mirrors TunerApp::SetActive(false)'s reasoning, just
       // gating one flag here instead of a connect/disconnect pair).
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
       scope_capture_.SetActiveChannel(-1);
 #endif
       break;
@@ -258,7 +259,7 @@ FLASHMEM void AppScope::Render() const {
         cv_head_ = (uint8_t)((cv_head_ + 1) % kRingSize);
         break;
       case KIND_AUDIO:
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
         {
           const uint8_t h = scope_capture_.Head(sub);
           last_raw_ = scope_capture_.RingValue(sub, (h + kRingSize - 1) % kRingSize);
@@ -300,7 +301,7 @@ FLASHMEM void AppScope::Render() const {
   for (int x = 0; x < kRingSize; ++x) {
     int32_t raw;
     if (kind == KIND_AUDIO) {
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
       const int idx = RingReadIndex(scope_capture_.Head(sub), x);
       raw = scope_capture_.RingValue(sub, idx);
 #else

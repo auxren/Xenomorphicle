@@ -80,6 +80,12 @@ typedef enum {
   // manager form, see parse_frame()). mod_addr = the module; arg = the one
   // payload byte (its own address, on the only module seen so far).
   BUS200E_OP_XFER_DONE,
+  // A module's poll reply after it loads a preset (cmd 0x03, module ->
+  // manager form). Proof that the named module acted on a RECALL. mod_addr
+  // = the module; arg = the payload byte, DIAGNOSTIC ONLY -- the 259e writes
+  // 0xFF there and the 251e ships uninitialised stack. Appended at the end,
+  // like the two ops above, so no existing op code shifts meaning.
+  BUS200E_OP_LOAD_ACK,
 } Bus200eOp;
 
 typedef struct {
@@ -123,6 +129,10 @@ typedef struct {
   // writing to (BACKUP) or reading from (RESTORE, presumed) a card. NULL =
   // log-only. Appended at the end of the struct, as query_reply was.
   void (*xfer_done)(uint8_t from_addr);
+  // A module reporting that it has loaded a preset (cmd 0x03, see
+  // BUS200E_OP_LOAD_ACK). `from_addr` is the module that followed. NULL =
+  // log-only. Appended at the end of the struct, as the two above were.
+  void (*load_ack)(uint8_t from_addr);
 } Bus200eOps;
 
 typedef struct {
@@ -231,9 +241,16 @@ int Bus200eBuildTransferFrame(uint8_t op, uint8_t mod_addr, uint8_t card_lo,
 // ACK, and what that 0xFF means is still unknown (it is NOT an echo of the
 // request's argument byte: request arguments 00, 01, 02, 03, 04 and FF all
 // drew the same FF back). Addresses with no module answer nothing at all.
-// The 0x13 command byte and the "30.6" version string this file used to
-// describe were this project's own invention and have never been seen on a
-// bus; 0x13 stays accepted on RX for compatibility with older firmware.
+// 0x13 IS a real command, and this file used to say it was not. It is the
+// module's firmware-display frame -- [0A 22 own 13] followed by 4 version
+// characters and 3 spaces, 11 bytes -- which the WPM decodes as its
+// DISPLAY_EVENT (2WIRELESS 2Wireless.ino:180, receiveEvent :1337-1351) and
+// both module firmwares build (251e 0x80008a04, 259e 0x8947). What was
+// wrong was the WIRING, not the opcode: a QUERY does not produce it. The
+// 0x13 frame is reachable only from a front-panel button hold, so nothing
+// on the bus can ask for it, and a QUERY answers with 0x1C instead. It
+// stays accepted on RX, which now means accepted because modules really
+// send it.
 #define BUS200E_QUERY_FRAME_LEN 5
 // Longest payload a reply can carry through this parser: FRAME_MAX (12)
 // minus the 4 header bytes. Real modules use 1.

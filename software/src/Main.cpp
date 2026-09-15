@@ -31,6 +31,7 @@
 #include "OC_apps.h"
 #include "OC_DAC.h"
 #include "OC_debug.h"
+#include "RtStats.h"
 #include "OC_gpio.h"
 #include "OC_global_settings.h"
 #include "OC_ADC.h"
@@ -43,7 +44,6 @@
 #include "src/drivers/display.h"
 #include "src/drivers/ADC/OC_util_ADC.h"
 #include "util/util_debugpins.h"
-#include "VBiasManager.h"
 #include "HSMIDI.h"
 
 #include "PhzConfig.h"
@@ -129,6 +129,11 @@ volatile uint32_t OC::CORE::ticks = 0;
 void FASTRUN CORE_timer_ISR() {
   DEBUG_PIN_SCOPE(OC_GPIO_DEBUG_PIN2);
   OC_DEBUG_PROFILE_SCOPE(OC::DEBUG::ISR_cycles);
+  // budget bookkeeping: DWT, because it keeps counting while interrupts
+  // are masked (a stalled ISR shows up as one late entry) and the
+  // profiler's max above is wiped every 16384 ticks
+  const uint32_t rt_entry = ARM_DWT_CYCCNT;
+  OC::RT::CoreIsrEntry(rt_entry);
 
   using namespace OC;
 
@@ -153,6 +158,7 @@ void FASTRUN CORE_timer_ISR() {
   }
 
   OC_DEBUG_RESET_CYCLES(OC::CORE::ticks, 16384, OC::DEBUG::ISR_cycles);
+  OC::RT::CoreIsrExit(rt_entry);
 }
 
 /*       ---------------------------------------------------------         */
@@ -185,11 +191,22 @@ FLASHMEM __attribute__((noinline)) void BootMenu() {
     if (x_held) choice = 2;
     if (y_held) choice = 3;
     if (choice > -1) {
-      if (OC::calibration_data.bootchoice() != choice) {
-        OC::calibration_data.set_bootchoice(choice);
-        if (z_held) {
-          save = true;
-        }
+      OC::calibration_data.set_bootchoice(choice);
+      // Z arms the EEPROM write, and it is re-checked on EVERY pass. It used
+      // to be checked only inside an `if (bootchoice() != choice)` guard,
+      // which could only ever be true on the FIRST pass that saw the button:
+      // set_bootchoice() makes bootchoice()==choice immediately, so from the
+      // second pass on the guard was false and `save` could never be armed
+      // again. Pressing the slot button a moment before reaching for Z --
+      // or re-picking the slot already stored -- therefore changed the
+      // in-memory value, showed the row highlighted as if it had taken, and
+      // wrote nothing. The next boot read the old value out of EEPROM and
+      // went straight back to the mode the user had just tried to leave,
+      // with no way to tell that the menu had silently done nothing. Cost a
+      // real recovery session; flashing does not clear bootchoice, so the
+      // module cannot be freed by reflashing either.
+      if (z_held) {
+        save = true;
       }
       if (!any_held)
         break;
@@ -221,7 +238,11 @@ FLASHMEM __attribute__((noinline)) void BootMenu() {
     }
 
     graphics.setPrintPos(1, 55);
-    graphics.print("(hold Z to set)");
+    // Says which of the two things is about to happen, rather than only what
+    // to do: without Z the pick lasts this boot only, with Z it is written.
+    // The silent-no-op bug above was invisible partly because this row read
+    // the same either way.
+    graphics.print(save ? "SAVED on release" : "(hold Z to set)");
     GRAPHICS_END_FRAME();
 
     delay(10);
@@ -306,6 +327,40 @@ static uint32_t *stack_paint_hi = nullptr;
 // had no remote form, so the scan path could not be exercised from a
 // headless bench at all.
 #if defined(__IMXRT1062__)
+// The button bit a console press character names, or 0. Shared by
+// ConsolePress and ConsoleChord so the two can never drift apart.
+FLASHMEM static uint16_t ConsoleButtonBit(char which) {
+  switch (which) {
+    case 'l': case 'L': return OC::CONTROL_BUTTON_L;
+    case 'r': case 'R': return OC::CONTROL_BUTTON_R;
+    case 'a': case 'A': return OC::CONTROL_BUTTON_A;
+    case 'b': case 'B': return OC::CONTROL_BUTTON_B;
+    case 'z': case 'Z': return OC::CONTROL_BUTTON_Z;
+    case 'x': case 'X': return OC::CONTROL_BUTTON_X;
+    case 'y': case 'Y': return OC::CONTROL_BUTTON_Y;
+    default: return 0;
+  }
+}
+
+// Press one control WHILE another is held: the shape of every global gesture
+// on this panel (hold A, push encR for the app switcher, and so on). Injection
+// could not express it before, so no chord-opened screen could be reached from
+// the console -- which meant the app switcher, the I/O menus, the preset-bus
+// overlay and the screensaver had no bench route at all, and every check of
+// them had to be run in the simulator instead, against a build with six apps
+// and no Hemisphere.
+FLASHMEM static void ConsoleChord(char mod, char which) {
+  const uint16_t held = ConsoleButtonBit(mod);
+  const uint16_t button = ConsoleButtonBit(which);
+  if (!held || !button) {
+    Serial.println("chord: cancelled (two of l r a b z x y: modifier then key)");
+    return;
+  }
+  OC::ui.Inject(UI::EVENT_BUTTON_DOWN, button, 0, held);
+  OC::ui.Inject(UI::EVENT_BUTTON_PRESS, button, 0);
+  Serial.printf("chord: %c held, %c pressed\n", mod, which);
+}
+
 FLASHMEM static void ConsolePress(char which) {
   uint16_t button = 0;
   int16_t detent = 0;
@@ -461,9 +516,6 @@ FLASHMEM void setup() {
   #if defined(ARDUINO_TEENSY41)
   OC::Pinout_Detect();
   #endif
-#if defined(__MK20DX256__)
-  NVIC_SET_PRIORITY(IRQ_PORTB, 0); // TR1 = 0 = PTB16
-#endif
   SPI_init();
   SERIAL_PRINTLN("* O&C BOOTING...");
   SERIAL_PRINTLN("* %s", OC::Strings::VERSION);
@@ -555,14 +607,50 @@ FLASHMEM void setup() {
     }
     OC::ui.DebugStats();
   } else if (OC::calibration_data.bootchoice()) {
-    GRAPHICS_BEGIN_FRAME(true);
-    graphics.setPrintPos(1, 28);
-    graphics.print("Switching to alt mode!");
-    GRAPHICS_END_FRAME();
-    AudioNoInterrupts();
-    delay(10);
-    disableCache();
-    jump_to_alt(OC::calibration_data.bootchoice());
+    // Hold-to-escape. bootchoice lives in EEPROM, so it survives a reflash:
+    // a module left pointing at an alt slot jumps before loop(), before the
+    // console, before anything a host can talk to, and reflashing slot 0
+    // does not clear it -- the only ways back were BootMenu's pre-boot
+    // window (easy to miss, and it silently no-opped until the fix above)
+    // and a gesture inside whichever alt build you landed in. That was
+    // enough to strand the module more than once.
+    //
+    // So the jump now always announces itself and always offers a way out:
+    // hold any button during this window and the alt mode is cancelled AND
+    // cleared, so the next power-cycle is normal too. No timing precision
+    // and no prior knowledge required -- the instruction is on the screen
+    // being shown. The cost is this delay on every deliberate alt-mode
+    // boot, which is a mode entered on purpose and rarely.
+    static constexpr uint32_t kAltEscapeMs = 2000;
+    const uint32_t start = millis();
+    bool escape = false;
+    while (millis() - start < kAltEscapeMs) {
+      escape = OC::ui.read_immediate(OC::CONTROL_BUTTON_A)
+            || OC::ui.read_immediate(OC::CONTROL_BUTTON_B)
+            || OC::ui.read_immediate(OC::CONTROL_BUTTON_X)
+            || OC::ui.read_immediate(OC::CONTROL_BUTTON_Y)
+            || OC::ui.read_immediate(OC::CONTROL_BUTTON_Z);
+      if (escape) break;
+
+      GRAPHICS_BEGIN_FRAME(true);
+      graphics.setPrintPos(1, 20);
+      graphics.print("Switching to alt mode!");
+      graphics.setPrintPos(1, 34);
+      graphics.print("hold any key to stay");
+      graphics.setPrintPos(1, 44);
+      graphics.print("in normal mode");
+      GRAPHICS_END_FRAME();
+    }
+
+    if (escape) {
+      OC::calibration_data.set_bootchoice(0);
+      OC::calibration_save();   // blocks, draws its own "saved" screen
+    } else {
+      AudioNoInterrupts();
+      delay(10);
+      disableCache();
+      jump_to_alt(OC::calibration_data.bootchoice());
+    }
   }
 #endif
 
@@ -590,10 +678,6 @@ FLASHMEM void setup() {
   }
   OC::ui.set_screensaver_timeout(OC::calibration_data.screensaver_timeout);
 
-#ifdef VOR
-  VBiasManager *vbias_m = vbias_m->get();
-  vbias_m->SetState(VBiasManager::BI);
-#endif
 
   bool firstrun = false;
 #ifdef __IMXRT1062__
@@ -633,12 +717,17 @@ FLASHMEM void setup() {
 
   // initialize apps (on T3.x firstrun is detected by the EEPROM load inside)
   firstrun |= !OC::app_switcher.Init(reset_settings || firstrun);
-#if defined(ARDUINO_TEENSY41) && defined(AUDIO_INTERFACE)
+#if defined(XENO_CODEC_AUDIO)
   // Force the audio output path (I2S codec out + host-playback monitor mix)
   // into existence. It is lazily built and was only ever constructed when an
   // audio applet wired up the chain - an appletless boot had DEAD panel outs
   // and no USB monitoring. Called here so it is created after every other
   // stream (its documented ordering requirement).
+  //
+  // XENO_CODEC_AUDIO, not AUDIO_INTERFACE: the panel outputs are the I2S2
+  // codec's, which runs on every build of this board. Gating this on the USB
+  // descriptor left T41_console -- the bench build -- booting with no output
+  // path at all, which is the one build most likely to be measured.
   OC::AudioIO::OutputStream();
 #endif
 
@@ -684,11 +773,10 @@ FLASHMEM void setup() {
 // flash instead of burning ~4KB of ITCM (it gets inlined into main()).
 #if defined(__IMXRT1062__)
 // console 't': one-shot system health report
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
 #include "extern/f32/AudioStream_F32.h"
-#ifdef ARDUINO_TEENSY41
+// Self-guarding: USB_F32.h compiles to nothing without a USB audio descriptor.
 #include "Audio/USB_F32.h"
-#endif
 #endif
 // TEMPORARY bench diagnostic: name the physical buttons. The pin tables in
 // OC_gpio.cpp branch on the hardware ID voltage and the variants disagree
@@ -794,7 +882,7 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
   }
   Serial.printf("heap free: %lu bytes (RAM2)\n",
                 (unsigned long)(_heap_end - __brkval));
-#ifdef AUDIO_INTERFACE
+#ifdef XENO_CODEC_AUDIO
   // integer tenths: %f would drag the float-printf tables into DTCM
   Serial.printf("audio i16 pool: %u now / %u max   cpu: %lu.%lu%% now / %lu.%lu%% max\n",
                 AudioMemoryUsage(), AudioMemoryUsageMax(),
@@ -811,7 +899,7 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
       Serial.printf("tweighty: acquired=%d ready=%d meter=%d\n",
                     tw_acquired, tw_ready, (int)(tw_meter * 1000));
   }
-#ifdef ARDUINO_TEENSY41
+#ifdef AUDIO_INTERFACE  // USB: these counters exist only in a USB audio build
   // All four must stay 0. Non-zero = the USB audio transport handed an ISR
   // callback a ring index or block pointer it had already invalidated, which
   // is what used to hard-fault inside copy_to_buffers after a preset Store.
@@ -864,6 +952,7 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
 #if defined(ARDUINO_TEENSY41)
   CaptainMidiHealth();
 #endif
+  OC::RT::Summary();
   Serial.println("=== selftest done ===");
 }
 #endif
@@ -878,6 +967,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
 
   while (true) {
     ++loop_counter;
+    RT::LoopPass();   // pass length into the budget histogram
 #if defined(__IMXRT1062__)
     watchdog_feed();  // a wedged loop() now reboots instead of bricking
 #endif
@@ -931,12 +1021,6 @@ FLASHMEM __attribute__((noinline)) void loop() {
         OC_DEBUG_PROFILE_SCOPE(DEBUG::MENU_draw_cycles);
         app_switcher.current_app()->Draw(ui_mode);
         ++menu_draw_count;
-#ifdef VOR
-        // TODO: move this into AppBase
-        // only if not screensaver
-        VBiasManager *vbias_m = vbias_m->get();
-        vbias_m->DrawPopupPerhaps();
-#endif
       }
 
       MENU_REDRAW = 0;
@@ -1047,6 +1131,8 @@ FLASHMEM __attribute__((noinline)) void loop() {
       // 'j' bench trigger: one more character names the control to press.
       // See ConsolePress().
       static bool press_pending = false;
+      static uint8_t chord_digits = 0;   // 0 = idle, 1 = waiting for the key
+      static char chord_mod = 0;
 #endif
       static bool recall_slot_pending = false;
       static uint8_t recall_slot_digits = 0;
@@ -1109,6 +1195,12 @@ FLASHMEM __attribute__((noinline)) void loop() {
         if (press_pending) {
           press_pending = false;
           ConsolePress((char)cmd);
+          continue;
+        }
+        if (chord_digits) {
+          if (1 == chord_digits) { chord_mod = (char)cmd; chord_digits = 2; continue; }
+          chord_digits = 0;
+          ConsoleChord(chord_mod, (char)cmd);
           continue;
         }
 #endif
@@ -1431,6 +1523,18 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.printf("PresetBusUI %s\n",
                           OC::PresetBusUI::Active() ? "open" : "closed");
             break;
+          case 'P':  // poke a MESSAGE_POPUP, so the cross-app popup path can
+                     // actually be TESTED on the bench instead of reasoned
+                     // about. Every real producer of these is a failure that
+                     // cannot be provoked safely from here: PhzConfig's
+                     // "Corrupt File!!" needs a damaged file, PresetEngine's
+                     // "Disk full !!" needs a full card, and "Empty preset"
+                     // needs a preset recall, which changes this module's own
+                     // state. This pokes the same popup those do, and touches
+                     // nothing else.
+            HS::PokePopup(HS::MESSAGE_POPUP, "BENCH POPUP");
+            Serial.println("poked MESSAGE_POPUP");
+            break;
           case 'b': OC::PresetBus::DebugDump(); break;
           case 'k':  // toggle 0x50 card serving (WPM-less bus only; hard-gated)
             OC::PresetBus::CardServeEnable(!OC::PresetBus::CardServing());
@@ -1530,17 +1634,114 @@ FLASHMEM __attribute__((noinline)) void loop() {
             }
             break;
           case 't': SelfTest(); break;  // one-shot system health report
+          case 'T': {  // real-time budget report; 'T' again within 3s resets
+            static uint32_t last_T_ms = 0;
+            const uint32_t now = millis();
+            const bool reset = last_T_ms && now - last_T_ms < 3000;
+            OC::RT::Report(reset);
+            last_T_ms = reset ? 0 : now;
+            break;
+          }
           case 'K': ButtonWatch(); break;  // name the physical buttons
           case 'a': OC::SwitchToDefaultApp(); break;  // remote: activate Captain
           case 'j':  // press the panel: one more character names the control
             Serial.println("press: l r a b z x y tap, capitals hold, [ ] encL, - + encR");
             press_pending = true;
             break;
+          case 'o':  // press a chord: two more characters, modifier then key
+            Serial.println("chord: two of l r a b z x y -- modifier then key "
+                           "(ar = hold A, push encR: the app switcher)");
+            chord_digits = 1;
+            break;
           case 'A':  // switch to any app by container index (2 decimal digits)
             Serial.println("app switch: type 2 decimal digits for the index");
             OC::ListApps();
             app_switch_pending = true; app_switch_digits = 0; app_switch_value = 0;
             break;
+          case 'f': {  // BENCH TOOL (2026-09-03, Sampler concurrent-voice test):
+            // receive a raw file over serial, write straight to SD. No
+            // MTP/host client needed -- this is temporary scaffolding to get
+            // WAV files onto the card for a bench test, not a shipped
+            // feature. Wire protocol, no delimiters: 3 ASCII digits (the
+            // file number, "000".."999"), 8 ASCII hex digits (payload length,
+            // big-endian text), then exactly that many raw bytes.
+            // Prints "FTOK" or "FTFAIL <reason>".
+            if (!SDcard_Ready) { Serial.println("FTFAIL no card"); break; }
+            // (Do NOT discard queued bytes here: the header usually arrives
+            // in the same USB burst as 'f' itself, so it is very often
+            // already sitting in the buffer the instant this case starts --
+            // an earlier version of this discarded exactly those bytes
+            // before ever reading them. Genuinely stale bytes from a prior
+            // failed attempt are handled by the drain on the failure path
+            // below instead.)
+            const uint32_t saved_timeout = 1000;  // Stream default; restored below
+            Serial.setTimeout(5000);
+            char numbuf[4] = {0};
+            const size_t n_got = Serial.readBytes(numbuf, 3);
+            bool ok = n_got == 3;
+            for (int i = 0; ok && i < 3; ++i) ok = isdigit((unsigned char)numbuf[i]);
+            char lenbuf[9] = {0};
+            size_t l_got = 0;
+            if (ok) { l_got = Serial.readBytes(lenbuf, 8); ok = l_got == 8; }
+            for (int i = 0; ok && i < 8; ++i) ok = isxdigit((unsigned char)lenbuf[i]);
+            if (!ok) {
+              // DEBUG (temporary): show exactly what arrived, not just that
+              // it was wrong -- printable bytes as chars, everything else as
+              // hex, so a control/garbage byte in the header is visible.
+              Serial.printf("FTFAIL bad header: n_got=%u numbuf=[", (unsigned)n_got);
+              for (size_t i = 0; i < n_got; ++i)
+                isprint((unsigned char)numbuf[i]) ? Serial.write(numbuf[i])
+                                                  : Serial.printf("\\x%02X", (unsigned char)numbuf[i]);
+              Serial.printf("] l_got=%u lenbuf=[", (unsigned)l_got);
+              for (size_t i = 0; i < l_got; ++i)
+                isprint((unsigned char)lenbuf[i]) ? Serial.write(lenbuf[i])
+                                                  : Serial.printf("\\x%02X", (unsigned char)lenbuf[i]);
+              Serial.println("]");
+              while (Serial.available()) Serial.read();  // drop whatever else is queued
+              Serial.setTimeout(saved_timeout);
+              break;
+            }
+            const uint32_t len = strtoul(lenbuf, nullptr, 16);
+            // Sanity cap: nothing this bench test sends is anywhere near
+            // this size, and refusing outright beats a multi-hour loop
+            // waiting for bytes that were never coming, if the header ever
+            // does get misparsed despite the checks above.
+            if (len > 2000000UL) {
+              Serial.println("FTFAIL length too large");
+              Serial.setTimeout(saved_timeout);
+              break;
+            }
+            char fname[12];
+            snprintf(fname, sizeof(fname), "%s.WAV", numbuf);
+            SD.remove(fname);
+            File f = SD.open(fname, FILE_WRITE);
+            if (!f) { Serial.println("FTFAIL open"); Serial.setTimeout(saved_timeout); break; }
+            // Header parsed and file opened -- explicitly hand back to the
+            // sender before it sends a single payload byte. The small USB-
+            // CDC RX ring buffer overflows (silently, oldest bytes lost) if
+            // the sender blasts header+payload as one continuous stream
+            // faster than loop() drains it; this handshake keeps the
+            // payload from ever starting until we're actually ready to
+            // drain it chunk by chunk.
+            Serial.println("FTGO");
+            uint32_t remaining = len;
+            uint8_t buf[512];
+            while (remaining && ok) {
+              watchdog_feed();
+              const size_t chunk = remaining < sizeof(buf) ? remaining : sizeof(buf);
+              const size_t n = Serial.readBytes((char *)buf, chunk);
+              if (n != chunk) { ok = false; break; }
+              f.write(buf, n);
+              remaining -= n;
+            }
+            watchdog_feed();
+            f.close();
+            watchdog_feed();
+            Serial.setTimeout(saved_timeout);
+            Serial.printf("%s %s (%lu bytes)\n", ok ? "FTOK" : "FTFAIL short",
+                          fname, (unsigned long)(len - remaining));
+            break;
+          }
           case 'l':
             Serial.println(" -=- LittleFS -=- ");
             PhzConfig::listFiles();

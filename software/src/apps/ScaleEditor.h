@@ -162,7 +162,16 @@ private:
     int8_t cursor;
     int8_t current_scale;
     int8_t current_note;
-    int8_t current_import_scale;
+    // NOT int8_t: this indexes the whole scale table, 0..NUM_SCALES-1, and
+    // NUM_SCALES is 148 (4 user slots + 144 braids scales) -- past what an
+    // int8_t holds. The import picker constrains to NUM_SCALES-1 = 147 and
+    // then assigns that back here, so stepping up from 127 stored -128, which
+    // (a) put the top 20 scales permanently out of reach, and (b) indexed
+    // scale_names[-128] on the very next draw -- an out-of-bounds read on the
+    // display path, not just a stuck cursor. GetScale() re-CONSTRAINs and so
+    // never saw it, which is why this stayed quiet.
+    // Transient UI state, not serialised, so widening it changes no format.
+    int16_t current_import_scale;
     int undo_value;
     bool length_set_mode;
     bool import_mode;

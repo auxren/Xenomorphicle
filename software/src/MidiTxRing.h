@@ -21,11 +21,11 @@ struct MidiTxRing {
 
   uint32_t q[kSize];
   uint8_t w, r;
-  uint32_t merged, dropped, high_water;
+  uint32_t merged, dropped, high_water, promoted;
 
   void reset() {
     w = r = 0;
-    merged = dropped = high_water = 0;
+    merged = dropped = high_water = promoted = 0;
     for (uint8_t i = 0; i < kSize; ++i) q[i] = 0;
   }
 
@@ -72,6 +72,38 @@ struct MidiTxRing {
     w = (uint8_t)(w + 1);
     const uint8_t d = pending();
     if (d > high_water) high_water = d;
+    return true;
+  }
+
+  // Bring the oldest realtime byte (0xF8-0xFF: clock, start, continue, stop)
+  // to the head, keeping the relative order of everything it passes.
+  //
+  // Coalescing stops a controller stream from GROWING the queue, but not
+  // from sitting in front of a clock tick that was queued after it: each
+  // frame ahead costs about a millisecond of quiet-gated bus, so a burst of
+  // note and program traffic delays the tick by as many milliseconds as it
+  // has entries. The tick is the one message whose whole value is WHEN it
+  // arrives, so it goes first. Rotating rather than swapping matters: a
+  // swap would move a note-off in front of its note-on and leave the voice
+  // stuck on.
+  //
+  // True when a realtime entry is at the head afterwards (including when it
+  // already was, which counts as no promotion); false when none is queued.
+  // The caller must mask interrupts: push()'s coalescing writes into the
+  // ring body from ISR context and would tear a rotation in progress.
+  bool promote_realtime() {
+    uint8_t i = r;
+    while (i != w && (q[i & (kSize - 1)] & 0xFF) < 0xF8) i = (uint8_t)(i + 1);
+    if (i == w) return false;   // nothing realtime queued
+    if (i == r) return true;    // already next out
+    const uint32_t rt = q[i & (kSize - 1)];
+    while (i != r) {            // shift the entries it passes up one slot
+      const uint8_t prev = (uint8_t)(i - 1);
+      q[i & (kSize - 1)] = q[prev & (kSize - 1)];
+      i = prev;
+    }
+    q[r & (kSize - 1)] = rt;
+    ++promoted;
     return true;
   }
 

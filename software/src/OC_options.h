@@ -9,23 +9,11 @@
 #ifndef OC_OPTIONS_H_
 #define OC_OPTIONS_H_
 
-/* ------------ uncomment for use with all Northernlight 4U modules - cOC, 2OC, hOC ---------- */
-//#define NORTHERNLIGHT
-/* ------------ uncomment for use with Northernlight 2OC on the left side: --------------------------  */
-//#define NORTHERNLIGHT_2OC_LEFTSIDE
-/* ------------ uncomment for the Northernlight hOC (to correct button mappings) ----- */
-//#define NLM_hOC
-/* ------------ uncomment for the Northernlight cardOC (to correct button mappings) ----- */
-//#define NLM_cardOC
-/* ------------ uncomment for older hardware revisions of the Northernlight 2OC ----- */
-//#define NLM_DIY
 
 /* ------------ uncomment for boring app names ------------------------------------------------------  */
 //#define BORING_APP_NAMES
 /* ------------ print debug messages to USB serial --------------------------------------------------  */
 //#define PRINT_DEBUG
-/* ------------ flip screen / IO mapping ------------------------------------------------------------  */
-//#define FLIP_180
 /* ------------ invert screen pixels ----------------------------------------------------------------  */
 //#define INVERT_DISPLAY
 /* ------------ use DAC8564 -------------------------------------------------------------------------  */
@@ -38,19 +26,10 @@
 //#define APPS_DEBUG
 
 
-/* ------------ uncomment for use with Plum Audio VOR enabled versions (OCP, 1uO_c v2, 4Robots) -----  */
-//#define VOR
 
 // idk what this means so I'm keeping it -NJM
-#if defined(VOR)
-  #define IO_10V
-#endif
 
 // backward compatibility
-#if defined(NORTHERNLIGHT)
-  #define BUCHLA_4U
-  #define BUCHLA_cOC
-#endif
 
 // Here are some custom flags:
 /* --- special Phazerville mode w/ easter eggs --- */
@@ -65,10 +44,8 @@
 /* files to prevent them from taking up space.                                                         */
 
 // #define ENABLE_APP_CALIBR8OR
-// #define ENABLE_APP_SCENES
 // #define ENABLE_APP_ENIGMA
 // #define ENABLE_APP_MIDI
-// #define ENABLE_APP_PONG
 // #define ENABLE_APP_PIQUED
 // #define ENABLE_APP_POLYLFO
 // #define ENABLE_APP_H1200
@@ -88,7 +65,7 @@
 
 // Disable Hemisphere and all the applets, freeing up space.
 // If you really want to squeeze everything else in, use this.
-// If you want to exclude individual applets, edit hemisphere_config.h
+// To exclude individual applets, edit the Registry<> list in applets/_config.h
 // #define NO_HEMISPHERE
 
 #endif

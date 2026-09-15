@@ -49,9 +49,6 @@ enum POLYLFO_SETTINGS {
   POLYLFO_SETTING_D_AM_BY_C,
   POLYLFO_SETTING_CV4,
   POLYLFO_SETTING_TR4_MULT,
-#ifdef VOR
-  POLYLFO_SETTING_VBIAS,
-#endif
   POLYLFO_SETTING_LAST
 };
 
@@ -165,21 +162,6 @@ public:
     return values_[POLYLFO_SETTING_TR4_MULT];
   }
 
-#ifdef VOR
-  void saveVbias() {
-    VBiasManager *v = v->get();
-    values_[POLYLFO_SETTING_VBIAS] = v->GetState();
-  }
-  void restoreVbias() {
-    if (values_[POLYLFO_SETTING_VBIAS] <= 2)
-    {
-        VBiasManager *v = v->get();
-        VBiasManager::VState bias_state = (VBiasManager::VState)values_[POLYLFO_SETTING_VBIAS];
-        v->SetState( bias_state );
-        //v->DrawPopupPerhaps();
-    }
-  }
-#endif
 
   void Init();
 
@@ -242,9 +224,6 @@ public:
     { 0, 0, 6, "CV4: DEST", cv4_destinations, settings::STORAGE_TYPE_U8 },
 #endif
     { 3, 0, 5, "TR4: MULT", tr4_multipliers, settings::STORAGE_TYPE_U4 }, 
-#ifdef VOR
-    { 0, 0, 2, "VBias", OC::Strings::VOR_offsets, settings::STORAGE_TYPE_U4 }, 
-#endif
   }};
 };
 SETTINGS_ARRAY_DEFINE(PolyLfo);
@@ -475,14 +454,8 @@ void AppPolyLfo::HandleAppEvent(AppEvent event) {
   switch (event) {
     case APP_EVENT_RESUME:
       cursor_.set_editing(false);
-#ifdef VOR
-      poly_lfo_.restoreVbias();
-#endif
       break;
     case APP_EVENT_SUSPEND:
-#ifdef VOR
-      poly_lfo_.saveVbias();
-#endif
     case APP_EVENT_SCREENSAVER_ON:
     case APP_EVENT_SCREENSAVER_OFF:
       break;

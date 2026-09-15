@@ -431,11 +431,7 @@ private:
   SETTINGS_ARRAY_DECLARE() {{
     {0, -11, 11, "Transpose", NULL, settings::STORAGE_TYPE_I8},
     {H1200_CV_SOURCE_NONE, H1200_CV_SOURCE_NONE, H1200_CV_SOURCE_LAST-1, "Transpose CV", OC::Strings::cv_input_names_none, settings::STORAGE_TYPE_U8},
-    #ifdef NORTHERNLIGHT
-    {0, 0, 7, "Octave", NULL, settings::STORAGE_TYPE_I8},
-    #else
     {0, -3, 3, "Octave", NULL, settings::STORAGE_TYPE_I8},
-    #endif
     {H1200_CV_SOURCE_NONE, H1200_CV_SOURCE_NONE, H1200_CV_SOURCE_LAST-1, "Octave CV", OC::Strings::cv_input_names_none, settings::STORAGE_TYPE_U8},
     {MODE_MAJOR, 0, MODE_LAST-1, "Root mode", mode_names, settings::STORAGE_TYPE_U8},
     {0, -3, 3, "Inversion", NULL, settings::STORAGE_TYPE_I8},
@@ -743,11 +739,7 @@ void /*FASTRUN*/ AppH1200::Process(OC::IOFrame *ioframe) {
     cv_src = h1200_settings.get_octave_cv_src();
     if (cv_src)
       octave_ += ioframe->cv.ScaledValue<8>(cv_src - H1200_CV_SOURCE_CV1);
-#ifdef NORTHERNLIGHT
-      CONSTRAIN(octave_, 0, 7);
-#else
       CONSTRAIN(octave_, -3, 3);
-#endif
 
     cv_src = h1200_settings.get_inversion_cv_src();
     if (cv_src)

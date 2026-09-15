@@ -388,8 +388,15 @@ says() {  # description, fault, expected
   [ "$got" = "$3" ] && ok "$1" || bad "$1 (said: '$got')"
 }
 
+# The byte counts below (18) are the size of the edit $W251 performs: it
+# changes Seq A's end stage, which rewrites several stage records, not one
+# field. The number is a property of THAT key sequence, so it has to be
+# re-derived whenever the macro or the generator changes -- it was 6 when
+# this was written and went stale when the arm/confirm rework changed which
+# control the sequence lands on. That the count itself is trustworthy is
+# proved separately by the flip-first case below, which must say exactly 1.
 says "a good write reads back and says VERIFIED" none "WROTE + VERIFIED"
-says "a module that stored nothing is caught" ignore "[inv] BAD: 6 bytes wrong"
+says "a module that stored nothing is caught" ignore "[inv] BAD: 18 bytes wrong"
 says "one wrong byte in the edited slot is caught" \
      flip-first "[inv] BAD: 1 byte wrong"
 says "a byte changed in ANOTHER preset is caught" \
@@ -455,7 +462,7 @@ rearm_says() {  # fault, screen row
        --dump-fb 2>/dev/null | python3 fbtext.py - | grep "^y=$2" \
     | sed "s/^y=$2 *x=0 *//"
 }
-[ "$(rearm_says ignore 26)" = "6 bytes change" ] \
+[ "$(rearm_says ignore 26)" = "18 bytes change" ] \
   && ok "a failed write keeps the edit, ready to retry" \
   || bad "a failed write lost the edit (re-arm said: '$(rearm_says ignore 26)')"
 [ "$(rearm_says none 36)" = "No changes to write" ] \
@@ -491,7 +498,7 @@ row_at() {  # y, then simulator args
 # write_state_ used to outrank everything on the status row and nothing ever
 # cleared it, so WROTE + VERIFIED stayed up for the rest of the session: the
 # screen asserted a verified match against the module while arming Save
-# simultaneously reported "6 bytes change". It also froze the staleness clock,
+# simultaneously reported the edit size as a change. It also froze the staleness clock,
 # so LIVE Ns ago never came back after the first write. Editing after a write
 # is the normal loop in this app, not a corner.
 edit_after_write=$(row_at 46 --keys "$W251,[,step50,[,step50,r,step10,r,step10,l,step200")
@@ -541,7 +548,7 @@ $SIM --app "200e Modules" --keys "$W251_EDIT,.,step200" --dump-fb 2>/dev/null \
   && ok "a refused slot turn leaves the slot where it was" \
   || bad "a refused slot turn moved the slot anyway"
 survived=$(row_at 26 --keys "$W251_EDIT,.,step200,],],a,step10")
-[ "$survived" = "6 bytes change" ] \
+[ "$survived" = "18 bytes change" ] \
   && ok "the working buffer survives the refusal, with the edit still in it" \
   || bad "the edit did not survive a refused slot turn (Save said: '$survived')"
 
@@ -790,21 +797,15 @@ $SIM --state-in "$IMG/bad2" --keys "$ENTER,r-down,step300,r-up,step3000,b,step50
   && ok "the refused recall leaves an app drawing" \
   || bad "nothing drawn after the refused recall"
 
-# The file-backed sections (B/S/C) used to be checksummed only as they were
-# streamed out to their live files in step 4 -- after validation, with the
-# app world frozen -- and a failure there was silent: the recall reported
-# "done" with the previous slot's file still in place. Scenery gives the sim
-# a slot with an S section to damage. Control first, again.
-$SIM --app Scenery --state-out "$IMG/goodS" --keys "$ENTER,l-down,step600,l-up,step4000" >/dev/null 2>&1
-$SIM --app Scenery --state-in "$IMG/goodS" --keys "$ENTER,r-down,step300,r-up,step3000" 2>&1 \
-  | grep -q 'recall slot 0 done' \
-  && ok "the undamaged Scenery slot recalls (control)" \
-  || bad "the undamaged Scenery slot did not recall"
-python3 corrupt_slot.py "$IMG/goodS" "$IMG/badS" 0 S
-$SIM --app Scenery --state-in "$IMG/badS" --keys "$ENTER,r-down,step300,r-up,step3000" 2>&1 \
-  | grep -q 'refused (BAD PRESET)' \
-  && ok "a flipped bit in a file-backed (S) section is refused before anything is applied" \
-  || bad "a damaged S section was recalled as done"
+# NOT COVERED HERE ANY MORE: a flipped bit in a file-backed section (B/S/C).
+# Scenery was the only app in this build that wrote one, and it was deleted
+# with the 2026-09-13 hard fork; the bank and Captain sections come from apps
+# this build cannot compile (see README.md, "Apps that are not simulated").
+# The G-section checks above still cover the container's own validation. The
+# firmware side of the file-backed path also moved under that fork -- a
+# recall now stages those sections in RAM and checksums them in
+# stage_section() before registering -- so re-establishing this check means
+# writing it against the staging path, not restoring these two lines.
 
 echo "the pre-write bank snapshot"
 
@@ -846,7 +847,7 @@ snap_bytes=$(snap_line --keys "$W251" | awk '{print $4}')
 # module that behaves), UNDO, then re-Read and build the SAME edit again:
 #
 #   snapshot = the bank BEFORE the write  ->  the edit is once more a change
-#                                             ("6 bytes change")
+#                                             ("18 bytes change")
 #   snapshot = the bank AFTER the write   ->  the edit is already in the module
 #                                             ("No changes to write")
 #
@@ -863,7 +864,7 @@ REDO='{,r,step3000,],],r,step10,r,step10,l,step10,],],a,step400'  # re-Read, sam
 undone=$($SIM --app "200e Modules" --write-fault flip-last --write-fault-once \
               --keys "$W251,$UNDO_ARM,$REDO" --dump-fb 2>/dev/null \
          | python3 fbtext.py - | grep '^y=26' | sed 's/^y=26 *x=0 *//')
-[ "$undone" = "6 bytes change" ] \
+[ "$undone" = "18 bytes change" ] \
   && ok "the snapshot holds the bank from BEFORE the write, so an undo really undoes" \
   || bad "after an undo the same edit was not a change again (said: '$undone')"
 
@@ -1259,21 +1260,24 @@ echo "a power cycle comes back in the app that was on screen"
 # as a side effect of saving every app's data. So the boot app was whatever
 # had last been long-press-saved, however many switches ago.
 #
-# Slot 0 stored from Pong; then a plain-press switch to Scenery (encR twice
-# up the list from Pong); then power. The recall must still run (the slot is
-# the module's state) and the screen must still be Scenery. The switches
-# below sit for 4 s first: the app is written down with the slot, ~3 s after
-# the last change, one cheap EEPROM program -- not a GLOBALS.CFG block erase
-# in the middle of a recall.
+# Slot 0 stored from Tweighty; then a plain-press switch to the 200e Modules
+# app; then power. The recall must still run (the slot is the module's state)
+# and the screen must still be 200e Modules. The switches below sit for 4 s
+# first: the app is written down with the slot, ~3 s after the last change,
+# one cheap EEPROM program -- not a GLOBALS.CFG block erase in the middle of
+# a recall.
+# The walk crosses a folder, which is the point: Tweighty is this build's
+# only AUDIO app, so one encL turn leaves that folder for SYSTEM (encL skips
+# empty folders) and one encR detent steps from Setup/About to 200e Modules.
 rm -f "$IMG/keepapp"
-$SIM --app "Pong 2.0" --state-out "$IMG/keepapp" \
-     --keys "$ENTER,l-down,step600,l-up,step4000,$MENU,encr-,encr-,step100,r,step4000" \
+$SIM --app Tweighty --state-out "$IMG/keepapp" \
+     --keys "$ENTER,l-down,step600,l-up,step4000,$MENU,encl+,encr+,step100,r,step4000" \
      >/dev/null 2>&1
 $SIM --state-in "$IMG/keepapp" --keys "step2000" > "$TMP/keepapp" 2>&1
 keep_app=$(sed -n 's/^  [a-z][a-z]*  *app=\(.*\)  held=.*/\1/p' "$TMP/keepapp" | tail -1)
 if ! grep -q 'boot recall slot 0' "$TMP/keepapp"; then
   bad "the power-up recall of slot 0 did not run (app came up as '$keep_app')"
-elif [ "$keep_app" = "Scenery" ]; then
+elif [ "$keep_app" = "200e Modules" ]; then
   ok "power-up recalls the slot but keeps the app that was on screen (plain-press switch)"
 else
   bad "power-up switched to the preset's app instead of the one on screen ('$keep_app')"
@@ -1281,13 +1285,14 @@ fi
 
 # The same rule from the other side: a bus recall that lands in another app
 # has changed what is on screen, so THAT is what the next power-up shows.
-# From the Scenery image above, recall slot 0 (Pong) through the overlay.
+# From the 200e Modules image above, recall slot 0 (Tweighty) through the
+# overlay.
 cp "$IMG/keepapp" "$IMG/keepapp2"
 $SIM --state "$IMG/keepapp2" --keys "step2000,$ENTER,r-down,step300,r-up,step4000" \
      >/dev/null 2>&1
-$SIM --state-in "$IMG/keepapp2" --keys "step2000" 2>&1 | grep -Eq '^  [a-z]+ +app=Pong 2.0' \
+$SIM --state-in "$IMG/keepapp2" --keys "step2000" 2>&1 | grep -Eq '^  [a-z]+ +app=Tweighty' \
   && ok "a bus recall into another app is what the next power-up comes back in" \
-  || bad "after a bus recall into Pong, power-up came back somewhere else"
+  || bad "after a bus recall into Tweighty, power-up came back somewhere else"
 
 # ...and the console's remote switch (SwitchToApp, which --app goes through):
 # the Orin's 'a' has to stick the way a menu pick does.
@@ -1407,7 +1412,7 @@ absorbs "the preset overlay (both encoders, encR held)" preset \
         "l-down,step20,r-down,step80,l-up,step900,r-up,step60"
 absorbs "the IO settings screen (A+encL, encL held)" - \
         "a-down,step60,l-down,step60,l-up,step60,a-up,step900" \
-        "a-down,step60,l-down,step60,a-up,step900,l-up,step60" --app Scenery
+        "a-down,step60,l-down,step60,a-up,step900,l-up,step60" --app Tweighty
 
 # The rule is "until released", not "for a while", so a press AFTER the release
 # must work normally. Without this pair the guard could be a permanent mute and
@@ -1427,24 +1432,150 @@ $SIM --keys "$ENTER,l-down,step600,l-up,step3000" 2>&1 | grep -q 'PresetEngine: 
   && ok "the release-first rule leaves the hold-sampled STORE working" \
   || bad "the release-first rule broke the 500ms STORE hold"
 
-echo "hold A reveals the chord list"
+echo "the app switcher has folders, and cannot lose an app in one"
+
+# Thirty-two apps in one flat list is a scroll, not a menu, so the switcher
+# shows one folder at a time: encL turns the folder, encR walks the apps in it.
+# It is the ONLY route between apps, so the checks that matter here are the
+# ones about not being able to get stuck: it opens where you already are, an
+# emptied folder is skipped rather than becoming a dead turn, and every move is
+# reversible.
+sw_rows() { $SIM "$@" --dump-fb 2>/dev/null | python3 fbtext.py -; }
+SW="step300,$MENU"
+
+# Opens on the folder holding the app you are in, never on folder 0. Tweighty
+# is the only app in AUDIO in this build, so this is unambiguous.
+sw_rows --app "Tweighty" --keys "$SW" | grep -q 'AUDIO' \
+  && ok "the switcher opens on the folder holding the current app" \
+  || bad "the switcher did not open on AUDIO with Tweighty running"
+
+# And the app you are in is the row under the cursor, not merely on screen.
+sw_rows --app "Tweighty" --keys "$SW" | grep -q '\[inv\] Tweighty' \
+  && ok "the current app is the row the right encoder would pick" \
+  || bad "the current app was not under the cursor"
+
+# encL skips folders with nothing in them. This build fills only AUDIO,
+# SYSTEM and HIDDEN, so one turn from AUDIO must land on SYSTEM -- if empty
+# folders were not skipped it would stop on PITCH and show "(empty)".
+sw_rows --app "Tweighty" --keys "$SW,encl+,step200" | grep -q 'SYSTEM' \
+  && ok "turning the folder skips the empty ones" \
+  || bad "turning encL landed on an empty folder"
+
+# HIDDEN is an ordinary folder, reachable by turning, not a special mode --
+# once there is something in it. Nothing is filed there at first boot any
+# more: Pong was the only app that started hidden and it was deleted with the
+# 2026-09-13 hard fork, and encL skips empty folders. So the app is moved
+# there first (X walks it AUDIO -> SYSTEM -> HIDDEN), and then turning away
+# and back has to find it again.
+sw_rows --app "Tweighty" --keys "$SW,x,x,step200" | grep -q 'HIDDEN' \
+  && ok "an app can be moved into HIDDEN, and the screen follows it there" \
+  || bad "moving an app twice did not reach HIDDEN"
+sw_rows --app "Tweighty" --keys "$SW,x,x,step100,encl+,step100,encl-,step200" \
+  | grep -q 'HIDDEN' \
+  && ok "HIDDEN is reachable by turning, like any other folder" \
+  || bad "HIDDEN was not reachable by turning encL"
+
+# X moves the app under the cursor to the next folder, and the screen follows
+# it there. Following is what keeps X and Y exact inverses: an emptied folder
+# has no row under the cursor, so staying behind would strand the app with no
+# gesture able to move it back.
+sw_rows --app "Tweighty" --keys "$SW,x,step200" | grep -q 'SYSTEM' \
+  && ok "the screen follows the app to the folder it was moved into" \
+  || bad "moving an app did not follow it to its new folder"
+
+# ...and the move is announced, because otherwise the app just vanishes.
+sw_rows --app "Tweighty" --keys "$SW,x,step200" | grep -q 'moved to' \
+  && ok "a move says where the app went" \
+  || bad "a move gave no feedback at all"
+
+# Y undoes X exactly: the round trip puts it back in AUDIO, under the cursor.
+sw_rows --app "Tweighty" --keys "$SW,x,step100,y,step200" | grep -q '\[inv\] Tweighty' \
+  && ok "X then Y returns the app to where it started" \
+  || bad "moving an app forward then back did not restore it"
+
+# The legend names the three controls this screen actually has.
+sw_rows --app "Tweighty" --keys "$SW" | grep -q 'L:fldr R:pick X:move' \
+  && ok "the switcher states its own controls" \
+  || bad "the switcher legend is missing or changed"
+
+# Nothing on the new header or legend runs off the right edge.
+$SIM --app "Tweighty" --keys "$SW" --dump-fb 2>/dev/null | python3 edgecheck.py - >/dev/null 2>&1 \
+  && ok "no clipped text on the app switcher" \
+  || bad "something on the app switcher is clipped at the right edge"
+
+echo "the panel sleeps when the module is left alone"
+
+# An OLED ages the pixels it lights, and nothing in this firmware ever stopped
+# drawing: AppBase::Draw() calls DrawScreensaver() for as long as the module
+# idles, so a module left powered held a static image indefinitely -- with
+# gfxHeader()'s 128-pixel full-width rule, the worst shape for burn-in there
+# is. Ui now turns the panel's DRIVE off after ten minutes idle.
+#
+# These assert on `panel=` from the status line, NOT on a blank framebuffer.
+# An app whose screensaver draws nothing and a panel that is genuinely asleep
+# both dump an all-zero frame; only one of them stops the display ageing, and
+# an early version of this check could not tell them apart.
+#
+# Margins are wide on purpose: `step` advances simulated time a couple of
+# percent over what is asked, so a check written tight against 600000 would
+# sit right on the boundary and flap.
+panel_state() { $SIM "$@" 2>&1 | grep -oE 'panel=[a-z]+' | tail -1; }
+
+# A press well inside the window leaves it lit.
+[ "$(panel_state --app Tweighty --keys 'a-down,step20,a-up,step400000')" = "panel=on" ] \
+  && ok "the panel stays lit while the module is in use" \
+  || bad "the panel slept while still inside the idle window"
+
+# Left alone past ten minutes, the drive goes off.
+[ "$(panel_state --app Tweighty --keys 'a-down,step20,a-up,step700000')" = "panel=asleep" ] \
+  && ok "the panel sleeps after ten minutes idle" \
+  || bad "the panel was still lit after ten minutes idle"
+
+# Every control wakes it. This is derived from idle_time() rather than hooked
+# to a wake path, so there is no control that can be forgotten -- assert that
+# for a button and for BOTH encoders rather than trusting the argument.
+for k in a z encr+ encl+ encr- encl-; do
+  [ "$(panel_state --app Tweighty --keys "a-down,step20,a-up,step700000,$k,step200")" = "panel=on" ] \
+    && ok "'$k' wakes the sleeping panel" \
+    || bad "'$k' did not wake the sleeping panel"
+done
+
+# And it wakes showing the live screen, not a stale or empty one: the firmware
+# keeps flushing to a sleeping panel, which is exactly what makes this true.
+$SIM --app Tweighty --keys "a-down,step20,a-up,step700000,a,step200" --dump-fb 2>/dev/null \
+  | grep -qE '[1-9a-fA-F]' \
+  && ok "the woken panel shows a drawn screen, not a blank one" \
+  || bad "the panel woke to an empty frame"
+
+echo "hold Z reveals the chord list"
 
 # Every global gesture here is an unlabelled chord, which is fine once and
 # unguessable the first time. Holding the modifier alone now lists them.
 # kChordHintDelayTicks is 700 UI ticks: long enough that the first half of a
 # real chord never flashes a card at you, short enough to find by accident.
+#
+# Z ONLY. A used to raise this card too, which cost every app the whole of A's
+# hold: an app binding A on long-press got the card painted over its own
+# response. A is an ordinary app button now, and the checks below assert that
+# in both directions -- Z still reveals, A never does.
 hint_rows() { $SIM "$@" --dump-fb 2>/dev/null | python3 fbtext.py -; }
 
-hint_rows --keys "a-down,step400" | grep -q 'HOLD A' \
+hint_rows --keys "z-down,step400" | grep -q 'HOLD Z' \
   && bad "the chord list appeared 400ms in, inside its own 700-tick delay" \
-  || ok "holding A for 400ms shows nothing -- the delay is real"
-hint_rows --keys "a-down,step900" | grep -q 'HOLD A' \
-  && ok "holding A past the delay reveals the chord list" \
-  || bad "holding A for 900ms revealed no chord list"
+  || ok "holding Z for 400ms shows nothing -- the delay is real"
+hint_rows --keys "z-down,step900" | grep -q 'HOLD Z' \
+  && ok "holding Z past the delay reveals the chord list" \
+  || bad "holding Z for 900ms revealed no chord list"
+
+# The half of the change that frees A: holding it must draw NOTHING, however
+# long it is held, so an app is free to bind A on long-press.
+hint_rows --keys "a-down,step900" | grep -qE 'HOLD [AZ]' \
+  && bad "holding A still raises a chord card -- A is not free for apps" \
+  || ok "holding A raises no card at all -- A belongs to the app"
 
 # It is a hint, not a mode. Releasing without a second press must do nothing at
 # all -- not switch app, not open anything, not leave a mark.
-$SIM --keys "a-down,step900,a-up,step300" --dump-fb 2>/dev/null > "$TMP/afterhint.hex"
+$SIM --keys "z-down,step900,z-up,step300" --dump-fb 2>/dev/null > "$TMP/afterhint.hex"
 $SIM --keys "step1200" --dump-fb 2>/dev/null > "$TMP/nohint.hex"
 cmp -s "$TMP/afterhint.hex" "$TMP/nohint.hex" \
   && ok "releasing the hold without a second press does nothing at all" \
@@ -1452,7 +1583,7 @@ cmp -s "$TMP/afterhint.hex" "$TMP/nohint.hex" \
 
 # ...and the chords still work THROUGH it: the overlay must not eat the second
 # press it exists to advertise.
-$SIM --keys "a-down,step900,r-down,step60,r-up,step60,a-up,step200" 2>&1 \
+$SIM --keys "z-down,step900,r-down,step60,r-up,step60,z-up,step200" 2>&1 \
   | grep -q '^  menu ' \
   && ok "a chord completed through the revealed list still works" \
   || bad "the chord list swallowed the chord it was advertising"
@@ -1485,8 +1616,16 @@ echo "nothing on screen is clipped at the right edge"
 # "LIVE 105s ago  wire 29" -- 22 columns, one over -- and the '9' was cut off,
 # leaving the well-formed and entirely wrong "wire 2". A 1-digit slot fits and
 # proves nothing.
+# The trailing `z,step200` is a WAKE. The panel sleeps after ten minutes idle
+# and AppBase::Draw() then draws nothing, so a capture past 600 s reads empty --
+# and 600 s is also this row's own last format threshold, so the two collide
+# exactly. Pressing a key first is what a person does: you walk up to a module
+# that has been sitting and touch it. Z is the right key because it is inert
+# here -- Bus200eApp leaves it unbound (Panel-Binding-Matrix.md:98) and a bare
+# Z tap does nothing globally either, since every Z chord needs a partner or a
+# 700 ms hold. A is NOT usable: it is this app's whole-bank Write ARM.
 age_row() {  # keys, label
-  $SIM --app "200e Modules" --keys "$1" --dump-fb 2>/dev/null > "$TMP/age.hex"
+  $SIM --app "200e Modules" --keys "$1,z,step200" --dump-fb 2>/dev/null > "$TMP/age.hex"
   said=$(python3 fbtext.py "$TMP/age.hex" | grep '^y=46' | sed 's/^y=46 *x=0 *//')
   case "$said" in
     "LIVE "*" ago") : ;;
@@ -1533,7 +1672,7 @@ sweep 200e-recovery-row --app "200e Modules" --write-fault ignore --keys "$W251"
 sweep 200e-undo-confirm --app "200e Modules" --write-fault ignore \
       --keys "$W251,],step100,r,step10"
 sweep setup --app "Setup/About"
-sweep scenery --app Scenery
+sweep tweighty --app Tweighty
 sweep screensaver --keys "z-down,step60,a-down,step60,a-up,step60,z-up,step300"
 echo
 

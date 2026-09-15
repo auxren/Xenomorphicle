@@ -157,11 +157,7 @@ public:
         }
         InterpolateSample(wavetable[OUT], _wt_blend, phase_acc_msb[0]);
 
-#if defined(VOR)
-        int16_t MAX_AMPLITUDE = HEMISPHERE_MAX_CV;
-#else
         int16_t MAX_AMPLITUDE = -HEMISPHERE_MIN_CV; // prevents clipping and fixes amplitude asymmetery for non-VOR O_Cs
-#endif
 
         Out(0, _attenuation * (wavetable[OUT][phase_acc_msb[0]] * MAX_AMPLITUDE / 127) / 100);
         Out(1, _attenuation * (wavetable[OUT][

@@ -16,14 +16,22 @@ namespace OC {
   const char * const BUILD_TAG = "";
 #endif
 
-  // 17 char width                  |                 |
-  const char * const RELEASE_NAME = "Phazerville Suite";
+  // The firmware's own name. This fork stopped tracking upstream and no
+  // longer keeps compatibility with it (see README), so the About screen
+  // naming itself "Phazerville Suite" identified the wrong product -- the
+  // build it describes cannot be produced from that project.
+  //
+  // Authorship is a separate matter from product identity and is NOT removed
+  // with it: the per-file copyright headers crediting djphazer, Patrick
+  // Dowling, Max Stadler, Tim Churches and the other o_C/Phazerville authors
+  // stay exactly as they are, which is both the licence terms and the honest
+  // record of who wrote this code.
+  //
+  // 21 char max (SETTINGS.h row width)   |                   |
+  const char * const RELEASE_NAME = "Xenomorphicle";
   // TODO: array of alternate titles, one for every letter of the alphabet
 
-#if defined(VOR)
-  const char * const NAME = "Plum Audio O_C+";
-  const char * const SHORT_NAME = "OC+";
-#elif defined(ARDUINO_TEENSY41)
+#if   defined(ARDUINO_TEENSY41)
   const char * const NAME = "O.R.N.8";
   const char * const SHORT_NAME = "oC8";
   // TODO: array of vendor names, hardware variants
@@ -41,14 +49,8 @@ namespace OC {
     "MYSTERIOUS ERROR",
   };
 
-#ifdef NORTHERNLIGHT
-  // legacy T3.2 builds
-  const char * const NAME_NLM = "NLM cOC/hOC/2OC";
-  const char * const SHORT_NAME_NLM = "xOC";
-#else
   const char * const NAME_NLM = "NLM Xenomorpher";
   const char * const SHORT_NAME_NLM = "XoC";
-#endif
 
   const char * const seq_playmodes[] = {" -", "SEQ+1", "SEQ+2", "SEQ+3", "TR+1", "TR+2", "TR+3", "ARP", "S+H#1", "S+H#2", "S+H#3", "S+H#4", "CV#1", "CV#2", "CV#3", "CV#4"};
 

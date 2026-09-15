@@ -40,7 +40,7 @@ INCLUDES  = -I. -Ishim/arduino -I$(BUILD) -I$(SHADOW) -I$(SHADOW)/src/extern \
 # firmware supports (T41_MTP builds with it): see README.md for what it costs.
 FWFLAGS = -DARDUINO_TEENSY41 -D__IMXRT1062__ -DPRESET_BUS -DNO_HEMISPHERE \
           -DENABLE_APP_BUS200E \
-          -DENABLE_APP_PONG -DENABLE_APP_SCENES -DENABLE_APP_TWEIGHTY -DXENO_SIM
+          -DENABLE_APP_TWEIGHTY -DXENO_SIM
 
 # Compiled from the mirror, so each of these is the real file unless shim/src/
 # replaces it (OC_ADC.cpp, OC_core.cpp, the SH1106 driver, OC_FreqMeasure.cpp).

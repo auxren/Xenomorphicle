@@ -26,11 +26,11 @@
 #include <string.h>
 
 #include "OC_apps.h"
+#include "HSUtils.h"  // HS::DrawPopup, for the cross-app MESSAGE_POPUP below
 #include "OC_global_settings.h"
 #include "OC_io_settings_menu.h"
 #include "OC_calibration.h"
 #include "OC_gpio.h"  // but_mid: whether this pin map has the grey Z button at all
-#include "VBiasManager.h"
 
 namespace OC {
 
@@ -66,8 +66,8 @@ static IOSettingsMenu io_settings_menu;
 // The FLOOR is Ui::kLongPressTicks (500), and it is a hard floor rather than a
 // preference. Below it, letting go after reading the card emits
 // EVENT_BUTTON_PRESS for A -- and a plain A press is a live control in most
-// apps: Captain MIDI changes setup (CaptainMIDI.h:2336), Hemisphere moves the
-// applet selection (Hemisphere.h:1753), Setup/About inverts the whole display
+// apps: Captain MIDI changes setup (CaptainMIDI.h:2336), Quadrants moves the
+// applet selection, Setup/About inverts the whole display
 // (SETTINGS.h:568). Past 500 ticks the release is an EVENT_BUTTON_LONG_RELEASE
 // instead, and nothing in the tree binds A on long press or on long release:
 // the only two A-long-press handlers, AppDualSequencer::HandleUpButtonLong()
@@ -91,17 +91,13 @@ static UiControl chord_hint_modifier = static_cast<UiControl>(0);
 static uint32_t chord_hint_ticks = 0;
 
 // The grey Z button only exists on some pin maps. CONTROL_BUTTON_M is bit 4,
-// and Ui::Poll() only scans CONTROL_BUTTON_LAST buttons -- which is 4 on the
-// Teensy 3.2 (antihem) and Teensy 4.0 builds, so bit 4 can never appear in an
-// event mask there and every Z row on this card would be a lie. On VOR the
-// middle button is the bias control (see DispatchEvent below), not Z.
+// and Ui::Poll() only scans CONTROL_BUTTON_LAST buttons. The hardware that
+// had no fifth button (Teensy 3.2, Teensy 4.0, and the VOR variants whose
+// middle button was a bias control) is gone from this fork, so the question
+// is now only whether the pin was detected.
 static inline bool z_button_present()
 {
-#if defined(VOR) || !defined(ARDUINO_TEENSY41)
-  return false;
-#else
   return but_mid != 0xFF;
-#endif
 }
 
 namespace {
@@ -141,14 +137,15 @@ struct ChordGloss {
   const char *tip;       // null: nothing to add beyond a_plus_b/z_alone
 };
 
-// Row budget, not decoration: DrawChordHint's `rows[5]` is sized for the
-// worst case (both A-branch optional rows, or both Z-branch optional rows)
-// and DrawChordCard's height is derived from row_count, so a 6th row would
-// push card_h past the 64px panel. `tip` therefore only ever takes the slot
-// its own branch's specific row (a_plus_b for HOLD A, z_alone for HOLD Z)
-// would otherwise leave empty -- see DrawChordHint. An app with both
-// a_plus_b and z_alone set (the three clock apps below) already fills both
-// slots with real content, so it has no room for `tip` and does not need it.
+// Row budget, not decoration: DrawChordHint's `rows[5]` is a hard cap --
+// DrawChordCard derives its height from row_count, so a 6th row would push
+// card_h past the 64px panel. Since A stopped raising a card of its own,
+// there is ONE card carrying what used to be spread over two, and the budget
+// is spent in priority order: the two global encoder chords always, then
+// z_alone, then a_plus_b, then "Z+A: Screensaver" only if the app left room.
+// `tip` therefore only appears for an app that binds neither chord -- an app
+// with both (the clock apps below) already fills both slots with content
+// specific to it, so it has no room for `tip` and does not need it.
 // Every entry is guarded by the same #ifdef its app is registered under in
 // _config.h's app_container, so the table never claims content for an app a
 // given build doesn't have. (TWOCCS() alone can't cause a build break either
@@ -157,11 +154,10 @@ struct ChordGloss {
 // still be a lie sitting in flash, matched against an app_id that binary
 // can never hand DrawChordHint. Not compiled in, not in the table.)
 static const ChordGloss kChordGloss[] = {
-  // Quadrants (Quadrants.h:615 / :1873) and Hemisphere (Hemisphere.h:980 /
-  // :1714) are the same two-encoder-plus-four-button UI on two different
-  // pin maps -- _config.h picks exactly one per build via ARDUINO_TEENSY41 --
-  // and Calibr8or (Calibr8or.h:568 / :919) makes the same two gestures do the
-  // same thing. All three open the clock-setup overlay on A+B and toggle the
+  // Quadrants (Quadrants.h:615 / :1873) and Calibr8or (Calibr8or.h:568 /
+  // :919) make the same two gestures do the same thing. (The 2-up
+  // Hemisphere host that shared this UI on the older pin map was deleted in
+  // the hard fork.) Both open the clock-setup overlay on A+B and toggle the
   // internal clock on Z.
 #ifndef NO_HEMISPHERE
 #ifdef ARDUINO_TEENSY41
@@ -182,11 +178,6 @@ static const ChordGloss kChordGloss[] = {
   // pixel invert on a solo UP press -- a different, still-useful control.
   // AppSettings has no #ifdef in _config.h -- it is always in the container.
   { TWOCCS("SE"), "Flip Screen",  nullptr,      "Up: Invert Pixels" },
-#ifdef ENABLE_APP_SCENES
-  // Scenery.h:717-718 -- Z jumps to a random scene (ZapButton); X/Y
-  // (Scenery.h:719-722) step to the previous/next saved scene.
-  { TWOCCS("SX"), nullptr,        "Random Scene", "X/Y: Change Scene" },
-#endif
 
   // Everything below binds neither A+B nor a bare Z, so both fields stay
   // null and `tip` is the whole entry.
@@ -262,11 +253,6 @@ static const ChordGloss kChordGloss[] = {
   // References.h:836-839 -- R on the Autotune row opens the autotuner.
   { TWOCCS("RF"), nullptr, nullptr, "R: Open Autotuner" },
 #endif
-#ifdef ENABLE_APP_PONG
-  // PongGame.h:478-484 -- L/R toggle each paddle between encoder and analog
-  // (CV) input.
-  { TWOCCS("PO"), nullptr, nullptr, "L/R: Analog/Digital" },
-#endif
 #ifdef ENABLE_APP_TUNER
   // TunerApp.h:314-318 -- R locks the strobe to the currently displayed note.
   { TWOCCS("TU"), nullptr, nullptr, "R: Lock Strobe" },
@@ -289,18 +275,24 @@ static const ChordGloss kChordGloss[] = {
   // SamplerApp.h:387-389 -- A manually previews/triggers the selected slot.
   { TWOCCS("SM"), nullptr, nullptr, "A: Preview Slot" },
 #endif
-#ifdef ENABLE_APP_USBDRIVE
-  // UsbDriveApp.h:254-255 -- holding B on the USB Drive item arms it.
-  { TWOCCS("UD"), nullptr, nullptr, "B-hold: USB Drive" },
+#ifdef ENABLE_APP_BUNGVERB
+  // BungverbApp.h -- same family, same one control missing from the footers.
+  { TWOCCS("BV"), nullptr, nullptr, "Hold X: fine adjust" },
+#endif
+#ifdef ENABLE_APP_REVERB
+  // ReverbApp.h -- same family, same one control missing from the footers.
+  { TWOCCS("RV"), nullptr, nullptr, "Hold X: fine adjust" },
+#endif
+#ifdef ENABLE_APP_DELAY
+  // DelayApp.h -- A, B, encL and encR are all in the footer legend on every
+  // page. X-held-fine is the one control that is NOT, because the footers are
+  // already 18-20 of their 21 characters, so it is exactly what `tip` is for:
+  // one control, the least guessable one.
+  { TWOCCS("DL"), nullptr, nullptr, "Hold X: fine adjust" },
 #endif
   // ScaleEditor.h:138-144 -- Up/Down switch which scale is being edited.
   // AppScaleEditor has no #ifdef in _config.h -- always in the container.
   { TWOCCS("SC"), nullptr, nullptr, "Up/Dn: Switch Scale" },
-#ifndef NO_HEMISPHERE
-  // WaveformEditor.h:164-174 -- Up/Down switch which waveform is being
-  // edited.
-  { TWOCCS("WA"), nullptr, nullptr, "Up/Dn: Switch Wave" },
-#endif
   // Backup.h:112-123 -- L arms Restore (then B commits), R sends the backup.
   // AppBackup has no #ifdef in _config.h -- always in the container.
   { TWOCCS("BU"), nullptr, nullptr, "L: Restore R: Send" },
@@ -392,38 +384,40 @@ FLASHMEM static void DrawChordHint(uint16_t app_id, bool io_settings_allowed)
   HintRow rows[5];
   int n = 0;
 
-  if (CONTROL_BUTTON_A == chord_hint_modifier) {
-    rows[n++] = { "A+encR: Switch App", nullptr };
-    // Offered only where EditIOSettings() will actually open something. It
-    // refuses in silence for any app that overrides io_settings_allowed(), and
-    // a row promising a screen that never arrives is how a working gesture gets
-    // learned as a broken one. No app in this tree overrides it today (the base
-    // returns true and nothing else defines it), so as things stand this row
-    // always appears -- the test is here so the card stays honest the moment
-    // one does, not because it is filtering anything now.
-    if (io_settings_allowed) rows[n++] = { "A+encL: I/O Cfg", nullptr };
-    // This slot is A+B's row when the app binds one; otherwise it is the
-    // app's general tip, so every app gets a useful row here rather than
-    // just the apps that happen to bind A+B -- see the ChordGloss comment.
-    if (gloss && gloss->a_plus_b) rows[n++] = { "A+B: ", gloss->a_plus_b };
-    else if (gloss && gloss->tip) rows[n++] = { gloss->tip, nullptr };
-    rows[n++] = { "encL+encR: Presets", nullptr };
-    if (z_button_present()) rows[n++] = { "Z+A: Screensaver", nullptr };
-    DrawChordCard("HOLD A", rows, n);
-  } else {
-    rows[n++] = { "Z+encR: Switch App", nullptr };
-    if (io_settings_allowed) rows[n++] = { "Z+encL: I/O Cfg", nullptr };
-    rows[n++] = { "Z+A: Screensaver", nullptr };
-    // Z is the one row here that can fire on RELEASE (Quadrants.h:1873 toggles
-    // the clock on either release), so naming what it does is not decoration:
-    // it is the difference between letting go and being surprised. Same
-    // either/or as the A-branch above: bare-Z meaning if the app binds one,
-    // else the app's general tip.
-    if (gloss && gloss->z_alone) rows[n++] = { "Z: ", gloss->z_alone };
-    else if (gloss && gloss->tip) rows[n++] = { gloss->tip, nullptr };
-    rows[n++] = { "encL+encR: Presets", nullptr };
-    DrawChordCard("HOLD Z", rows, n);
-  }
+  // Z is the only modifier that raises this card (see ArmChordHint), so there
+  // is one card, not two -- and it is now the ONLY discovery surface in the
+  // firmware, since holding A draws nothing. What used to be split across two
+  // cards has to fit on this one, inside the same hard rows[5] budget.
+  rows[n++] = { "Z+encR: Switch App", nullptr };
+  // Offered only where EditIOSettings() will actually open something. It
+  // refuses in silence for any app that overrides io_settings_allowed(), and
+  // a row promising a screen that never arrives is how a working gesture gets
+  // learned as a broken one. No app in this tree overrides it today (the base
+  // returns true and nothing else defines it), so as things stand this row
+  // always appears -- the test is here so the card stays honest the moment
+  // one does, not because it is filtering anything now.
+  if (io_settings_allowed) rows[n++] = { "Z+encL: I/O Cfg", nullptr };
+
+  // App-specific rows, most contextual first. Z is the one row that can fire
+  // on RELEASE (Quadrants.h:1873 toggles the clock on either release), so
+  // naming it is the difference between letting go and being surprised. A+B
+  // follows because it no longer has a card of its own: an app that binds it
+  // (the clock apps, CaptainMIDI's router, SETTINGS' screen flip) would
+  // otherwise be entirely undiscoverable now that HOLD A draws nothing.
+  // `tip` fills the slot only when the app binds neither, so every app still
+  // gets one useful row.
+  int app_rows = 0;
+  if (gloss && gloss->z_alone)  { rows[n++] = { "Z: ", gloss->z_alone };   ++app_rows; }
+  if (gloss && gloss->a_plus_b) { rows[n++] = { "A+B: ", gloss->a_plus_b }; ++app_rows; }
+  if (!app_rows && gloss && gloss->tip) rows[n++] = { gloss->tip, nullptr };
+
+  // Lowest priority: it is a global gesture, true in every app, so it yields
+  // to app-specific content rather than crowding it out. n<4 leaves exactly
+  // one slot for the Presets row below, keeping the worst case at rows[5].
+  if (n < 4) rows[n++] = { "Z+A: Screensaver", nullptr };
+
+  rows[n++] = { "encL+encR: Presets", nullptr };
+  DrawChordCard("HOLD Z", rows, n);
 }
 
 // Arms the card on a modifier pressed ALONE, disarms it the moment anything
@@ -443,9 +437,15 @@ FLASHMEM static void DrawChordHint(uint16_t app_id, bool io_settings_allowed)
 // DispatchAppEvent and EditIOSettings each of them ends in.
 static void ArmChordHint(const UI::Event &event)
 {
+  // Z ONLY. A used to raise this card too, which cost every app the whole of
+  // A's hold -- an app binding A on long-press got the card painted over its
+  // own response, so A read as a system button in all 31 apps to buy
+  // discoverability for two chords that also answer to Z. Z is the dedicated
+  // system modifier and carries the card alone; A is an ordinary app button.
+  // A+encR / A+encL still work (OC_ui.cpp's hotkey block accepts either
+  // modifier) -- they are simply documented on Z's card now, not A's.
   if (UI::EVENT_BUTTON_DOWN == event.type &&
-      (CONTROL_BUTTON_A == event.control ||
-       (CONTROL_BUTTON_Z == event.control && z_button_present())) &&
+      CONTROL_BUTTON_Z == event.control && z_button_present() &&
       event.control == event.mask) {
     chord_hint_modifier = static_cast<UiControl>(event.control);
     chord_hint_ticks = ui.ticks();
@@ -476,6 +476,17 @@ size_t AppBase::Restore(util::StreamBufferReader &stream_buffer)
 
 FLASHMEM void AppBase::Draw(UiMode ui_mode) const
 {
+  // Panel asleep: draw nothing, and draw nothing over it either -- no chord
+  // hint, no popup. An OLED ages the pixels it LIGHTS, so an empty frame is
+  // what actually stops burn-in; the panel's drive is deliberately left alone
+  // (see Ui::DispatchEvents for why touching SPI from here wedged a module).
+  //
+  // Returning before the popup draw is intentional. A popup is worth waking
+  // for or it is not; painting one onto a screen nobody is looking at, for
+  // however many hours the module is left running, is exactly the static
+  // image this exists to prevent.
+  if (ui.display_asleep()) return;
+
   if (UI_MODE_MENU == ui_mode) {
     if (!io_settings_menu.active())
       DrawMenu();
@@ -489,6 +500,37 @@ FLASHMEM void AppBase::Draw(UiMode ui_mode) const
   // protected member: this file owns the card, but AppBase's declaration lives
   // in OC_apps.h and is not ours to extend.
   DrawChordHint(id(), io_settings_allowed());
+
+  // MESSAGE_POPUP is raised by code that runs under EVERY app, but until now it
+  // was DRAWN by only four of them.
+  //
+  // HS::PokePopup(HS::MESSAGE_POPUP, ...) fires from PhzConfig.cpp ("Write
+  // ERROR !!" :666, "File ERROR !!" :672, "TempFile ERR !!" :691, "Corrupt
+  // File!!" :807 and :818) and from PresetEngine.cpp ("Disk full !!" :917,
+  // "Bus save OK"/"Bus save ERR" :1089, "Empty preset" :1240, "Bad preset"
+  // :1249 and :1293, "Bad preset ver" :1260, "Bus recall OK" :1356) -- none of
+  // which is Hemisphere-specific; they are filesystem and preset-engine
+  // failures that can happen under any app.
+  //
+  // But HS::DrawPopup() was only ever called from Quadrants.h:1699,
+  // CaptainMIDI.h:457, the deleted Hemisphere host and Calibr8or.h:503. In Tweighty,
+  // Sampler, Scope, Delay, Reverb, the 200e app, Setup/About, the Wave editor,
+  // Tuner and Back It Up!, every one of those messages was raised into a
+  // variable and never put on the glass. A save that hit "Disk full !!" looked
+  // exactly like a save that worked.
+  //
+  // Drawn here because this is already where a cross-app overlay belongs --
+  // DrawChordHint() above is one -- and because every app reaches it.
+  //
+  // ONLY MESSAGE_POPUP. The other popup types are Hemisphere-family UI whose
+  // rendering needs the config_cursor/preset_id state this layer does not have
+  // and must not invent; the four apps above still draw their own. MESSAGE_POPUP
+  // is the one case that reads nothing but popup_msg (HSUtils.cpp:561-583), so
+  // it is safe to draw from here. The four apps drawing it twice is harmless:
+  // clearRect + drawFrame + print over the same rect is idempotent.
+  if (HS::popup_type == HS::MESSAGE_POPUP
+      && OC::CORE::ticks - HS::popup_tick < HEMISPHERE_CURSOR_TICKS)
+    HS::DrawPopup();
 }
 
 UiMode AppBase::DispatchEvent(const UI::Event &event)
@@ -507,26 +549,10 @@ UiMode AppBase::DispatchEvent(const UI::Event &event)
         break;
 
       case UI::EVENT_BUTTON_PRESS:
-#ifdef VOR
-        if (OC::CONTROL_BUTTON_M == event.control) {
-            VBiasManager *vbias_m = vbias_m->get();
-            vbias_m->AdvanceBias();
-        } else
-#endif
         HandleButtonEvent(event);
         break;
 
       case UI::EVENT_BUTTON_DOWN:
-#ifdef VOR
-        // dual encoder press
-        if ( ((OC::CONTROL_BUTTON_L | OC::CONTROL_BUTTON_R) == event.mask) )
-        {
-            VBiasManager *vbias_m = vbias_m->get();
-            vbias_m->AdvanceBias();
-            ui.SetButtonIgnoreMask(); // ignore release and long-press
-            break;
-        }
-#endif
         HandleButtonEvent(event);
         break;
 

@@ -24,13 +24,8 @@ enum UiControl : uint16_t {
   /* Reverse the left and right buttons if Hemisphere Suite is installed on the left-hand
    * side of a Northern Light 2OC 4U module.
    */
-#ifdef NORTHERNLIGHT_2OC_LEFTSIDE
-  CONTROL_BUTTON_L    = 1 << 3,
-  CONTROL_BUTTON_R    = 1 << 2,
-#else
   CONTROL_BUTTON_L    = 1 << 2,
   CONTROL_BUTTON_R    = 1 << 3,
-#endif
 
   // not all of these are present on all hardware...
   // but it probably doesn't hurt to include in the enum
@@ -41,9 +36,7 @@ enum UiControl : uint16_t {
   CONTROL_ENCODER_L   = 1 << 8,
   CONTROL_ENCODER_R   = 1 << 9,
 
-#if defined(VOR)
-  CONTROL_BUTTON_LAST = 5,
-#elif defined(ARDUINO_TEENSY41)
+#if   defined(ARDUINO_TEENSY41)
   CONTROL_BUTTON_LAST = 7,
 #else
   CONTROL_BUTTON_LAST = 4,
@@ -90,7 +83,12 @@ public:
   // against it; the consumer (DispatchEvents) is loop context like the
   // console and cannot interleave. Callers send a tap as DOWN then PRESS,
   // the way the panel reports one.
-  void Inject(UI::EventType type, uint16_t control, int16_t value);
+  // `held` names buttons to report as still down in the event's mask, which
+  // is how every global chord is recognised (see z_hold/a_hold in
+  // OC_ui.cpp). Injecting a chord needs it; injecting a plain press does
+  // not, so it defaults to none and existing callers are unchanged.
+  void Inject(UI::EventType type, uint16_t control, int16_t value,
+              uint16_t held = 0);
 
   void Poll();
   void Poke();
@@ -253,6 +251,10 @@ public:
     IgnoreUntilRelease(control);
   }
 
+  // True once the module has idled past kDisplaySleepMs. AppBase::Draw() draws
+  // nothing at all while this holds, which is what stops the panel ageing.
+  bool display_asleep() const { return display_asleep_; }
+
   uint32_t screensaver_timeout() const {
     return screensaver_timeout_;
   }
@@ -271,6 +273,21 @@ private:
 
   uint32_t ticks_ = 0;
   uint32_t screensaver_timeout_ = 120;
+
+  // Panel sleep. The screensaver replaces what is drawn; this turns the OLED's
+  // drive off entirely, because a screensaver still lights pixels and an OLED
+  // ages the pixels it lights. Nothing in this firmware ever stopped drawing:
+  // AppBase::Draw() calls DrawScreensaver() for as long as the module idles, so
+  // before this a module left powered held a static image indefinitely -- and
+  // gfxHeader() draws a 128-pixel full-width rule, which is the worst shape for
+  // burn-in there is.
+  //
+  // Ten minutes, in milliseconds, matched against event_queue_.idle_time().
+  // Note this fires BEFORE the default screensaver (25 minutes, because the
+  // stored seconds get a * 60 at the comparison), which is deliberate: a dark
+  // panel protects the display better than any animation can.
+  static constexpr uint32_t kDisplaySleepMs = 10UL * 60UL * 1000UL;
+  bool display_asleep_ = false;
 
   UI::Button buttons_[CONTROL_BUTTON_LAST];
   uint32_t button_press_time_[CONTROL_BUTTON_LAST];
@@ -292,13 +309,8 @@ private:
   /* Reverse the left and right encoders if Hemisphere Suite is installed on the left-hand
    * side of a Northern Light 2OC 4U module.
    */
-#ifdef NORTHERNLIGHT_2OC_LEFTSIDE
-  UI::Encoder<encR1, encR2> encoder_left_;
-  UI::Encoder<encL1, encL2> encoder_right_;
-#else
   UI::Encoder<encR1, encR2> encoder_right_;
   UI::Encoder<encL1, encL2> encoder_left_;
-#endif
 
   UI::EventQueue<kEventQueueDepth> event_queue_;
 

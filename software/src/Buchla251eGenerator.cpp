@@ -3,7 +3,7 @@
 // itself needs Arduino.h for PROGMEM; host test builds supply a minimal
 // stub, see software/test/host_stubs/Arduino.h). See Buchla251eGenerator.h
 // for the contract.
-#if defined(__IMXRT1062__) || defined(__MK20DX256__)
+#if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define B251E_GEN_CODE FLASHMEM
 #else

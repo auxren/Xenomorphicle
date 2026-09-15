@@ -8,7 +8,7 @@ nav_order: 7
 Jump to the lists of [Full Screen Apps](App-and-Applet-Index#full-screen-apps) or [Hemisphere Applets](App-and-Applet-Index#cv-applets), also organized [by function](App-and-Applet-Index#apps-and-applets-by-function)
 
 ## Full Screen Apps
-Full screen apps in Phazerville are mostly from the original Ornament and Crime firmware, with a few notable additions ([Calibr8or](Calibr8or), [Scenery](Scenery), and [Passencore](Passencore)). Each of the full screen apps takes advantage of all inputs and outputs in their own way, which is usually configurable.
+Full screen apps in Phazerville are mostly from the original Ornament and Crime firmware, with a few notable additions ([Calibr8or](Calibr8or) and [Passencore](Passencore)). Each of the full screen apps takes advantage of all inputs and outputs in their own way, which is usually configurable.
 
 Not everything can fit at once on Teensy 3.2 hardware, but you can use the [default set](https://github.com/djphazer/O_C-Phazerville/releases) or [choose your own selection](https://github.com/djphazer/O_C-Phazerville/discussions/38) with a custom build.
 
@@ -28,13 +28,10 @@ Not everything can fit at once on Teensy 3.2 hardware, but you can use the [defa
  * [Quadraturia](Quadraturia) - Quadrature wavetable LFO
  * [Quantermain](Quantermain) - Quad quantizer
  * [References](References) - Tuning utility
- * [Scenery](Scenery) - Macro CV switch / crossfader
  * [Passencore](Passencore) - Generate a chord progression from LFOs (from sixolet)
  * [Piqued](Piqued) - Quad envelope generator
- * [Pong](Pong) - It's Pong!
  * [Scale Editor](Scale-Editor) - Edit and save microtonal scales
  * [Sequins](Sequins) - Basic dual-channel sequancer
- * [Waveform Editor](Waveform-Editor) - Edit and save vector waveforms (for [LFOs](VectorLFO), [envelopes](VectorEG), [one-shots](VectorMod), and [phase scrubbing](VectorMorph))
  * [Viznutcracker, sweet!](Viznutcracker-sweet) - Quad Bytebeat generator
  * [Backup / Restore](Backup-and-Restore) - Transfer app and calibration data as SysEx
  * [Setup / About](Setup-About) - Check your version, change encoder directions, adjust display/DAC/ADC, screen off time
@@ -127,7 +124,7 @@ Newer ORN8 hardware (T41) hosts the same set of Applets, four at a time, inside 
 * [TrigSeq16](TrigSeq16) - one 16-step trigger sequence
 * [Tuner](Tuner) - oscillator frequency detector
 * [TwoRings](TwoRings) - Highly configurable pair of Turing-Machine-style shift registers (formerly DualTM, replacement for ShiftReg/TM)
-* [VectorEG](VectorEG) - Dual envelopes from a library of bipolar and unipolar shapes (customizable with the [Waveform Editor](Waveform-Editor))
+* [VectorEG](VectorEG) - Dual envelopes from a library of bipolar and unipolar shapes (from a built-in library of shapes)
 * [VectorLFO](VectorLFO) - Dual LFOs from a library of bipolar and unipolar shapes
 * [VectorMod](VectorMod) - Dual One-shots from a library of bipolar and unipolar shapes
 * [VectorMorph](VectorMorph) - Dual (or linked) phase scrubbing along a library of bipolar and unipolar shapes
@@ -182,13 +179,13 @@ _(note: T41 Audio Applets are not included here)_
 | **LFO**                      | [Ebb & LFO](Ebb-&-LFO), [LowerRenz](LowerRenz), [Relabi](Relabi), [VectorLFO](VectorLFO)   | [Quadraturia](Quadraturia) |
 | **MIDI**                     | [MIDI In](MIDI-Input), [MIDI Out](MIDI-Out) _(See also: [MIDI Maps](MIDI-Maps), [Auto MIDI Output](Hemisphere-General-Settings#auto-midi-output))_   | [Captain MIDI](Captain-MIDI) |
 | **Mixer**                    | [AttenOff](AttenOff), [Calculate](Calculate), [Combin8](Combin8), [Squanch](Squanch), [Xfader](Xfader) |    |
-| **Modulation Source**        | [GameOfLife](GameOfLife), [Relabi](Relabi) [Stairs](Stairs), [VectorMorph](VectorMorph) | [Low-rents](Low-rents), [Pong](Pong) |
-| **Performance Utility**      | [Button2](Button2), [Voltage](Voltage) |  [Scenery](Scenery) |
+| **Modulation Source**        | [GameOfLife](GameOfLife), [Relabi](Relabi) [Stairs](Stairs), [VectorMorph](VectorMorph) | [Low-rents](Low-rents) |
+| **Performance Utility**      | [Button2](Button2), [Voltage](Voltage) |  |
 | **Pitch Sequencer**          | [Carpeggio](Carpeggio), [TwoRings](TwoRings), [Enigma Jr.](Enigma-Jr), [MarkoV](MarkoV), [Pigeons](Pigeons), [ProbMeloD](ProbMeloD), [Seq32](Seq32), [SeqPlay7](SeqPlay7), [SequenceX](SequenceX), [Shredder](Shredder), [Strum](Strum), [SwitchSeq](Switch-Seq), [TB-3PO](TB-3PO) | [Enigma](Enigma), [The Darkest Timeline](The-Darkest-Timeline), [Automatonnetz](Automatonnetz), [Sequins](Sequins), [Acid Curds](Acid-Curds), [Passencore](Passencore) |
 | **Quantizer**               | [Calibr8](Calibr8), [Chordinate](Chordinate), [DualQuant](Dual-Quantizer), [DuoTET](DuoTET), [MultiScale](MultiScale), [ScaleDuet](ScaleDuet), [Squanch](Squanch)         | [Calibr8or](Calibr8or), [Harrington 1200](Harrington-1200), [Quantermain](Quantermain), [Meta-Q](Meta-Q)                                  |
 | **Random / Chaos**           | [BitBeat](BitBeat), [Brancher](Brancher), [Calculate](Calculate), [LowerRenz](LowerRenz), [ProbDiv](ProbDiv), [ProbMeloD](ProbMeloD), [Relabi](Relabi), [RndWalk](Random-Walk), [Shredder](Shredder)                                                        | [Low-rents](Low-rents)                                                                              |
 | **Shift Register**           | [ASR](ASR), [TwoRings](TwoRings), [Enigma Jr.](Enigma-Jr), [RunglBook](RunglBook), [ShiftGate](ShiftGate)  | [Enigma](Enigma), [CopierMaschine](Copiermaschine)  |
-| **Switch**                   | [Switch](Switch), [SwitchSeq](Switch-Seq) | [Scenery](Scenery) |
+| **Switch**                   | [Switch](Switch), [SwitchSeq](Switch-Seq) |  |
 | **Trigger / Gate Sequencer** | [Burst](Burst), [DivSeq](DivSeq), [DrumMap](DrumMap), [EuclidX](EuclidX), [MarkovPerc](MarkovPerc), [PolyDiv](PolyDiv), [ProbDiv](ProbDiv), [Seq32](Seq32), [ShiftGate](ShiftGate), [TrigSeq](TrigSeq), [TrigSeq16](TrigSeq16)   |     |
 | **VCA**                      | [GatedVCA](Gated-VCA)        |       |
 | **Voltage Utility**          | [AttenOff](AttenOff), [Calculate](Calculate), [Calibr8](Calibr8), [Scope](Scope), [Slew](Slew), [Stairs](Stairs), [Switch](Switch), [Tuner](Tuner), [Trending](Trending), [Voltage](Voltage)                         | [Calibr8or](Calibr8or), [References](References)

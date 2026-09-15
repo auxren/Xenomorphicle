@@ -7,10 +7,13 @@
 // app classes, the app switcher that lists them -- is the real thing, and each
 // app below is the firmware's own header, unmodified.
 //
-// Which apps are here, which are not, and why, is in README.md. Three of the
-// missing ones are blocked by the same firmware issue: they call a non-const
-// member from a const draw path, which arm-none-eabi-g++ accepts and clang
-// rejects. See README.md, "Apps that are not simulated".
+// Which apps are here, which are not, and why, is in README.md. The
+// const-correctness issue that used to block Captain MIDI, Calibr8or and
+// Scale Editor is fixed; each now compiles under clang. They are still absent
+// because three unrelated blockers sat behind it -- a 4-vs-5 argument
+// usbMIDI.send() in this shim, a real int8_t truncation in ScaleEditor, and
+// cursor_countdown being undefined in a NO_HEMISPHERE build. See README.md,
+// "Apps that are not simulated".
 namespace menu = OC::menu;
 
 // The firmware's redraw flag lives in Main.cpp and is declared by whichever
@@ -18,12 +21,6 @@ namespace menu = OC::menu;
 // here; sim_runtime.cpp defines it.
 extern uint_fast8_t MENU_REDRAW;
 
-#ifdef ENABLE_APP_SCENES
-#include "Scenery.h"
-#endif
-#ifdef ENABLE_APP_PONG
-#include "PongGame.h"
-#endif
 #ifdef ENABLE_APP_BUS200E
 #include "Bus200eApp.h"
 #endif
@@ -37,14 +34,8 @@ namespace OC {
 
 static AppContainer<void
   , AppSettings
-#ifdef ENABLE_APP_SCENES
-  , AppScenery
-#endif
 #ifdef ENABLE_APP_BUS200E
   , AppBus200e
-#endif
-#ifdef ENABLE_APP_PONG
-  , AppPong
 #endif
 #ifdef ENABLE_APP_TWEIGHTY
   , AppTweighty
@@ -56,11 +47,18 @@ static AppContainer<void
 // (see above), so the simulator boots into the 200e app instead. --app picks
 // any of them, and the app switcher reaches all of them.
 #ifdef ENABLE_APP_BUS200E
-static constexpr int DEFAULT_APP_INDEX = 2;
+static constexpr int DEFAULT_APP_INDEX = 1;
 #else
 static constexpr int DEFAULT_APP_INDEX = 1;
 #endif
 static constexpr uint16_t DEFAULT_APP_ID = decltype(app_container)::GetAppIDAtIndex<DEFAULT_APP_INDEX>();
+// Position-indexed, like the firmware's, so deleting an app above the boot
+// app silently moves it. The firmware has the same assert for the same
+// reason; without it the only symptom is selfcheck booting somewhere else.
+#ifdef ENABLE_APP_BUS200E
+static_assert(DEFAULT_APP_ID == AppBus200e::kAppId,
+              "DEFAULT_APP_INDEX must select the 200e app");
+#endif
 
 // The app container is TU-local to OC_apps.cpp on target (it is `static` in
 // the firmware's manifest too), so the simulator's --app option and its status

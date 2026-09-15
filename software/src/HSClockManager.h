@@ -31,7 +31,12 @@
 #include "HSUtils.h"
 #include "PresetBus.h"
 #include <functional>
+#include <queue>
 #include <vector>
+
+// Loop-context beat-sync callbacks (BeatSync below). Not the ISR defer path:
+// that is OC::CORE::DeferTask, plain function pointers, no allocation.
+using Task = std::function<void()>;
 
 namespace HS {
 
@@ -297,21 +302,26 @@ public:
         paused = p;
         auto_reset = !p;
         if (!p && midi_out_enabled) {
-            // TODO: DeferTask?
+            // Deferred to loop context, like the Clock tick in Captain's
+            // PumpTransport: Start() is reachable from the CORE ISR, and
+            // usb_midi_write_packed() busy-waits with yield() for up to
+            // 40 ms when the host is not draining the endpoint.
+            OC::CORE::DeferTask([](){
 #ifdef ARDUINO_TEENSY41
-            if (~midi_clktx_disable & mMaskUSBDev)
-              usbMIDI.sendRealTime(usbMIDI.Start);
-            if (~midi_clktx_disable & mMaskUSBHost)
-              usbHostMIDI[0].sendRealTime(usbMIDI.Start);
-            if (~midi_clktx_disable & mMaskUSBHost2)
-              usbHostMIDI[1].sendRealTime(usbMIDI.Start);
-            if (~midi_clktx_disable & mMaskSerial)
-              MIDI1.sendRealTime(midi::MidiType(usbMIDI.Start));
-            if (~midi_clktx_disable & mMaskBus)
-              OC::PresetBus::QueueMidiTx(usbMIDI.Start, 0, 0, 0);
+              if (~midi_clktx_disable & mMaskUSBDev)
+                usbMIDI.sendRealTime(usbMIDI.Start);
+              if (~midi_clktx_disable & mMaskUSBHost)
+                usbHostMIDI[0].sendRealTime(usbMIDI.Start);
+              if (~midi_clktx_disable & mMaskUSBHost2)
+                usbHostMIDI[1].sendRealTime(usbMIDI.Start);
+              if (~midi_clktx_disable & mMaskSerial)
+                MIDI1.sendRealTime(midi::MidiType(usbMIDI.Start));
+              if (~midi_clktx_disable & mMaskBus)
+                OC::PresetBus::QueueMidiTx(usbMIDI.Start, 0, 0, 0);
 #else
-            usbMIDI.sendRealTime(usbMIDI.Start);
+              usbMIDI.sendRealTime(usbMIDI.Start);
 #endif
+            });
         }
     }
 
@@ -320,21 +330,23 @@ public:
         paused = 0;
         extsync = false;
         if (midi_out_enabled) {
+            // deferred for the same reason as Start()
+            OC::CORE::DeferTask([](){
 #ifdef ARDUINO_TEENSY41
-            // TODO: DeferTask?
-            if (~midi_clktx_disable & mMaskUSBDev)
-              usbMIDI.sendRealTime(usbMIDI.Stop);
-            if (~midi_clktx_disable & mMaskUSBHost)
-              usbHostMIDI[0].sendRealTime(usbMIDI.Stop);
-            if (~midi_clktx_disable & mMaskUSBHost2)
-              usbHostMIDI[1].sendRealTime(usbMIDI.Stop);
-            if (~midi_clktx_disable & mMaskSerial)
-              MIDI1.sendRealTime(midi::MidiType(usbMIDI.Stop));
-            if (~midi_clktx_disable & mMaskBus)
-              OC::PresetBus::QueueMidiTx(usbMIDI.Stop, 0, 0, 0);
+              if (~midi_clktx_disable & mMaskUSBDev)
+                usbMIDI.sendRealTime(usbMIDI.Stop);
+              if (~midi_clktx_disable & mMaskUSBHost)
+                usbHostMIDI[0].sendRealTime(usbMIDI.Stop);
+              if (~midi_clktx_disable & mMaskUSBHost2)
+                usbHostMIDI[1].sendRealTime(usbMIDI.Stop);
+              if (~midi_clktx_disable & mMaskSerial)
+                MIDI1.sendRealTime(midi::MidiType(usbMIDI.Stop));
+              if (~midi_clktx_disable & mMaskBus)
+                OC::PresetBus::QueueMidiTx(usbMIDI.Stop, 0, 0, 0);
 #else
-            usbMIDI.sendRealTime(usbMIDI.Stop);
+              usbMIDI.sendRealTime(usbMIDI.Stop);
 #endif
+            });
         }
         EnableMIDIOut();
     }

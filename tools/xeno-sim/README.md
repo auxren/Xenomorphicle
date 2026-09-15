@@ -30,12 +30,12 @@ splash screen, app restore. Every screen below is drawn by firmware.
 | **app switcher** | hold **A** (or **Z**), press the **right encoder** | `--keys "a-down,step60,r-down,step60,r-up,step60,a-up,step200"` |
 | **preset-bus overlay** | press **both encoder buttons** | `--keys "l-down,step20,r-down,step80,l-up,r-up,step200"` |
 | **screensaver** | hold **Z**, press **A** | `--keys "z-down,step60,a-down,step60,a-up,step60,z-up,step300"` |
-| **IO settings** | hold **A** (or **Z**), press the **left encoder** | `--app Scenery --keys "a-down,step60,l-down,step60,l-up,step60,a-up,step300"` |
+| **IO settings** | hold **A** (or **Z**), press the **left encoder** | `--app Tweighty --keys "a-down,step60,l-down,step60,l-up,step60,a-up,step300"` |
 | **EEPROM reset prompt** | hold **A** and **B** through the splash | `--reset-settings` |
 | **Setup/About**, and its calibration wizard | app switcher → *Setup/About* | `--app "Setup/About"` |
 
 The IO settings screen is offered per app: the 200e app declines it
-(`io_settings_allowed()`), so reach it from Scenery or Pong.
+(`io_settings_allowed()`), so reach it from Tweighty.
 
 Inside the app switcher the **right** encoder scrolls, a click switches app, and
 a long click switches and saves. The **left** encoder cancels on a press and
@@ -246,16 +246,21 @@ success.
 ## Apps
 
 `app_container` is the real one, and the app switcher lists exactly what is in
-it. This build carries six apps:
+it. This build carries four apps:
 
 | app | what the shims cost it |
 |---|---|
 | **Setup/About** | The calibration wizard runs and its pages navigate, but every measurement it takes reads a **fixed, silent ADC**, so no step converges on anything and the numbers are meaningless. The bus statistics page is all zeros (see *the bus*, below). The invert-display toggle on `A` **does** work — the panel shim honours the inversion command. |
 | **200e Modules** | The most faithful app here: the bus master FSM, the codecs, the write guard and the bank data are real (see *the simulated bus*). Writes go nowhere. |
-| **Scenery** | Scene state and the UI are real; the CV that would drive a scene is a fixed value, so nothing modulates. |
-| **Pong 2.0** | Plays. Its pace comes from the loop rather than an audio-rate ISR, so speed is not representative. |
 | **Tweighty** | The UI, the persisted settings, and `AudioTweightyF32::Acquire()`/`Release()`/`IsReady()` are real — app-switching into and out of Tweighty genuinely allocates and frees the engine's delay buffer (via `SetActive()`, control-rate, exactly as on target), and `RequestTransportToggle()`/the WRITE↔RECIRC state shown on screen is the real transport state machine. What is **not** real: any actual audio. `AudioTweightyF32::update()` — the DSP itself, and every field the home screen reads off it (`transport_state_`, `meter_level_`, `crossfade_active_`, `active_tap_mask_`) as an audio-ISR-hot mirror — never runs here, because **this simulator has no audio-rate callback at all** (see *the shims*, `arduino/Audio.h`), so those fields just sit at their static default values. The stock int16 `AudioStream`/`AudioConnection` pair Tweighty derives its F32 engine from is not part of `software/src` at all (it ships in the `framework-arduinoteensy` git dependency, not vendored in this repo) — `shim/arduino/AudioStream.h` is this build's stand-in for it, written from scratch rather than mirrored. `AUDIO_INTERFACE` is never defined in this build, so `WireAudio()`/`SetActive()`'s actual `AudioConnection`/`AudioConnection_F32` wiring (the `#ifdef AUDIO_INTERFACE` blocks in `TweightyApp.h`) never runs either — only the `Acquire()`/`Release()` bracket around it does. |
 | **Back It Up!** | Runs against the RAM-backed file system, so a "backup" is written to a file that dies with the process. |
+
+Scenery and Pong were in this manifest until the 2026-09-13 hard fork
+deleted them from the firmware. Two things went with them: Scenery was the
+only app here that wrote a **file-backed (S) preset section**, so the
+self-check no longer covers a flipped bit in one, and Pong was the only app
+filed under **HIDDEN**, so that folder now starts empty and the switcher
+test moves an app into it first.
 
 ### Apps that are **not** simulated, and why
 
@@ -263,18 +268,46 @@ it. This build carries six apps:
   (`applets/_config.h`, ~60 applets and the audio applet chain). This is the
   big one, and it is the largest single gap in coverage: much of the module's
   UI lives in Hemisphere. It is a project, not a shim.
-* **Captain MIDI**, **Calibr8or**, **Scale Editor** — blocked by a **firmware
-  portability issue, not by the simulator**. Each calls a non-`const` member
-  from a `const` draw path:
-  * `apps/CaptainMIDI.h:393-394` — `MainView() const` calls `DrawCopyScreen()`
-    and `DrawLogScreen()`
-  * `apps/Calibr8or.h:755,757` and `apps/ScaleEditor.h:192-213` — a `const`
-    draw method calls `SegmentDisplay::PrintWhole()` / `PrintDecimal()`
+* **Captain MIDI**, **Calibr8or**, **Scale Editor** — the const-correctness
+  issue that blocked these is **fixed**. Each called a non-`const` member from
+  a `const` draw path; `arm-none-eabi-g++` accepted it and clang did not.
+  `SegmentDisplay`'s printers are now `const` with a `mutable` cursor (which
+  covers Calibr8or and Scale Editor), and `CaptainMIDI::DrawLogScreen()` /
+  `DrawCopyScreen()` / `CaptainMIDILog::DrawAt()` are `const`. Verified: each
+  app compiles under clang, and both `T41` and `T41_console` still build.
 
-  `arm-none-eabi-g++` accepts all of these; Apple clang rejects them. Marking
-  those methods `const` (and `SegmentDisplay`'s cursor members `mutable`) would
-  fix it and cost the firmware nothing — no simulator change is needed. Captain
-  MIDI is the module's default app on hardware, so this is worth doing.
+  They are still not in the manifest, because fixing that uncovered three
+  further blockers behind it — each a different root cause, none of them
+  const-correctness:
+  * **Captain MIDI** — ~~the shim's `usbMIDI.send()` takes 4 arguments~~ FIXED:
+    `SimMidiPortBase::send()` now carries the real core's fifth cable-number
+    argument, defaulted so USBHost_t36's four-argument `MIDIDevice::send()`
+    keeps compiling against the same declaration.
+  * **Scale Editor** — `apps/ScaleEditor.h:270` assigns
+    `OC::Scales::NUM_SCALES - 1` (= 148) into an `int8_t`, truncating to -108.
+    This is a **real firmware bug**, not a host-build artefact: scale import
+    cannot reach any scale above index 127 on target either. clang catches it
+    via `-Wconstant-conversion`; gcc does not.
+  * **Any app that pulls in `ClockSetup`** — adding `HemisphereApplet.cpp` to
+    `FW_SRCS` resolves the symbol but does **not** work, and the reason is the
+    scope of the job: `HemisphereApplet::BaseView() const` calls the non-const
+    virtuals `View()`, `DrawFullScreen()` and `SetHelp()`, which is the same
+    const-correctness class fixed for the three apps above — except that
+    **93 applets override `View()`**. Dropping `BaseView`'s own `const`
+    instead is not a shortcut: `Quadrants.h:450` calls it from
+    `DrawFullScreen() const`, so the const sheds upward through Quadrants too.
+    This is the "project, not a shim" entry above wearing a different hat.
+    Original symptom: `HemisphereApplet::cursor_countdown`
+    is defined at `HemisphereApplet.cpp:9`, and **this Makefile's `FW_SRCS`
+    does not list that file**, so the sim link has no definition for it while
+    `ClockSetup` still references it. Purely a gap in *this* manifest: the
+    firmware is fine. `NO_HEMISPHERE` gates app and applet *registration*, not
+    that translation unit, so `T41_MTP` — also a `NO_HEMISPHERE` build —
+    compiles `HemisphereApplet.cpp` and ships the symbol (verified: it builds
+    and links clean, and `.pio/build/T41_MTP/src/HemisphereApplet.cpp.o`
+    exists). The fix is adding the source here; watch what it drags in, since
+    it will want the applet registry.
+
 * Everything else in `apps/` — simply not in this build's manifest. Adding one
   is a line in `shim/src/apps/_config.h` plus its `-DENABLE_APP_*`.
 
@@ -652,6 +685,6 @@ Requests are one line each: `key <token>`, `btn <a|b|x|y|z|l|r> <down|up>`,
 ## Not part of the firmware build
 
 No `platformio.ini` env references this directory and no file under
-`software/src/` was modified for it. `pio run -e T41_console -e T41_audio -e T40`
+`software/src/` was modified for it. `pio run -e T41_console -e T41_audio`
 is unaffected, `make` on its own produces a headless `build/xeno-sim`, and the
 server is a separate python3 script that is never built, imported or shipped.

@@ -22,7 +22,7 @@ Plum Audio | [**OCP X**](https://www.plum-audio.com/product-page/ocp-x) (using f
 * Support for Teensy 4.0 on original O_C hardware
 * Multiple Apps can fit into the original Teensy 3.2 ([choose your own App selection](https://github.com/djphazer/O_C-Phazerville/discussions/38))
 * Many new and improved [Hemisphere Applets](App-and-Applet-Index#cv-applets)
-* New full screen apps: [Scenery](Scenery) and [Calibr8or](Calibr8or)
+* New full screen app: [Calibr8or](Calibr8or)
 * New UI features, codebase optimizations, and QoL improvements
     * [Presets](Hemisphere-Presets) — with auto-save and loading via MIDI Program Changes
     * [Trigger and CV Input re-mapping](Hemisphere-Input-Mapping) (including internal routing)

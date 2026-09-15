@@ -683,6 +683,15 @@ public:
     int preset_select = 0; // both a flag and an index
     bool preset_modified = 0;
 
+    // X-press toggle: flip DrawInterface's main block from the channel's
+    // outgoing/calibration parameters (transpose, scale, tracking
+    // compensation) to a live incoming CV voltmeter instead, read straight
+    // off HS::frame.In(), the same calibrated ADC->pitch value
+    // HSApplication's own debug view already reads. X (unlike A/Z, which are
+    // global chord modifiers -- see OC_app_base.cpp's "chord card") is an
+    // ordinary, otherwise-unbound button in this app.
+    bool show_incoming = false;
+
     uint32_t click_tick = 0;
     bool first_click = 0;
     bool clock_setup = 0;
@@ -739,11 +748,60 @@ public:
         gfxLine(127, y, 127, y+10); // vertical line
         gfxLine(0, y+11, 127, y+11);
     }
+    // X-press view: the calibrated instantaneous voltage actually arriving on
+    // this channel's input, as opposed to DrawInterface's normal
+    // outgoing/calibration display. HS::frame.In(ch) is the same
+    // ADC::value_to_pitch() pitch value HSApplication's own channel meter
+    // reads; IO::pitch_to_millivolts() is the same linear pitch->mV
+    // conversion References.h's screensaver uses, just without that view's
+    // extra octave-relative offset, since this is a literal signed voltmeter
+    // reading, not a quantized note display.
+    void DrawIncomingVoltage(int y) const {
+        gfxIcon(9, y, CV_ICON);
+
+        const int32_t total_mv = OC::IO::pitch_to_millivolts(HS::frame.In(sel_chan));
+        const bool negative = total_mv < 0;
+        const uint32_t abs_mv = negative ? (uint32_t)(-total_mv) : (uint32_t)total_mv;
+        const uint32_t whole = abs_mv / 1000;          // 0..10 volts
+        const uint32_t centi = (abs_mv % 1000) / 10;   // 0..99 hundredths
+
+        // The frame is the transpose readout's, and its interior is only wide
+        // enough for two BIG digit cells per group: 10px each at x=33/43 and
+        // x=61/71, inside a 64px box starting at x=20 (so x=20..84).
+        //
+        // HUNDREDTHS, NOT MILLIVOLTS, and PrintDigit rather than PrintWhole,
+        // for two separate reasons the first version got wrong: PrintWhole
+        // with range 1000 reserves FOUR cells from x=61 and ran to x=101,
+        // seventeen pixels past the frame; and it space-pads its leading
+        // cells, so the digits slid left and right as the reading crossed
+        // each power of ten. A voltmeter that moves is exactly the case where
+        // a shifting field is unreadable, so both digits are placed
+        // absolutely and zero-padded -- x.NN never changes width.
+        gfxFrame(20, y-3, 64, 18);
+        gfxIcon(23, y+2, negative ? MINUS_ICON : PLUS_ICON);
+        segment.PrintWhole(33, y, whole, 10);
+        gfxPrint(53, y+5, ".");
+        segment.PrintDigit(61, y, centi / 10);
+        segment.PrintDigit(71, y, centi % 10);
+        gfxPrint(89, y, "V");   // outside the frame, where the scale icon sits
+
+        y += 22;
+        gfxIcon(9, y, CV_ICON);
+        gfxPrint(20, y, "Incoming (IN ");
+        gfxPrint(sel_chan + 1);
+        gfxPrint(")");
+    }
+
     void DrawInterface() const {
         DrawTabs();
 
         // Draw parameters for selected channel
         int y = 32;
+
+        if (show_incoming) {
+            DrawIncomingVoltage(y);
+            return;
+        }
 
         // Transpose
         gfxIcon(9, y, BEND_ICON);
@@ -891,6 +949,7 @@ void AppCalibr8or::HandleButtonEvent(const UI::Event &event) {
     // For right encoder, only handle press (long press is reserved)
     // For up button, handle only press (long press is reserved)
     // For down button, handle press and long press
+    // X: press toggles incoming/outgoing CV display -- see show_incoming
     switch (event.type) {
     case UI::EVENT_BUTTON_DOWN:
         // Quantizer popup editor intercepts everything on-press
@@ -926,6 +985,14 @@ void AppCalibr8or::HandleButtonEvent(const UI::Event &event) {
         case OC::CONTROL_BUTTON_DOWN:
         case OC::CONTROL_BUTTON_UP:
             SwitchChannel(event.control == OC::CONTROL_BUTTON_UP);
+            break;
+        case OC::CONTROL_BUTTON_X:
+            // X/Y are ordinary, unclaimed buttons on this panel (unlike A/Z,
+            // which are global chord modifiers -- see OC_app_base.cpp's
+            // "chord card": a long hold of A or Z pops a full-screen hint
+            // overlay regardless of what the app itself binds, so neither is
+            // usable for an in-app toggle like this one).
+            show_incoming = !show_incoming;
             break;
         default: break;
         }

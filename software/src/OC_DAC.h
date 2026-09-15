@@ -51,11 +51,7 @@ private:
   static void Write(uint32_t cmd, uint32_t data);
 
   static constexpr uint32_t kChannelCommand[4] = {
-#ifdef FLIP_180
-    0b00010110, 0b00010100, 0b00010010, 0b00010000 
-#else
     0b00010000, 0b00010010, 0b00010100, 0b00010110
-#endif
   };
 };
 
@@ -91,26 +87,14 @@ public:
   static constexpr size_t kHistoryDepth = 8;
   static constexpr uint16_t MAX_VALUE = DAC8565::kMaxValue; // DAC fullscale 
 
-#if defined(ARDUINO_TEENSY41) || defined(VOR)
+#if defined(ARDUINO_TEENSY41)
   static int kOctaveZero;
-#elif defined(NORTHERNLIGHT)
-  static constexpr int kOctaveZero = 0;
 #else
   static constexpr int kOctaveZero = 3;
 #endif
-#if defined(VOR)
-  static constexpr int VBiasUnipolar = 3900;   // onboard DAC @ Vref 1.2V (internal), 1.75x gain
-  static constexpr int VBiasBipolar = 2000;    // onboard DAC @ Vref 1.2V (internal), 1.75x gain
-  static constexpr int VBiasAsymmetric = 2760; // onboard DAC @ Vref 1.2V (internal), 1.75x gain
-#endif
 
-#ifdef NORTHERNLIGHT
-  static constexpr int32_t kMillvoltsPerOctave = 1200;
-  static constexpr int32_t kOctaveGateHigh = 8;
-#else
   static constexpr int32_t kMillvoltsPerOctave = 1000;
   static constexpr int32_t kOctaveGateHigh = 9;
-#endif
 
   #if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
   static void DAC8568_Vref_enable();

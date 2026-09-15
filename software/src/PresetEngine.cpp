@@ -19,6 +19,8 @@
 #include <SD.h>
 
 #include "PresetEngine.h"
+#include "PresetStage.h"
+#include "RtStats.h"
 #include "OC_apps.h"
 #include "OC_app_switcher.h"
 #include "OC_storage.h"
@@ -295,6 +297,21 @@ static DMAMEM AppData capture;               // RAM capture buffer (~4KB)
 // loudly rather than quietly, and OCRAM has the room.
 static constexpr uint32_t kSecBufBytes = 16384;
 static DMAMEM uint8_t sec_buf[kSecBufBytes];
+
+// Zero-write recall. The file-backed sections a slot carries for the apps
+// ('B' bank extract, 'S', 'C' Captain) used to be extracted to their live
+// files on every recall: each one a flash write with interrupts masked,
+// hundreds of ms of dead audio, USB and bus. They are now copied into this
+// RAM2 arena and registered in RecallStage(); PhzConfig::load_config serves
+// them by name. The disk catches up in stage_sync_pump() at idle. A section
+// too large for the arena or the temp buffer falls back to the old write.
+static constexpr uint32_t kStageArenaBytes = 24576;
+static DMAMEM uint8_t stage_arena[kStageArenaBytes];
+static PresetStage recall_stage(stage_arena, kStageArenaBytes);
+static constexpr uint32_t kStageTmpBytes = 12288;
+static DMAMEM uint8_t stage_tmp[kStageTmpBytes];
+static uint32_t last_recall_ms = 0;   // the sync pump waits 3 s after this
+// OC::RecallStage() is defined after the namespaces close, at the file end.
 
 // active Quadrants preset during bank extraction (predicate/remap context)
 static uint8_t extract_preset;
@@ -888,6 +905,17 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   bus_slot = (int8_t)slot;
   serial_printf("PresetEngine: save slot %d\n", slot);
 
+  // A save cannot avoid writing flash, and a flash write on this part masks
+  // interrupts for the whole erase/program: audio, USB, the display and the
+  // bus slave all stop. That is declared here rather than suffered, so the
+  // stall is heard as a short dip the player caused by pressing STORE
+  // instead of a click into a frozen tone. The window fades out on the way
+  // in and back in when it goes out of scope, at every return below.
+  //
+  // A save is the right place for this and a background write is not: only a
+  // write the player asked for may take the audio away.
+  const OC::RT::PersistenceWindow window("save");
+
   // Free-space guard. UNCONDITIONAL now: presets always land on internal
   // flash, so there is no longer an "SD is effectively unbounded" case to
   // skip it for. Leaving the old !SDcard_Ready gate in place would have
@@ -1150,10 +1178,76 @@ FLASHMEM static RecallStage recall_stage_head(uint8_t slot, bool &from_container
   return PhzConfig::load_config(name, preset_fs()) ? STAGE_OK : STAGE_BAD;
 }
 
-// Stage the file-backed stores into their live names. Runs with the app world
-// already frozen, so it only moves bytes around.
+// Copy one section's bytes into the recall stage instead of a file. Reads
+// from the container (memory-mapped flash, cheap), verifies the checksum,
+// registers the image under the live file's name. False = not staged (too
+// big, or the registry refused): the caller falls back to section_to_file.
+FLASHMEM static bool stage_section(File &f, const SectionEntry &e, const char *dest) {
+  if (e.length > kStageTmpBytes) return false;
+  if (!f.seek(e.offset)) return false;
+  uint32_t left = e.length, pos = 0;
+  uint16_t sum = 0;
+  while (left) {
+    const uint32_t want = left < 256 ? left : 256;
+    const int r = f.read(stage_tmp + pos, want);
+    if (r != (int)want) return false;
+    for (int i = 0; i < r; ++i) sum += stage_tmp[pos + i];
+    pos += want;
+    left -= want;
+  }
+  if (sum != e.checksum) return false;
+  if (!recall_stage.put(dest, stage_tmp, e.length)) return false;
+  serial_printf("PresetEngine: staged %s (%lu bytes) in RAM, disk syncs at idle\n",
+                dest, (unsigned long)e.length);
+  return true;
+}
+
+// Does `name` on `fs` already hold exactly these bytes? Reads only.
+FLASHMEM static bool file_matches(FS &fs, const char *name, const uint8_t *data, uint32_t len) {
+  File d = fs.open(name, FILE_READ);
+  if (!d) return false;
+  bool same = d.size() == len;
+  uint8_t b[128];
+  uint32_t pos = 0;
+  while (same && pos < len) {
+    const uint32_t want = len - pos < sizeof(b) ? len - pos : sizeof(b);
+    if (d.read(b, want) != (int)want || memcmp(b, data + pos, want) != 0) same = false;
+    pos += want;
+  }
+  d.close();
+  return same;
+}
+
+// Write a RAM image to its live file the way section_to_file does: scratch
+// name, then rename, so a power loss mid-write cannot leave a torn file.
+FLASHMEM static bool bytes_to_file(FS &fs, const char *dest, const uint8_t *data, uint32_t len) {
+  if (file_matches(fs, dest, data, len)) return true;
+  static const char *const kScratch = "PB_XTR.TMP";
+  fs.remove(kScratch);
+  File d = fs.open(kScratch, FILE_WRITE_BEGIN);
+  if (!d) return false;
+  bool ok = true;
+  uint32_t pos = 0;
+  while (ok && pos < len) {
+    const uint32_t want = len - pos < 256 ? len - pos : 256;
+    if (d.write(data + pos, want) != (size_t)want) ok = false;
+    pos += want;
+    watchdog_feed();
+  }
+  d.close();
+  if (!ok) { fs.remove(kScratch); return false; }
+  fs.remove(dest);
+  ok = fs.rename(kScratch, dest);
+  if (!ok) fs.remove(kScratch);
+  return ok;
+}
+
+// Stage the file-backed stores under their live names. Runs with the app
+// world already frozen, so it only moves bytes around, and since the recall
+// stage landed it moves them into RAM, not onto flash.
 FLASHMEM static void recall_stage_files(uint8_t slot, bool from_container,
                                         uint64_t flags) {
+  recall_stage.begin_recall();   // counts anything the last sync never finished
   if (from_container) {
     File f;
     SectionEntry sec[kMaxSections];
@@ -1162,22 +1256,26 @@ FLASHMEM static void recall_stage_files(uint8_t slot, bool from_container,
     // Destination FS per file, mirroring the save side: the bank goes where
     // Quadrants looks (quad_fs() -- SD when a card is present), Scenery and
     // Captain go where THEY look (myfs, always). Restoring those two to the
-    // card put them somewhere neither app ever reads.
+    // card put them somewhere neither app ever reads. The stage serves by
+    // name regardless of FS; the FS matters again when the sync pump writes.
     const SectionEntry *e;
     if ((flags & CONTENT_BANK) && (e = find_section(sec, n, 'B')) != nullptr) {
-      if (section_to_file(f, *e, "BANK_255.DAT", quad_fs()))
+      if (stage_section(f, *e, "BANK_255.DAT") ||
+          section_to_file(f, *e, "BANK_255.DAT", quad_fs()))
         quad_recall_hint = kScratchBank;
       watchdog_feed();
     }
     if ((flags & CONTENT_SCENERY) && (e = find_section(sec, n, 'S')) != nullptr) {
-      section_to_file(f, *e, "SCENERY.DAT", PhzConfig::myfs);
+      if (!stage_section(f, *e, "SCENERY.DAT"))
+        section_to_file(f, *e, "SCENERY.DAT", PhzConfig::myfs);
       watchdog_feed();
     }
     // Boot recall deliberately keeps the LIVE Captain config -- see the note
     // on the legacy branch below.
     if ((flags & CONTENT_CAPTAIN) && !boot_recall &&
         (e = find_section(sec, n, 'C')) != nullptr) {
-      section_to_file(f, *e, "CAPTAIN.DAT", PhzConfig::myfs);
+      if (!stage_section(f, *e, "CAPTAIN.DAT"))
+        section_to_file(f, *e, "CAPTAIN.DAT", PhzConfig::myfs);
       watchdog_feed();
     }
     f.close();
@@ -1353,6 +1451,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   cur_slot_dirty_ms = StampMs();
   op_count++;
   busy = false;
+  last_recall_ms = StampMs();   // stage_sync_pump() waits 3 s from here
   HS::PokePopup(HS::MESSAGE_POPUP, "Bus recall OK");
   serial_printf("PresetEngine: recall slot %d done (app %04x)\n", slot, slot_app_id);
   serial_printf("PresetEngine: recall took %lums wall (millis saw %lums): "
@@ -1366,6 +1465,31 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
 }
 
 // ---- service ---------------------------------------------------------------
+
+// Deferred sync of staged recall images: one file per pass, 3 s after the
+// recall, never while a request or a bus transfer is in flight. Until Track
+// C's persistence window lands this write still masks interrupts; it just
+// no longer sits inside the recall gesture, and `T` counts it as a
+// background stall. A file that already holds the bytes is not rewritten.
+static constexpr uint32_t kStageSyncDelayMs = 3000;
+FLASHMEM static void stage_sync_pump() {
+  if (!recall_stage.pending()) return;
+  if (busy || !req_q.empty()) return;
+  if (PresetBus::MasterTransferring()) return;
+  if (!last_recall_ms || millis() - last_recall_ms < kStageSyncDelayMs) return;
+  const PresetStage::Image *img = recall_stage.next_unsynced();
+  if (!img) return;
+  char name[PresetStage::kNameMax + 1];
+  strncpy(name, img->name, PresetStage::kNameMax);
+  name[PresetStage::kNameMax] = 0;
+  FS &fs = strcmp(name, "BANK_255.DAT") == 0 ? quad_fs() : PhzConfig::myfs;
+  WallClock wall;
+  wall.start();
+  const bool ok = bytes_to_file(fs, name, img->data, img->len);
+  recall_stage.mark_synced(name);
+  serial_printf("PresetEngine: synced %s to disk %s in %lu ms wall\n", name,
+                ok ? "ok" : "FAILED", (unsigned long)wall.lap_ms());
+}
 
 FLASHMEM void Init() {
   req_q.clear();
@@ -1541,6 +1665,7 @@ FLASHMEM void Process() {
   if (cur_slot_dirty_ms && millis() - cur_slot_dirty_ms > 3000 &&
       !PresetBus::MasterTransferring())
     persist_cur_record();
+  stage_sync_pump();
   // Names an import left in the cache. The console's batch flushes itself;
   // this is the net under any caller that does not.
   FlushSlotNames();
@@ -2110,5 +2235,7 @@ FLASHMEM int RecoverAllLegacyFromCard() {
 
 }  // namespace PresetEngine
 }  // namespace OC
+
+PresetStage &OC::RecallStage() { return OC::PresetEngine::recall_stage; }
 
 #endif  // ARDUINO_TEENSY41

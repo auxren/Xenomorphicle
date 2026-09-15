@@ -1,9 +1,6 @@
 #ifndef OC_CONFIG_H_
 #define OC_CONFIG_H_
 
-#if defined(__MK20DX256__) && F_CPU != 120000000
-#error "Please compile O&C firmware for Teensy 3.2 with CPU speed 120MHz"
-#endif
 
 // --- Hardware details --- //
 static constexpr int DIGITAL_INPUT_COUNT = 4;

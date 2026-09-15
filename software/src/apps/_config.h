@@ -1,18 +1,19 @@
 // workaround
 namespace menu = OC::menu;
 
+// For the kMaxApps assertion below the container. OC_apps.cpp includes this
+// file before OC_app_folders.h, so the assert cannot wait for that one.
+#include "../OC_app_folders.h"
+
+// Quadrants is the applet host on this hardware. The old 2-up host, which
+// drew two applets side by side on the four-button panel, was deleted in the
+// 2026-09-13 hard fork: it only ever built for non-T4.1 targets this fork no
+// longer has.
 #ifndef NO_HEMISPHERE
-
-#ifdef ARDUINO_TEENSY41
 #include "Quadrants.h"
-#else
-#include "Hemisphere.h"
-#endif
-
 #endif
 
 #include "Calibr8or.h"
-#include "Scenery.h"
 #include "ASR.h"
 #ifdef ENABLE_APP_H1200
 #include "H1200.h"
@@ -40,8 +41,6 @@ namespace menu = OC::menu;
 #include "NeuralNetwork.h"
 #endif
 #include "ScaleEditor.h"
-#include "WaveformEditor.h"
-#include "PongGame.h"
 #ifdef ENABLE_APP_TUNER
 #include "TunerApp.h"
 #endif
@@ -57,8 +56,14 @@ namespace menu = OC::menu;
 #ifdef ENABLE_APP_SAMPLER
 #include "SamplerApp.h"
 #endif
-#ifdef ENABLE_APP_USBDRIVE
-#include "UsbDriveApp.h"
+#ifdef ENABLE_APP_DELAY
+#include "DelayApp.h"
+#endif
+#ifdef ENABLE_APP_REVERB
+#include "ReverbApp.h"
+#endif
+#ifdef ENABLE_APP_BUNGVERB
+#include "BungverbApp.h"
 #endif
 #include "Backup.h"
 #include "SETTINGS.h"
@@ -83,17 +88,10 @@ namespace OC {
 static DMAMEM AppContainer<void // this space intentionally left blank
   , AppSettings
 #ifndef NO_HEMISPHERE
-  #ifdef ARDUINO_TEENSY41
   , AppQuadrants
-  #else
-  , AppHemisphere
-  #endif
 #endif
 #ifdef ENABLE_APP_CALIBR8OR
   , AppCalibr8or
-#endif
-#ifdef ENABLE_APP_SCENES
-  , AppScenery
 #endif
 #ifdef ENABLE_APP_MIDI
   , AppCaptainMIDI
@@ -149,9 +147,6 @@ static DMAMEM AppContainer<void // this space intentionally left blank
 #ifdef ENABLE_APP_REFERENCES
   , AppReferences
 #endif
-#ifdef ENABLE_APP_PONG
-  , AppPong
-#endif
 #ifdef ENABLE_APP_TUNER
   , AppTuner
 #endif
@@ -167,31 +162,45 @@ static DMAMEM AppContainer<void // this space intentionally left blank
 #ifdef ENABLE_APP_SAMPLER
   , AppSampler
 #endif
-#ifdef ENABLE_APP_USBDRIVE
-  , AppUsbDrive
+#ifdef ENABLE_APP_DELAY
+  , AppDelay
+#endif
+#ifdef ENABLE_APP_REVERB
+  , AppReverb
+#endif
+#ifdef ENABLE_APP_BUNGVERB
+  , AppBungverb
 #endif
   , AppScaleEditor
-#ifndef NO_HEMISPHERE
-  , AppWaveformEditor
-#endif
   , AppBackup
 > app_container;
 
 static_assert(decltype(app_container)::TotalAppDataStorageSize() < AppData::kAppDataSize,
               "Apps use too much EEPROM space!");
 
-#if defined(NLM_hOC) && defined(ENABLE_APP_MIDI)
-// hOC MIDI build boots into Captain MIDI: [0]=AppSettings, [1]=Calibr8or, [2]=CaptainMIDI
-static constexpr int DEFAULT_APP_INDEX = 2;
-#elif defined(DEFAULT_APP_MIDI) && defined(ENABLE_APP_MIDI) && defined(ARDUINO_TEENSY41) && !defined(NO_HEMISPHERE)
-// T41 boots into Captain MIDI:
-// [0]=AppSettings, [1]=Quadrants, [2]=Calibr8or, [3]=Scenery, [4]=CaptainMIDI
-static constexpr int DEFAULT_APP_INDEX = 4;
+// The app switcher files apps by position, four bits each across two words, so
+// it can only see the first kMaxApps of them. An app past that never enters the
+// switcher's visible list at all and would be PERMANENTLY UNREACHABLE -- and
+// since the switcher is the only route between apps, a build that booted into
+// one would open on SYSTEM with the running app simply not listed.
+//
+// The maximal roster is at 31 of 32 today; uncommenting Passencore makes it
+// exactly 32. Fail the build rather than ship a silently invisible app.
+static_assert(decltype(app_container)::kNumApps <= OC::AppFolders::kMaxApps,
+              "More apps than the app switcher can file: raise "
+              "OC::AppFolders::kMaxApps (and widen State::bits) first.");
+
+#if   defined(DEFAULT_APP_MIDI) && defined(ENABLE_APP_MIDI) && defined(ARDUINO_TEENSY41) && !defined(NO_HEMISPHERE)
+// Boots into Captain MIDI:
+// [0]=AppSettings, [1]=Quadrants, [2]=Calibr8or, [3]=CaptainMIDI
+// (was 4 until Scenery was deleted; the static_assert below is what
+// catches this the moment the roster above the boot app changes)
+static constexpr int DEFAULT_APP_INDEX = 3;
 #else
 static constexpr int DEFAULT_APP_INDEX = 1;
 #endif
 static constexpr uint16_t DEFAULT_APP_ID = decltype(app_container)::GetAppIDAtIndex<DEFAULT_APP_INDEX>();
-#if defined(ENABLE_APP_MIDI) && (defined(NLM_hOC) || defined(DEFAULT_APP_MIDI))
+#if defined(ENABLE_APP_MIDI) && defined(DEFAULT_APP_MIDI)
 static_assert(DEFAULT_APP_ID == AppCaptainMIDI::kAppId, "DEFAULT_APP_INDEX must select Captain MIDI");
 #endif
 

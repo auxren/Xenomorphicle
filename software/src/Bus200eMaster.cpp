@@ -3,7 +3,7 @@
 #include <stddef.h>
 
 // On target, keep this cold code out of ITCM; host builds compile it bare.
-#if defined(__IMXRT1062__) || defined(__MK20DX256__)
+#if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define MASTER_CODE FLASHMEM
 #else

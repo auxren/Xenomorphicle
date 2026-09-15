@@ -8,12 +8,16 @@
 // RATES are right, but nothing here can overrun, preempt, or be late, and CPU
 // load is not a thing the simulator has. See README.md.
 //
-// The deferred-task queue and the tick counter below are the real ones, copied
-// only because the file they live in is otherwise all peripheral setup.
+// The deferred-call ring and the tick counter below are the real ones, copied
+// only because the file they live in is otherwise all peripheral setup. The
+// ring itself is the firmware's DeferRing.h, so wrap/full/order behaviour is
+// the real behaviour; only the budget counters the firmware feeds from
+// FlushTasks are left out, since the simulator has no `T` report.
 // ---------------------------------------------------------------------------
 #include "OC_core.h"
+#include "DeferRing.h"
 
-std::queue<Task> fn_queue;
+static DeferRing defer_ring;
 
 namespace OC {
 namespace CORE {
@@ -24,15 +28,10 @@ volatile bool app_loop_enabled = false;
 }  // namespace CORE
 }  // namespace OC
 
-void OC::CORE::DeferTask(Task func) { fn_queue.emplace(func); }
+void OC::CORE::DeferTask(void (*fn)()) { defer_ring.push(fn); }
+void OC::CORE::DeferTask(void (*fn)(void *), void *ctx) { defer_ring.push(fn, ctx); }
 
-void OC::CORE::FlushTasks() {
-  if (fn_queue.empty()) return;
-  while (!fn_queue.empty()) {
-    fn_queue.front()();
-    fn_queue.pop();
-  }
-}
+void OC::CORE::FlushTasks() { defer_ring.run_all(); }
 
 // A fixed, plausible number. A host process has no RAM1/RAM2 split, and the
 // simulator says nothing about the firmware's memory pressure.

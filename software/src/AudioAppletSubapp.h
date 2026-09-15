@@ -93,8 +93,12 @@ public:
         get_selected_mono_applet(RIGHT_HEMISPHERE, i).Controller();
       }
     }
-    if (cpu_percent <= 100)
-      AudioInterrupts();
+    // Always re-enable. This used to be gated on cpu_percent <= 100, which
+    // left the audio interrupt OFF for STATS_TIMEOUT ticks (250 ms) whenever
+    // the measured audio load exceeded 100%: the instrument answered
+    // overload by switching audio off for a quarter second. Overload is
+    // now visible as dropped blocks in the `T` report instead.
+    AudioInterrupts();
 
     if (last_stats_update > STATS_TIMEOUT) {
       AudioInterrupts(); // force usage refresh

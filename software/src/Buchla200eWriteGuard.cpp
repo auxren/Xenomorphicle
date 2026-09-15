@@ -1,6 +1,6 @@
 // Pure permit/refuse logic for a 200e whole-bank write. See the header for
 // why this is separated out and tested on its own.
-#if defined(__IMXRT1062__) || defined(__MK20DX256__)
+#if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define B200E_GUARD_CODE FLASHMEM
 #define B200E_GUARD_DATA PROGMEM

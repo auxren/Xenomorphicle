@@ -66,8 +66,25 @@ static int8_t pending_slot = -1;          // op we're waiting on
 static bool pending_was_save = false;
 static uint32_t pending_start_ms = 0;
 static uint32_t pending_opcount = 0;
-static char banner[14] = "";
+static char banner[20] = "";
 static uint32_t banner_until_ms = 0;
+// The banner's own words, before the follower count is appended. Modules
+// that act on a broadcast answer with a poll reply over the ~500 ms AFTER
+// the engine has finished our copy of the op, so the count cannot be known
+// when the banner is first drawn. The banner is never made to wait for the
+// bus: it appears at once and grows a "+N" as the case reports in.
+static char banner_base[16] = "";
+static uint32_t banner_follow_since = 0;
+
+// `follow_since` is the millis() stamp our broadcast went out, or 0 for a
+// banner that is about this module alone.
+FLASHMEM static void set_banner(const char *text, uint32_t follow_since) {
+  strncpy(banner_base, text, sizeof(banner_base) - 1);
+  banner_base[sizeof(banner_base) - 1] = 0;
+  banner_follow_since = follow_since;
+  snprintf(banner, sizeof(banner), "%s", banner_base);
+  banner_until_ms = millis() + 1600;
+}
 
 bool Active() { return active; }
 
@@ -469,8 +486,7 @@ FLASHMEM void Draw() {
 FLASHMEM static void cancel_store_hold() {
   hold_start_ms = 0;
   ui.IgnoreUntilRelease(CONTROL_BUTTON_L);
-  snprintf(banner, sizeof(banner), "STORE OFF");
-  banner_until_ms = millis() + 1600;
+  set_banner("STORE OFF", 0);
 }
 
 // A RECALL hold that has not fired yet is abandoned, quietly: the event
@@ -608,8 +624,9 @@ void Task() {
         pending_opcount = PresetEngine::OpCount();
       } else if (PresetEngine::OpCount() != pending_opcount) {
         const uint8_t shown = (uint8_t)PresetEngine::BusSlot() + 1;
+        char text[16];
         if (pending_was_save) {
-          snprintf(banner, sizeof(banner),
+          snprintf(text, sizeof(text),
                    PresetEngine::LastSaveOk() ? "STORED %d" : "STORE ERR %d", shown);
         } else {
           // A refused recall reports its reason at once ("EMPTY SLOT 7"),
@@ -617,10 +634,13 @@ void Task() {
           // means the slot has nothing stored, the second means the op
           // never finished. A night was lost to conflating them.
           const char *err = PresetEngine::LastRecallError();
-          if (err) snprintf(banner, sizeof(banner), "%s %d", err, shown);
-          else snprintf(banner, sizeof(banner), "RECALLED %d", shown);
+          if (err) snprintf(text, sizeof(text), "%s %d", err, shown);
+          else snprintf(text, sizeof(text), "RECALLED %d", shown);
         }
-        banner_until_ms = millis() + 1600;
+        // Count followers from the moment the frame went out. A refused
+        // recall still broadcast, so the case still moved: the count is
+        // about the bus, not about this module's own result.
+        set_banner(text, pending_start_ms);
         pending_slot = -1;
         sel_stored = -1;
       } else if (PresetBus::BroadcastQueued()) {
@@ -632,11 +652,18 @@ void Task() {
         // the timeout below is then the true verdict.
         pending_start_ms = millis();
       } else if (millis() - pending_start_ms > 4000) {
-        snprintf(banner, sizeof(banner),
-                 pending_was_save ? "STORE FAILED" : "RECALL FAILED");
-        banner_until_ms = millis() + 1600;
+        set_banner(pending_was_save ? "STORE FAILED" : "RECALL FAILED", 0);
         pending_slot = -1;
       }
+    }
+
+    // Followers report in after the engine has finished, so the count is
+    // refreshed while the banner is up rather than waited for. A case with
+    // no polling module answers nothing and the banner simply stays as it
+    // was: the absence of a count is not a claim that nothing followed.
+    if (banner_until_ms && banner_follow_since) {
+      const int n = PresetBus::LoadAckCountSince(banner_follow_since);
+      if (n > 0) snprintf(banner, sizeof(banner), "%s +%d", banner_base, n);
     }
 
     // Throttled redraw: forcing MENU_REDRAW every pass makes the renderer

@@ -217,10 +217,8 @@ namespace HS {
   extern util::SemitoneQuantizer input_quant[ADC_CHANNEL_COUNT];
   extern QuantEngine q_engine[QUANT_CHANNEL_COUNT];
 
-#if defined(ARDUINO_TEENSY41) || defined(VOR)
+#if defined(ARDUINO_TEENSY41)
   extern int octave_max;
-#elif defined(NORTHERNLIGHT)
-  static constexpr int octave_max = 10;
 #else
   static constexpr int octave_max = 6;
 #endif

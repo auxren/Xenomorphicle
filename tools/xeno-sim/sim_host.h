@@ -45,6 +45,7 @@ void SimSetIdVoltage(float v);
 // hands them over: bit (y & 7) of buf[(y >> 3) * 128 + x].
 const uint8_t *SimPanelBytes();
 bool SimPanelInverted();
+bool SimPanelDisplayOn();
 
 // The panel as the eye sees it: the same bytes with the panel's invert command
 // applied. This is what the front end draws and what --dump-fb emits.

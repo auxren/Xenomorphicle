@@ -13,6 +13,7 @@
 #include "PresetBus.h"
 #include "PresetBus200e.h"
 #include "PresetBusCard.h"
+#include "CardSectors.h"
 #include "PresetEngine.h"
 #include "OC_gpio.h"
 #include "OC_core.h"
@@ -211,12 +212,58 @@ static void cb_xfer_done(uint8_t from_addr) {
   if (verbose) Serial.printf("PresetBus: transfer done from %02X\n", from_addr);
 }
 
+// Which modules answered a preset load, and when. A module in polling mode
+// masters [04 22 addr 03 xx] once per preset load; that is the only positive
+// confirmation this bus offers that a broadcast RECALL was acted on. The
+// table is small and last-wins by address: what a caller ever asks is "which
+// addresses answered in the last N ms", never a history.
+static constexpr int kLoadAckSlots = 12;
+static struct { uint8_t addr; uint32_t ms; } load_ack[kLoadAckSlots];
+
+static void cb_load_ack(uint8_t from_addr) {
+  const uint32_t now = millis() ? millis() : 1;
+  int free_slot = -1;
+  for (int i = 0; i < kLoadAckSlots; ++i) {
+    if (load_ack[i].ms && load_ack[i].addr == from_addr) {
+      load_ack[i].ms = now;
+      if (verbose) Serial.printf("PresetBus: %02X followed the recall\n", from_addr);
+      return;
+    }
+    if (!load_ack[i].ms && free_slot < 0) free_slot = i;
+  }
+  if (free_slot < 0) {  // full: take the stalest entry
+    free_slot = 0;
+    for (int i = 1; i < kLoadAckSlots; ++i)
+      if (load_ack[i].ms < load_ack[free_slot].ms) free_slot = i;
+  }
+  load_ack[free_slot].addr = from_addr;
+  load_ack[free_slot].ms = now;
+  if (verbose) Serial.printf("PresetBus: %02X followed the recall\n", from_addr);
+}
+
+bool LoadAckSeenSince(uint8_t addr, uint32_t ms_ago) {
+  const uint32_t now = millis();
+  for (int i = 0; i < kLoadAckSlots; ++i)
+    if (load_ack[i].ms && load_ack[i].addr == addr && now - load_ack[i].ms <= ms_ago)
+      return true;
+  return false;
+}
+
+int LoadAckCountSince(uint32_t since_ms) {
+  if (!since_ms) return 0;
+  int n = 0;
+  for (int i = 0; i < kLoadAckSlots; ++i)
+    if (load_ack[i].ms && (int32_t)(load_ack[i].ms - since_ms) >= 0) ++n;
+  return n;
+}
+
 static const Bus200eOps kOps = {
   cb_save, cb_recall,
   0, nullptr, nullptr, nullptr, nullptr,  // card transfers: phase 2
   cb_midi,
   cb_query_reply,
   cb_xfer_done,
+  cb_load_ack,
 };
 
 static bool tx_gate_open();  // defined with Task() below
@@ -435,9 +482,14 @@ FLASHMEM static void slave_reconfig(bool serve, uint8_t addr7 = BUS200E_CARD_BAS
   LPI2C1_SCR = LPI2C_SCR_SEN | LPI2C_SCR_FILTEN;
 }
 
-// CRC-32 of what PBCARD.BIN holds, as of the last load or successful flush.
-// 0 = unknown (never loaded, or the last flush failed): always write.
-static uint32_t card_file_crc = 0;
+// What PBCARD.BIN holds, as of the last load or successful flush, tracked
+// per 4 KB sector -- the granularity the write cost is actually paid in.
+// This subsumes the whole-image CRC it replaced: "no sector changed" is
+// the same answer as "the image is unchanged", for one pass over the 64 KB
+// instead of two. Measured 2026-09-14: the two passes put a loop iteration
+// at 5.25 ms, over the 5 ms budget, when a backup enabled card serving.
+// See CardSectors.h.
+static CardSectors card_sectors;
 
 // Dirty means "a slave write landed", not "the bytes changed": a 251e BACKUP
 // writes the bank in whether or not it differs from the last one, and most
@@ -463,8 +515,8 @@ FLASHMEM static void card_image_flush(const char *why) {
     Serial.printf("PresetBus: card image kept in RAM, PBCARD.BIN untouched (%s)\n", why);
     return;
   }
-  const uint32_t crc = Buchla200eCrc32(card_image, BUSCARD_SIZE);
-  if (card_file_crc && crc == card_file_crc) {
+  const CardSectors::Plan plan = card_sectors.plan(card_image, Buchla200eCrc32);
+  if (!plan.whole_image && plan.count == 0) {
     BusCardClearDirty();
     Serial.printf("PresetBus: card image unchanged, not rewritten (%s)\n", why);
     return;
@@ -473,16 +525,56 @@ FLASHMEM static void card_image_flush(const char *why) {
   // the flash programs, so millis() under-reports exactly the costly part.
   // One lap is fine here -- the counter wraps at ~7 s and a flush is ~1 s.
   const uint32_t c0 = ARM_DWT_CYCCNT;
-  File f = PhzConfig::myfs.open(kCardFile, FILE_WRITE_BEGIN);
-  bool ok = false;
-  if (f) {
-    ok = f.write(card_image, BUSCARD_SIZE) == BUSCARD_SIZE;
-    f.close();
+
+  // Only the sectors that actually moved. A 259e's 990-byte bank touches one
+  // of the sixteen; writing all of them cost 1088 ms with interrupts masked
+  // for fifteen sectors of unchanged bytes. The whole-image path stays for
+  // the cases where partial writing is not sound: nothing known about the
+  // file yet, or a file that is not exactly BUSCARD_SIZE (a short or absent
+  // one cannot be seeked into).
+  bool whole = plan.whole_image;
+  if (!whole) {
+    File probe = PhzConfig::myfs.open(kCardFile, FILE_READ);
+    const bool sized = probe && probe.size() == BUSCARD_SIZE;
+    if (probe) probe.close();
+    if (!sized) whole = true;
   }
-  if (ok) BusCardClearDirty();
-  card_file_crc = ok ? crc : 0;
-  Serial.printf("PresetBus: card image %s in %lu ms wall (%s)\n",
-                ok ? "saved" : "SAVE FAILED",
+
+  bool ok = false;
+  int wrote = 0;
+  if (whole) {
+    File f = PhzConfig::myfs.open(kCardFile, FILE_WRITE_BEGIN);
+    if (f) {
+      ok = f.write(card_image, BUSCARD_SIZE) == BUSCARD_SIZE;
+      f.close();
+    }
+    wrote = CardSectors::kSectors;
+  } else if (plan.count == 0) {
+    ok = true;   // the per-sector view agrees with the file; nothing to do
+  } else {
+    File f = PhzConfig::myfs.open(kCardFile, FILE_WRITE);
+    if (f) {
+      ok = true;
+      for (int i = 0; i < CardSectors::kSectors && ok; ++i) {
+        if (!plan.dirty[i]) continue;
+        const uint32_t off = CardSectors::offset_of(i);
+        ok = f.seek(off) &&
+             f.write(card_image + off, CardSectors::kSectorBytes) ==
+                 CardSectors::kSectorBytes;
+        ++wrote;
+      }
+      f.close();
+    }
+  }
+
+  if (ok) {
+    BusCardClearDirty();
+    card_sectors.adopt(card_image, Buchla200eCrc32);
+  } else {
+    card_sectors.forget();
+  }
+  Serial.printf("PresetBus: card image %s, %d of %d sectors in %lu ms wall (%s)\n",
+                ok ? "saved" : "SAVE FAILED", wrote, (int)CardSectors::kSectors,
                 (unsigned long)((ARM_DWT_CYCCNT - c0) / (F_CPU_ACTUAL / 1000)), why);
 }
 
@@ -536,7 +628,10 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   }
   // Only a whole file is known to match the image; a short or missing one
   // leaves the CRC unknown so the first flush always writes.
-  card_file_crc = (got == BUSCARD_SIZE) ? Buchla200eCrc32(card_image, BUSCARD_SIZE) : 0;
+  // One pass over the image, not two: adopt() computes the per-sector CRCs
+  // and that is the whole record of what the file holds.
+  if (got == BUSCARD_SIZE) card_sectors.adopt(card_image, Buchla200eCrc32);
+  else card_sectors.forget();
   BusCardInit(card_image, BUSCARD_SIZE);
   card_seen_writes = 0;
   card_seen_reads = 0;
@@ -913,7 +1008,19 @@ bool ReadMidiRx(uint8_t &status, uint8_t &d1, uint8_t &d2) {
 FLASHMEM static void pump_midi_tx() {
   uint8_t sent = 0;
   uint32_t v = 0;
-  while (midi_tx.peek(v) && sent < 4) {
+  for (;;) {
+    // Clock first. Every frame ahead of a tick costs about a millisecond of
+    // quiet-gated bus, so a burst of notes or controllers queued before it
+    // arrives delays the tick by that many milliseconds -- and a tick's
+    // whole value is when it lands. IRQ-masked because QueueMidiTx runs in
+    // ISR context and its coalescing writes into the same ring body; the
+    // unconditional re-enable is fine here for the reason QueueMidiTx
+    // gives, this is loop context.
+    __disable_irq();
+    midi_tx.promote_realtime();
+    __enable_irq();
+
+    if (!midi_tx.peek(v) || sent >= 4) return;
     if (!tx_gate_open()) return;
 
     // [08][00][22][0F][status|mask][00][d1][d2][00] -- 2WIRELESS long format
@@ -1161,6 +1268,8 @@ FLASHMEM void DebugDump() {
                 stats.ring_hw, kRingSize, stats.midi_rx_hw, kMidiRingRx,
                 stats.midi_tx_hw, kMidiRingTx, stats.bus_stuck,
                 stats.bus_recovered);
+  Serial.printf("midi tx ring: merged=%lu promoted=%lu dropped=%lu\n",
+                midi_tx.merged, midi_tx.promoted, midi_tx.dropped);
   const Bus200eStats *ps = Bus200eGetStats();
   Serial.printf("frames=%lu dropped=%lu query_tx=%lu query_retry=%lu\n",
                 ps->frames, ps->dropped, stats.query_replies, stats.query_retries);
@@ -1209,7 +1318,7 @@ FLASHMEM void DebugDump() {
   static const char *const opnames[] = {
     "none", "RECALL", "SAVE", "REMOTE_EN", "REMOTE_DIS", "POLL_DONE",
     "QUERY", "BACKUP", "RESTORE", "MIDI", "CLOCK", "UNKNOWN", "DROPPED",
-    "QRY_REPLY", "XFER_DONE",
+    "QRY_REPLY", "XFER_DONE", "LOAD_ACK",
   };
   const uint32_t total = Bus200eLogTotal();
   Serial.printf("decoded commands (%lu total, newest first):\n", total);

@@ -348,9 +348,16 @@ const char *SimRuntimeAppName() {
 
 std::string SimRuntimeStatusLine() {
   char buf[256];
-  snprintf(buf, sizeof(buf), "%s  app=%s  held=[%s]  t=%ums  ticks=%lu",
+  // panel= reports whether the module is DRAWING, which a capture alone cannot
+  // tell you: an app whose screensaver draws nothing and a module that has
+  // idled into panel sleep both dump an all-zero frame, and only one of them
+  // is the state that stops the display ageing. Read from Ui rather than from
+  // the driver, because sleep is now a decision not to draw -- the panel's own
+  // drive is deliberately left alone (see Ui::DispatchEvents).
+  snprintf(buf, sizeof(buf), "%s  app=%s  held=[%s]  t=%ums  ticks=%lu  panel=%s",
            SimRuntimeScreen(), SimRuntimeAppName(),
            SimInputHeldTokens().c_str(), SimNowMs(),
-           (unsigned long)OC::ui.ticks());
+           (unsigned long)OC::ui.ticks(),
+           OC::ui.display_asleep() ? "asleep" : "on");
   return buf;
 }

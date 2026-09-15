@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <vector>
 #include "PhzConfig.h"
+#include "PresetStage.h"
 #include "HSUtils.h"
 #include "util/util_misc.h"
 #include "usb_desc.h"
@@ -691,7 +692,12 @@ bool save_config(const char* filename, FS &fs)
         HS::PokePopup(HS::MESSAGE_POPUP, "TempFile ERR !!");
     }
 
-    if (success) mark_clean(filename, fs);
+    if (success) {
+      mark_clean(filename, fs);
+      // The disk is now newer than any recall image staged under this name:
+      // stop serving the stage, and the sync pump has nothing left to write.
+      OC::RecallStage().mark_synced(filename);
+    }
     return success;
 }
 
@@ -825,6 +831,19 @@ bool load_config(const char* filename, FS &fs)
   cfg_store.clear();
   data_store.clear();
   mark_dirty();
+
+  // A preset recall registers the apps' files as RAM images instead of
+  // writing them (PresetEngine.cpp, recall_stage_files). Serve those here,
+  // by name, until the sync pump has put the bytes on disk. The map is then
+  // a clean copy of `filename` on `fs` exactly as if it had been read from
+  // there, so the app's own saves keep going to the right place.
+  if (const PresetStage::Image *img = OC::RecallStage().find(filename)) {
+    const bool ok = deserialize(img->data, img->len);
+    if (ok) mark_clean(filename, fs);
+    SERIAL_PRINTLN("PhzConfig: %s served from the recall stage (%lu bytes)%s\n",
+                   filename, (unsigned long)img->len, ok ? "" : " -- BAD IMAGE");
+    return ok;
+  }
 
   SERIAL_PRINTLN("\nLoading Config: %s\n", filename);
   dataFile = fs.open(filename);

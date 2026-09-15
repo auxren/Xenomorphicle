@@ -133,13 +133,8 @@ public:
 
   // TOTAL EEPROM SIZE: 9 bytes
   SETTINGS_ARRAY_DECLARE() {{
-    #ifdef NORTHERNLIGHT
-    { 0, 0, 255, "Freq 1", NULL, settings::STORAGE_TYPE_U8 },
-    { 0, 0, 255, "Freq 2", NULL, settings::STORAGE_TYPE_U8 },
-    #else
     { 128, 0, 255, "Freq 1", NULL, settings::STORAGE_TYPE_U8 },
     { 128, 0, 255, "Freq 2", NULL, settings::STORAGE_TYPE_U8 },
-    #endif
     { 63, 4, 127, "Rho/c 1", NULL, settings::STORAGE_TYPE_U8 }, 
     { 63, 4, 127, "Rho/c 2", NULL, settings::STORAGE_TYPE_U8 }, 
     { 2, 0, 4, "LFreq 1 Rng", lorenz_freq_range_names, settings::STORAGE_TYPE_U4 },

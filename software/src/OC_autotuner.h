@@ -10,11 +10,7 @@
 #include "OC_ui.h"
 
 // autotune constants:
-#ifdef VOR
-static constexpr int ACTIVE_OCTAVES = OCTAVES;
-#else
 static constexpr int ACTIVE_OCTAVES = OCTAVES - 1;
-#endif
 
 #define ZERO_OFFSET (5 - OC::DAC::kOctaveZero)
 
@@ -33,16 +29,9 @@ static constexpr uint32_t ERROR_TIMEOUT = (FREQ_MEASURE_TIMEOUT << 0x4);
 #endif
 
 
-#if defined(NORTHERNLIGHT) && !defined(IO_10V)
-const char* const AT_steps[] = {
-  " ", " ", " ", " ", " ", // 5 blanks
-  "0.0V", "1.2V", "2.4V", "3.6V", "4.8V", "6.0V", "7.2V", "8.4V", "9.6V", "10.8V", " " 
-};
-#else
 const char* const AT_steps[] = {
   "-5V", "-4V", "-3V", "-2V", "-1V", " 0V", "+1V", "+2V", "+3V", "+4V", "+5V", "+6V", "+7V", "+8V", "+9V", "+10V", " " 
 };
-#endif
 
 constexpr float target_multipliers[OCTAVES + 6] = { 0.03125f, 0.0625f, 0.125f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f, 128.0f, 256.0f, 512.0f, 1024.0f };
 
@@ -106,9 +95,6 @@ enum AUTO_CALIBRATION_STEP {
   DAC_VOLT_4, 
   DAC_VOLT_5, 
   DAC_VOLT_6,
-#ifdef VOR
-  DAC_VOLT_7,
-#endif
   AUTO_CALIBRATION_STEP_LAST
 };
 
@@ -379,9 +365,6 @@ private:
       case OC::DAC_VOLT_4:
       case OC::DAC_VOLT_5:
       case OC::DAC_VOLT_6:
-      #ifdef VOR
-      case OC::DAC_VOLT_7:
-      #endif
       { 
         bool _update = auto_frequency();
         

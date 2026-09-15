@@ -8,7 +8,7 @@
 // once-in-a-while human action, never an audio/USB hot path), so it lives in
 // flash and leaves the scarce ITCM bank alone -- same treatment as
 // Bus200eSysEx.cpp. Host builds compile it bare.
-#if defined(__IMXRT1062__) || defined(__MK20DX256__)
+#if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define BRIDGE_CODE FLASHMEM
 #else

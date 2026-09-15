@@ -67,6 +67,14 @@ public:
 	bool get_update_responsibility() { return update_responsibility;}
 	void set_channel_swap(bool sw) { channel_swap = sw ? 1 : 0;}
 	bool get_channel_swap() {return (bool)channel_swap;}
+	// Master output gain applied in isr(). 1.0f normally; a declared
+	// persistence window (OC::RT::PersistenceWindow) ramps it to 0 before an
+	// unavoidable interrupts-masked flash write and back afterwards, so the
+	// write is heard as a short dip rather than a click into a frozen tone.
+	static volatile float master_gain;
+	// Zero both halves of the DMA buffer and flush them to RAM. For a caller
+	// about to mask interrupts for longer than one audio block.
+	static void silence_now(void);
 protected:
 	AudioOutputI2S2_F32(int dummy): AudioStream_F32(2, inputQueueArray) {} // to be used only inside AudioOutputI2Sslave !!
 	static void config_i2s(void);
