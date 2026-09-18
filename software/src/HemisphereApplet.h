@@ -135,14 +135,19 @@ public:
     }
 
     // standard entry points
-    void BaseView(bool full_screen = false, bool parked = true) const;
+    // NOT const: both of these call the applet's own View()/DrawFullScreen()/
+    // SetHelp(), which are not const and should not be -- drawing an applet
+    // legitimately updates its display state. Every caller reaches the applet
+    // through a pointer or reference member, so a const DrawMenu() can still
+    // call these; the constness simply never needed to be here.
+    void BaseView(bool full_screen = false, bool parked = true);
     void BaseStart(const HEM_SIDE hemisphere_);
     void SetDisplaySide(HEM_SIDE side) {
         hemisphere = side;
     }
 
     /* Formerly Help Screen */
-    void DrawConfigHelp() const;
+    void DrawConfigHelp();
 
     // --- Cursor stuff
     static void ProcessCursors() {
@@ -168,8 +173,10 @@ public:
     inline bool EditMode() const {
       return (enc_edit[hemisphere].isEditing);
     }
-    void SetLabel(const char *str) { enc_edit[hemisphere].label = str; }
-    void SetAux(bool aux) { enc_edit[hemisphere].aux_action = aux; }
+    // const: enc_edit is a STATIC member, so neither of these touches *this.
+    // Saying so is what lets the gfxCursor family stay const honestly.
+    void SetLabel(const char *str) const { enc_edit[hemisphere].label = str; }
+    void SetAux(bool aux) const { enc_edit[hemisphere].aux_action = aux; }
 
     template<typename T>
     void MoveCursor(T &cursor, int direction, int max) {

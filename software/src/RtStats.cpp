@@ -7,12 +7,19 @@
 #include "RtStats.h"
 #include "PresetStage.h"
 #include "Fade.h"
-// ARDUINO_TEENSY41, not AUDIO_INTERFACE: the latter is a USB descriptor
-// interface number that only exists when USB audio is compiled in, while
-// the I2S2 codec output runs on every build of this hardware (AudioIO.cpp
-// creates AudioOutputI2S2_F32 unconditionally). Guarding the fade on the USB
-// descriptor compiled it out of the console build, where the DAC is live.
-#ifdef ARDUINO_TEENSY41
+// XENO_CODEC_AUDIO (platformio.ini), not AUDIO_INTERFACE and not
+// ARDUINO_TEENSY41. AUDIO_INTERFACE is a USB descriptor interface number that
+// exists only when USB audio is compiled in, and guarding the fade on it
+// compiled the fade out of the console build, where the DAC is live.
+// ARDUINO_TEENSY41 is true for trees that have no F32 audio engine at all --
+// upstream Phazerville is one, and so is the simulator -- so it is not the
+// question either. The question is whether AudioOutputI2S2_F32 exists to be
+// faded, and that is exactly what XENO_CODEC_AUDIO means.
+//
+// Everything else in this file works without it: the window still stops the
+// clock, silences MIDI and attributes the stall. A build with no codec simply
+// has no audio to ramp.
+#ifdef XENO_CODEC_AUDIO
 #include "extern/f32/output_i2s2_F32.h"
 #endif
 
@@ -70,7 +77,7 @@ void MidiGap(uint32_t us) {
 static constexpr uint32_t kFadeOutMs = 15;
 static constexpr uint32_t kFadeInMs = 25;
 
-#ifdef ARDUINO_TEENSY41
+#ifdef XENO_CODEC_AUDIO
 // Step the master gain from loop context while the audio ISR is still
 // running and producing blocks. delay(1) advances the clock and lets the
 // ISR run, which is the whole point: a fade written in one go would just be
@@ -106,7 +113,7 @@ PersistenceWindow::PersistenceWindow(const char *reason, uint32_t declared_max_m
   // documented as loop-context-only; this is what makes a mistake harmless
   // instead of a lockup.
   faded_ = false;
-#ifdef ARDUINO_TEENSY41
+#ifdef XENO_CODEC_AUDIO
   if (!window_primask() && window_depth == 0) {
     Fade::Ramp out;
     out.start(kFadeOutMs, true);
@@ -143,7 +150,7 @@ PersistenceWindow::~PersistenceWindow() {
     Serial.printf("rt: window '%s' ran %lu ms, declared %lu\n", reason_,
                   (unsigned long)ms, (unsigned long)declared_max_ms_);
   }
-#ifdef ARDUINO_TEENSY41
+#ifdef XENO_CODEC_AUDIO
   if (faded_) {
     Fade::Ramp in;
     in.start(kFadeInMs, false);

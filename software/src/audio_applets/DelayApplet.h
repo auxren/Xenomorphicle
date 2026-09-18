@@ -376,7 +376,7 @@ public:
     if (oldclk) clock_source.Unpack(oldclk);
   }
 
-  int PitchFromDelaySecs(float secs) {
+  int PitchFromDelaySecs(float secs) const {
     return -RatioToPitch(C3 * 2 * secs);
   }
 

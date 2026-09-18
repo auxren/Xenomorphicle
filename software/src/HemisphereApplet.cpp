@@ -29,7 +29,7 @@ void HemisphereApplet::BaseStart(const HEM_SIDE hemisphere_) {
         }
     }
 }
-FLASHMEM void HemisphereApplet::BaseView(bool full_screen, bool parked) const {
+FLASHMEM void HemisphereApplet::BaseView(bool full_screen, bool parked) {
     //if (HS::select_mode == hemisphere)
     gfxHeader(applet_name(), (HS::ALWAYS_SHOW_ICONS || full_screen) ? applet_icon() : nullptr);
     // If active, draw the full screen view instead of the application screen
@@ -42,7 +42,7 @@ FLASHMEM void HemisphereApplet::BaseView(bool full_screen, bool parked) const {
     else this->View();
 }
 
-FLASHMEM void HemisphereApplet::DrawConfigHelp() const {
+FLASHMEM void HemisphereApplet::DrawConfigHelp() {
     for (int i=0; i<HELP_LABEL_COUNT; ++i) help[i] = "";
     SetHelp();
     const bool clockrun = HS::clock_m.IsRunning();
