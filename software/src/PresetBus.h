@@ -71,6 +71,21 @@ void BroadcastRecall(uint8_t slot);
 // dispatched to the engine yet, so a completion watch should not be timing
 bool BroadcastQueued();
 
+// Master an ARBITRARY general-call frame onto the bus, synchronously, right
+// now. This is the raw escape hatch BroadcastSave/Recall do not give: it
+// sends exactly the bytes handed in ([nBytes][dest][src][cmd][args...] for
+// a long frame, or a short frame -- the caller owns the framing), so bus
+// commands with no dedicated helper (block-move 0x07, slot-exchange 0x08,
+// remote enable/disable 0x16/0x17, ...) can be issued and confirmed on real
+// hardware. The local slave stays enabled and the echo is suppressed, same
+// as pump_broadcast(). Nothing is dispatched to the local PresetEngine --
+// a raw frame may be anything, so the caller decides what, if anything, it
+// means locally. Returns 0 on a clean ACK, -1 if the bus is not quiet (tx
+// gate closed; retry), -2 for bad args, or the raw Wire error otherwise.
+// EXPERT/BENCH USE: an ill-formed command frame can hang a module (see the
+// 2026-09-10 257e freeze in the 200e_bus_protocol repo). Back up first.
+int SendRawFrame(const uint8_t *bytes, uint8_t n);
+
 // WPM / preset-manager presence: probed as a master ACK test on address
 // 0x50 every few seconds when the bus is quiet. Hot plug/unplug is normal.
 bool WpmPresent();

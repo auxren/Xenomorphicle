@@ -1156,6 +1156,14 @@ FLASHMEM __attribute__((noinline)) void loop() {
       static bool restore_addr_pending = false;
       static uint8_t restore_addr_digits = 0;
       static uint8_t restore_addr_value = 0;
+      // 'W' raw-frame sender: accumulate hex bytes then Enter/space to master
+      // an arbitrary general-call frame (block-move 0x07, slot-exchange 0x08,
+      // remote enable/disable, etc). Even nibble count required; bounded to
+      // avoid a runaway. See PresetBus::SendRawFrame -- expert/bench use.
+      static bool rawframe_pending = false;
+      static uint8_t rawframe_buf[32];
+      static uint8_t rawframe_len = 0;   // whole bytes assembled so far
+      static uint8_t rawframe_nib = 0;   // 0 = expecting hi nibble, 1 = lo
       do {
         int cmd = Serial.read();
         if (!console_unlocked) {
@@ -1389,6 +1397,55 @@ FLASHMEM __attribute__((noinline)) void loop() {
 #endif
           continue;
         }
+        if (rawframe_pending) {
+          // Enter, space or any other non-hex char ends the frame and sends.
+          if (cmd == '\r' || cmd == '\n' || cmd == ' ') {
+            rawframe_pending = false;
+            if (rawframe_nib != 0) {
+              Serial.println("rawframe: odd number of hex nibbles, cancelled");
+              continue;
+            }
+            if (rawframe_len == 0) {
+              Serial.println("rawframe: no bytes, cancelled");
+              continue;
+            }
+            Serial.print("rawframe: sending");
+            for (uint8_t i = 0; i < rawframe_len; i++)
+              Serial.printf(" %02X", rawframe_buf[i]);
+            Serial.println();
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+            const int wrc = OC::PresetBus::SendRawFrame(rawframe_buf, rawframe_len);
+            if (wrc == 0)       Serial.println("  ACK");
+            else if (wrc == -1) Serial.println("  refused: bus not quiet (tx gate closed) -- retry");
+            else if (wrc == -2) Serial.println("  refused: bad args");
+            else                Serial.printf("  Wire error %d (2=NAK, 4=other)\n", wrc);
+#endif
+            continue;
+          }
+          int v = -1;
+          if (cmd >= '0' && cmd <= '9') v = cmd - '0';
+          else if (cmd >= 'a' && cmd <= 'f') v = cmd - 'a' + 10;
+          else if (cmd >= 'A' && cmd <= 'F') v = cmd - 'A' + 10;
+          if (v < 0) {
+            Serial.println("rawframe: cancelled (not a hex digit)");
+            rawframe_pending = false;
+            continue;
+          }
+          if (rawframe_len >= sizeof(rawframe_buf)) {
+            Serial.println("rawframe: too long, cancelled");
+            rawframe_pending = false;
+            continue;
+          }
+          if (rawframe_nib == 0) {
+            rawframe_buf[rawframe_len] = (uint8_t)(v << 4);
+            rawframe_nib = 1;
+          } else {
+            rawframe_buf[rawframe_len] |= (uint8_t)v;
+            rawframe_len++;
+            rawframe_nib = 0;
+          }
+          continue;
+        }
         switch (cmd) {
 #ifdef PRINT_DEBUG
           case 'z':
@@ -1617,6 +1674,15 @@ FLASHMEM __attribute__((noinline)) void loop() {
             recall_slot_pending = true;
             recall_slot_digits = 0;
             recall_slot_value = 0;
+            break;
+          case 'W':  // send a RAW general-call frame: hex bytes then Enter
+            Serial.println("rawframe: type hex bytes then Enter/space to send "
+                           "on the general call, e.g. 04002207010005 (block-"
+                           "move). Odd nibble count or a non-hex char cancels. "
+                           "EXPERT: back up first, a bad frame can hang a module.");
+            rawframe_pending = true;
+            rawframe_len = 0;
+            rawframe_nib = 0;
             break;
 #endif
           // destructive keys need a second press within 3s ('pew!' stops

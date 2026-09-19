@@ -725,6 +725,22 @@ static const Bus200eMasterOps kMasterOps = {
   master_send_frame, master_suppress_echo, master_card_activity,
 };
 
+// Raw arbitrary-frame master send. See PresetBus.h for the contract. Mirrors
+// pump_broadcast()'s successful-TX path (same tx gate, same echo suppression,
+// same self-echo drain) but sends caller-supplied bytes and dispatches
+// nothing locally. Synchronous, called from loop/console context on a quiet
+// bus; the slave stays enabled so a lost arbitration is still heard.
+FLASHMEM int SendRawFrame(const uint8_t *bytes, uint8_t n) {
+  if (!bytes || n == 0) return -2;
+  if (!tx_gate_open()) return -1;      // bus not quiet -- caller retries
+  const int err = master_send_frame(bytes, n);
+  if (err == 0) {
+    Bus200eSuppressFrame(bytes, n);    // don't re-parse our own echo
+    drain_ring();                      // consume it while suppression is fresh
+  }
+  return err;
+}
+
 // Candidates tried, in order: 0x50 first (the canonical/expected card
 // address), then 0x51 -- lets a capture still succeed with a live WPM
 // occupying 0x50 (the whole point of this fix: that used to mean the only
