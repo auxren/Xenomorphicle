@@ -135,6 +135,22 @@ enum FocusParam : uint8_t {
 
 }  // namespace SamplerAppNS
 
+// AudioPlaySdResmp exposes no way to close its file. Its evClose is internal
+// to update(), and `reader` is protected -- so this subclass is the least-bad
+// way to reach ResamplingSdReader::close(), which frees the ~29 KB of
+// read-ahead buffers that IndexableFile::preLoadBuffers allocated, without
+// forking the vendored teensy-variable-playback submodule.
+//
+// The obvious trick -- playWav() on a name that cannot exist, relying on
+// ResamplingReader::play() calling close() first -- is NOT safe: an empty
+// string walks FatFile::parsePathName off the end of the buffer and faults
+// (accessed 0xFFFFFFFF, seen on the bench 2026-09-18), and any real name
+// makes the release depend on a file's absence.
+class SamplerVoice : public AudioPlaySdResmp {
+ public:
+  void CloseFile() { if (reader) reader->close(); }
+};
+
 OC_APP_CLASS(AppSampler, TWOCCS("SM"), "Sampler", "Sample Player") {
 public:
   // Per slot: file_num_ u16 + rate_pct_ i16 + flags_ u8 (bit0 loop_on, bit1
@@ -157,7 +173,7 @@ private:
   bool file_loaded_[SamplerMath::kSlotCount] = {};
 
 #ifdef XENO_CODEC_AUDIO
-  AudioPlaySdResmp players_[SamplerMath::kSlotCount];
+  SamplerVoice players_[SamplerMath::kSlotCount];
   AudioSummingRoute<OC::AudioIO::kOutputRouteChannels, (uint8_t)SamplerMath::kSlotCount> slot_mix_;
   AudioConnection *conn_player_l_[SamplerMath::kSlotCount] = {};
   AudioConnection *conn_player_r_[SamplerMath::kSlotCount] = {};
@@ -178,6 +194,7 @@ private:
 
   void WireAudio();
   void LoadSlotFile(int i);
+  void ReleaseSlotBuffers();
   void StartSlot(int i);
   void StopSlot(int i);
   void PollSlots();
@@ -268,6 +285,9 @@ FLASHMEM size_t AppSampler::RestoreAppData(util::StreamBufferReader &stream_buff
 
 FLASHMEM void AppSampler::HandleAppEvent(OC::AppEvent event) {
   switch (event) {
+    case OC::APP_EVENT_SUSPEND:
+      ReleaseSlotBuffers();
+      break;
     case OC::APP_EVENT_RESUME:
       // Audio graph is wired unconditionally at Init() (see class comment),
       // so RESUME has nothing to (re)connect -- but a stale file selection
@@ -280,6 +300,34 @@ FLASHMEM void AppSampler::HandleAppEvent(OC::AppEvent event) {
     default:
       break;
   }
+}
+
+// Hand back the read-ahead buffers when this app leaves the screen.
+//
+// Each loaded voice preloads MAX_NUM_BUFFERS x BUFFER_SIZE of RAM2 -- about
+// 29 KB (IndexableFile::preLoadBuffers), and this app loads all eight slots
+// on RESUME whether or not any of them is playing. Measured on hardware
+// 2026-09-18: opening this app took RAM2 from 269,040 bytes free to 36,432,
+// 232,608 bytes held for as long as the module stayed up. Nothing released
+// it, because nothing ever called for it to be released: there was no
+// SUSPEND handler at all. That left the rest of the instrument to run on
+// what was left, and it is what made the Delay's crossfade allocation fail.
+//
+// Safe to drop here: only the current app's Process() runs, so a
+// backgrounded Sampler cannot be triggered and has nothing to play. RESUME
+// reloads through need_reload_, the same path a bus preset recall uses.
+//
+// SamplerVoice::CloseFile (above) is what makes this possible at all.
+FLASHMEM void AppSampler::ReleaseSlotBuffers() {
+#ifdef XENO_CODEC_AUDIO
+  for (int i = 0; i < SamplerMath::kSlotCount; ++i) {
+    if (!file_loaded_[i]) continue;
+    players_[i].stop();
+    players_[i].CloseFile();
+    file_loaded_[i] = false;
+    need_reload_[i] = true;
+  }
+#endif
 }
 
 FLASHMEM void AppSampler::LoadSlotFile(int i) {
