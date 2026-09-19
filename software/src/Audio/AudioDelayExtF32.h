@@ -4,6 +4,7 @@
 // crossfade/stretch modulated delay, but the buffer and the feedback path stay
 // float32 between blocks, so recirculating audio never truncates to int16.
 
+#include <new>   // std::nothrow
 #include "AudioBuffer.h"
 #include "AudioParam.h"
 #include "../dsputils.h"
@@ -36,8 +37,22 @@ public:
   void Acquire() {
     buffer.Acquire();
     // TODO xfade lut should be static
-    xfade_in_scalars = new float[CrossfadeSamples];
-    xfade_out_scalars = new float[CrossfadeSamples];
+    // operator new returns nullptr here rather than throwing: this firmware
+    // builds -fno-exceptions. The loop below writes through both pointers
+    // immediately, so an unchecked failure stored to address 0 and hard-faulted
+    // the module -- reproduced on the bench 2026-09-18 by opening the Sampler
+    // (which holds its buffers in RAM2) and then the Delay: 2 x 2048 floats per
+    // channel is 32 KB for a stereo delay, against 31 KB of heap left.
+    //
+    // Failing here is not fatal to the instrument; this class already documents
+    // the no-PSRAM path as "no delay, not a shorter delay". Release() puts it in
+    // exactly that state, so IsReady() is false and update() early-returns.
+    xfade_in_scalars = new (std::nothrow) float[CrossfadeSamples];
+    xfade_out_scalars = new (std::nothrow) float[CrossfadeSamples];
+    if (!xfade_in_scalars || !xfade_out_scalars) {
+      Release();
+      return;
+    }
     float n = static_cast<float>(CrossfadeSamples - 1);
     for (size_t i = 0; i < CrossfadeSamples; i++) {
       EqualPowerFade(xfade_out_scalars[i], xfade_in_scalars[i], i / n);

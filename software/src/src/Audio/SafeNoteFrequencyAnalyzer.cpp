@@ -22,6 +22,7 @@
 
 #ifdef ARDUINO_TEENSY41
 
+#include <new>   // std::nothrow
 #include <Arduino.h>
 #include "SafeNoteFrequencyAnalyzer.h"
 #include "utility/dspinst.h"
@@ -275,8 +276,21 @@ uint16_t SafeNoteFrequencyAnalyzer::estimate( uint64_t *yin, uint64_t *rs, uint1
 void SafeNoteFrequencyAnalyzer::begin( float threshold , float cutoff_hz) {
 
     size_t n = AUDIO_GUITARTUNER_BLOCKS * 128;
+    // std::nothrow, and checked: this firmware builds -fno-exceptions, so a
+    // throwing operator new[] has nowhere to go, and update() memcpy's into
+    // this buffer on the very next audio block. Unchecked, an exhausted heap
+    // turned a tuner that should simply not lock into a hard fault -- observed
+    // on the bench 2026-09-18 with 576 bytes of RAM2 left.
+    //
+    // enabled stays false when the allocation fails, which update() already
+    // treats as "release the block and do nothing". The tuner reads no sig;
+    // the instrument keeps running.
     AudioBuffer = reinterpret_cast<int16_t*>(
-        ::operator new[](n * sizeof(int16_t), std::align_val_t(4)));
+        ::operator new[](n * sizeof(int16_t), std::align_val_t(4), std::nothrow));
+    if (!AudioBuffer) {
+        enabled = false;
+        return;
+    }
 
     // choosing a window in ms based on the lowest note we care to detect. higher values increase latency
     const float window_ms = 42.0f;   // this is what's going to affect the lowest pitch we can track; use 18–24 ms range
