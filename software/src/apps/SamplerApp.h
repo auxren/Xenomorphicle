@@ -290,12 +290,18 @@ FLASHMEM void AppSampler::HandleAppEvent(OC::AppEvent event) {
       break;
     case OC::APP_EVENT_RESUME:
       // Audio graph is wired unconditionally at Init() (see class comment),
-      // so RESUME has nothing to (re)connect -- but a stale file selection
-      // made while backgrounded (bus preset recall rewriting file_num_ via
-      // RestoreAppData) is picked up here rather than waiting for the user
-      // to touch encR on that field.
-      for (int i = 0; i < SamplerMath::kSlotCount; ++i)
-        if (need_reload_[i]) LoadSlotFile(i);
+      // so RESUME has nothing to (re)connect. A stale file selection made
+      // while backgrounded (a bus preset recall rewriting file_num_ via
+      // RestoreAppData) still gets picked up without the user touching encR
+      // -- but by PollSlots, one slot per loop pass, not all eight here.
+      //
+      // Loading eight WAVs from SD in one go blocked a single loop pass for
+      // 270 ms (measured 2026-09-25). Interrupts stay enabled through it, so
+      // the clock never missed a tick, but the UI and everything else sharing
+      // loop() stopped dead for a quarter second on every entry to this app.
+      // Spread across passes it is the same work at the same total cost, and
+      // the loop keeps turning; the slots are all in within a few ms because
+      // loop() runs far faster than a human notices.
       break;
     default:
       break;
@@ -376,6 +382,10 @@ FLASHMEM void AppSampler::StopSlot(int i) {
 // gate source and the pitch-mod source for its own slot.
 FLASHMEM void AppSampler::PollSlots() {
   using namespace SamplerMath;
+  // At most one SD load per pass: see APP_EVENT_RESUME above for why eight at
+  // once is not acceptable. Gating here rather than at the call site keeps the
+  // rule in one place, so a reload armed by the encoder is spread too.
+  bool loaded_this_pass = false;
   for (int i = 0; i < kSlotCount; ++i) {
     const int32_t raw = OC::ADC::value(SamplerAppNS::AdcChannelForSlot(i));
     const GateEdge edge = UpdateGate(raw, prev_gate_high_[i]);
@@ -391,7 +401,10 @@ FLASHMEM void AppSampler::PollSlots() {
       const float rate = ComputeRateMultiplier((int)rate_pct_[i], raw);
       players_[i].setPlaybackRate(rate);
     }
-    if (need_reload_[i]) LoadSlotFile(i);
+    if (need_reload_[i] && !loaded_this_pass) {
+      LoadSlotFile(i);
+      loaded_this_pass = true;
+    }
 #endif
   }
 }
