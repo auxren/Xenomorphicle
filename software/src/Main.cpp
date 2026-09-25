@@ -520,6 +520,18 @@ FLASHMEM void setup() {
   SERIAL_PRINTLN("* O&C BOOTING...");
   SERIAL_PRINTLN("* %s", OC::Strings::VERSION);
 
+#if defined(OC_BUILD_EPOCH) && defined(__IMXRT1062__)
+  // The RTC has no battery here, so it powers up at its 2019-01-01 default and
+  // counts from there -- every file timestamp was uptime wearing a date. An
+  // image cannot legitimately be running before it was built, so a clock
+  // reading earlier than the build is provably unset and safe to correct. A
+  // clock that is already ahead is left alone: it may well be right.
+  if (Teensy3Clock.get() < (uint32_t)OC_BUILD_EPOCH) {
+    Teensy3Clock.set(OC_BUILD_EPOCH);
+    SERIAL_PRINTLN("* RTC was behind the build; set to build time");
+  }
+#endif
+
   OC::DEBUG::Init();
   OC::DigitalInputs::Init();
 
@@ -1689,6 +1701,33 @@ FLASHMEM __attribute__((noinline)) void loop() {
             recall_slot_digits = 0;
             recall_slot_value = 0;
             break;
+          case 'G': {  // set the RTC: unix seconds (local), then Enter
+            // The RTC has no battery, so it powers up at 2019-01-01 and every file
+            // timestamp becomes uptime wearing a date. setup() corrects that from
+            // the build time, but only when the clock reads EARLIER than the build.
+            // A clock wrong in the other direction -- a UTC epoch handed to a part
+            // that reads it as local, say -- is indistinguishable from one that is
+            // simply right and later, so it needs saying explicitly. This is that.
+            Serial.println("rtc: type unix seconds (local) then Enter");
+            char rbuf[16];
+            size_t rn = 0;
+            Serial.setTimeout(10000);
+            uint32_t deadline = millis() + 10000;
+            while (rn < sizeof(rbuf) - 1 && millis() < deadline) {
+              int ch = Serial.read();
+              if (ch < 0) { delay(2); continue; }
+              if (ch == '\r' || ch == '\n') break;
+              if (ch < '0' || ch > '9') { rn = 0; break; }
+              rbuf[rn++] = (char)ch;
+            }
+            rbuf[rn] = 0;
+            if (rn == 0) { Serial.println("rtc: cancelled"); break; }
+            const uint32_t rt = (uint32_t)strtoul(rbuf, nullptr, 10);
+            if (rt < 1700000000UL) { Serial.println("rtc: refusing a value before 2023"); break; }
+            Teensy3Clock.set(rt);
+            Serial.printf("rtc: set to %lu\n", (unsigned long)rt);
+            break;
+          }
           case 'W':  // send a RAW general-call frame: hex bytes then Enter
             // Example is a QUERY: read-only, addressed, and the exact frame
             // Bus200eBuildQueryFrame already sends, so it is known-good on a
