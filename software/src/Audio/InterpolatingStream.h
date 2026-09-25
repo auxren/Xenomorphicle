@@ -72,7 +72,10 @@ public:
     // settles (or takes a really long time to). Just having it try to stick to
     // the ideal except when it can't is simple and worked the best.
     float d = constrain(delta, lo, hi);
+    // allocate() returns nullptr on an exhausted int16 pool, and every
+    // Update* helper below writes straight into out->data.
     audio_block_t* out = allocate();
+    if (!out) return;
     switch (method) {
       case INTERPOLATION_ZOH:
         UpdateZOH(d, out);

@@ -45,7 +45,10 @@ public:
     }
 
     arm_mult_f32(mod, signal_f32, signal_f32, AUDIO_BLOCK_SAMPLES);
+    // allocate() returns nullptr on an exhausted int16 pool; drop the block
+    // rather than write through it from the audio ISR.
     auto* out = allocate();
+    if (!out) return;
     arm_float_to_q15(signal_f32, out->data, AUDIO_BLOCK_SAMPLES);
     transmit(out);
     release(out);

@@ -104,6 +104,14 @@ struct Registry {
             Serial.printf("Free RAM: %d\n", OC::CORE::FreeRam());
             Serial.printf("AppletRegistry: new - ID: %u Index: %d Slot: %u\n", id, idx, slot);
             instances[slot][idx] = factories[idx]();
+            // The factory returns nullptr when both calloc and extmem_calloc fail,
+            // and callers of get() already handle a null return -- but this line
+            // dereferenced it first, so that handling was unreachable and an
+            // out-of-memory applet load faulted instead of degrading.
+            if (!instances[slot][idx]) {
+              Serial.println("AppletRegistry: out of memory, applet not created");
+              return nullptr;
+            }
             Serial.println(instances[slot][idx]->applet_name());
         }
         return instances[slot][idx];

@@ -41,10 +41,16 @@ public:
     }
 
     if (out_filled) {
+      // Checked, like AudioSummingRoute further down this same file already
+      // does. allocate() returns nullptr when the int16 block pool is dry, and
+      // this runs in the audio ISR every block -- dropping a block is the
+      // designed behaviour there, dereferencing null is not.
       audio_block_t* out_block = allocate();
-      arm_float_to_q15(out, out_block->data, AUDIO_BLOCK_SAMPLES);
-      transmit(out_block);
-      release(out_block);
+      if (out_block) {
+        arm_float_to_q15(out, out_block->data, AUDIO_BLOCK_SAMPLES);
+        transmit(out_block);
+        release(out_block);
+      }
     }
   }
 

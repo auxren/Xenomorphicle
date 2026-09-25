@@ -139,7 +139,26 @@ class AudioConvert_F32toI16 : public AudioStream_F32 //receive Float and transmi
       AudioStream_F32::release(float_block);
     };
 
-   static void convertAudio_F32toI16(audio_block_f32_t *in, audio_block_t *out, int len) {
+   // NOT FIXED, deliberately -- read before "correcting" the constant below.
+   //
+   // MAX_INT is 32678 where it should be 32768: a transposed digit, inherited
+   // from upstream OpenAudio. The I16->F32 direction at the top of this file
+   // has it right. Effect is 0.9972x, -0.0239 dB, clipping 0.24% early.
+   // Inaudible, but it shows as a systematic offset in any bench linearity
+   // measurement of the int16 path.
+   //
+   // The naive fix is a bug. Scale and clamp here use the SAME constant, which
+   // is why the present code is at least self-consistent and never overflows.
+   // Raise the scale to 32768 while leaving a symmetric clamp and full-scale
+   // samples wrap to -32768 -- clicks, far worse than 0.024 dB. The correct
+   // form needs asymmetric limits:
+   //     out = (int16_t) max(min(in * 32768.0f, 32767.0f), -32768.0f)
+   // and convertAudio_F32toI16x2 below needs the same care, with the extra
+   // trap that 2^31 is not exactly representable as a float, so its positive
+   // limit must be 2147483520.0f (the largest float below 2^31).
+   //
+   // Wants a full-scale sine and someone listening before it is touched.
+      static void convertAudio_F32toI16(audio_block_f32_t *in, audio_block_t *out, int len) {
       //WEA Method.  Should look at CMSIS arm_float_to_q15 instead: https://www.keil.com/pack/doc/CMSIS/DSP/html/group__float__to__x.html#ga215456e35a18db86882e1d3f0d24e1f2	
       const float MAX_INT = 32678.0;
       for (int i = 0; i < len; i++) {
