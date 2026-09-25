@@ -36,7 +36,58 @@ def after_build(source, target, env):
 
     out = env.subst("${PROGNAME}.hex")
 
-    platform = env.PioPlatform()
-    subprocess.call([join(platform.get_package_dir("tool-sreccat") or "", "srec_cat"), app_A, "-Intel", app_B, "-Intel", app_X, "-Intel", "-o", out, "-Intel"])
+    concat_intel_hex([app_A, app_B, app_X], out)
+
+
+def concat_intel_hex(sources, out):
+    """Concatenate Intel HEX files into one multiboot image.
+
+    This used to shell out to tool-sreccat's srec_cat. PlatformIO ships that
+    only as darwin_x86_64, and macOS 27 dropped Rosetta, so it stopped being
+    runnable at all ("Bad CPU type in executable") -- the firmware linked fine
+    and only the stitching failed. The three slot images occupy disjoint,
+    already-ordered address ranges (0x60000000 / 0x60100000 / 0x60200000), so
+    the whole job is: every record from every file, minus their end-of-file
+    records, plus one end-of-file at the end. Doing that here costs nothing and
+    removes an architecture-specific tool from the build.
+    """
+    EOF = ":00000001FF"
+    # Address order, not argument order. The callers pass slot 1 first, and
+    # srec_cat used to sort records internally; concatenating as given produced
+    # an image whose addresses ran backwards at the first seam. Each file is
+    # internally ascending and the three ranges are disjoint, so sorting the
+    # FILES by their lowest address is enough to make the whole image ascending.
+    sources = sorted(sources, key=_base_address)
+    with open(out, "w") as dst:
+        for src in sources:
+            with open(src) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line.startswith(":"):
+                        continue
+                    # record type is bytes 7..8; 01 is end-of-file
+                    if line[7:9].upper() == "01":
+                        continue
+                    dst.write(line + "\n")
+        dst.write(EOF + "\n")
+
+def _base_address(path):
+    """Lowest absolute address of any data record in an Intel HEX file."""
+    ext = 0
+    lowest = None
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith(":"):
+                continue
+            rectype = line[7:9].upper()
+            if rectype == "04":          # extended linear address
+                ext = int(line[9:13], 16) << 16
+            elif rectype == "00":        # data
+                addr = ext + int(line[3:7], 16)
+                if lowest is None or addr < lowest:
+                    lowest = addr
+    return lowest if lowest is not None else 0
+
 
 env.AddPostAction("buildprog", after_build)
