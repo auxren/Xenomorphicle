@@ -95,6 +95,7 @@
 // -- useful for auditioning a sample without patching a gate cable).
 // ---------------------------------------------------------------------------
 
+#include <new>   // std::nothrow
 #include "../HSUtils.h"
 #include "../OC_ADC.h"
 #include "../SamplerMath.h"
@@ -210,21 +211,30 @@ private:
 // like Bus200eApp::Loop().
 // ---------------------------------------------------------------------------
 
+// std::nothrow on every connection allocated here, deliberately.
+//
+// -fcheck-new is not in this build (verified in the compile line), and the
+// standard only requires the compiler to test operator new's result when it
+// cannot throw. With -fno-exceptions and a plain `new`, a failed allocation
+// runs the AudioConnection constructor with `this` == nullptr and faults
+// inside it -- before any null check at a later use site can help.
+// std::nothrow makes the compiler emit the test and skip the constructor, so
+// the pointer simply stays null and the existing guards do their job.
 FLASHMEM void AppSampler::WireAudio() {
   if (audio_wired_) return;
 #ifdef XENO_CODEC_AUDIO
   for (int i = 0; i < SamplerMath::kSlotCount; ++i) {
     players_[i].enableInterpolation(true);
     players_[i].setBufferInPSRAM(false);  // prefer RAM2; see class comment's risk note
-    conn_player_l_[i] = new AudioConnection(
+    conn_player_l_[i] = new (std::nothrow) AudioConnection(
         players_[i], 0, slot_mix_, i * OC::AudioIO::kOutputRouteChannels + 0);
-    conn_player_r_[i] = new AudioConnection(
+    conn_player_r_[i] = new (std::nothrow) AudioConnection(
         players_[i], 1, slot_mix_, i * OC::AudioIO::kOutputRouteChannels + 1);
   }
-  conn_out_l_ = new AudioConnection(
+  conn_out_l_ = new (std::nothrow) AudioConnection(
       slot_mix_, 0, OC::AudioIO::OutputStream(),
       OC::AudioIO::kOutputRouteSamplerSlot * OC::AudioIO::kOutputRouteChannels + 0);
-  conn_out_r_ = new AudioConnection(
+  conn_out_r_ = new (std::nothrow) AudioConnection(
       slot_mix_, 1, OC::AudioIO::OutputStream(),
       OC::AudioIO::kOutputRouteSamplerSlot * OC::AudioIO::kOutputRouteChannels + 1);
 #endif

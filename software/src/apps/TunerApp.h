@@ -16,6 +16,7 @@
 // the instrument being tuned drifts further than this reads.
 // ---------------------------------------------------------------------------
 
+#include <new>   // std::nothrow
 #include "../Audio/AudioAnalyzeStrobe.h"
 #include "../AudioIO.h"
 // The fork's own analyzer, not the stock <analyze_notefreq.h>. It has the
@@ -112,6 +113,15 @@ private:
 // The audio graph is global and always running, so the tuner's taps are
 // created once and then connected only while the app is on screen - an idle
 // analyzer would cost CPU in every other app.
+// std::nothrow on every connection allocated here, deliberately.
+//
+// -fcheck-new is not in this build (verified in the compile line), and the
+// standard only requires the compiler to test operator new's result when it
+// cannot throw. With -fno-exceptions and a plain `new`, a failed allocation
+// runs the AudioConnection constructor with `this` == nullptr and faults
+// inside it -- before any null check at a later use site can help.
+// std::nothrow makes the compiler emit the test and skip the constructor, so
+// the pointer simply stays null and the existing guards do their job.
 FLASHMEM void AppTuner::WireAudio() {
   if (audio_wired_) return;
   // XENO_CODEC_AUDIO (platformio.ini), not AUDIO_INTERFACE. The latter is a
@@ -124,8 +134,8 @@ FLASHMEM void AppTuner::WireAudio() {
   // -7 dBFS. Found on the bench 2026-09-14, with the new audio-in peak
   // meter as the thing that told them apart.
 #ifdef XENO_CODEC_AUDIO
-  conn_strobe_ = new AudioConnection(OC::AudioIO::InputStream(0), 0, strobe_, 0);
-  conn_notefreq_ = new AudioConnection(OC::AudioIO::InputStream(0), 0, notefreq_, 0);
+  conn_strobe_ = new (std::nothrow) AudioConnection(OC::AudioIO::InputStream(0), 0, strobe_, 0);
+  conn_notefreq_ = new (std::nothrow) AudioConnection(OC::AudioIO::InputStream(0), 0, notefreq_, 0);
   if (conn_strobe_) conn_strobe_->disconnect();
   if (conn_notefreq_) conn_notefreq_->disconnect();
 #endif

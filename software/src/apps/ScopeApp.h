@@ -39,6 +39,7 @@
 // hardware (see Bus200eApp.h's header comment) so it was never an option.
 // ---------------------------------------------------------------------------
 
+#include <new>   // std::nothrow
 #include "../HSUtils.h"
 #include "../OC_ADC.h"
 #include "../OC_DAC.h"
@@ -125,6 +126,15 @@ private:
 // AudioAnalyzeStrobe::update() and AudioTweightyF32::update().
 // ---------------------------------------------------------------------------
 
+// std::nothrow on every connection allocated here, deliberately.
+//
+// -fcheck-new is not in this build (verified in the compile line), and the
+// standard only requires the compiler to test operator new's result when it
+// cannot throw. With -fno-exceptions and a plain `new`, a failed allocation
+// runs the AudioConnection constructor with `this` == nullptr and faults
+// inside it -- before any null check at a later use site can help.
+// std::nothrow makes the compiler emit the test and skip the constructor, so
+// the pointer simply stays null and the existing guards do their job.
 FLASHMEM void AppScope::WireAudio() {
   if (audio_wired_) return;
 #ifdef XENO_CODEC_AUDIO
@@ -134,13 +144,13 @@ FLASHMEM void AppScope::WireAudio() {
   // selected") is the actual cost gate, so an unselected or backgrounded
   // Scope costs a bare release() per block on all 4 taps, not a torn-down
   // graph to rebuild on every RESUME.
-  conn_in_l_ = new AudioConnection(OC::AudioIO::InputStream(0), 0,
+  conn_in_l_ = new (std::nothrow) AudioConnection(OC::AudioIO::InputStream(0), 0,
                                     scope_capture_, AudioScopeCapture::TAP_IN_L);
-  conn_in_r_ = new AudioConnection(OC::AudioIO::InputStream(0), 1,
+  conn_in_r_ = new (std::nothrow) AudioConnection(OC::AudioIO::InputStream(0), 1,
                                     scope_capture_, AudioScopeCapture::TAP_IN_R);
-  conn_out_l_ = new AudioConnection(OC::AudioIO::OutputStream(), 0,
+  conn_out_l_ = new (std::nothrow) AudioConnection(OC::AudioIO::OutputStream(), 0,
                                      scope_capture_, AudioScopeCapture::TAP_OUT_L);
-  conn_out_r_ = new AudioConnection(OC::AudioIO::OutputStream(), 1,
+  conn_out_r_ = new (std::nothrow) AudioConnection(OC::AudioIO::OutputStream(), 1,
                                      scope_capture_, AudioScopeCapture::TAP_OUT_R);
 #endif
   audio_wired_ = true;

@@ -47,6 +47,12 @@ public:
     // Failing here is not fatal to the instrument; this class already documents
     // the no-PSRAM path as "no delay, not a shorter delay". Release() puts it in
     // exactly that state, so IsReady() is false and update() early-returns.
+    // Idempotent from here, like the PSRAM buffer above. Acquire() allocated
+    // these unconditionally, so a second call without an intervening Release()
+    // dropped the first pair on the floor -- 16 KB, or 32 KB for a stereo pair.
+    // Both callers happen to guard today; the class should not rely on that
+    // when its own buffer does not.
+    if (xfade_in_scalars && xfade_out_scalars) return;
     xfade_in_scalars = new (std::nothrow) float[CrossfadeSamples];
     xfade_out_scalars = new (std::nothrow) float[CrossfadeSamples];
     if (!xfade_in_scalars || !xfade_out_scalars) {

@@ -52,6 +52,7 @@
 // open the looper.
 // ---------------------------------------------------------------------------
 
+#include <new>   // std::nothrow
 #include "../Audio/AudioTweightyF32.h"
 #include "../TweightyTapPhase.h"
 #include "../TweightyTransport.h"
@@ -346,15 +347,24 @@ FLASHMEM size_t AppTweighty::RestoreAppData(util::StreamBufferReader &stream_buf
 // back down on an ordinary app-switch. Mirrors TunerApp.h's WireAudio(),
 // widened to the full duplex path this app needs (Tuner only ever taps the
 // input for analysis).
+// std::nothrow on every connection allocated here, deliberately.
+//
+// -fcheck-new is not in this build (verified in the compile line), and the
+// standard only requires the compiler to test operator new's result when it
+// cannot throw. With -fno-exceptions and a plain `new`, a failed allocation
+// runs the AudioConnection constructor with `this` == nullptr and faults
+// inside it -- before any null check at a later use site can help.
+// std::nothrow makes the compiler emit the test and skip the constructor, so
+// the pointer simply stays null and the existing guards do their job.
 FLASHMEM void AppTweighty::WireAudio() {
   if (audio_wired_) return;
 #ifdef XENO_CODEC_AUDIO
-  conn_in_l_ = new AudioConnection(OC::AudioIO::InputStream(0), 0, in_adapter_, 0);
-  conn_in_r_ = new AudioConnection(OC::AudioIO::InputStream(0), 1, in_adapter_, 1);
-  conn_f32_in_l_ = new AudioConnection_F32(in_adapter_, 0, engine_, 0);
-  conn_f32_in_r_ = new AudioConnection_F32(in_adapter_, 1, engine_, 1);
-  conn_f32_out_l_ = new AudioConnection_F32(engine_, 0, out_adapter_, 0);
-  conn_f32_out_r_ = new AudioConnection_F32(engine_, 1, out_adapter_, 1);
+  conn_in_l_ = new (std::nothrow) AudioConnection(OC::AudioIO::InputStream(0), 0, in_adapter_, 0);
+  conn_in_r_ = new (std::nothrow) AudioConnection(OC::AudioIO::InputStream(0), 1, in_adapter_, 1);
+  conn_f32_in_l_ = new (std::nothrow) AudioConnection_F32(in_adapter_, 0, engine_, 0);
+  conn_f32_in_r_ = new (std::nothrow) AudioConnection_F32(in_adapter_, 1, engine_, 1);
+  conn_f32_out_l_ = new (std::nothrow) AudioConnection_F32(engine_, 0, out_adapter_, 0);
+  conn_f32_out_r_ = new (std::nothrow) AudioConnection_F32(engine_, 1, out_adapter_, 1);
   // output_route (AudioIO.cpp) is a summing point, not a plain relay --
   // Quadrants' own chain-tail is unconditionally wired to source slot 0
   // (dest_index == channel) at boot, so Tweighty has to land on a distinct
@@ -362,10 +372,10 @@ FLASHMEM void AppTweighty::WireAudio() {
   // silently win each audio block and the other's audio would never reach
   // the codec (see AudioIO.cpp's output_route comment for the full story --
   // this is the fix for Tweighty's total-silence-on-hardware bug).
-  conn_out_l_ = new AudioConnection(
+  conn_out_l_ = new (std::nothrow) AudioConnection(
       out_adapter_, 0, OC::AudioIO::OutputStream(),
       OC::AudioIO::kOutputRouteTweightySlot * OC::AudioIO::kOutputRouteChannels + 0);
-  conn_out_r_ = new AudioConnection(
+  conn_out_r_ = new (std::nothrow) AudioConnection(
       out_adapter_, 1, OC::AudioIO::OutputStream(),
       OC::AudioIO::kOutputRouteTweightySlot * OC::AudioIO::kOutputRouteChannels + 1);
   if (conn_in_l_) conn_in_l_->disconnect();

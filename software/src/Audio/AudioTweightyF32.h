@@ -105,6 +105,12 @@ public:
     // ready_ stays false on failure, which is the flag update() already checks
     // before touching either buffer -- the documented "no engine" state rather
     // than a fault.
+    // Idempotent from here, like the PSRAM buffer above. Acquire() allocated
+    // these unconditionally, so a second call without an intervening Release()
+    // dropped the first pair on the floor -- 16 KB, or 32 KB for a stereo pair.
+    // Both callers happen to guard today; the class should not rely on that
+    // when its own buffer does not.
+    if (xfade_in_scalars_ && xfade_out_scalars_) return;
     xfade_in_scalars_ = new (std::nothrow) float[kCrossfadeSamples];
     xfade_out_scalars_ = new (std::nothrow) float[kCrossfadeSamples];
     if (!xfade_in_scalars_ || !xfade_out_scalars_) {

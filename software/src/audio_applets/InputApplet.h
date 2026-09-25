@@ -238,9 +238,16 @@ private:
 #ifdef AUDIO_INTERFACE
   AudioConvertI16toF32Multi<2> usb_conv;
 #endif
+  // Declaration order IS update order for members, and the flow here is
+  // i2s_conv -> srcmix -> vcas -> mixer. vcas used to be declared ahead of
+  // srcmix, so it ran before its own source and read the previous block --
+  // one block of latency, 2.667 ms at 48 kHz, on the applet that sits in
+  // slot 0 by default. Swapping the two introduces no new inversion:
+  // attenuations still precedes vcas (it feeds vcas input 1) and mixer still
+  // follows it.
   std::array<InterpolatingStreamF32<>, 2> attenuations;
-  std::array<AudioVCA_F32, 2> vcas;
   AudioMixerF32<2> srcmix[2];
+  std::array<AudioVCA_F32, 2> vcas;
   AudioMixerF32<3> mixer[Channels];
   AudioAnalyzePeakF32 peakmeter[2];
 
