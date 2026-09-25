@@ -1413,6 +1413,20 @@ FLASHMEM __attribute__((noinline)) void loop() {
             for (uint8_t i = 0; i < rawframe_len; i++)
               Serial.printf(" %02X", rawframe_buf[i]);
             Serial.println();
+            // Warn, never refuse: sending a deliberately malformed frame is
+            // half the point of a raw sender. But every frame this firmware
+            // builds sets byte 0 to "bytes after itself"
+            // (Bus200eBuildQueryFrame), and a length byte that disagrees with
+            // what actually follows is the most likely way to hang a module by
+            // accident rather than on purpose.
+            if (rawframe_buf[0] != (uint8_t)(rawframe_len - 1))
+              Serial.printf("  NOTE: byte 0 is %02X, but %u bytes follow it "
+                            "(expected %02X)\n",
+                            rawframe_buf[0], (unsigned)(rawframe_len - 1),
+                            (uint8_t)(rawframe_len - 1));
+            if (rawframe_len > 3 && (rawframe_buf[3] == 0x07 || rawframe_buf[3] == 0x08))
+              Serial.println("  NOTE: cmd 07/08 are broadcast, ignore the "
+                             "destination address, and rewrite preset flash.");
 #if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
             const int wrc = OC::PresetBus::SendRawFrame(rawframe_buf, rawframe_len);
             if (wrc == 0)       Serial.println("  ACK");
@@ -1676,10 +1690,25 @@ FLASHMEM __attribute__((noinline)) void loop() {
             recall_slot_value = 0;
             break;
           case 'W':  // send a RAW general-call frame: hex bytes then Enter
+            // Example is a QUERY: read-only, addressed, and the exact frame
+            // Bus200eBuildQueryFrame already sends, so it is known-good on a
+            // real bus. It used to be a block-move (cmd 0x07), which was a bad
+            // first thing to hand someone twice over: that opcode is broadcast
+            // with no address check, is gated only by remote-enable, and
+            // rewrites flash on every module that hears it -- the decoded
+            // reference for the 259e says in as many words to stay away from
+            // 0x07 and 0x08 on a live bus. The example was also malformed: seven
+            // bytes carrying a length byte of 0x04, and only three of the four
+            // arguments cmd 0x07 reads.
             Serial.println("rawframe: type hex bytes then Enter/space to send "
-                           "on the general call, e.g. 04002207010005 (block-"
-                           "move). Odd nibble count or a non-hex char cancels. "
-                           "EXPERT: back up first, a bad frame can hang a module.");
+                           "on the general call, e.g. 045C221AFF (QUERY the "
+                           "251e at 0x5C -- read-only). Odd nibble count or a "
+                           "non-hex char cancels.");
+            Serial.println("  byte 0 is nBytes = total - 1; then dest, src 0x22,"
+                           " cmd, args.");
+            Serial.println("  EXPERT: back up first. A bad frame can hang a "
+                           "module, and 0x07/0x08 rewrite the preset bank of "
+                           "EVERY remote-enabled module on the bus.");
             rawframe_pending = true;
             rawframe_len = 0;
             rawframe_nib = 0;
