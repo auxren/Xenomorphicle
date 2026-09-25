@@ -951,7 +951,20 @@ void printDirectory(File dir, int numSpaces) {
        // files have sizes, directories do not
        printSpaces(36 - numSpaces - strlen(entry.name()));
        Serial.print("  ");
-       Serial.println(entry.size(), DEC);
+       Serial.print(entry.size(), DEC);
+       // Modified time, when the filesystem kept one. LittleFS's Teensy
+       // wrapper writes a 'm' attribute on every open for write, so this
+       // costs nothing to store and answers "when did this file appear,
+       // and was it me?" -- which the listing could not answer at all.
+       DateTimeFields tm;
+       if (entry.getModifyTime(tm)) {
+         char buf[24];
+         snprintf(buf, sizeof(buf), "  %04d-%02d-%02d %02d:%02d:%02d",
+                  tm.year + 1900, tm.mon + 1, tm.mday,
+                  tm.hour, tm.min, tm.sec);
+         Serial.print(buf);
+       }
+       Serial.println();
      }
      entry.close();
    }
