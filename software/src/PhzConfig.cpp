@@ -956,6 +956,9 @@ void printDirectory(File dir, int numSpaces) {
        // wrapper writes a 'm' attribute on every open for write, so this
        // costs nothing to store and answers "when did this file appear,
        // and was it me?" -- which the listing could not answer at all.
+       // Not in the simulator: its File shim has no timestamp support, and
+       // this is a diagnostic line rather than behaviour worth shimming for.
+#ifndef XENO_SIM
        DateTimeFields tm;
        if (entry.getModifyTime(tm)) {
          char buf[24];
@@ -964,6 +967,7 @@ void printDirectory(File dir, int numSpaces) {
                   tm.hour, tm.min, tm.sec);
          Serial.print(buf);
        }
+#endif
        Serial.println();
      }
      entry.close();

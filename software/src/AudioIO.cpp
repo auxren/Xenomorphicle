@@ -124,6 +124,16 @@ namespace OC {
       if (output_stream == nullptr) {
         conv_out[0] = new AudioConvert_I16toF32();
         conv_out[1] = new AudioConvert_I16toF32();
+#if defined(AUDIO_INTERFACE) && AUDIO_SUBSLOT_SIZE == 3
+        // BEFORE output_stream, deliberately. Update order is construction
+        // order and these mixers feed the codec output further down; built
+        // after it, the codec played their result one block late -- 2.667 ms
+        // at 48 kHz, inside the very function whose comment above exists to
+        // stop exactly this. The other two branches were already right: there
+        // only conv_out feeds the output, and it is built first.
+        usbmix_f32[0] = new AudioMixer4_F32();
+        usbmix_f32[1] = new AudioMixer4_F32();
+#endif
         output_stream = new AudioOutputI2S2_F32();
 #if defined(AUDIO_INTERFACE) && AUDIO_SUBSLOT_SIZE == 3
         // engine out (int16 bus) -> F32
@@ -133,8 +143,6 @@ namespace OC {
         new AudioConnection_F32(*conv_out[0], 0, output_usb, 0);
         new AudioConnection_F32(*conv_out[1], 0, output_usb, 1);
         // monitor mix: host playback (ch 2,3) + engine out -> codec
-        usbmix_f32[0] = new AudioMixer4_F32();
-        usbmix_f32[1] = new AudioMixer4_F32();
         new AudioConnection_F32(input_usb, 2, *usbmix_f32[0], 0);
         new AudioConnection_F32(input_usb, 3, *usbmix_f32[1], 0);
         new AudioConnection_F32(*conv_out[0], 0, *usbmix_f32[0], 1);

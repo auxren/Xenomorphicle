@@ -53,11 +53,18 @@ namespace OC {
 template <typename T, size_t max_instances>
 struct Factory {
   std::array<T*, max_instances> pool;
-  uint16_t mask = 0;
+  // The mask must be at least as wide as the pool it indexes. It was
+  // uint16_t while compressor_factory is Factory<AudioEffectDynamics,20>,
+  // so `mask |= (1 << i)` for i >= 16 truncated the bit away and those
+  // four slots never got marked used. get() then returned the SAME
+  // instance to every caller past the sixteenth -- several applets
+  // sharing one compressor and fighting over its state.
+  static_assert(max_instances <= 32, "Factory mask is 32 bits wide");
+  uint32_t mask = 0;
 
   T* get() {
     for (size_t i = 0; i < max_instances; ++i) {
-      if (mask & (1 << i)) continue;
+      if (mask & (1u << i)) continue;
 
       if (!pool[i]) {
 #ifdef __IMXRT1062__
@@ -71,7 +78,7 @@ struct Factory {
         // else cry about it
       }
       if (pool[i]) {
-        mask |= (1 << i);
+        mask |= (1u << i);
         return pool[i];
       }
     }
@@ -80,7 +87,7 @@ struct Factory {
   void release(T* instance) {
     for (size_t i = 0; i < max_instances; ++i) {
       if (pool[i] == instance) {
-        mask &= ~(1 << i);
+        mask &= ~(1u << i);
       }
     }
   }
