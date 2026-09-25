@@ -343,6 +343,22 @@ FLASHMEM void AppSampler::LoadSlotFile(int i) {
     need_reload_[i] = false;
     return;
   }
+  // Don't ask the SD library for a file when there is no heap to open it
+  // with. SDClass::open() mallocs and writes through the result without
+  // checking it -- verified in the disassembly: `bl malloc` then
+  // `str r7, [r0, #4]` with no null test in between -- so on an exhausted
+  // heap it faults on address 0x4 rather than returning a false File.
+  //
+  // Reproduced on hardware 2026-09-25 by cycling the Sampler and the audio
+  // apps: pass 2 of 5 took a DACCVIOL inside SDClass::open, reached from this
+  // function. The library is vendored, so the guard has to live here.
+  //
+  // need_reload_ is deliberately left set: PollSlots retries one slot per
+  // pass, so the slot loads by itself once memory comes back.
+  if (OC::CORE::FreeRam() <= OC::CORE::RAM2_HEADROOM) {
+    file_loaded_[i] = false;
+    return;
+  }
   char filename[SamplerMath::kFilenameBufLen];
   SamplerMath::BuildFilename(file_num_[i], filename, sizeof(filename));
   // playWav() stops any current playback on this voice first (see
