@@ -129,3 +129,49 @@ one bank, though, not a licence to go exploring: 0x07 and 0x08 ignore the
 destination address and rewrite flash on every remote-enabled module that
 hears them, and 0x08's loop end condition is still only a hypothesis in the
 reference.
+
+## Cmd 0x08 slot exchange, confirmed on hardware 2026-09-25
+
+The reference carried this one as **[hypothesis]** -- "I traced the data flow
+but did not fully characterise the loop's end condition, so I am not asserting
+the exact semantics." It is asserted now.
+
+Frame:
+
+```
+06 00 22 08 03 03 1B
+```
+
+Arguments a=3, b=3, c=27. Same method as 0x07: BACKUP, dump, send, BACKUP,
+dump, diff.
+
+Result: 52 bytes changed across exactly two slots. Slot 3 came out equal to
+slot 27's previous contents and slot 27 equal to slot 3's, byte for byte.
+Nothing else moved.
+
+So `0x08` **exchanges** slot `a` with slot `c` and repeats while `a <= b`,
+incrementing both. With `a == b` that is exactly one swap. It is a true swap,
+not a copy -- which is the difference from 0x07, where the source survives
+unchanged.
+
+### What a short frame does, learned the hard way
+
+The first attempt at this was typed with a stray space, and the console treats
+space as "send". A six-byte frame went out carrying `a` and `b` but no `c`:
+
+```
+06 00 22 08 02 02        <- byte 0 says 6, only 5 bytes follow
+```
+
+The raw sender's length check caught it and said so, but sent it anyway, which
+is the intended behaviour for a tool whose job is arbitrary frames.
+
+What the module did with it is the useful part. It did not hang, and it did not
+reject the frame. It read `c` from whatever was left in its receive buffer at
+that offset, came up with 4, and **silently swapped slots 2 and 4**. Both
+modules and the bus were completely healthy afterwards -- all four still
+answered a QUERY, `stuck=0`.
+
+So the realistic failure mode for a malformed command frame here is not a hung
+module. It is a well-formed-looking operation on a slot you did not name. Back
+up before experimenting, and read the length warning.
