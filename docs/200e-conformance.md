@@ -86,3 +86,46 @@ field use demands it.
 
 *Last updated 2026-09-02 (b198f197); regenerate against `docs/upstream-prs.md` when the
 PR packages move.*
+
+## Cmd 0x07 block move, confirmed on hardware 2026-09-25
+
+This opcode had been decoded from the 259e firmware image and, by the
+reference's own account, never once sent on a bus. It has now been sent, and
+the decode is exactly right.
+
+Frame, mastered with the console's raw sender (`W`):
+
+```
+07 00 22 07 01 01 1D 1D
+```
+
+nBytes 0x07 (bytes after itself), destination 0x00, source 0x22, command
+0x07, then the arguments: run start 1, run end 1, destination slot 0x1D (29),
+and the fourth byte the firmware uses only to decide whether the loaded slot
+needs redisplaying.
+
+Method: BACKUP the 259e's bank, dump the 990-byte image, send the frame,
+BACKUP and dump again, diff. The bank is 30 slots of 33 bytes.
+
+Result:
+
+| | |
+|---|---|
+| bytes changed | 21, all within 0x03BF-0x03DD |
+| slots touched | 29, and only 29 |
+| slot 29 after | byte-for-byte equal to slot 1 before, all 33 |
+| slot 1 after | unchanged |
+| any other slot | unchanged |
+
+So `0x07` copies the run of slots `frame[4]..frame[5]` to a run starting at
+`frame[6]`, exactly as decoded.
+
+**It is a copy, not a move** -- the source slot survives intact. The name
+"block move" comes from the disassembly, not from the behaviour.
+
+The bus stayed healthy throughout: the frame ACKed, `stuck=0`, and every
+module still answered a QUERY afterwards. That is one broadcast command on
+one bank, though, not a licence to go exploring: 0x07 and 0x08 ignore the
+destination address and rewrite flash on every remote-enabled module that
+hears them, and 0x08's loop end condition is still only a hypothesis in the
+reference.
