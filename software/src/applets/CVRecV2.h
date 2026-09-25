@@ -18,6 +18,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <new>   // std::nothrow
+
 #include "../SegmentDisplay.h"
 
 const char* const CVRecV2_MODES[4] = {
@@ -34,11 +36,16 @@ public:
     const uint8_t* applet_icon() { return PhzIcons::cvRec; }
 
     void Start() {
-        cv[0] = new int16_t[CVREC_MAX_STEP];
-        cv[1] = new int16_t[CVREC_MAX_STEP];
+        // std::nothrow + checked: -fno-exceptions makes a failed new return
+        // nullptr, and Controller()/View() index these directly. Guarded on the
+        // existing pointer so a restart does not leak the previous pair.
+        if (!cv[0]) cv[0] = new (std::nothrow) int16_t[CVREC_MAX_STEP];
+        if (!cv[1]) cv[1] = new (std::nothrow) int16_t[CVREC_MAX_STEP];
     }
 
     void Controller() {
+
+        if (!cv[0] || !cv[1]) return;   // allocation failed; nothing to record
         if (Clock(1)) reset = true;
         if (reset) {
             step = start;
@@ -87,6 +94,8 @@ public:
     }
 
     FLASHMEM void View() {
+
+        if (!cv[0] || !cv[1]) { gfxPrint(1, 15, "no mem"); return; }
         DrawInterface();
     }
 
@@ -195,7 +204,7 @@ private:
     int cursor; // 0=Start 1=End 2=Smooth 3=Record Mode
     SegmentDisplay segment{SegmentSize::BIG_SEGMENTS};
 
-    int16_t* cv[2];
+    int16_t* cv[2] = { nullptr, nullptr };   // were uninitialised
     simfloat rise[2];
     simfloat signal[2];
     bool smooth;

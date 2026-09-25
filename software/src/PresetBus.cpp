@@ -7,6 +7,7 @@
 
 #include <LittleFS.h>
 
+#include "RtStats.h"
 #include "Buchla200eWriteGuard.h"
 #include "Bus200eMaster.h"
 #include "MidiTxRing.h"
@@ -539,6 +540,23 @@ FLASHMEM static void card_image_flush(const char *why) {
     if (probe) probe.close();
     if (!sized) whole = true;
   }
+
+  // Declare a window around the write itself.
+  //
+  // This is a background write -- it defers to an idle gap rather than
+  // happening on a user gesture -- and the reasoning was that deferring made
+  // it harmless. A soak on 2026-09-25 says otherwise: flushing a 259e bank
+  // captured minutes earlier stalled a loop pass for 137 ms, missed 1981 CORE
+  // ticks and dropped an audio block in and out, with windows count=0 because
+  // nothing declared one. Idle is not silent; the clock still has to tick and
+  // the codec still has to be fed.
+  //
+  // Declaring it fades the codec across the stall instead of clicking through
+  // it, sends all-notes-off, and attributes the missed ticks to the window
+  // rather than failing a budget row for doing exactly what it was designed to
+  // do. The window opens here, after the CRC compare has already decided there
+  // is really something to write, so an unchanged image still costs nothing.
+  OC::RT::PersistenceWindow window("card flush");
 
   bool ok = false;
   int wrote = 0;

@@ -35,6 +35,7 @@
 // picking our own number would mean re-proving it.
 // ---------------------------------------------------------------------------
 
+#include <new>   // std::nothrow
 #include "AudioBuffer.h"
 #include "AudioParam.h"
 #include "../dsputils.h"
@@ -91,8 +92,25 @@ public:
     buffer_l_.Acquire();
     buffer_r_.Acquire();
     // TODO xfade lut should be static (see AudioDelayExtF32::Acquire, same TODO)
-    xfade_in_scalars_ = new float[kCrossfadeSamples];
-    xfade_out_scalars_ = new float[kCrossfadeSamples];
+    //
+    // std::nothrow, and checked. This firmware builds -fno-exceptions, so a
+    // failed new returns nullptr rather than throwing, and the fill loop below
+    // writes through both pointers immediately -- a store to address 0. The
+    // same mistake was fixed in AudioDelayExtF32 and AudioDelayExt after it
+    // hard-faulted the module on the bench; this third copy was missed then.
+    // 2 x 2048 floats is 16 KB of RAM2, and that is measurably not always
+    // there: opening this app costs 16,400 bytes, and after the Sampler has
+    // been visited there is far less than that free.
+    //
+    // ready_ stays false on failure, which is the flag update() already checks
+    // before touching either buffer -- the documented "no engine" state rather
+    // than a fault.
+    xfade_in_scalars_ = new (std::nothrow) float[kCrossfadeSamples];
+    xfade_out_scalars_ = new (std::nothrow) float[kCrossfadeSamples];
+    if (!xfade_in_scalars_ || !xfade_out_scalars_) {
+      Release();
+      return;
+    }
     const float n = static_cast<float>(kCrossfadeSamples - 1);
     for (size_t i = 0; i < kCrossfadeSamples; i++) {
       EqualPowerFade(xfade_out_scalars_[i], xfade_in_scalars_[i], i / n);

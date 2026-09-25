@@ -1,5 +1,6 @@
 #pragma once
 
+#include <new>   // std::nothrow
 #include "HemisphereApplet.h"
 #include "dsputils.h"
 #include "Audio/effect_reverb_schroeder_F32.h"
@@ -77,7 +78,15 @@ public:
 
   // call this from Start() to connect objects together
   void PatchCable(AudioStream &source, uint8_t s_ch, AudioStream &dest, uint8_t d_ch) {
-    if (!cables) cables = new AudioConnection[MAX_CABLES];
+    // std::nothrow + checked. -fno-exceptions means a failed new returns
+    // nullptr, and the connect() below indexes straight into it. Reuse the
+    // "we cannot give you this cable" path that already exists just under
+    // here rather than inventing a second way to fail.
+    if (!cables) cables = new (std::nothrow) AudioConnection[MAX_CABLES];
+    if (!cables) {
+      HS::PokePopup(HS::MESSAGE_POPUP, "AUDIO NO MEM!");
+      return;
+    }
 
     // TODO: we need a static_assert, if possible... or use a vector instead
     if (cable_count >= MAX_CABLES) {

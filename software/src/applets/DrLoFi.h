@@ -17,6 +17,8 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
+#include <new>   // std::nothrow
+
 /*
  * heavily modified from the original LoFi Tape applet by Chysn,
  * with concepts from armandvedel, implementation by djphazer
@@ -45,15 +47,24 @@ public:
         // this might take too long, which causes crashes. It's not crucial.
         //for (int i = 0; i < HEM_LOFI_PCM_BUFFER_SIZE; i++) lofi_pcm_buffer[i] = 127;
         cursor = 1; //for gui
-        lofi_pcm_buffer = new uint8_t[HEM_LOFI_PCM_BUFFER_SIZE];
+        // std::nothrow + checked: -fno-exceptions makes a failed new return
+        // nullptr, and Controller()/View() index this buffer directly. Guarded
+        // on !buffer so a restart does not leak the previous one.
+        if (!lofi_pcm_buffer)
+            lofi_pcm_buffer = new (std::nothrow) uint8_t[HEM_LOFI_PCM_BUFFER_SIZE];
         AllowRestart();
     }
 
     void Unload() override {
-        delete lofi_pcm_buffer;
+        // delete[], not delete: allocated with new[], and the mismatched form is
+        // undefined behaviour whatever it happened to do here.
+        delete[] lofi_pcm_buffer;
+        lofi_pcm_buffer = nullptr;
     }
 
     void Controller() {
+
+        if (!lofi_pcm_buffer) return;   // allocation failed; nothing to process
         play = !Gate(0); // Continuously play unless gated
         fdbk_g = Gate(1) ? 100 : feedback; // Feedback = 100 when gated
 
@@ -89,6 +100,8 @@ public:
     }
 
     FLASHMEM void View() {
+
+        if (!lofi_pcm_buffer) { gfxPrint(1, 15, "no mem"); return; }
         DrawSelector();
         if (play) DrawWaveform();
     }
@@ -160,7 +173,7 @@ private:
     int depth = 0; // bit reduction depth aka bitcrush
     int cursor; //for gui
 
-    uint8_t* lofi_pcm_buffer;
+    uint8_t* lofi_pcm_buffer = nullptr;   // was uninitialised
 
     FLASHMEM void DrawWaveform() {
         int inc = rate_mod/2 + 1;

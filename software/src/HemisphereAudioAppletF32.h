@@ -8,6 +8,7 @@
 
 #ifdef ARDUINO_TEENSY41
 
+#include <new>   // std::nothrow
 #include "HemisphereAudioApplet.h"
 #include "extern/f32/AudioStream_F32.h"
 #include "extern/f32/AudioConvert_F32.h"
@@ -79,7 +80,12 @@ public:
   }
 
   void PatchCableF32(AudioStream_F32& source, uint8_t s_ch, AudioStream_F32& dest, uint8_t d_ch) {
-    if (!cables_f32) cables_f32 = new AudioConnection_F32[MAX_CABLES_F32];
+    // See PatchCable in HemisphereAudioApplet.h: checked for the same reason.
+    if (!cables_f32) cables_f32 = new (std::nothrow) AudioConnection_F32[MAX_CABLES_F32];
+    if (!cables_f32) {
+      HS::PokePopup(HS::MESSAGE_POPUP, "AUDIO NO MEM!");
+      return;
+    }
     if (cable_f32_count >= MAX_CABLES_F32) {
       HS::PokePopup(HS::MESSAGE_POPUP, "AUDIO MAXED!!");
       return;

@@ -1530,6 +1530,20 @@ FLASHMEM static void persist_cur_record() {
   cur_slot_dirty_ms = 0;
   const uint16_t app = global_settings.current_app_id;
   if (persisted_slot == last_slot && persisted_app == app) return;
+  // Declare a window around the write.
+  //
+  // This is a background write and the design deliberately defers it to an
+  // idle gap 3 s after the app on screen changes, rather than doing it on the
+  // gesture. Deferring is not the same as being free: a soak on 2026-09-25,
+  // idling in Quadrants after one app switch, took a 137 ms loop pass, missed
+  // 1981 CORE ticks and dropped an audio block each way -- with windows
+  // count=0, because nothing declared one, so the budget failed four rows for
+  // a write working exactly as intended.
+  //
+  // The window fades the codec across the stall, silences MIDI, and attributes
+  // the missed ticks to it. Opened after the early-out above, so the common
+  // case where nothing changed still costs nothing.
+  OC::RT::PersistenceWindow window("cur record");
   cur_rec_store(last_slot, app);
   int8_t s = -1;
   uint16_t a = 0;
