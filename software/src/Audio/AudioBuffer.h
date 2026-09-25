@@ -149,11 +149,21 @@ public:
     }
   }
 
-  // TODO: Might need to 0 data; not sure if better on init or uninit though:
-  // - extmem_calloc assumes the data is already 0-filled
-  // https://github.com/PaulStoffregen/cores/blob/58224e5554d0cda93f92c52078a500a0d898a996/teensy4/extmem.c#L38
-  // - The extmem pool isn't 0-filled on uninit
-  // https://github.com/PaulStoffregen/cores/blob/master/teensy4/startup.c#L500
+  // Settled 2026-09-25: the buffer IS zeroed, and nothing here has to do it.
+  //
+  // The worry was fair from extmem.c alone -- extmem_calloc does not memset,
+  // it just calls sm_malloc_pool and leaves a comment saying it "is assumed
+  // that the pool was created with do_zero set to true". But that assumption
+  // holds: startup.c builds the pool with sm_set_pool(..., 1, NULL), and that
+  // fourth argument is do_zero, so the allocator zeroes on the way out.
+  //
+  // This is also where a delay's entry cost goes. Zeroing is real work at
+  // PSRAM bandwidth: the standalone Delay asks for 512K samples, 2 MB, and
+  // opening that app takes 18.6 ms of loop pass almost entirely here
+  // (measured on hardware). That is inherent to handing out a clean 2 MB
+  // buffer, not something to optimise away -- and it must stay zeroed, since
+  // the read head trails the write head and would otherwise play whatever the
+  // previous tenant left behind for a whole delay period.
   void Release() {
     if (this->buffer != nullptr) {
       extmem_free(this->buffer);

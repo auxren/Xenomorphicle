@@ -201,3 +201,39 @@ So the window is bounded by flash physics and a filesystem that cannot be
 asked to tidy up early. A 250 ms line failed a budget row every fifth save on
 behaviour that is correct and unimprovable. 300 reflects what the hardware
 does and still catches a regression.
+
+## App switching, measured
+
+Switching apps is a user gesture that tears down and rebuilds the audio
+graph, so it is not free. Measured per switch on T41_console, 2026-09-25,
+counters reset immediately before each one:
+
+| switch into | loop pass max | audio xrun |
+|---|---|---|
+| Setup, Tuner, Scope, Bungverb, ScaleEdit | 1.1-2.0 ms | 0 |
+| Calibr8or, Captain, Quadrants, Sampler, Reverb, Backup, Tweighty | 1.5-3.8 ms | 0 |
+| 200e Modules | 4.4 ms | 0 |
+| **Delay** | **18.6 ms** | 0 |
+
+Every one of them drops zero audio blocks and misses zero CORE ticks. The
+loop pass is long because loop() is doing real work, not because anything is
+masked.
+
+**The Delay is the outlier and it is inherent.** Its buffer is 512K samples
+of PSRAM, 2 MB, and `extmem_calloc` hands it out zeroed -- the pool is built
+with `do_zero` (startup.c), so the allocator clears it. Zeroing 2 MB at PSRAM
+bandwidth is about 20 ms. It has to stay zeroed: the read head trails the
+write head, so an unzeroed buffer would play whatever the previous tenant
+left there for a whole delay period. See `src/Audio/AudioBuffer.h`.
+
+A full sweep of all fourteen apps costs about 23 ms of worst-case loop pass
+in steady state, with zero dropped audio blocks and zero missed ticks across
+three consecutive passes. The first sweep after a flash is dearer -- one pass
+measured 200 ms and a 147-block audio gap -- which is filesystem and SD
+warm-up, not a recurring cost.
+
+So the `loop pass p100 <= 5 ms` row fails during app switches, and that is
+the row describing steady-state operation rather than a deliberate rebuild.
+It is left as-is rather than widened: it costs one known, explained failure
+during a gesture the user just made, and keeping it tight means an
+*unexpected* 20 ms stall still shows up.
