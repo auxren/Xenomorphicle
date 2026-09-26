@@ -52,6 +52,7 @@ suite test_defer_ring
 suite test_preset_stage
 suite test_card_sectors
 suite test_audio_graph_order
+suite test_f32_int_convert
 suite test_fade
 suite test_buchla251e_slot_codec    -I host_stubs ../src/Buchla251eSlotCodec.cpp \
                                     ../src/Buchla251eGenerator.cpp ../src/src/extern/bjorklund.cpp
