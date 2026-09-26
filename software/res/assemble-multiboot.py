@@ -27,7 +27,7 @@ def after_build(source, target, env):
     for item in defines:
         if item[0] == 'OC_VERSION_EXTRA':
             version += item[1].strip('"')
-    env.Replace(PROGNAME=f"o_C-phazerville-{version}-{git_rev}")
+    env.Replace(PROGNAME=f"xenomorphicle-{version}-{git_rev}")
 
     app_A = env.subst(".pio/build/T41/firmware.hex")
     app_B = env.subst(".pio/build/T41_audio/firmware.hex")

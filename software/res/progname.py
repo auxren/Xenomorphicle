@@ -45,4 +45,9 @@ if "T41" not in env['PIOENV']:
     for item in defines:
         if item[0] == 'OC_VERSION_EXTRA':
             version += item[1].strip('"')
-    env.Replace(PROGNAME=f"o_C-phazerville-{version}-{tag}")
+    # This fork is Xenomorphicle, not Phazerville. Note this branch is dead
+    # for every environment here -- they all have "T41" in the name, so the
+    # guard above skips it, and the release image is named by
+    # assemble-multiboot.py instead. Corrected anyway so it cannot come back
+    # wrong if an env is ever added without "T41" in its name.
+    env.Replace(PROGNAME=f"xenomorphicle-{version}-{tag}")
