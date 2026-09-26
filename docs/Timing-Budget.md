@@ -237,3 +237,81 @@ the row describing steady-state operation rather than a deliberate rebuild.
 It is left as-is rather than widened: it costs one known, explained failure
 during a gesture the user just made, and keeping it tight means an
 *unexpected* 20 ms stall still shows up.
+
+## Audio graph update order, measured
+
+Console `O` (T41_console) walks the live audio graph and reports every patch
+cable whose source updates *after* its destination. Such a cable costs one
+whole audio block — 2.666 ms at 48 kHz / 128 samples — because the
+destination already ran and consumed what the source left on the previous
+pass. Nothing faults and the signal sounds correct, so this is invisible to
+every other counter here.
+
+It is a property of object construction, not of wiring. The Teensy Audio
+library links each `AudioStream` into one global list in its constructor
+(`AudioStream.h:149-156`), the ISR walks that list in order, and nothing
+reorders it. There is no destructor, so nothing leaves it either. The
+library's own comment calls this a TODO awaiting "a proper data flow
+analysis".
+
+Measured at idle, 2026-09-25, T41_console, 76 nodes and 70 cables:
+
+| class | count | what it is |
+|---|---|---|
+| static → static | 6 | declaration and link order between translation units |
+| runtime → static | 12 | an applet feeding fixed infrastructure |
+| runtime → runtime | 2 | ordering inside one F32 applet |
+| feedback (self) | 0 | inherent, not a defect |
+
+The three classes need different fixes. **runtime → static is structural:**
+the infrastructure is static and applets are built on demand by
+`Registry::get()`, which memoises per (slot, id) and never destroys, so an
+applet used for the first time mid-session cannot have been constructed
+before the thing it feeds. No declaration order fixes that.
+**runtime → runtime** is `HemisphereAudioAppletF32`'s edge adapters being
+base-class members, so `output_adapter` is constructed before the derived
+DSP that feeds it.
+
+### Dead end: `init_priority` on AudioIO's streams
+
+The six static → static cables sat on both ends of the main audio path —
+`input_route` reached `audio_app`'s slot inputs a block late, and the chain
+tail reached `app_container`'s monitor tap a block late — so 5.3 ms before
+any applet did any work. They are late because `audio_app` and
+`app_container` are constructed before `AudioIO.cpp`'s statics, and
+cross-translation-unit static init order is unspecified.
+
+`__attribute__((init_priority(101)))` on `input_i2s`, `conv_in`,
+`input_route` and `output_route` fixes the ordering exactly as intended:
+**static → static went 6 → 0**, with no new late cables created.
+
+**It also kills the audio.** On the bench: `audio in peak` 0 where it had
+been ~6.9M, and `audio out` in one unbroken xrun run that kept growing
+(28,000+ and climbing). Reverting restored both immediately — input peak
+back to 4.2–6.9M, xrun 0, 0 of 11 rows FAIL — so the causation is not in
+doubt in either direction.
+
+The cause is that `AudioInputI2S2_F32`'s constructor calls `begin()`, which
+configures I2S2 and starts its DMA. Moving that ahead of every other
+translation unit's static init breaks it. Both halves of the codec path
+have to be brought up together, and `output_stream` is deliberately built
+lazily in `OutputStream()` long afterwards, so raising the input's priority
+pulls the two further apart rather than closer.
+
+**Do not retry this without first making the codec bring-up explicit** —
+ordered in `AudioIO::Init()` rather than implied by constructor side
+effects. 2.666 ms of latency is not worth a dead input.
+
+### The fix that would work, and why it is not here
+
+Reordering the update list itself — a topological sort after each topology
+change — fixes all three classes at once and stays correct as applets are
+swapped. It is what the library's own TODO asks for.
+
+It is blocked on access, not on the algorithm. `first_update` and
+`next_update` are private, and the core's `AudioDebug` friend
+(`AudioStream.h:205-230`) exposes only getters. Writing them needs either a
+patched vendored header — out of tree, so not reproducible in CI — or the
+explicit-template-instantiation access loophole, which is standard-conforming
+but exotic and would silently rot against a library update. Both change the
+data structure the audio ISR walks, so neither should land unattended.
