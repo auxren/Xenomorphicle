@@ -982,6 +982,13 @@ FLASHMEM __attribute__((noinline)) void loop() {
   while (true) {
     ++loop_counter;
     RT::LoopPass();   // pass length into the budget histogram
+#if defined(XENO_CODEC_AUDIO) && defined(AUDIO_DEBUG_CLASS)
+    // Keep the audio update list in dependency order. Rate-limited inside,
+    // and skipped while a persistence window is open: a save has already
+    // faded the output and is about to mask interrupts for a flash write,
+    // which is not the moment to walk the graph.
+    if (!RT::window_open) AudioGraph::MaintainOrder();
+#endif
 #if defined(__IMXRT1062__)
     watchdog_feed();  // a wedged loop() now reboots instead of bricking
 #endif
@@ -1781,6 +1788,9 @@ FLASHMEM __attribute__((noinline)) void loop() {
 #if defined(XENO_CODEC_AUDIO) && defined(AUDIO_DEBUG_CLASS)
           case 'O':  // audio graph update order: which cables run backwards
             OC::AudioGraph::Report(Serial);
+            break;
+          case 'U':  // rewrite the update list into dependency order
+            OC::AudioGraph::Reorder(&Serial);
             break;
 #endif
 #ifdef XENO_CODEC_AUDIO

@@ -92,6 +92,78 @@ inline Stats Summarize(const Edge* edges, uint16_t n, uint16_t nodes) {
   return s;
 }
 
+// Produce an update order in which every source is visited before the
+// destinations it feeds, so no block is ever consumed a cycle late.
+//
+// Kahn's algorithm. Repeatedly emit a node that nothing un-emitted still
+// feeds, which is the definition of "safe to run now". Ties are broken by
+// taking the lowest index, so the result is deterministic and stays as close
+// to the original order as the dependencies allow -- a stable sort is much
+// easier to reason about on a bench than one that reshuffles freely.
+//
+// Self-edges are skipped when counting dependencies. A node wired into
+// itself is feedback, which is inherently a one-block delay; treating it as
+// a dependency would mean the node could never become ready, and every delay
+// and reverb applet would be reported as an unorderable cycle.
+//
+// Genuine multi-node feedback loops cannot be ordered correctly -- that is
+// what feedback IS -- so when no node is ready and some remain, the
+// remainder are emitted in their existing relative order and counted in
+// *cycles_out. The caller reports that; it is information, not a failure.
+//
+// Buffers are caller-provided and nothing is allocated: this runs on a
+// module with the audio ISR paused.
+//   out_order   [nodes] receives the new order as node indices
+//   scratch     [nodes] working space for dependency counts
+// Returns the number of nodes written, which on any successful call equals
+// `nodes`. The caller MUST check that before relinking anything.
+inline uint16_t TopoSort(const Edge* edges, uint16_t edge_count, uint16_t nodes,
+                         uint16_t* out_order, uint16_t* scratch,
+                         uint16_t* cycles_out) {
+  if (cycles_out) *cycles_out = 0;
+  if (nodes == 0) return 0;
+
+  uint16_t* indeg = scratch;
+  for (uint16_t i = 0; i < nodes; ++i) indeg[i] = 0;
+  for (uint16_t e = 0; e < edge_count; ++e) {
+    if (EdgeIsFeedback(edges[e])) continue;         // self-edge: not a dependency
+    if (edges[e].dst < nodes && edges[e].src < nodes) ++indeg[edges[e].dst];
+  }
+
+  // emitted[i] is tracked by setting indeg[i] to this sentinel, so no second
+  // array is needed.
+  constexpr uint16_t kEmitted = 0xFFFF;
+  uint16_t out = 0;
+
+  while (out < nodes) {
+    // Lowest-index ready node.
+    uint16_t pick = kEmitted;
+    for (uint16_t i = 0; i < nodes; ++i) {
+      if (indeg[i] == 0) { pick = i; break; }
+    }
+    if (pick == kEmitted) break;                    // nothing ready: a cycle
+
+    out_order[out++] = pick;
+    indeg[pick] = kEmitted;
+    for (uint16_t e = 0; e < edge_count; ++e) {
+      if (EdgeIsFeedback(edges[e])) continue;
+      if (edges[e].src != pick) continue;
+      const uint16_t d = edges[e].dst;
+      if (d < nodes && indeg[d] != kEmitted && indeg[d] > 0) --indeg[d];
+    }
+  }
+
+  // Whatever is left sits in a feedback loop. Emit it in existing order so
+  // the result is still a permutation -- dropping a node here would hand the
+  // audio ISR a list that skips a live object.
+  uint16_t stuck = 0;
+  for (uint16_t i = 0; i < nodes && out < nodes; ++i) {
+    if (indeg[i] != kEmitted) { out_order[out++] = i; indeg[i] = kEmitted; ++stuck; }
+  }
+  if (cycles_out) *cycles_out = stuck;
+  return out;
+}
+
 }  // namespace AudioGraph
 }  // namespace OC
 
@@ -108,6 +180,30 @@ namespace AudioGraph {
 // Walks the live update list and both connection lists and prints a report.
 // Loop context only: it is O(nodes * edges) and allocates nothing.
 void Report(Print& out);
+
+// Rewrite the ISR's update list into dependency order, so every source is
+// visited before the destinations it feeds. Loop context only.
+//
+// Returns true if the list was rewritten. It refuses, leaving the list
+// untouched, if the walk truncated, if the sort did not return a
+// permutation of the nodes, or if the private-link access disagrees with
+// the library's own AudioDebug getters -- any of which would mean handing
+// the audio ISR a list that skips or repeats a live object.
+//
+// `out` may be null; when given, it reports what happened.
+bool Reorder(Print* out);
+
+// Call from the main loop. Reorders the update list whenever the wiring has
+// changed since the last reorder, and does nothing at all when it has not.
+//
+// Driven by a fingerprint of the live graph rather than by hooks at each
+// topology-changing site, because the bench found the obvious trigger to be
+// the wrong one: opening five apps left the node count unchanged at 76 while
+// the cable count went 70 -> 110 and nine late cables reappeared. New
+// connections between objects that already exist are just as damaging as new
+// objects, and they are wired from many more places than are practical to
+// hook individually.
+void MaintainOrder();
 }  // namespace AudioGraph
 }  // namespace OC
 #endif

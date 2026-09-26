@@ -11,6 +11,40 @@
 #include "AudioIO.h"
 #include "extern/f32/AudioStream_F32.h"
 
+// Write access to AudioStream's private update-list links.
+//
+// `first_update` and `next_update` are private, and the core's AudioDebug
+// friend (AudioStream.h:205-230) offers getters only, so reordering the list
+// cannot be done through the sanctioned interface. The two alternatives were
+// patching the vendored header -- which lives outside this repo, so CI would
+// build something different from the bench -- or this: the explicit
+// instantiation access rule.
+//
+// It is not a hack in the "undefined behaviour" sense. [temp.spec] says
+// access checking is not performed on the names used in an explicit
+// instantiation, which makes `&AudioStream::next_update` legal there even
+// though it is private. The idiom is well known and standard-conforming; it
+// is simply unusual, which is why Reorder() cross-checks the pointers it
+// gets here against AudioDebug's getters before trusting them. If a library
+// update ever moves these, the check fails and the reorder is refused rather
+// than silently corrupting the list the audio ISR walks.
+namespace privacy {
+template <typename Tag, typename Tag::type M>
+struct Rob { friend typename Tag::type get(Tag) { return M; } };
+
+struct NextUpd {
+  using type = AudioStream* AudioStream::*;
+  friend type get(NextUpd);
+};
+template struct Rob<NextUpd, &AudioStream::next_update>;
+
+struct FirstUpd {
+  using type = AudioStream**;
+  friend type get(FirstUpd);
+};
+template struct Rob<FirstUpd, &AudioStream::first_update>;
+}  // namespace privacy
+
 // Provided by the linker script (slot*.ld): the first address the heap can
 // hand out. Must sit at file scope -- inside a namespace, even declared
 // extern "C", GCC mangles it into that namespace and the link fails.
@@ -34,6 +68,9 @@ constexpr uint16_t kMaxEdges = 512;
 
 DMAMEM AudioStream* g_nodes[kMaxNodes];
 DMAMEM Edge         g_edges[kMaxEdges];
+DMAMEM uint16_t     g_order[kMaxNodes];
+DMAMEM uint16_t     g_scratch[kMaxNodes];
+DMAMEM uint8_t      g_seen[kMaxNodes];
 
 uint16_t g_node_count = 0;
 uint16_t g_edge_count = 0;
@@ -177,6 +214,144 @@ void Report(Print& out) {
     PrintNode(out, g_edges[i].dst);
     out.printf(":%u  %s\n", g_edges[i].dst_ch, g_edges[i].f32 ? "f32" : "i16");
   }
+}
+
+bool Reorder(Print* out) {
+  Collect();
+
+  if (g_nodes_truncated || g_edges_truncated) {
+    if (out) out->println("reorder refused: the walk truncated, so the graph is only partly known");
+    return false;
+  }
+  if (g_node_count == 0) return false;
+
+  // Cross-check the private links against the library's own getters before
+  // writing through them. Reading agreement on the head and on every node's
+  // successor proves the member pointers alias the same storage AudioDebug
+  // reports, which is the thing that would break if the library changed.
+  AudioDebug dbg;
+  auto next_of = get(privacy::NextUpd{});
+  auto first_pp = get(privacy::FirstUpd{});
+  if (*first_pp != dbg.firstUpdate(*g_nodes[0])) {
+    if (out) out->println("reorder refused: private head link disagrees with AudioDebug");
+    return false;
+  }
+  for (uint16_t i = 0; i < g_node_count; ++i) {
+    if (g_nodes[i]->*next_of != dbg.nextUpdate(*g_nodes[i])) {
+      if (out) out->printf("reorder refused: private next link disagrees at node %u\n", i);
+      return false;
+    }
+  }
+
+  uint16_t cycles = 0;
+  const uint16_t produced =
+      TopoSort(g_edges, g_edge_count, g_node_count, g_order, g_scratch, &cycles);
+
+  // The sort must return every node exactly once. Anything else would hand
+  // the ISR a list that skips a live object or loops forever, so this is
+  // checked rather than assumed.
+  if (produced != g_node_count) {
+    if (out) out->printf("reorder refused: sort produced %u of %u nodes\n", produced, g_node_count);
+    return false;
+  }
+  for (uint16_t i = 0; i < g_node_count; ++i) g_seen[i] = 0;
+  for (uint16_t i = 0; i < g_node_count; ++i) {
+    const uint16_t n = g_order[i];
+    if (n >= g_node_count || g_seen[n]) {
+      if (out) out->println("reorder refused: sort result is not a permutation");
+      return false;
+    }
+    g_seen[n] = 1;
+  }
+
+  // Count what this is about to buy, before the list changes.
+  const Stats before = Summarize(g_edges, g_edge_count, g_node_count);
+
+  {
+    // The audio software ISR preempts thread mode, so if this code is
+    // running then no update_all() is part-way through the list; pausing
+    // here means none can start either. Restores rather than enables, for
+    // the same reasons as everywhere else (see AudioIO.h).
+    AudioIsrPause pause_isr;
+    for (uint16_t i = 0; i + 1 < g_node_count; ++i) {
+      g_nodes[g_order[i]]->*next_of = g_nodes[g_order[i + 1]];
+    }
+    g_nodes[g_order[g_node_count - 1]]->*next_of = nullptr;
+    *first_pp = g_nodes[g_order[0]];
+  }
+
+  // Walk the list the ISR will actually walk and confirm it still holds
+  // every node exactly once.
+  uint16_t walked = 0;
+  for (AudioStream* p = *first_pp; p && walked <= g_node_count; p = p->*next_of) ++walked;
+  if (out) {
+    if (walked != g_node_count) {
+      out->printf("REORDER BROKE THE LIST: walked %u, expected %u\n", walked, g_node_count);
+    } else {
+      out->printf("reordered %u nodes; %u late cables before\n", g_node_count, before.late);
+      if (cycles) {
+        out->printf("  %u nodes sit in feedback loops and cannot be ordered (this is normal)\n",
+                    cycles);
+      }
+      out->println("  run 'O' to see what is left");
+    }
+  }
+  return walked == g_node_count;
+}
+
+namespace {
+
+// A cheap hash of the live wiring: every node in walk order, and every
+// connection's endpoints. Pointers, not indices, so this costs one pass over
+// the list and its destination lists -- no O(n^2) index lookups, nothing
+// allocated, and no dependence on the collected arrays.
+uint32_t Fingerprint() {
+  AudioDebug dbg;
+  AudioDebug_F32 dbg32;
+  uint32_t h = 2166136261u;                       // FNV-1a basis
+  auto mix = [&h](const void* p) {
+    uint32_t v = (uint32_t)(uintptr_t)p;
+    h ^= v; h *= 16777619u;
+  };
+
+  uint16_t guard = 0;
+  for (AudioStream* p = *get(privacy::FirstUpd{}); p && guard < kMaxNodes;
+       p = p->*get(privacy::NextUpd{}), ++guard) {
+    mix(p);
+    for (AudioConnection* c = dbg.dstList(*p); c; c = dbg.getNext(*c)) {
+      if (!dbg.isConnected(*c)) continue;
+      mix(dbg.getSrc(*c)); mix(dbg.getDst(*c));
+    }
+  }
+  for (AudioStream_F32* p = dbg32.firstF32(); p; p = dbg32.nextF32(*p)) {
+    for (AudioConnection_F32* c = dbg32.dstList(*p); c; c = dbg32.getNext(*c)) {
+      if (!dbg32.isConnected(*c)) continue;
+      mix(dbg32.getSrc(*c)); mix(dbg32.getDst(*c));
+    }
+  }
+  return h;
+}
+
+uint32_t g_last_fingerprint = 0;
+uint32_t g_last_check_ms = 0;
+
+}  // namespace
+
+void MaintainOrder() {
+  // Rate limited: the fingerprint walk is cheap but the loop runs at tens of
+  // kHz, and the wiring only changes on a user gesture.
+  const uint32_t now = millis();
+  if (now - g_last_check_ms < 250) return;
+  g_last_check_ms = now;
+
+  const uint32_t fp = Fingerprint();
+  if (fp == g_last_fingerprint) return;
+
+  // Reordering changes the walk order, so the fingerprint afterwards differs
+  // from the one that triggered it. Store the new one or this would fire
+  // again on the next pass, forever.
+  Reorder(nullptr);
+  g_last_fingerprint = Fingerprint();
 }
 
 }  // namespace AudioGraph
