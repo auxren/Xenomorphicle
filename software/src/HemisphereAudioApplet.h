@@ -35,7 +35,12 @@ public:
   static const int LVL_MAX_DB = 90;
 
   AudioConnection* cables = nullptr;
-  size_t cable_count;
+  // Initialised here, not left to the allocator. Every applet today is
+  // placement-new'd into calloc'd memory (AppletRegistry.h) or is one of the
+  // zero-filled statics in AudioAppletSubapp.h, so this was zero by
+  // accident. A stack or plain-new applet would get an indeterminate count,
+  // which both PatchCable() and Disconnect() use as an array bound.
+  size_t cable_count = 0;
   size_t slot_index = 0;
   void SetSlot(size_t slot) {
     slot_index = slot;

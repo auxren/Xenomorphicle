@@ -2,6 +2,48 @@
 
 #include <Audio.h>
 
+// Pause the audio software ISR across a graph mutation, and put it back the
+// way it was found.
+//
+// Why a guard and not a bare AudioNoInterrupts()/AudioInterrupts() pair:
+// those macros are an unconditional disable and an unconditional *enable*
+// (Audio.h:55-56 -> NVIC_DISABLE_IRQ / NVIC_ENABLE_IRQ), so a pair nested
+// inside another pair re-enables the ISR while the outer one still believes
+// it is holding it off. AudioAppletHost::BuildCables() brackets and then
+// calls OutputStream() from inside the bracket, which is exactly that shape.
+// Unconditional enable is also wrong at boot: OutputStream() is forced into
+// existence from setup() (Main.cpp), and enabling IRQ_SOFTWARE before
+// update_setup() has configured it is not something to do by accident.
+//
+// Restoring instead of enabling makes both cases correct, and makes the
+// guard safe to use anywhere.
+//
+// What it protects: AudioStream's constructor publishes the new node into
+// the ISR's walk list (AudioStream.h:151-156) and only *then* clears its
+// next_update (:158), along with cpu_cycles and numConnections. For calloc'd
+// memory -- applets, Factory pool instances -- the gap is harmless because
+// those fields are already zero. For anything from plain `new` it is a
+// window in which a traversal can reach the node and follow an
+// uninitialised pointer.
+//
+// XENO_CODEC_AUDIO, not ARDUINO_TEENSY41: tools/xeno-sim compiles with
+// -DARDUINO_TEENSY41 and links no audio engine, so it has no IRQ_SOFTWARE to
+// name. Same rule as every other audio-graph tap here (see platformio.ini's
+// [env] comment and fork-gates.sh gate 6).
+#ifdef XENO_CODEC_AUDIO
+class AudioIsrPause {
+public:
+  AudioIsrPause() : was_enabled_(NVIC_IS_ENABLED(IRQ_SOFTWARE) != 0) {
+    AudioNoInterrupts();
+  }
+  ~AudioIsrPause() { if (was_enabled_) AudioInterrupts(); }
+  AudioIsrPause(const AudioIsrPause&) = delete;
+  AudioIsrPause& operator=(const AudioIsrPause&) = delete;
+private:
+  const bool was_enabled_;
+};
+#endif  // XENO_CODEC_AUDIO
+
 namespace OC {
   namespace AudioIO {
     // total block size including header is 260 bytes

@@ -122,6 +122,18 @@ namespace OC {
       // mixers in 24-bit USB mode) are created here for the same reason: they
       // must update after the applet chain feeding them.
       if (output_stream == nullptr) {
+        // The five objects below come from plain `new`, so their memory is
+        // not zeroed. AudioStream's constructor links each one into the
+        // ISR's walk list before clearing its next_update (AudioStream.h:
+        // 151-158), and the audio ISR is already live here -- it is started
+        // at static-init time by AudioInputI2S2_F32's constructor, long
+        // before this runs. Without the pause a traversal landing inside
+        // that window follows an uninitialised pointer.
+        //
+        // Restores rather than enables, because BuildCables() calls this
+        // from inside its own AudioNoInterrupts() bracket, and because the
+        // first call comes from setup().
+        AudioIsrPause pause_isr;
         conv_out[0] = new AudioConvert_I16toF32();
         conv_out[1] = new AudioConvert_I16toF32();
 #if defined(AUDIO_INTERFACE) && AUDIO_SUBSLOT_SIZE == 3
