@@ -353,3 +353,60 @@ active, the module self-oscillates to full scale — `audio in peak` reads 99%
 where the floor with a cable attached is under 0.3%. That is the patch, not
 a fault, but it makes the probe meaningless (detection triggers instantly on
 the feedback), so measure with a non-audio app in front.
+
+## Update order, fixed
+
+The graph is now sorted into dependency order rather than left in
+construction order. `src/AudioGraphOrder`'s `MaintainOrder()` runs from the
+loop, notices when the wiring has changed, and re-sorts. Console `U` forces
+it; `O` reports the result.
+
+Measured 2026-09-26, T41_console:
+
+| | before | after |
+|---|---|---|
+| cables running backwards | 20 of 70 | **0** |
+| nodes in the list | 76 | 76 |
+| budget rows failing | 0 of 11 | 0 of 11 |
+
+Steady-state cost is below the noise: loop pass max 372 us against the 5 ms
+ceiling, p95 under 100 us, xrun 0, missed ticks 0, CRASH.LOG unchanged.
+
+### The trigger is the wiring, not the node count
+
+The first attempt at an automatic trigger would have watched for new nodes.
+That is wrong, and the bench said so: opening five apps left the node count
+at **76** -- `Registry::get()` memoises per (slot, id), so those apps reused
+objects that already existed -- while the cable count went **70 -> 110** and
+**nine late cables reappeared**. A new connection between two objects that
+both already exist is as damaging as a new object.
+
+So `MaintainOrder()` hashes the live wiring (one pass over the update list
+and both destination lists, endpoint pointers into an FNV-1a mix), 4 Hz, and
+re-sorts when it changes. It is skipped while a persistence window is open: a
+save has already faded the output and is about to mask interrupts, which is
+not the moment to walk the graph.
+
+### What it does not fix
+
+Feedback loops. Around 14 nodes sit in loops with the full app set loaded,
+and the handful of cables inside them stay one block late. A one-block delay
+in a feedback path is what feedback *is*; `O` names them rather than hiding
+them.
+
+### Why this is safe to do to the ISR's own list
+
+`first_update` and `next_update` are private and the core's `AudioDebug`
+friend has getters only, so the links are reached through the explicit
+instantiation access rule -- `[temp.spec]` does not access-check names in an
+explicit instantiation, which makes it standard-conforming rather than a
+layout guess, and keeps the vendored header untouched so CI builds what the
+bench runs.
+
+`Reorder()` refuses, leaving the list alone, on any of four conditions: the
+walk truncated, the sort did not return every node, the result is not a
+permutation, or the private links disagree with `AudioDebug`'s getters on any
+node. After relinking it walks the list the ISR will actually walk and
+confirms the count. Pausing is safe rather than hopeful: the audio software
+ISR preempts thread mode, so if the reorder is running then no `update_all()`
+is part-way through the list, and the pause stops another starting.

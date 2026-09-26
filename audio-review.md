@@ -5,6 +5,41 @@ touched. Everything below was checked against the source in the repo plus the
 Teensy core actually linked from
 `~/.platformio/packages/framework-arduinoteensy/cores/teensy4/`.
 
+## STATUS 2026-09-26 — what has been fixed since this review was written
+
+Findings **5, 6, 7 and 9 are closed by one change** and none of them by the
+per-site fix each section proposes. They were all the same mechanism: the
+Teensy Audio library walks one list of every `AudioStream` in construction
+order and never reorders it, so any object constructed before something that
+feeds it consumes that input a block late. `src/AudioGraphOrder` now sorts
+that list into dependency order and re-sorts it automatically whenever the
+wiring changes (PR #7, fc1b7097). Bench: 20 late cables -> 0, "every cable
+runs forwards".
+
+That includes **#9, the only audible finding here.** The wet leg of
+`PhaserApplet` was late because `dry_wet_mixer` is a member and `phaser` is
+heap-allocated in `Start()`; the sort now puts `phaser` first regardless. Its
+dry/wet split and sum form a DAG, not a feedback loop, so it is ordered
+correctly rather than left in the unorderable set. `FreeverbApplet`'s 2-block
+wet path goes the same way. **Do not rewrite either applet's allocation
+order** -- the per-applet fix this review suggests would have had to be
+remembered by every applet written afterwards.
+
+What the sort cannot fix, and should not: genuine feedback loops. Around 14
+nodes sit in loops once the full app set is loaded, and the few cables inside
+them stay one block late. That is what feedback is. Console `O` reports them
+as such.
+
+Also closed since: **11** (the 32678 scale, PR #5 -- 65,535 of 65,536 int16
+values failed a codec round trip, fixed with the asymmetric clamp it needed),
+**14** (`OutputStream()`'s `new`ed streams published into the ISR walk list
+before `next_update` was cleared, PR #3), **15** (`cable_count`), and
+earlier: **1, 2, 3, 4, 8, 10, 12, 13**.
+
+Still open: nothing in this document that is both real and fixable. See
+`docs/Timing-Budget.md` for the measured state and for one recorded dead end
+(`init_priority` on AudioIO's streams fixes ordering and kills the codec).
+
 ## Ordering facts this review depends on
 
 `AudioStream::AudioStream()` (core `AudioStream.h:150-158`) **appends** itself to
