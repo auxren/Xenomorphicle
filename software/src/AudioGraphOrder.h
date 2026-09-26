@@ -192,6 +192,18 @@ void Report(Print& out);
 //
 // `out` may be null; when given, it reports what happened.
 bool Reorder(Print* out);
+
+// Call from the main loop. Reorders the update list whenever the wiring has
+// changed since the last reorder, and does nothing at all when it has not.
+//
+// Driven by a fingerprint of the live graph rather than by hooks at each
+// topology-changing site, because the bench found the obvious trigger to be
+// the wrong one: opening five apps left the node count unchanged at 76 while
+// the cable count went 70 -> 110 and nine late cables reappeared. New
+// connections between objects that already exist are just as damaging as new
+// objects, and they are wired from many more places than are practical to
+// hook individually.
+void MaintainOrder();
 }  // namespace AudioGraph
 }  // namespace OC
 #endif

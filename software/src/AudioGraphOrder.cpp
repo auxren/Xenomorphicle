@@ -299,6 +299,61 @@ bool Reorder(Print* out) {
   return walked == g_node_count;
 }
 
+namespace {
+
+// A cheap hash of the live wiring: every node in walk order, and every
+// connection's endpoints. Pointers, not indices, so this costs one pass over
+// the list and its destination lists -- no O(n^2) index lookups, nothing
+// allocated, and no dependence on the collected arrays.
+uint32_t Fingerprint() {
+  AudioDebug dbg;
+  AudioDebug_F32 dbg32;
+  uint32_t h = 2166136261u;                       // FNV-1a basis
+  auto mix = [&h](const void* p) {
+    uint32_t v = (uint32_t)(uintptr_t)p;
+    h ^= v; h *= 16777619u;
+  };
+
+  uint16_t guard = 0;
+  for (AudioStream* p = *get(privacy::FirstUpd{}); p && guard < kMaxNodes;
+       p = p->*get(privacy::NextUpd{}), ++guard) {
+    mix(p);
+    for (AudioConnection* c = dbg.dstList(*p); c; c = dbg.getNext(*c)) {
+      if (!dbg.isConnected(*c)) continue;
+      mix(dbg.getSrc(*c)); mix(dbg.getDst(*c));
+    }
+  }
+  for (AudioStream_F32* p = dbg32.firstF32(); p; p = dbg32.nextF32(*p)) {
+    for (AudioConnection_F32* c = dbg32.dstList(*p); c; c = dbg32.getNext(*c)) {
+      if (!dbg32.isConnected(*c)) continue;
+      mix(dbg32.getSrc(*c)); mix(dbg32.getDst(*c));
+    }
+  }
+  return h;
+}
+
+uint32_t g_last_fingerprint = 0;
+uint32_t g_last_check_ms = 0;
+
+}  // namespace
+
+void MaintainOrder() {
+  // Rate limited: the fingerprint walk is cheap but the loop runs at tens of
+  // kHz, and the wiring only changes on a user gesture.
+  const uint32_t now = millis();
+  if (now - g_last_check_ms < 250) return;
+  g_last_check_ms = now;
+
+  const uint32_t fp = Fingerprint();
+  if (fp == g_last_fingerprint) return;
+
+  // Reordering changes the walk order, so the fingerprint afterwards differs
+  // from the one that triggered it. Store the new one or this would fire
+  // again on the next pass, forever.
+  Reorder(nullptr);
+  g_last_fingerprint = Fingerprint();
+}
+
 }  // namespace AudioGraph
 }  // namespace OC
 
