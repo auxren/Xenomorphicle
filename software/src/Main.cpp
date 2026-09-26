@@ -70,6 +70,7 @@ MIDIDevice_BigBuffer usbHostMIDI[2] {
 };
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial8, MIDI1);
 #include "AudioIO.h"
+#include "AudioGraphOrder.h"
 #include "usb_desc.h"
 #include "Wire.h"
 #ifdef MULTIBOOT
@@ -1776,6 +1777,11 @@ FLASHMEM __attribute__((noinline)) void loop() {
             last_T_ms = reset ? 0 : now;
             break;
           }
+#if defined(XENO_CODEC_AUDIO) && defined(AUDIO_DEBUG_CLASS)
+          case 'O':  // audio graph update order: which cables run backwards
+            OC::AudioGraph::Report(Serial);
+            break;
+#endif
           case 'K': ButtonWatch(); break;  // name the physical buttons
           case 'a': OC::SwitchToDefaultApp(); break;  // remote: activate Captain
           case 'j':  // press the panel: one more character names the control

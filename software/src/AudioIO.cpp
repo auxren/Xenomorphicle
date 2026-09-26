@@ -175,4 +175,43 @@ namespace OC {
     }
   }
 }
+
+#if defined(XENO_CODEC_AUDIO) && defined(AUDIO_DEBUG_CLASS)
+// Names for the fixed part of the graph, so the update-order report reads in
+// words rather than addresses. Only the objects declared in this file can be
+// named here; applet-owned streams are created elsewhere at runtime and print
+// as addresses, which is enough to tell them apart and to see where they sit
+// relative to these. Overrides the weak default in AudioGraphOrder.cpp.
+#include "AudioGraphOrder.h"
+namespace OC {
+  namespace AudioGraph {
+    const char* NodeName(const void* p) {
+      using namespace OC::AudioIO;
+      if (p == &input_i2s)     return "input_i2s (codec in)";
+      if (p == &conv_in[0])    return "conv_in[0]";
+      if (p == &conv_in[1])    return "conv_in[1]";
+      if (p == &input_route)   return "input_route";
+      if (p == &output_route)  return "output_route (chain tail)";
+      if (output_stream && p == output_stream) return "output_stream (codec out)";
+      if (conv_out[0] && p == conv_out[0])     return "conv_out[0]";
+      if (conv_out[1] && p == conv_out[1])     return "conv_out[1]";
+#ifdef AUDIO_INTERFACE  // USB: these exist only when USB audio is enumerated
+      if (p == &input_usb)     return "input_usb";
+      if (p == &output_usb)    return "output_usb";
+#if AUDIO_SUBSLOT_SIZE == 3
+      if (p == &usb_in_route)  return "usb_in_route";
+      if (p == &conv_usb_in[0]) return "conv_usb_in[0]";
+      if (p == &conv_usb_in[1]) return "conv_usb_in[1]";
+      if (usbmix_f32[0] && p == usbmix_f32[0]) return "usbmix_f32[0]";
+      if (usbmix_f32[1] && p == usbmix_f32[1]) return "usbmix_f32[1]";
+#else
+      if (p == &usbmix[0])     return "usbmix[0]";
+      if (p == &usbmix[1])     return "usbmix[1]";
+#endif
+#endif
+      return nullptr;
+    }
+  }
+}
+#endif
 #endif
