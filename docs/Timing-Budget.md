@@ -30,8 +30,12 @@ is no third category.
 ## Arithmetic behind the numbers
 
 - CORE ISR period: 60 us (`OC_CORE_TIMER_RATE`), 36,000 cycles at 600 MHz.
-- Audio block: 128 samples at 44117.647 Hz = 2.902 ms. The DMA half-buffer
-  interrupt fires every 1.451 ms; `update_all()` runs every 2.902 ms.
+- Audio block: 128 samples at 48000 Hz = 2.667 ms. The DMA half-buffer
+  interrupt fires every 1.333 ms; `update_all()` runs every 2.667 ms.
+  (44117.647 Hz, and the 2.902/1.451 ms that follow from it, is the Teensy
+  3.x rate. This core defines `AUDIO_SAMPLE_RATE_EXACT` as 48000.0f and
+  nothing in `platformio.ini` overrides it. The graph-order section below
+  always used 48 kHz, so the two halves of this document disagreed.)
 - A stall of S ms misses S / 0.060 CORE ticks.
 
 **A masked stall does not show up as dropped audio blocks, and expecting
