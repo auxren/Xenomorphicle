@@ -71,6 +71,7 @@ MIDIDevice_BigBuffer usbHostMIDI[2] {
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial8, MIDI1);
 #include "AudioIO.h"
 #include "AudioGraphOrder.h"
+#include "AudioLoopbackProbe.h"
 #include "usb_desc.h"
 #include "Wire.h"
 #ifdef MULTIBOOT
@@ -1781,6 +1782,40 @@ FLASHMEM __attribute__((noinline)) void loop() {
           case 'O':  // audio graph update order: which cables run backwards
             OC::AudioGraph::Report(Serial);
             break;
+#endif
+#ifdef XENO_CODEC_AUDIO
+          case 'Y': {  // round-trip latency; needs AUDIO OUT jumped to IN
+            using namespace OC::LoopbackProbe;
+            state = IDLE;
+            t_out = t_in = 0;
+            state = ARMED;
+            // Bounded wait. 100 ms is ~37 audio blocks; anything that has
+            // not come back by then is not a latency measurement, it is a
+            // missing cable.
+            const uint32_t deadline = millis() + 100;
+            while (state != DONE && millis() < deadline) { /* spin */ }
+            if (state != DONE) {
+              Serial.println("loopback: no marker returned -- is AUDIO OUT patched to AUDIO IN?");
+              state = IDLE;
+              break;
+            }
+            const uint32_t cycles = t_in - t_out;
+            const uint32_t per_us = (F_CPU_ACTUAL / 1000000u);
+            const uint32_t us = cycles / per_us;
+            // AUDIO_SAMPLE_RATE_EXACT is 48000 here, so a block is 2666 us.
+            const uint32_t block_us =
+                (uint32_t)((1000000ull * AUDIO_BLOCK_SAMPLES) / (uint32_t)AUDIO_SAMPLE_RATE_EXACT);
+            Serial.printf("loopback round trip: %lu.%03lu ms (%lu us, %lu cycles)\n",
+                          (unsigned long)(us / 1000), (unsigned long)(us % 1000),
+                          (unsigned long)us, (unsigned long)cycles);
+            Serial.printf("  = %lu.%02lu audio blocks of %lu.%03lu ms\n",
+                          (unsigned long)(us / block_us),
+                          (unsigned long)(((us % block_us) * 100) / block_us),
+                          (unsigned long)(block_us / 1000), (unsigned long)(block_us % 1000));
+            Serial.println("  covers TX DMA + DAC + cable + ADC + RX DMA, both ends timed in the DMA ISRs");
+            state = IDLE;
+            break;
+          }
 #endif
           case 'K': ButtonWatch(); break;  // name the physical buttons
           case 'a': OC::SwitchToDefaultApp(); break;  // remote: activate Captain
