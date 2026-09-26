@@ -56,6 +56,10 @@ namespace menu = OC::menu;
 #ifdef ENABLE_APP_SAMPLER
 #include "SamplerApp.h"
 #endif
+#ifdef ENABLE_APP_ARP
+#include "ArpApp.h"
+#endif
+
 #ifdef ENABLE_APP_DELAY
 #include "DelayApp.h"
 #endif
@@ -161,6 +165,9 @@ static DMAMEM AppContainer<void // this space intentionally left blank
 #endif
 #ifdef ENABLE_APP_SAMPLER
   , AppSampler
+#endif
+#ifdef ENABLE_APP_ARP
+  , AppArp
 #endif
 #ifdef ENABLE_APP_DELAY
   , AppDelay
