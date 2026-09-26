@@ -1782,6 +1782,9 @@ FLASHMEM __attribute__((noinline)) void loop() {
           case 'O':  // audio graph update order: which cables run backwards
             OC::AudioGraph::Report(Serial);
             break;
+          case 'U':  // rewrite the update list into dependency order
+            OC::AudioGraph::Reorder(&Serial);
+            break;
 #endif
 #ifdef XENO_CODEC_AUDIO
           case 'Y': {  // round-trip latency; needs AUDIO OUT jumped to IN
