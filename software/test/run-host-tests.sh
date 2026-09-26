@@ -30,8 +30,10 @@ else
 fi
 
 # suite <name> [extra sources / flags ...]
+suite_count=0
 suite() {
   local name="$1"; shift
+  suite_count=$((suite_count + 1))
   printf '\n--- %s%s ---\n' "$TAG" "$name"
   # shellcheck disable=SC2086
   $CXX $WARN $OPT -o "build/${TAG}${name}" "${name}.cpp" "$@"
@@ -49,6 +51,7 @@ suite test_rtstats
 suite test_defer_ring
 suite test_preset_stage
 suite test_card_sectors
+suite test_audio_graph_order
 suite test_fade
 suite test_buchla251e_slot_codec    -I host_stubs ../src/Buchla251eSlotCodec.cpp \
                                     ../src/Buchla251eGenerator.cpp ../src/src/extern/bjorklund.cpp
@@ -67,4 +70,7 @@ suite test_sampler_math             ../src/SamplerMath.cpp
 suite test_sample_convert
 suite test_preset_op_queue
 
-printf '\n%s25 host suites passed.\n' "$TAG"
+# Counted, not typed: the literal that used to live here said 25 while 26
+# suites ran, which is the same hand-maintained-list drift this file exists
+# to end.
+printf '\n%s%d host suites passed.\n' "$TAG" "$suite_count"

@@ -21,6 +21,9 @@ static inline uint32_t read_primask() {
 audio_block_f32_t * AudioStream_F32::f32_memory_pool;
 uint32_t AudioStream_F32::f32_memory_pool_available_mask[6];
 
+#if defined(AUDIO_DEBUG_CLASS)
+AudioStream_F32 *AudioStream_F32::first_f32 = NULL;
+#endif
 uint8_t AudioStream_F32::f32_memory_used = 0;
 uint8_t AudioStream_F32::f32_memory_used_max = 0;
 

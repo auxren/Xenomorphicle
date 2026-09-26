@@ -114,6 +114,9 @@ class AudioConnection_F32
     unsigned char dest_index;
     AudioConnection_F32 *next_dest;
     bool isConnected;
+#if defined(AUDIO_DEBUG_CLASS)
+    friend class AudioDebug_F32;
+#endif
 };
 
 
@@ -129,6 +132,21 @@ class AudioStream_F32 : public AudioStream {
       for (int i=0; i < n_input_f32; i++) {
         inputQueue_f32[i] = NULL;
       }
+#if defined(AUDIO_DEBUG_CLASS)
+      // Enumerating the F32 streams needs its own list. The base class's
+      // first_update list holds every stream, i16 and F32 alike, but with
+      // -fno-rtti (the Teensy builder sets it) there is no way to ask an
+      // AudioStream* whether it is really an AudioStream_F32, and therefore
+      // no way to reach destination_list_f32 from there.
+      //
+      // Prepend, not append: this list is only ever enumerated, never walked
+      // in order -- node indices come from the update list -- so O(1) beats
+      // the library's own O(n) append. It deliberately does NOT touch
+      // first_update, so a build with this flag has exactly the same update
+      // order as one without, which is what makes the measurement valid.
+      next_f32 = first_f32;
+      first_f32 = this;
+#endif
     };
     AudioStream_F32(unsigned char n_input_f32, audio_block_f32_t **iqueue)
       : AudioStream_F32(n_input_f32, iqueue, 1, inputQueueArray_i16)
@@ -157,7 +175,31 @@ class AudioStream_F32 : public AudioStream {
     audio_block_t *inputQueueArray_i16[1];  //two for stereo
     static audio_block_f32_t *f32_memory_pool;
     static uint32_t f32_memory_pool_available_mask[6];
+#if defined(AUDIO_DEBUG_CLASS)
+    static AudioStream_F32 *first_f32;
+    AudioStream_F32 *next_f32;
+    friend class AudioDebug_F32;
+#endif
 };
+
+#if defined(AUDIO_DEBUG_CLASS)
+// The F32 counterpart to the core's AudioDebug (AudioStream.h:205-230),
+// which only reaches the int16 graph. Same contract: a debugging aid, not
+// for general use. See src/AudioGraphOrder.h for the one consumer.
+class AudioDebug_F32
+{
+  public:
+    AudioStream_F32*     firstF32()                      { return AudioStream_F32::first_f32; }
+    AudioStream_F32*     nextF32(AudioStream_F32& s)     { return s.next_f32; }
+    AudioConnection_F32* dstList(AudioStream_F32& s)     { return s.destination_list_f32; }
+    AudioStream_F32*     getSrc(AudioConnection_F32& c)  { return c.src; }
+    AudioStream_F32*     getDst(AudioConnection_F32& c)  { return c.dst; }
+    unsigned char        getSrcN(AudioConnection_F32& c) { return c.src_index; }
+    unsigned char        getDstN(AudioConnection_F32& c) { return c.dest_index; }
+    AudioConnection_F32* getNext(AudioConnection_F32& c) { return c.next_dest; }
+    bool                 isConnected(AudioConnection_F32& c) { return c.isConnected; }
+};
+#endif
 
 /*
 #define AudioMemory_F32(num) ({ \
