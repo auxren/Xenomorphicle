@@ -61,6 +61,7 @@ int AudioOutputI2S2_F32::audio_block_samples = AUDIO_BLOCK_SAMPLES;
 
 #if defined(__IMXRT1062__)
 #include <utility/imxrt_hw.h> //from Teensy Audio library.  For set_audioClock()
+#include "../../AudioLoopbackProbe.h"
 #endif
 
 #define I2S2_BUFFER_TO_USE_BYTES (AudioOutputI2S2_F32::audio_block_samples * sizeof(i2s2_tx_buffer[0]))
@@ -214,10 +215,19 @@ void AudioOutputI2S2_F32::isr(void)
 		// replaying the stale cache-shadowed buffer - a frozen 128-sample
 		// loop at the DAC whenever the source stops (heard as a steady
 		// 375Hz-harmonic drone that survives everything but power-off).
+		// Inject here too: with no audio app running this is the branch the
+		// ISR takes every block, and it is exactly the quiet graph the
+		// latency probe wants to measure against.
+#ifdef XENO_CODEC_AUDIO
+		OC::LoopbackProbe::InjectFromIsr(dest, audio_block_samples);
+#endif
 		arm_dcache_flush_delete(dest, sizeof(i2s2_tx_buffer) / 2);
 		return;
 	}
 
+#ifdef XENO_CODEC_AUDIO
+	OC::LoopbackProbe::InjectFromIsr(dest, audio_block_samples);
+#endif
 	arm_dcache_flush_delete(dest, sizeof(i2s2_tx_buffer) / 2);
 
 	if (offsetL < (uint16_t)audio_block_samples)

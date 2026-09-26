@@ -41,6 +41,7 @@
 #include "basic_DSPutils.h"
 #include "../../RtStats.h"
 #include <arm_math.h>
+#include "../../AudioLoopbackProbe.h"
 
 // DMAMEM __attribute__((aligned(32)))
 static uint64_t i2s2_rx_buffer[AUDIO_BLOCK_SAMPLES] __attribute__((aligned(32))); // good for 16-bit audio samples coming in from teh AIC.  32-bit transfers will need this to be bigger.
@@ -148,6 +149,13 @@ void AudioInputI2S2_F32::isr(void)
 				*dest_right_f32++ = (float32_t)r;
 			} while (src < end);
 			OC::RT::stats.audio_in_peak = (uint32_t)peak;
+			// One predictable branch per half-block while idle; the extra
+			// pass runs only between arming and detection. Kept out of the
+			// sample loop above so the ordinary path is untouched.
+#ifdef XENO_CODEC_AUDIO
+			OC::LoopbackProbe::DetectFromIsr(
+			    (const int32_t *)(end - audio_block_samples), audio_block_samples);
+#endif
 		}
 		else
 		{

@@ -319,3 +319,37 @@ patched vendored header — out of tree, so not reproducible in CI — or the
 explicit-template-instantiation access loophole, which is standard-conforming
 but exotic and would silently rot against a library update. Both change the
 data structure the audio ISR walks, so neither should land unattended.
+
+## Round-trip latency, measured
+
+Console `Y` (needs AUDIO OUT jumped back to AUDIO IN) writes a marker into
+the outgoing I2S half-buffer from the output DMA ISR and timestamps the
+first sample over threshold in the input DMA ISR. Both ends are taken in the
+hardware DMA ISRs, not in `update()`, so the audio software ISR's own
+scheduling is not folded into the number.
+
+Measured 2026-09-26, T41_console, quiet graph (Captain MIDI active, no
+applet chain in the path):
+
+| run | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| ms | 3.186 | 3.186 | 3.186 | 3.186 | 3.183 |
+
+**3.186 ms, or 1.19 audio blocks**, repeatable to 3 µs. That spread is
+small enough to say the probe is tracking a real DMA boundary rather than
+sampling noise.
+
+This is the **floor**: TX DMA buffering, the codec's DAC, the patch cable,
+the codec's ADC and RX DMA buffering, with nothing of ours in between.
+Whatever the applet graph adds — including every late cable the `O` report
+counts, at 2.666 ms each — stacks on top of it.
+
+Running the probe costs nothing: 0 of 11 rows FAIL with probes in the
+window, xrun 0, core ISR max 14 µs, missed 0. When idle it is one
+predictable branch per half-block in each DMA ISR.
+
+**Bench note.** With both outs jumped to both ins and any passthrough app
+active, the module self-oscillates to full scale — `audio in peak` reads 99%
+where the floor with a cable attached is under 0.3%. That is the patch, not
+a fault, but it makes the probe meaningless (detection triggers instantly on
+the feedback), so measure with a non-audio app in front.
