@@ -21,6 +21,11 @@
 // address: the lookup below relies on nothing, but a sorted table is far
 // easier to diff against the source if it is ever revised.
 static const Buchla200eModuleEntry kModules[] B200E_TABLE_DATA = {
+  // LOCAL addition, not from the 2Wireless source: Oren's MARF sits at 0x0E,
+  // in the 0x08-0x0F range the Buchla table leaves unclaimed. It runs the
+  // MARF firmware this project's bus layer was ported from, answers QUERY,
+  // and obeys broadcast RECALL/SAVE, so a bus sweep should name it.
+  {0x0E, "MARF"},
   {0x10, "257 A"},   {0x11, "257 B"},   {0x12, "267 A"},   {0x13, "267 B"},
   {0x20, "210"},     {0x21, "225"},     {0x23, "227"},     {0x24, "249 A"},
   {0x25, "249 B"},   {0x28, "259 A"},   {0x29, "259 B"},   {0x2A, "259 C"},

@@ -51,6 +51,10 @@ static void test_spot_checks_across_table() {
   // in the header; pinned here so the collision can't vanish silently.
   const char *ours = Buchla200eModelForAddress(0x3C);
   CHECK(ours && strcmp(ours, "281 C1") == 0);
+
+  // The local MARF entry (0x0E), the one non-Buchla address in the table.
+  const char *marf = Buchla200eModelForAddress(0x0E);
+  CHECK(marf && strcmp(marf, "MARF") == 0);
 }
 
 static void test_unknown_addresses_return_null() {
@@ -70,7 +74,7 @@ static void test_unknown_addresses_return_null() {
 static void test_table_invariants() {
   printf("test_table_invariants\n");
   const int n = Buchla200eModuleCount();
-  CHECK(n == 61);
+  CHECK(n == 62);  // 61 Buchla entries + the local MARF at 0x0E
 
   CHECK(Buchla200eModuleAt(-1) == nullptr);
   CHECK(Buchla200eModuleAt(n) == nullptr);

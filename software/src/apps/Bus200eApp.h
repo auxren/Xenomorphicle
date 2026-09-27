@@ -57,6 +57,7 @@
 #include "../Buchla251eRecorder.h"
 #include "../Buchla251eSlotCodec.h"
 #include "../Buchla259eSlotCodec.h"
+#include "../Buchla227eSlotCodec.h"
 #include "../HSMIDI.h"
 #include "../PresetBus.h"
 // SnapshotBank/LoadSnapshot for the pre-write undo. Included explicitly rather
@@ -134,6 +135,7 @@ enum ModuleType : uint8_t {
   MODTYPE_UNKNOWN = 0,
   MODTYPE_251E,
   MODTYPE_259E,
+  MODTYPE_227E,   // System Interface: geometry known (14 B x 30), fields TBD
 };
 
 // Scan pacing. One query in flight at a time; the FSM below is the whole
@@ -512,6 +514,7 @@ private:
   void DrawModuleHome() const;
   void DrawModule251e() const;
   void DrawModule259e() const;
+  void DrawModule227e() const;
   void DrawRow259e(int row, int y) const;
   void DrawTenths(int tenths, const char *suffix) const;
   void DrawAge(uint32_t ms) const;
@@ -812,6 +815,9 @@ FLASHMEM __attribute__((noinline))
 Bus200eAppNS::ModuleType AppBus200e::CurrentModuleType() const {
   const char *model = Buchla200eModelForAddress(target_);
   if (!model) return Bus200eAppNS::MODTYPE_UNKNOWN;
+  // 227 System Interface: checked before the "25x" gate since model[1] != '5'.
+  if (model[0] == '2' && model[1] == '2' && model[2] == '7')
+    return Bus200eAppNS::MODTYPE_227E;
   if (model[0] != '2' || model[1] != '5') return Bus200eAppNS::MODTYPE_UNKNOWN;
   if (model[2] == '1') return Bus200eAppNS::MODTYPE_251E;
   if (model[2] == '9') return Bus200eAppNS::MODTYPE_259E;
@@ -1829,6 +1835,7 @@ void AppBus200e::DrawModuleHome() const {
   switch (CurrentModuleType()) {
     case MODTYPE_251E: DrawModule251e(); return;
     case MODTYPE_259E: DrawModule259e(); return;
+    case MODTYPE_227E: DrawModule227e(); return;
     default: break;
   }
 
@@ -1836,6 +1843,25 @@ void AppBus200e::DrawModuleHome() const {
   graphics.print("no handler for this");
   graphics.setPrintPos(0, 40);
   graphics.print("module type yet");
+  graphics.setPrintPos(0, 56);
+  graphics.print("encL:back");
+}
+
+// 227e System Interface. Geometry is firmware-derived (see Buchla227eSlotCodec.h
+// and the 200e_bus_protocol repo): 30 slots of 14 bytes, a 420-byte bank. The
+// field map is NOT decoded yet, so this deliberately does not decode or draw
+// parameters -- doing so with the wrong layout would draw noise as data (the
+// same hazard DecodeSlotFromCardImage guards against). It states what is known
+// and no more, until a live panel-diff decode fills in the fields.
+FLASHMEM __attribute__((noinline))
+void AppBus200e::DrawModule227e() const {
+  graphics.setPrintPos(0, 26);
+  graphics.print("227 System Interface");
+  graphics.setPrintPos(0, 36);
+  graphics.printf("%d slots x %d B",
+                  kBuchla227eSlotsPerBank, kBuchla227eRecordBytes);
+  graphics.setPrintPos(0, 46);
+  graphics.print("fields: not decoded");
   graphics.setPrintPos(0, 56);
   graphics.print("encL:back");
 }
