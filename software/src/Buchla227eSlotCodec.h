@@ -11,8 +11,12 @@
 // helper computes slot*14 + 0x3A01 in XDATA. The size is now CONFIRMED ON
 // HARDWARE (2026-09-26: a byte-counted BACKUP of 0x23 returned exactly 420
 // bytes, reproducible). What is still NOT reverse-engineered is the MEANING
-// of the 14 bytes -- that needs front-panel diffs. See the 200e_bus_protocol
-// repo, modules/227e-preset-record-format.md.
+// of the 14 bytes. A partial live decode (2026-09-26) established: bytes 0,1,3,4
+// are fixed framing; byte 5 = ch4 rate (confirmed, full range); byte 6 is a
+// LIVE analog sample, not a stored control; bytes 10-13 are volume-related
+// (packed, not a checksum). The rest is still open, and note the 227e's RESTORE
+// is NOT slot-symmetric with its BACKUP -- verify a write with a read-back.
+// See the 200e_bus_protocol repo, modules/227e-preset-record-format.md.
 //
 // Because no field is understood, this codec stores all 14 bytes raw and its
 // only job is BYTE-EXACT PRESERVATION -- the same core invariant as the 251e
