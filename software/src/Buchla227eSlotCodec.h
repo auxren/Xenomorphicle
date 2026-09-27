@@ -8,11 +8,11 @@
 //
 // GEOMETRY ONLY, for now. The record SIZE and bank layout are decoded from
 // firmware (227Ev301.hex) with high confidence -- a single shared address
-// helper computes slot*14 + 0x3A01 in XDATA -- but the MEANING of the 14
-// bytes has NOT been reverse-engineered yet, and the size has NOT been
-// confirmed on hardware (the bench was unreachable when this was written).
-// See the 200e_bus_protocol repo, modules/227e-preset-record-format.md, for
-// the firmware evidence and what still needs a live BACKUP to confirm.
+// helper computes slot*14 + 0x3A01 in XDATA. The size is now CONFIRMED ON
+// HARDWARE (2026-09-26: a byte-counted BACKUP of 0x23 returned exactly 420
+// bytes, reproducible). What is still NOT reverse-engineered is the MEANING
+// of the 14 bytes -- that needs front-panel diffs. See the 200e_bus_protocol
+// repo, modules/227e-preset-record-format.md.
 //
 // Because no field is understood, this codec stores all 14 bytes raw and its
 // only job is BYTE-EXACT PRESERVATION -- the same core invariant as the 251e
