@@ -1209,6 +1209,39 @@ FLASHMEM static bool tx_gate_open() {
 
 static uint32_t loop_rate_hz = 0;
 
+// ---- boot-time POLL_DONE (WPM-less case) ----
+// A 272e only acts on bus RECALL/SAVE/BACKUP after a "polling complete"
+// (0x14) frame since its own boot: Remote-enable (0x16) only lights its
+// LED, and its Remote button cannot open the gate before one 0x14 has
+// arrived (docs/272e-LOCKUP-ANALYSIS.md 4.2 in Buchla_FW; probed on the
+// bench 2026-10-18: 5 RECALLs received, gate closed, all dropped). The WPM
+// sends 04 00 22 14 FF ~2 s after ITS boot (POLL ON START). With no WPM in
+// the case nothing sends it, so do it once here. Skipped whenever a WPM is
+// present: it polls for itself and a second poll would only be noise.
+// 0x14 only, not the WPM's follow-up 0x16: remote-enable could switch on
+// modules whose remote the user turned off at the panel.
+#define BOOT_POLL_AFTER_MS  8000   // after the first WPM probe (5 s) has had a say
+#define BOOT_POLL_RETRY_MS  250
+#define BOOT_POLL_MAX_TRIES 40     // ~10 s of waiting for a quiet bus, then give up
+FLASHMEM static void pump_boot_poll() {
+  static bool done = false;
+  static uint8_t tries = 0;
+  static uint32_t last_try_ms = 0;
+  if (done || millis() < BOOT_POLL_AFTER_MS) return;
+  if (wpm_present) { done = true; return; }
+  if (last_try_ms && millis() - last_try_ms < BOOT_POLL_RETRY_MS) return;
+  last_try_ms = millis() ? millis() : 1;
+  static const uint8_t kPollDone[] = { 0x04, 0x00, 0x22, 0x14, 0xFF };
+  const int err = SendRawFrame(kPollDone, sizeof(kPollDone));
+  if (err == 0) {
+    done = true;
+    if (verbose) Serial.println("PresetBus: sent boot POLL_DONE (no WPM)");
+  } else if (++tries >= BOOT_POLL_MAX_TRIES) {
+    done = true;
+    if (verbose) Serial.println("PresetBus: boot POLL_DONE gave up");
+  }
+}
+
 void Task() {
   if (!enabled) return;
   Bus200eSetNow(millis());
@@ -1235,6 +1268,7 @@ void Task() {
   pump_broadcast();
   pump_midi_tx();
   probe_wpm();
+  pump_boot_poll();
   bus_stuck_check();
 }
 
