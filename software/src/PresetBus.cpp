@@ -1390,8 +1390,8 @@ static uint32_t loop_rate_hz = 0;
 // A 272e only acts on bus RECALL/SAVE/BACKUP after a "polling complete"
 // (0x14) frame since its own boot: Remote-enable (0x16) only lights its
 // LED, and its Remote button cannot open the gate before one 0x14 has
-// arrived (docs/272e-LOCKUP-ANALYSIS.md 4.2 in Buchla_FW; probed on the
-// bench 2026-10-18: 5 RECALLs received, gate closed, all dropped). The WPM
+// arrived (seen on the bench 2026-10-18: 5 RECALLs received by a 272e whose
+// gate was closed, all dropped). The WPM
 // sends 04 00 22 14 FF ~2 s after ITS boot (POLL ON START). With no WPM in
 // the case nothing sends it, so do it once here. Skipped whenever a WPM is
 // present: it polls for itself and a second poll would only be noise.
