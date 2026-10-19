@@ -98,6 +98,25 @@ bool WpmPresent();
 int CardServeEnable(bool on);
 bool CardServing();
 
+// ---- firmware-card mode: flash a 200e module with NO WPM and NO USB card ----
+// The module bootloader (power on with its Remote button held) reads a v1
+// firmware card image from 0x50 ONCE at power-up, so the card must already be
+// answering when the case powers on. This keeps a firmware image in its own
+// file (FWCARD.BIN, never PBCARD.BIN, so bank backups are safe) and, while
+// armed (FWCARD.ARM), serves it from Init() at every boot. Once a module has
+// read the whole image and the bus has been quiet for 30 s the mode disarms
+// itself and the Xenomorpher goes back to normal (boot POLL_DONE etc).
+// Load an image over the console with 'H' (see docs/bench-console.md).
+void NoteBoot(uint8_t slot);                          // boot-timeline checkpoint (slot 0..3), shown by the bus dump
+void FwCardEarlyServe();                              // call right after Wire.begin(): serve FWCARD.BIN if armed
+int  FwCardBegin();                                   // start a load: 0 ok, <0 refused
+void FwCardPush(uint8_t b);                           // next image byte
+int  FwCardCommit(uint32_t len, uint32_t crc32);      // verify + write FWCARD.BIN + arm: 0 ok
+void FwCardAbort();
+bool FwCardArmed();                                   // FWCARD.ARM present
+void FwCardArm(bool on);                              // arm/disarm (takes effect at next boot)
+bool FwCardMode();                                    // serving the firmware card right now
+
 // ---- foreign-module BACKUP/RESTORE (transient master; new) ----
 // Capture (BACKUP) or write back (RESTORE) another 200e module's preset
 // dump -- e.g. a 251e for a browser applet -- by transiently mastering the
@@ -244,6 +263,15 @@ inline bool BroadcastQueued() { return false; }
 inline bool WpmPresent() { return false; }
 inline int CardServeEnable(bool) { return -1; }
 inline bool CardServing() { return false; }
+inline void NoteBoot(uint8_t) {}
+inline void FwCardEarlyServe() {}
+inline int  FwCardBegin() { return -1; }
+inline void FwCardPush(uint8_t) {}
+inline int  FwCardCommit(uint32_t, uint32_t) { return -1; }
+inline void FwCardAbort() {}
+inline bool FwCardArmed() { return false; }
+inline void FwCardArm(bool) {}
+inline bool FwCardMode() { return false; }
 inline int MasterBackup(uint8_t) { return -1; }
 inline int MasterRestore(uint8_t) { return -1; }
 inline Bus200eMasterState MasterState() { return BUS200E_MASTER_IDLE; }

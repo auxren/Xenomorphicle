@@ -319,6 +319,17 @@ static constexpr uint32_t diskSize = 1024 * 512;
 // custom file format header
 static constexpr uint32_t HEADER_SIZE = 12;
 
+static bool early_mounted = false;
+
+FLASHMEM
+bool EarlyMount()
+{
+  if (early_mounted) return true;
+  if (!myfs.begin(diskSize)) return false;
+  early_mounted = true;
+  return true;
+}
+
 FLASHMEM
 void Init()
 {
@@ -334,7 +345,7 @@ void Init()
   }
 
   // This mounts or creates a LittleFS drive in Teensy PCB Flash.
-  if (!myfs.begin(diskSize)) {
+  if (!early_mounted && !myfs.begin(diskSize)) {
     SERIAL_PRINTLN("LittleFS unavailable!! Settings WILL NOT BE SAVED!");
     return;
   }

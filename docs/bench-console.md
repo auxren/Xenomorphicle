@@ -44,6 +44,8 @@ stray typing is harmless but will spew capture bytes.
 | `b` | preset-bus debug dump |
 | `B` | toggle preset-bus verbose logging |
 | `k` | toggle 0x50 card serving (slave-TX card emulator; hard-gated off when a live WPM is present) |
+| `H` | **load a firmware-card image** into `FWCARD.BIN` (the host streams hex bytes, then `#` + 8 hex crc32 + 8 hex length; any host script that speaks this protocol works). Verifies length, `#!200EFU` header and CRC-32, writes the file, reads it back, then arms firmware-card mode. Any non-hex byte aborts. Refused while card serving is on |
+| `M` | arm / disarm firmware-card mode (see below) |
 
 ### 200e master operations
 | key | action |
@@ -251,3 +253,27 @@ capture script — blocks both the console write and the loader, and the
 loader's failure reads "Error opening USB device… press the reset button",
 which sends you hunting for a button that does not exist. That is exactly how
 an afternoon went missing on 2026-08-27.
+
+## Firmware-card mode: flash a 200e module with no WPM and no USB card
+
+A module's bootloader (power on with its Remote / load button held) reads a v1
+firmware card image from address 0x50 **once, right after power-up**. A WPM
+answers instantly because it is always on; the Xenomorpher used to start
+answering ~6 s after reset, far too late.
+
+1. Load the image: `H` (see the key map), or the host tool. The image goes to
+   `FWCARD.BIN`, never `PBCARD.BIN`, so bank backups are untouched. The
+   Xenomorpher arms itself (`FWCARD.ARM`).
+2. **Take any WPM off the bus** (a device already answering 0x50 makes the
+   Xenomorpher refuse to serve: two cards on one bus corrupt each other).
+3. Power-cycle the case with the module's load button held. While armed, the
+   Xenomorpher answers 0x50 from `setup()` before `Serial.begin()` (USB waits up
+   to 2 s for a host), `Pinout_Detect()` (~2 s ADC read) and the crash-report
+   wait: serving starts ~0.3 s after reset. The boot POLL_DONE is held back.
+4. When the module has read the whole image (TOC data end) and the bus has been
+   quiet for 30 s the mode disarms itself and the next boot is normal.
+
+`b` prints `fwcard: armed/serving/used`, the boot timeline, and the time of the
+module's first read. `M` toggles the arm flag by hand (e.g. to cancel). While
+serving, the 0x50 slave is read-only in effect: nothing is flushed to flash.
+Verified on a 272e (31.0b1 -> 0.rc.1 community build, 54,186 bytes read).

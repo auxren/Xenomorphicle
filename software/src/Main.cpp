@@ -467,6 +467,20 @@ FLASHMEM static void watchdog_feed_during(void (*op)()) {
 #endif
 
 FLASHMEM void setup() {
+  OC::PresetBus::NoteBoot(0);
+  // Armed firmware-card mode: a module's bootloader looks for its card once,
+  // right after power-up, so answer 0x50 almost immediately -- BEFORE
+  // Serial.begin() (USB: waits up to 2 s for a host), Pinout_Detect() (an ADC
+  // read, ~2 s), the crash-report wait, the ADC calibration (~1.2 s), the
+  // delays and the splash. Every ORN8 board has the I2C header on pins 18/19,
+  // so the detection result is not needed (see PresetBus::FwCardEarlyServe).
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+  Wire.begin();
+  Wire.setClock(100000);
+  OC::PresetBus::NoteBoot(1);
+  OC::PresetBus::FwCardEarlyServe();
+  OC::PresetBus::NoteBoot(2);
+#endif
   delay(50);
 #if defined(__IMXRT1062__)
   boot_srsr = SRC_SRSR;
@@ -474,6 +488,8 @@ FLASHMEM void setup() {
   SRC_SRSR = boot_srsr;  // w1c: next boot reports only its own cause
 #endif
   Serial.begin(9600);
+  OC::PresetBus::NoteBoot(3);
+
 
   if (CrashReport) {
     while (!Serial && millis() < 3000) ; // wait
@@ -558,8 +574,12 @@ FLASHMEM void setup() {
   OC::SetFlipMode(OC::calibration_data.flipcontrols());
 
 #if defined(ARDUINO_TEENSY41)
-  Wire.begin();
-  Wire.setClock(100000);
+  // A second Wire.begin() resets LPI2C1, which would drop a firmware card
+  // that FwCardEarlyServe() is already serving (see just after SPI_init()).
+  if (!OC::PresetBus::FwCardMode()) {
+    Wire.begin();
+    Wire.setClock(100000);
+  }
 #endif
 
   OC::ADC::Init(&OC::calibration_data.adc, OC::calibration_data.flipcontrols());
@@ -1185,6 +1205,16 @@ FLASHMEM __attribute__((noinline)) void loop() {
       static uint8_t rawframe_buf[32];
       static uint8_t rawframe_len = 0;   // whole bytes assembled so far
       static uint8_t rawframe_nib = 0;   // 0 = expecting hi nibble, 1 = lo
+      // 'H' firmware-card load: hex byte pairs of a v1 card image, then '#' and
+      // 16 hex digits (crc32 then length, both big-endian), nothing else. Any
+      // other byte aborts the load. See PresetBus::FwCardCommit.
+      static bool fwload_pending = false;
+      static uint8_t fwload_phase = 0;     // 0 = data, 1 = trailer
+      static int8_t fwload_nib = -1;       // -1 = expecting hi nibble
+      static uint8_t fwload_byte = 0;
+      static uint64_t fwload_tr = 0;
+      static uint8_t fwload_trn = 0;
+      static uint32_t fwload_count = 0;
       do {
         int cmd = Serial.read();
         if (!console_unlocked) {
@@ -1193,6 +1223,49 @@ FLASHMEM __attribute__((noinline)) void loop() {
             console_unlocked = true;
             Serial.println("-=[ console unlocked ]=-");
           }
+          continue;
+        }
+        if (fwload_pending) {
+          int v = -1;
+          if (cmd >= '0' && cmd <= '9') v = cmd - '0';
+          else if (cmd >= 'a' && cmd <= 'f') v = cmd - 'a' + 10;
+          else if (cmd >= 'A' && cmd <= 'F') v = cmd - 'A' + 10;
+          if (fwload_phase == 0) {
+            if (cmd == '#') { fwload_phase = 1; fwload_trn = 0; fwload_tr = 0; continue; }
+            if (cmd == ' ' || cmd == '\r' || cmd == '\n') continue;
+            if (v < 0) {
+              Serial.printf("fwcard: load aborted at byte %lu (non-hex input)\n",
+                            (unsigned long)fwload_count);
+              OC::PresetBus::FwCardAbort();
+              fwload_pending = false;
+              continue;
+            }
+            if (fwload_nib < 0) { fwload_byte = (uint8_t)(v << 4); fwload_nib = 0; }
+            else {
+              OC::PresetBus::FwCardPush((uint8_t)(fwload_byte | v));
+              fwload_nib = -1;
+              ++fwload_count;
+            }
+            continue;
+          }
+          if (v < 0) {
+            Serial.println("fwcard: load aborted (bad trailer)");
+            OC::PresetBus::FwCardAbort();
+            fwload_pending = false;
+            continue;
+          }
+          fwload_tr = (fwload_tr << 4) | (uint64_t)v;
+          if (++fwload_trn < 16) continue;
+          const uint32_t crc = (uint32_t)(fwload_tr >> 32);
+          const uint32_t len = (uint32_t)fwload_tr;
+          const int rc = OC::PresetBus::FwCardCommit(len, crc);
+          if (rc == 0)
+            Serial.printf("fwcard: OK %lu bytes crc %08lX written, read back, ARMED\n",
+                          (unsigned long)len, (unsigned long)crc);
+          else
+            Serial.printf("fwcard: FAILED rc=%d (got %lu bytes; -2 length, -3 header, -4 crc, -5 file)\n",
+                          rc, (unsigned long)fwload_count);
+          fwload_pending = false;
           continue;
         }
         if (master_addr_pending) {
@@ -1506,6 +1579,9 @@ FLASHMEM __attribute__((noinline)) void loop() {
                           OC::PresetBusUI::Active() ? "open" : "closed",
                           OC::PresetBus::Verbose() ? "on" : "off",
                           OC::PresetBus::CardServing() ? "on" : "off");
+            Serial.printf("H load firmware-card image (host tool)   M arm/disarm FW card at boot [%s%s]\n",
+                          OC::PresetBus::FwCardArmed() ? "armed" : "off",
+                          OC::PresetBus::FwCardMode() ? ", serving" : "");
             Serial.println("m master BACKUP <2 hex digit addr>   c dump last capture (hex)");
             Serial.println("q QUERY module identity <2 hex digit addr>");
             Serial.printf("y USB bridge status + fallback usbMIDI poll [%s]\n",
@@ -1628,6 +1704,20 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.println("poked MESSAGE_POPUP");
             break;
           case 'b': OC::PresetBus::DebugDump(); break;
+          case 'H':  // load a firmware-card image into FWCARD.BIN (host tool streams it)
+            if (OC::PresetBus::FwCardBegin() == 0) {
+              fwload_pending = true;
+              fwload_phase = 0;
+              fwload_nib = -1;
+              fwload_count = 0;
+              Serial.println("fwcard: send the image as hex bytes, then # and 8 hex crc32 + 8 hex length");
+            } else {
+              Serial.println("fwcard: cannot start (card serving on, or no memory)");
+            }
+            break;
+          case 'M':  // arm/disarm serving FWCARD.BIN at every boot
+            OC::PresetBus::FwCardArm(!OC::PresetBus::FwCardArmed());
+            break;
           case 'k':  // toggle 0x50 card serving (WPM-less bus only; hard-gated)
             OC::PresetBus::CardServeEnable(!OC::PresetBus::CardServing());
             break;

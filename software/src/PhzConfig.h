@@ -77,6 +77,7 @@ namespace PhzConfig {
 
   // Forward Decl
   void Init();
+  bool EarlyMount();   // mount LittleFS before Init() (firmware-card boot serving); Init() then skips its own begin()
   void listFiles(FS &fs = myfs);
   bool load_config(const char* filename = CONFIG_FILENAME, FS &fs = myfs);
   bool save_config(const char* filename = CONFIG_FILENAME, FS &fs = myfs);

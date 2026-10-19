@@ -454,6 +454,20 @@ static uint32_t card_gap_max_us = 0;     // longest inter-chunk gap this burst
 // itself up to us. See card_task() for why that decides whether it persists.
 static bool card_burst_ours = false;
 static constexpr const char *kCardFile = "PBCARD.BIN";
+// firmware-card mode (see PresetBus.h): its own file, read-only while serving
+static constexpr const char *kFwCardFile = "FWCARD.BIN";
+static constexpr const char *kFwArmFile  = "FWCARD.ARM";
+static bool     fw_mode = false;        // serving FWCARD.BIN instead of PBCARD.BIN
+static uint32_t fw_used = 0;            // bytes the module must read (TOC data end)
+static uint32_t fw_last_bytes = 0;      // bytes_read at the last movement
+static uint32_t fw_last_move_ms = 0;    // millis() of that movement, 0 = none yet
+static uint32_t boot_ms[4] = {0, 0, 0, 0};   // boot checkpoints, see NoteBoot()
+static bool     fw_early = false;        // engine + card brought up by FwCardEarlyServe()
+static uint32_t fw_init_ms = 0;          // millis() when PresetBus::Init ran
+static uint32_t fw_served_ms = 0;        // millis() when the firmware card started answering
+static uint32_t fw_first_read_ms = 0;    // millis() of the module's first read (0 = none yet)
+static uint8_t *fw_buf = nullptr;       // upload buffer, only while loading
+static uint32_t fw_idx = 0;
 // The card_lo that produced card_addr7 (card_addr7 == BUS200E_CARD_BASE |
 // card_addr_lo), so MasterBackup()/MasterRestore() can hand Bus200eMaster
 // back whichever candidate is actually being served without recomputing it.
@@ -502,6 +516,7 @@ static CardSectors card_sectors;
 // holds these bytes. A CRC of the image is a few ms with interrupts on, so
 // compare first and write only on a change.
 FLASHMEM static void card_image_flush(const char *why) {
+  if (fw_mode) { BusCardClearDirty(); return; }   // firmware card: read-only, never persisted
   if (!card_image || !BusCardDirty()) return;
   if (card_burst_ours) {
     // A capture we commanded (the 200e app's Read, the console's m, the USB
@@ -614,6 +629,7 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
     card_tx_open = false;
     slave_reconfig(false);
     card_image_flush("disable");
+    fw_mode = false;
     Serial.println("PresetBus: card serving off");
     return 0;
   }
@@ -638,7 +654,15 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
     return -3;
   }
   memset(card_image, 0xFF, BUSCARD_SIZE);  // blank card = erased EEPROM
-  File f = PhzConfig::myfs.open(kCardFile, FILE_READ);
+  if (fw_mode) {
+    // Nobody else may already own the address: a live WPM/card ACKs a probe.
+    Wire.beginTransmission(addr7);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("PresetBus: firmware card REFUSED - %02X already answers\n", addr7);
+      return -5;
+    }
+  }
+  File f = PhzConfig::myfs.open(fw_mode ? kFwCardFile : kCardFile, FILE_READ);
   size_t got = 0;
   if (f) {
     got = f.read(card_image, BUSCARD_SIZE);
@@ -651,6 +675,13 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   if (got == BUSCARD_SIZE) card_sectors.adopt(card_image, Buchla200eCrc32);
   else card_sectors.forget();
   BusCardInit(card_image, BUSCARD_SIZE);
+  if (fw_mode) {
+    // TOC data end (big-endian at 0x1D) = how much of the card a module reads.
+    fw_used = ((uint32_t)card_image[29] << 8) | card_image[30];
+    if (fw_used < 0x60 || fw_used > BUSCARD_SIZE) fw_used = BUSCARD_SIZE;
+    fw_last_bytes = 0;
+    fw_last_move_ms = 0;
+  }
   card_seen_writes = 0;
   card_seen_reads = 0;
   card_flush_arm_ms = 0;
@@ -688,6 +719,95 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
 FLASHMEM int CardServeEnable(bool on) { return card_serve_enable_at(on, 0); }
 
 bool CardServing() { return card_serving; }
+
+// ---- firmware-card mode -------------------------------------------------------
+bool FwCardMode() { return fw_mode; }
+
+bool FwCardArmed() { return PhzConfig::myfs.exists(kFwArmFile); }
+
+FLASHMEM void FwCardArm(bool on) {
+  if (on) {
+    if (!PhzConfig::myfs.exists(kFwCardFile)) {
+      Serial.println("fwcard: no FWCARD.BIN on the Xenomorpher; load one first (H)");
+      return;
+    }
+    File f = PhzConfig::myfs.open(kFwArmFile, FILE_WRITE_BEGIN);
+    if (f) { f.write((const uint8_t *)"1", 1); f.close(); }
+  } else {
+    PhzConfig::myfs.remove(kFwArmFile);
+  }
+  Serial.printf("fwcard: %s (serves FWCARD.BIN at every boot while armed)\n",
+                FwCardArmed() ? "ARMED" : "disarmed");
+}
+
+FLASHMEM int FwCardBegin() {
+  if (card_serving) return -1;
+  if (fw_buf) { free(fw_buf); fw_buf = nullptr; }
+  fw_buf = (uint8_t *)malloc(BUSCARD_SIZE);
+  if (!fw_buf) return -2;
+  memset(fw_buf, 0xFF, BUSCARD_SIZE);
+  fw_idx = 0;
+  return 0;
+}
+
+void FwCardPush(uint8_t b) {
+  if (fw_buf && fw_idx < BUSCARD_SIZE) fw_buf[fw_idx++] = b;
+}
+
+FLASHMEM void FwCardAbort() {
+  if (fw_buf) { free(fw_buf); fw_buf = nullptr; }
+  fw_idx = 0;
+}
+
+// Verify the received image (length, v1 header, CRC-32), write it to FWCARD.BIN,
+// read it back and compare, then arm. Own buffer: never touches card_image (the
+// resident capture) or PBCARD.BIN.
+FLASHMEM int FwCardCommit(uint32_t len, uint32_t crc32) {
+  int rc = 0;
+  if (!fw_buf) return -1;
+  if (len != fw_idx || len < 0x60 || len > BUSCARD_SIZE) rc = -2;
+  else if (memcmp(fw_buf, "#!200EFU", 8) != 0) rc = -3;
+  else if (Buchla200eCrc32(fw_buf, len) != crc32) rc = -4;
+  if (rc == 0) {
+    OC::RT::PersistenceWindow window("fwcard write");
+    File f = PhzConfig::myfs.open(kFwCardFile, FILE_WRITE_BEGIN);
+    bool ok = f && f.write(fw_buf, BUSCARD_SIZE) == BUSCARD_SIZE;
+    if (f) f.close();
+    if (ok) {
+      File r = PhzConfig::myfs.open(kFwCardFile, FILE_READ);
+      uint8_t *chk = (uint8_t *)malloc(BUSCARD_SIZE);
+      ok = r && chk && r.read(chk, BUSCARD_SIZE) == BUSCARD_SIZE &&
+           memcmp(chk, fw_buf, BUSCARD_SIZE) == 0;
+      if (r) r.close();
+      if (chk) free(chk);
+    }
+    if (!ok) rc = -5;
+  }
+  free(fw_buf);
+  fw_buf = nullptr;
+  fw_idx = 0;
+  if (rc == 0) FwCardArm(true);
+  return rc;
+}
+
+// Called every Task(): once the module has read the whole image and then gone
+// quiet, drop out of firmware-card mode so the next boot is a normal one.
+FLASHMEM static void fw_card_task() {
+  if (!fw_mode || !card_serving) return;
+  const BusCardStats *st = BusCardGetStats();
+  if (st->bytes_read != fw_last_bytes) {
+    if (!fw_first_read_ms) fw_first_read_ms = millis() ? millis() : 1;
+    fw_last_bytes = st->bytes_read;
+    fw_last_move_ms = millis() ? millis() : 1;
+    return;
+  }
+  if (fw_last_move_ms && st->bytes_read >= fw_used && millis() - fw_last_move_ms > 30000) {
+    Serial.printf("fwcard: module read %lu bytes, bus quiet 30 s: done, disarming\n",
+                  (unsigned long)st->bytes_read);
+    FwCardArm(false);
+    card_serve_enable_at(false, 0);   // also leaves fw_mode
+  }
+}
 
 // ---- foreign-module BACKUP/RESTORE (transient master; new) -----------------
 // Adapter wiring Bus200eMaster (BSP-free FSM, see Bus200eMaster.h/.cpp) onto
@@ -1130,6 +1250,44 @@ FLASHMEM static void try_query_reply() {
 
 // ---- public API ------------------------------------------------------------
 
+// Called from setup() right after Wire.begin(), BEFORE the slow part of boot
+// (SD probe, splash, app init: ~6 s on this module). A module's bootloader
+// checks for its firmware card once, within a fraction of a second of power-up,
+// so the card has to be answering almost immediately. Needs only LittleFS and
+// the I2C pads; everything else in Init() still runs later and leaves a card
+// that is already being served alone.
+void NoteBoot(uint8_t slot) { if (slot < 4) boot_ms[slot] = millis(); }
+
+FLASHMEM void FwCardEarlyServe() {
+  // No I2C_Expansion test: it is only known after Pinout_Detect() (~2 s later) and
+  // is true on every ORN8 board this firmware targets. Init() still checks it.
+  fw_init_ms = millis();
+  if (!PhzConfig::EarlyMount()) return;
+  if (!(PhzConfig::myfs.exists(kFwArmFile) && PhzConfig::myfs.exists(kFwCardFile))) return;
+  Bus200eInit(&kOps);
+  Bus200eMasterInit(&kMasterOps);
+  LPI2C1_SCR = LPI2C_SCR_RST;
+  LPI2C1_SCR = 0;
+  LPI2C1_SCFGR2 = LPI2C_SCFGR2_FILTSDA(2) | LPI2C_SCFGR2_FILTSCL(2)
+                | LPI2C_SCFGR2_DATAVD(3) | LPI2C_SCFGR2_CLKHOLD(2);
+  attachInterruptVector(IRQ_LPI2C1, lpi2c1_slave_isr);
+  NVIC_SET_PRIORITY(IRQ_LPI2C1, 144);
+  NVIC_ENABLE_IRQ(IRQ_LPI2C1);
+  slave_reconfig(false);
+  enabled = true;
+  fw_mode = true;
+  const int r = card_serve_enable_at(true, 0);
+  fw_served_ms = millis();
+  if (r != 0) {
+    fw_mode = false;
+    Serial.printf("PresetBus: early firmware card not served (%d)\n", r);
+    return;
+  }
+  fw_early = true;
+  Serial.printf("PresetBus: FIRMWARE CARD served EARLY (Init +%lu ms, serving +%lu ms)\n",
+                (unsigned long)fw_init_ms, (unsigned long)fw_served_ms);
+}
+
 FLASHMEM void Init() {
   if (!I2C_Expansion) return;  // no I2C header on this hardware
 
@@ -1146,18 +1304,37 @@ FLASHMEM void Init() {
   // GCEN (set in slave_reconfig): match the general call (0x00) — the bit
   // neither Wire nor teensy4_i2c ever sets, the whole reason this block
   // exists. RXSTALL lets the peripheral clock-stretch if we fall behind.
-  LPI2C1_SCR = LPI2C_SCR_RST;
-  LPI2C1_SCR = 0;
-  LPI2C1_SCFGR2 = LPI2C_SCFGR2_FILTSDA(2) | LPI2C_SCFGR2_FILTSCL(2)
-                | LPI2C_SCFGR2_DATAVD(3) | LPI2C_SCFGR2_CLKHOLD(2);
-  attachInterruptVector(IRQ_LPI2C1, lpi2c1_slave_isr);
-  NVIC_SET_PRIORITY(IRQ_LPI2C1, 144);  // below CORE (80) and UI (128)
-  NVIC_ENABLE_IRQ(IRQ_LPI2C1);
-  slave_reconfig(false);  // GC-only; card serving is opt-in per boot
+  // Skipped when FwCardEarlyServe() already brought the engine up and is
+  // answering 0x50: resetting it here would drop the card mid-load.
+  if (!fw_early) {
+    LPI2C1_SCR = LPI2C_SCR_RST;
+    LPI2C1_SCR = 0;
+    LPI2C1_SCFGR2 = LPI2C_SCFGR2_FILTSDA(2) | LPI2C_SCFGR2_FILTSCL(2)
+                  | LPI2C_SCFGR2_DATAVD(3) | LPI2C_SCFGR2_CLKHOLD(2);
+    attachInterruptVector(IRQ_LPI2C1, lpi2c1_slave_isr);
+    NVIC_SET_PRIORITY(IRQ_LPI2C1, 144);  // below CORE (80) and UI (128)
+    NVIC_ENABLE_IRQ(IRQ_LPI2C1);
+    slave_reconfig(false);  // GC-only; card serving is opt-in per boot
+  }
 
   enabled = true;
   Serial.printf("PresetBus: slave listening on general call (module addr %02X)\n",
                 Bus200eModuleAddress());
+
+  // Firmware-card mode: answer 0x50 NOW, before anything slow in boot, because a
+  // module's bootloader looks for its card once, at power-up.
+  if (!fw_early && PhzConfig::myfs.exists(kFwArmFile) && PhzConfig::myfs.exists(kFwCardFile)) {
+    fw_mode = true;
+    fw_init_ms = millis();
+    const int r = card_serve_enable_at(true, 0);
+    fw_served_ms = millis();
+    if (r != 0) {
+      fw_mode = false;
+      Serial.printf("PresetBus: firmware card not served (%d)\n", r);
+    } else {
+      Serial.printf("PresetBus: FIRMWARE CARD served at boot (+%lu ms)\n", (unsigned long)millis());
+    }
+  }
 }
 
 // Master-TX gate shared by every pump: quiet bus AND no card transfer in
@@ -1228,6 +1405,7 @@ FLASHMEM static void pump_boot_poll() {
   static uint8_t tries = 0;
   static uint32_t last_try_ms = 0;
   if (done || millis() < BOOT_POLL_AFTER_MS) return;
+  if (fw_mode) return;            // the module may be loading firmware; poll after it is done
   if (wpm_present) { done = true; return; }
   if (last_try_ms && millis() - last_try_ms < BOOT_POLL_RETRY_MS) return;
   last_try_ms = millis() ? millis() : 1;
@@ -1268,6 +1446,7 @@ void Task() {
   pump_broadcast();
   pump_midi_tx();
   probe_wpm();
+  fw_card_task();
   pump_boot_poll();
   bus_stuck_check();
 }
@@ -1294,6 +1473,9 @@ bool Verbose() { return verbose; }
 
 FLASHMEM void DebugDump() {
   Serial.println("--- PresetBus ---");
+  Serial.printf("fwcard: armed=%d serving=%d used=%lu\n", (int)FwCardArmed(), (int)fw_mode, (unsigned long)fw_used);
+  Serial.printf("boot timeline ms: setup entered %lu, after Wire.begin %lu, after early card %lu, after Serial.begin %lu\n", (unsigned long)boot_ms[0], (unsigned long)boot_ms[1], (unsigned long)boot_ms[2], (unsigned long)boot_ms[3]);
+  Serial.printf("fwcard timing: Init at +%lu ms, serving from +%lu ms, first module read at +%lu ms\n", (unsigned long)fw_init_ms, (unsigned long)fw_served_ms, (unsigned long)fw_first_read_ms);
   // CORE ISR liveness: two tick samples 5ms apart (16.67kHz => ~83 delta)
   {
     Serial.printf("loop rate ~%lu Hz\n", (unsigned long)loop_rate_hz);
