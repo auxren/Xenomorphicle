@@ -258,7 +258,114 @@ static void test_detached() {
   CHECK(BusCardGetStats()->txns_read == 1);
 }
 
+// ---- v2 firmware card: 3-byte pointer, 0x38000 window, 0xFF beyond ---------
+// The USB Firmware Card serves AVR32 modules (251e, 257e, ...) with a 3-byte
+// big-endian pointer over a 224 KB window; the card firmware picks the width
+// from the image magic ("#$200EFU"). Reads past the window return 0xFF.
+
+#define V2_SIZE 0x38000u
+static uint8_t img2[V2_SIZE];
+
+static void m3_read_at(uint32_t addr, uint8_t *out, uint32_t n) {
+  BusCardStart(0);
+  BusCardRxByte((addr >> 16) & 0xFF);
+  BusCardRxByte((addr >> 8) & 0xFF);
+  BusCardRxByte(addr & 0xFF);
+  BusCardStart(1);
+  for (uint32_t i = 0; i < n; ++i) out[i] = BusCardTxByte();
+  BusCardStop();
+}
+
+static void test_v2_init_and_width() {
+  CHECK(BusCardInitEx(img2, V2_SIZE, 3) == 0);     // not a power of two: fine in 3-byte mode
+  CHECK(BusCardAttached());
+  CHECK(BusCardAddrBytes() == 3);
+  CHECK(BusCardInitEx(img2, V2_SIZE, 4) == -1);    // only 2 or 3
+  CHECK(!BusCardAttached());
+  CHECK(BusCardInitEx(img, 100, 2) == -1);         // 2-byte mode keeps the power-of-two rule
+  CHECK(BusCardInit(img, BUSCARD_SIZE) == 0);
+  CHECK(BusCardAddrBytes() == 2);
+}
+
+static void test_v2_random_access_above_64k() {
+  BusCardInitEx(img2, V2_SIZE, 3);
+  for (uint32_t i = 0; i < V2_SIZE; ++i) img2[i] = (uint8_t)(i * 7 + (i >> 8));
+  uint8_t r[4];
+  m3_read_at(0x000000, r, 2);
+  CHECK(r[0] == img2[0] && r[1] == img2[1]);
+  m3_read_at(0x012345, r, 4);
+  CHECK(r[0] == img2[0x12345] && r[3] == img2[0x12348]);
+  CHECK(BusCardPointer() == 0x12349);
+  m3_read_at(0x037FFE, r, 2);                       // last two bytes of the window
+  CHECK(r[0] == img2[0x37FFE] && r[1] == img2[0x37FFF]);
+}
+
+static void test_v2_sequential_read_crosses_64k() {
+  BusCardInitEx(img2, V2_SIZE, 3);
+  uint8_t r[4];
+  m3_read_at(0x00FFFE, r, 4);                       // 0xFFFE 0xFFFF 0x10000 0x10001
+  CHECK(r[0] == img2[0xFFFE] && r[1] == img2[0xFFFF]);
+  CHECK(r[2] == img2[0x10000] && r[3] == img2[0x10001]);
+  CHECK(BusCardPointer() == 0x10002);
+  // current-address read continues from there (the bootloader's chunked reads)
+  m_read(r, 2);
+  CHECK(r[0] == img2[0x10002] && r[1] == img2[0x10003]);
+}
+
+static void test_v2_beyond_window_reads_ff() {
+  BusCardInitEx(img2, V2_SIZE, 3);
+  uint8_t r[3];
+  m3_read_at(V2_SIZE - 1, r, 3);
+  CHECK(r[0] == img2[V2_SIZE - 1]);
+  CHECK(r[1] == 0xFF && r[2] == 0xFF);              // erased flash beyond the window
+  CHECK(BusCardPointer() == V2_SIZE + 2);           // pointer keeps counting, no wrap into the image
+  m3_read_at(0x800000, r, 1);                       // 24-bit space, far outside
+  CHECK(r[0] == 0xFF);
+  // a write beyond the window changes nothing
+  BusCardClearDirty();
+  BusCardStart(0);
+  BusCardRxByte(0x03); BusCardRxByte(0x80); BusCardRxByte(0x00);
+  BusCardRxByte(0x55);
+  BusCardStop();
+  CHECK(!BusCardDirty());
+  CHECK(BusCardGetStats()->bytes_written == 0);
+}
+
+static void test_v2_partial_pointer_writes() {
+  BusCardInitEx(img2, V2_SIZE, 3);
+  memset(img2, 0, sizeof(img2));
+  const uint8_t one[1] = { 0x02 };
+  m_write(one, 1);                                  // hi only -> 0x020000
+  CHECK(BusCardPointer() == 0x020000);
+  const uint8_t two[2] = { 0x01, 0x23 };
+  m_write(two, 2);                                  // hi+mid -> 0x012300
+  CHECK(BusCardPointer() == 0x012300);
+  const uint8_t three[3] = { 0x00, 0x00, 0x2B };
+  m_write(three, 3);                                // full pointer, no data
+  CHECK(BusCardPointer() == 0x00002B);
+  CHECK(!BusCardDirty());
+  const uint8_t wr[5] = { 0x01, 0x00, 0x00, 0xDE, 0xAD };
+  m_write(wr, 5);                                   // data lands at 0x10000
+  CHECK(img2[0x10000] == 0xDE && img2[0x10001] == 0xAD);
+  CHECK(BusCardDirty());
+}
+
+static void test_v2_mode_does_not_change_v1() {
+  // after a v2 session, a v1 init behaves exactly as before (wrap at 64K)
+  BusCardInitEx(img2, V2_SIZE, 3);
+  BusCardInit(img, BUSCARD_SIZE);
+  const uint8_t d[2] = { 0x11, 0x22 };
+  m_write_at(BUSCARD_SIZE - 1, d, 2);
+  CHECK(img[BUSCARD_SIZE - 1] == 0x11 && img[0] == 0x22);
+}
+
 int main() {
+  test_v2_init_and_width();
+  test_v2_random_access_above_64k();
+  test_v2_sequential_read_crosses_64k();
+  test_v2_beyond_window_reads_ff();
+  test_v2_partial_pointer_writes();
+  test_v2_mode_does_not_change_v1();
   test_init_gating();
   test_write_read_roundtrip();
   test_pointer_persistence();

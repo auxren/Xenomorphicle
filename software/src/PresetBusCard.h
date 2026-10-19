@@ -47,6 +47,16 @@ typedef struct {
 // success, -1 on a bad size (card left detached).
 int BusCardInit(uint8_t *image, uint32_t size);
 
+// The USB Firmware Card for AVR32 modules (251e, 257e, 267e, 296e, 225h, 226h,
+// 218e...) is the same card holding a "#$200EFU" (v2) image, read with a
+// 3-byte big-endian pointer over a 0x38000-byte window; reads beyond the
+// window return 0xFF (erased flash) and the pointer does not wrap into the
+// image. addr_bytes selects 2 (24xx/FRAM, image must be a power of two) or 3
+// (any size <= 16 MB). The transport picks the width from the image magic the
+// way the card firmware does: "#!" -> 2, "#$" -> 3.
+int BusCardInitEx(uint8_t *image, uint32_t size, uint8_t addr_bytes);
+uint8_t BusCardAddrBytes(void);
+
 // Address 0x50 matched. is_read = R/W bit of the address byte.
 void BusCardStart(int is_read);
 

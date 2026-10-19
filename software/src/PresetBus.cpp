@@ -468,6 +468,36 @@ static uint32_t fw_served_ms = 0;        // millis() when the firmware card star
 static uint32_t fw_first_read_ms = 0;    // millis() of the module's first read (0 = none yet)
 static uint8_t *fw_buf = nullptr;       // upload buffer, only while loading
 static uint32_t fw_idx = 0;
+// Firmware-card geometry, decided from the image magic exactly as the real
+// card's firmware decides it: "#!200EFU" (v1) is the 64 KB card with a 2-byte
+// pointer that the 8051 modules read; "#$200EFU" (v2) is the same card holding
+// a 0x38000-byte image read with a 3-byte pointer by the AVR32 modules (251e,
+// 257e, 267e, 296e, 225h, 226h, 218e). Both are served from FWCARD.BIN.
+static constexpr uint32_t kFwCardV2Size = 0x38000u;
+static constexpr uint32_t kFwCardMaxSize = kFwCardV2Size;
+static uint32_t fw_size = BUSCARD_SIZE;  // bytes served (window) while fw_mode
+static uint8_t  fw_addr_bytes = 2;       // pointer bytes the module sends
+static uint32_t card_image_cap = 0;      // bytes allocated at card_image
+
+// Read the card geometry off an image header. `used` is how much the module
+// has to read before the image is complete: v1 = the TOC's data-end word,
+// v2 = header (0x2B) + the length field. Returns false on an unknown magic.
+static bool fw_geometry(const uint8_t *hdr, uint32_t *size, uint8_t *abytes, uint32_t *used) {
+  if (memcmp(hdr, "#!200EFU", 8) == 0) {
+    *size = BUSCARD_SIZE;
+    *abytes = 2;
+    *used = ((uint32_t)hdr[29] << 8) | hdr[30];
+  } else if (memcmp(hdr, "#$200EFU", 8) == 0) {
+    *size = kFwCardV2Size;
+    *abytes = 3;
+    *used = 0x2Bu + (((uint32_t)hdr[0x17] << 24) | ((uint32_t)hdr[0x18] << 16) |
+                     ((uint32_t)hdr[0x19] << 8) | hdr[0x1A]);
+  } else {
+    return false;
+  }
+  if (*used < 0x60 || *used > *size) *used = *size;
+  return true;
+}
 // The card_lo that produced card_addr7 (card_addr7 == BUS200E_CARD_BASE |
 // card_addr_lo), so MasterBackup()/MasterRestore() can hand Bus200eMaster
 // back whichever candidate is actually being served without recomputing it.
@@ -648,12 +678,32 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
     Serial.println("PresetBus: card serve REFUSED - WPM owns 0x50");
     return -2;
   }
-  if (!card_image) card_image = (uint8_t *)malloc(BUSCARD_SIZE);
+  // Geometry: the preset card is always the 64 KB / 2-byte-pointer card; a
+  // firmware card takes its size and pointer width from the image's magic
+  // (fw_geometry), read off the file header before the image is loaded.
+  uint32_t size = BUSCARD_SIZE;
+  uint8_t abytes = 2;
+  uint32_t used = BUSCARD_SIZE;
+  if (fw_mode) {
+    uint8_t hdr[0x2B];
+    File h = PhzConfig::myfs.open(kFwCardFile, FILE_READ);
+    const bool got_hdr = h && h.read(hdr, sizeof(hdr)) == sizeof(hdr);
+    if (h) h.close();
+    if (!got_hdr || !fw_geometry(hdr, &size, &abytes, &used)) {
+      Serial.println("PresetBus: firmware card REFUSED - FWCARD.BIN has no v1/v2 header");
+      return -6;
+    }
+  }
+  if (card_image && card_image_cap < size) { free(card_image); card_image = nullptr; card_image_cap = 0; }
   if (!card_image) {
-    Serial.println("PresetBus: card serve failed - no memory");
+    card_image = (uint8_t *)malloc(size);
+    card_image_cap = card_image ? size : 0;
+  }
+  if (!card_image) {
+    Serial.printf("PresetBus: card serve failed - no memory for %lu bytes\n", (unsigned long)size);
     return -3;
   }
-  memset(card_image, 0xFF, BUSCARD_SIZE);  // blank card = erased EEPROM
+  memset(card_image, 0xFF, size);  // blank card = erased EEPROM
   if (fw_mode) {
     // Nobody else may already own the address: a live WPM/card ACKs a probe.
     Wire.beginTransmission(addr7);
@@ -665,20 +715,24 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   File f = PhzConfig::myfs.open(fw_mode ? kFwCardFile : kCardFile, FILE_READ);
   size_t got = 0;
   if (f) {
-    got = f.read(card_image, BUSCARD_SIZE);
+    got = f.read(card_image, size);
     f.close();
   }
   // Only a whole file is known to match the image; a short or missing one
   // leaves the CRC unknown so the first flush always writes.
   // One pass over the image, not two: adopt() computes the per-sector CRCs
-  // and that is the whole record of what the file holds.
-  if (got == BUSCARD_SIZE) card_sectors.adopt(card_image, Buchla200eCrc32);
+  // and that is the whole record of what the file holds. (Preset card only:
+  // a firmware card is read-only and never flushed, see card_image_flush.)
+  if (!fw_mode && got == BUSCARD_SIZE) card_sectors.adopt(card_image, Buchla200eCrc32);
   else card_sectors.forget();
-  BusCardInit(card_image, BUSCARD_SIZE);
+  if (BusCardInitEx(card_image, size, abytes) != 0) {
+    Serial.println("PresetBus: card serve failed - bad geometry");
+    return -3;
+  }
+  fw_size = size;
+  fw_addr_bytes = abytes;
   if (fw_mode) {
-    // TOC data end (big-endian at 0x1D) = how much of the card a module reads.
-    fw_used = ((uint32_t)card_image[29] << 8) | card_image[30];
-    if (fw_used < 0x60 || fw_used > BUSCARD_SIZE) fw_used = BUSCARD_SIZE;
+    fw_used = used;   // how much of the card the module reads before it is done
     fw_last_bytes = 0;
     fw_last_move_ms = 0;
   }
@@ -711,8 +765,8 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
                   addr7, at_card, at_other);
     return -4;
   }
-  Serial.printf("PresetBus: serving %02X (%luK card image)\n", addr7,
-                (unsigned long)(BUSCARD_SIZE / 1024));
+  Serial.printf("PresetBus: serving %02X (%luK card image, %u-byte pointer)\n", addr7,
+                (unsigned long)(size / 1024), abytes);
   return 0;
 }
 
@@ -743,15 +797,15 @@ FLASHMEM void FwCardArm(bool on) {
 FLASHMEM int FwCardBegin() {
   if (card_serving) return -1;
   if (fw_buf) { free(fw_buf); fw_buf = nullptr; }
-  fw_buf = (uint8_t *)malloc(BUSCARD_SIZE);
+  fw_buf = (uint8_t *)malloc(kFwCardMaxSize);
   if (!fw_buf) return -2;
-  memset(fw_buf, 0xFF, BUSCARD_SIZE);
+  memset(fw_buf, 0xFF, kFwCardMaxSize);
   fw_idx = 0;
   return 0;
 }
 
 void FwCardPush(uint8_t b) {
-  if (fw_buf && fw_idx < BUSCARD_SIZE) fw_buf[fw_idx++] = b;
+  if (fw_buf && fw_idx < kFwCardMaxSize) fw_buf[fw_idx++] = b;
 }
 
 FLASHMEM void FwCardAbort() {
@@ -759,29 +813,38 @@ FLASHMEM void FwCardAbort() {
   fw_idx = 0;
 }
 
-// Verify the received image (length, v1 header, CRC-32), write it to FWCARD.BIN,
-// read it back and compare, then arm. Own buffer: never touches card_image (the
-// resident capture) or PBCARD.BIN.
+// Verify the received image (length, v1/v2 header, CRC-32), write it to
+// FWCARD.BIN at the card's full size for that format (the unsent tail is 0xFF,
+// erased flash), read it back in chunks and compare, then arm. Own buffer:
+// never touches card_image (the resident capture) or PBCARD.BIN.
 FLASHMEM int FwCardCommit(uint32_t len, uint32_t crc32) {
   int rc = 0;
   if (!fw_buf) return -1;
-  if (len != fw_idx || len < 0x60 || len > BUSCARD_SIZE) rc = -2;
-  else if (memcmp(fw_buf, "#!200EFU", 8) != 0) rc = -3;
+  uint32_t size = 0, used = 0;
+  uint8_t abytes = 0;
+  if (len != fw_idx || len < 0x60 || len > kFwCardMaxSize) rc = -2;
+  else if (!fw_geometry(fw_buf, &size, &abytes, &used)) rc = -3;
+  else if (len > size) rc = -2;
   else if (Buchla200eCrc32(fw_buf, len) != crc32) rc = -4;
   if (rc == 0) {
-    OC::RT::PersistenceWindow window("fwcard write");
+    // 64 KB took ~1.1 s through XenoFS's 4 KB sectors; declare for the v2 size.
+    OC::RT::PersistenceWindow window("fwcard write", 5000);
     File f = PhzConfig::myfs.open(kFwCardFile, FILE_WRITE_BEGIN);
-    bool ok = f && f.write(fw_buf, BUSCARD_SIZE) == BUSCARD_SIZE;
+    bool ok = f && f.write(fw_buf, size) == size;
     if (f) f.close();
     if (ok) {
       File r = PhzConfig::myfs.open(kFwCardFile, FILE_READ);
-      uint8_t *chk = (uint8_t *)malloc(BUSCARD_SIZE);
-      ok = r && chk && r.read(chk, BUSCARD_SIZE) == BUSCARD_SIZE &&
-           memcmp(chk, fw_buf, BUSCARD_SIZE) == 0;
+      static uint8_t chk[4096];
+      ok = (bool)r;
+      for (uint32_t off = 0; ok && off < size; off += sizeof(chk)) {
+        const uint32_t n = (size - off < sizeof(chk)) ? size - off : sizeof(chk);
+        ok = r.read(chk, n) == n && memcmp(chk, fw_buf + off, n) == 0;
+      }
       if (r) r.close();
-      if (chk) free(chk);
     }
     if (!ok) rc = -5;
+    else Serial.printf("fwcard: %s image, %lu-byte card, %u-byte pointer, module reads %lu bytes\n",
+                       abytes == 3 ? "v2 (AVR32)" : "v1 (8051)", (unsigned long)size, abytes, (unsigned long)used);
   }
   free(fw_buf);
   fw_buf = nullptr;
@@ -1473,7 +1536,8 @@ bool Verbose() { return verbose; }
 
 FLASHMEM void DebugDump() {
   Serial.println("--- PresetBus ---");
-  Serial.printf("fwcard: armed=%d serving=%d used=%lu\n", (int)FwCardArmed(), (int)fw_mode, (unsigned long)fw_used);
+  Serial.printf("fwcard: armed=%d serving=%d used=%lu size=%lu ptr_bytes=%u\n", (int)FwCardArmed(), (int)fw_mode,
+                (unsigned long)fw_used, (unsigned long)fw_size, fw_addr_bytes);
   Serial.printf("boot timeline ms: setup entered %lu, after Wire.begin %lu, after early card %lu, after Serial.begin %lu\n", (unsigned long)boot_ms[0], (unsigned long)boot_ms[1], (unsigned long)boot_ms[2], (unsigned long)boot_ms[3]);
   Serial.printf("fwcard timing: Init at +%lu ms, serving from +%lu ms, first module read at +%lu ms\n", (unsigned long)fw_init_ms, (unsigned long)fw_served_ms, (unsigned long)fw_first_read_ms);
   // CORE ISR liveness: two tick samples 5ms apart (16.67kHz => ~83 delta)
