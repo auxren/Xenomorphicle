@@ -60,6 +60,8 @@ static uint8_t  g_scan_found = 0;   // responders reported so far == next SCAN_R
 static uint8_t  g_scan_active = 0;  // a query_start was accepted and is unresolved
 static uint8_t  g_scan_have_done = 0;
 static uint32_t g_scan_done_ms = 0; // when the previous query was resolved
+static uint8_t  g_scan_trying = 0;  // query_start for g_scan_next has been refused busy
+static uint32_t g_scan_try_ms = 0;  // when that first attempt was made
 
 // ---- small helpers -------------------------------------------------------------
 
@@ -135,6 +137,8 @@ BRIDGE_CODE static void session_reset(void) {
   g_scan_active = 0;
   g_scan_have_done = 0;
   g_scan_done_ms = 0;
+  g_scan_trying = 0;
+  g_scan_try_ms = 0;
 }
 
 // Leaving a session from outside its own handlers (Abort, re-Init): release
@@ -743,6 +747,7 @@ BRIDGE_CODE static void pump_scan(void) {
     g_scan_have_done = 1;
     g_scan_done_ms = now;
     g_scan_next++;
+    g_scan_trying = 0;
   }
   if (g_scan_next > g_scan_last) {
     const uint8_t n_found = g_scan_found;
@@ -754,12 +759,22 @@ BRIDGE_CODE static void pump_scan(void) {
   const int rc = g_ops->query_start(g_scan_next);
   if (rc == 0) {
     g_scan_active = 1;
-  } else if (-rc != (int) BUS200E_MASTER_ERR_BUSY) {
-    // Refused outright (bad address, ...): skip it, no SCAN_R.
-    g_scan_have_done = 1;
-    g_scan_done_ms = now;
-    g_scan_next++;
-  }   // else busy: retry on the next tick
+    g_scan_trying = 0;
+    return;
+  }
+  if (-rc == (int) BUS200E_MASTER_ERR_BUSY) {
+    // Busy: retry on later ticks, but only for BUS200E_BRIDGE_SCAN_ADDR_DEADLINE_MS
+    // from the first refusal, so a foreign query that is never reset cannot
+    // hold the sweep (and the host's SCAN_END) hostage.
+    if (!g_scan_trying) { g_scan_trying = 1; g_scan_try_ms = now; return; }
+    if ((uint32_t) (now - g_scan_try_ms) < BUS200E_BRIDGE_SCAN_ADDR_DEADLINE_MS) return;
+  }
+  // Refused outright (bad address, ...) or the deadline expired: skip the
+  // address, no SCAN_R.
+  g_scan_trying = 0;
+  g_scan_have_done = 1;
+  g_scan_done_ms = now;
+  g_scan_next++;
 }
 
 BRIDGE_CODE void Bus200eBridgeTask(void) {

@@ -1420,6 +1420,27 @@ static void test_scan_gap_150ms() {
   CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
 }
 
+static void test_scan_busy_forever_skips_address() {
+  printf("test_scan_busy_forever_skips_address\n");
+  reset_all();
+  fake_q_start_rc = -(int) BUS200E_MASTER_ERR_BUSY;
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x29 });
+  const uint32_t t0 = fake_now;
+  Bus200eBridgeTask();                              // first refusal at t0
+  fake_now = t0 + 2999;
+  Bus200eBridgeTask();
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_SCANNING);
+  fake_now = t0 + 3000;
+  Bus200eBridgeTask();                              // 0x28 skipped
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_SCANNING);
+  scan_run();
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(fake_now - t0 <= 7000);
+  CHECK(q_starts.empty());
+  CHECK(sent.size() == 2 && sent[1].cmd == BUS200E_SYSEX_CMD_SCAN_END &&
+        sent[1].raw == bytes({ 0x00 }));
+}
+
 static void test_scan_abort_releases_query() {
   printf("test_scan_abort_releases_query\n");
   reset_all();
@@ -1642,6 +1663,7 @@ int main() {
   test_scan_r_carries_cached_version();
   test_scan_naks_busy_during_master_job();
   test_scan_gap_150ms();
+  test_scan_busy_forever_skips_address();
   test_scan_abort_releases_query();
   test_poll_done_sends_frame_and_acks();
   test_bus_status_r_fields();

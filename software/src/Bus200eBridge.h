@@ -198,7 +198,9 @@ typedef struct {
   Bus200eQueryState (*query_state)(void);
   void (*query_reset)(void);
   int (*fw_version_get)(uint8_t addr, uint8_t out[7]);  // 1 if known (Buchla200eFwVersionGet)
-  int (*send_poll_done)(void);                    // SendRawFrame(04 00 22 14 FF): 0 ok, <0 not sent
+  // SendRawFrame(04 00 22 14 FF): 0 ok, <0 not sent. SYNCHRONOUS: it may block
+  // the loop for up to the platform's 2 s send timeout before returning.
+  int (*send_poll_done)(void);
   int (*bus_quiet)(void);
   uint8_t (*bus_dialect)(void);                   // 1 = long/PRIMO, 2 = short/V2, 0 = none yet
   uint8_t (*last_version_addr)(void);             // address of the last 0x13 frame seen, 0 = none
@@ -207,6 +209,12 @@ typedef struct {
 // Gap between one scan query finishing and the next starting. The device's
 // quiet gate paces the bus; this keeps a 0x08..0x72 sweep under about 30 s.
 #define BUS200E_BRIDGE_SCAN_GAP_MS 150
+
+// Per-address busy deadline: if query_start keeps answering busy for this long
+// (measured from the first refusal for that address) the address is skipped as
+// not found and the sweep moves on, so a scan always ends in SCAN_END. The
+// query's own 2 s send + 1 s reply timeouts live inside the master query.
+#define BUS200E_BRIDGE_SCAN_ADDR_DEADLINE_MS 3000
 
 // Store `ops` and reset all session state. Safe to call again to re-arm.
 void Bus200eBridgeInit(const Bus200eBridgeOps *ops);
