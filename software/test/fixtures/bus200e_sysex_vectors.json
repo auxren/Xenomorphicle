@@ -1,0 +1,20 @@
+[
+  {"name": "FW_BEGIN", "cmd": 32, "hex": "7D62350220022A2703782C511101"},
+  {"name": "FW_DATA_first", "cmd": 33, "hex": "7D6235022100000B0A60032241607F1E3D435C7B1A39587716073554731231506F0F0E2D4C6B0A29481E6706254463022178405F7E1D3C5B7A"},
+  {"name": "FW_DATA_middle", "cmd": 33, "hex": "7D6235022158040B0A7841607F1E3D5C7B701A39587716355461731231506F0E2D434C6B0A29486706072544630221405F1E7E1D3C5B7A1938"},
+  {"name": "FW_DATA_last", "cmd": 33, "hex": "7D623502210A0A0B0A0F5E2D3E6F007F"},
+  {"name": "FW_END", "cmd": 34, "hex": "7D623502220B0A5A"},
+  {"name": "FW_ARM_on", "cmd": 35, "hex": "7D6235022301"},
+  {"name": "FW_ARM_off", "cmd": 35, "hex": "7D6235022300"},
+  {"name": "FW_STATUS", "cmd": 36, "hex": "7D62350224"},
+  {"name": "SCAN", "cmd": 37, "hex": "7D62350225105F"},
+  {"name": "SCAN_END", "cmd": 102, "hex": "7D6235026601"},
+  {"name": "POLL_DONE", "cmd": 38, "hex": "7D62350226"},
+  {"name": "BUS_STATUS", "cmd": 39, "hex": "7D62350227"},
+  {"name": "INFO_R_level1", "cmd": 65, "hex": "7D62350241021E10506D032A7F7F0101"},
+  {"name": "ACK_fw_data", "cmd": 64, "hex": "7D62350240210A0A"},
+  {"name": "NAK_fw_sequence", "cmd": 126, "hex": "7D6235027E2010"},
+  {"name": "FW_STATUS_R", "cmd": 100, "hex": "7D6235026401010239600004002A2703420133312E30623120"},
+  {"name": "SCAN_R", "cmd": 101, "hex": "7D62350265007F420133312E30623120"},
+  {"name": "BUS_STATUS_R", "cmd": 103, "hex": "7D6235026700010100"}
+]
