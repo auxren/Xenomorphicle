@@ -78,7 +78,9 @@ NAK codes 10–16 clear hOC's 1–6 and the bridge's 7–9).
 schema n_sequences max_steps len0 len1 len2 chunk_bytes max_pk_lo max_pk_hi card_serving bridge_level
 ```
 
-`bridge_level` = `01` for everything in this document.
+`bridge_level` = `01` for everything in this document. It sits at payload
+index 10 (the eleventh INFO_R payload byte), so a host tests `len > 10` before
+reading it; absent means level 0.
 
 ## FW_BEGIN (`20`)
 
@@ -102,7 +104,17 @@ F0 7D 62 35 02 20 02 2A 27 03 78 2C 51 11 01 F7
 
 `54186 = 0x2A + (0x27 << 7) + (0x03 << 14)`; `0x12345678` = `78 2C 51 11 01`.
 
-FW_BEGIN is **refused** (NAK, device stays IDLE) when:
+FW_BEGIN is **validated at BEGIN time**, before `FwCardBegin()` is called:
+
+- `kind` not 1 or 2: **NAK 13 FW_MAGIC**;
+- `len` < `0x60` or `len` > the kind's capacity (65,536 bytes for kind 1,
+  `0x38000` for kind 2): **NAK 12 FW_LENGTH**.
+
+Whether `kind` agrees with the image's own magic (`#!200EFU` for kind 1,
+`#$200EFU` for kind 2) cannot be known until the bytes arrive; that is checked
+at commit (FW_END).
+
+FW_BEGIN is also **refused** (NAK, device stays IDLE) when:
 
 - a WPM answers `0x50` on the bus: **NAK 7 NO_FREE_CARD** (two cards on one bus
   corrupt each other, so the device will not serve one — the same rule the
@@ -147,7 +159,11 @@ F0 7D 62 35 02 21 0A 0A 0B 0A 0F 5E 2D 3E 6F 00 7F F7
 `1290 = 0x0A + (0x0A << 7)`, `1291 = 0x0B + (0x0A << 7)`. The reply is ACK
 `{21 0A 0A}`; each packet is ACKed before the next is sent.
 
-Each accepted packet is fed to `FwCardPush()` byte by byte. Anything that is
+Each accepted packet is fed to `FwCardPush()` byte by byte, and the ACK is
+sent only after `FwCardPush` has consumed the whole chunk. Because `len` was
+validated at FW_BEGIN against the buffer capacity, the push can never overrun
+the buffer. A packet with `seq` >= `total`, or a `total` different from
+`ceil(len / 42)` computed from FW_BEGIN's `len`, is NAK 16. Anything that is
 not exactly the next packet is **NAK 16 FW_SEQUENCE**, and the load is
 aborted (below): a `seq` other than the expected one, a `total` that changes
 mid-load, a short chunk before the last one, a chunk that would push the
@@ -173,7 +189,8 @@ F0 7D 62 35 02 22 0B 0A 5A F7
 
 A packet-count or xor7 mismatch is **NAK 6 CHECKSUM** (abort). Otherwise the
 device calls `FwCardCommit(len, crc32)`, which verifies the length, the
-`#!200EFU` header and the CRC-32, writes `FWCARD.BIN`, reads it back, and arms
+header magic (`#!200EFU` for kind 1, `#$200EFU` for kind 2; a mismatch with
+`kind` is `FwCardCommit` -3) and the CRC-32, writes `FWCARD.BIN`, reads it back, and arms
 firmware-card mode. Its return code selects the reply; ACK `{22 n_lo n_hi}`
 means the image is on flash **and** armed.
 
@@ -189,10 +206,12 @@ means the image is on flash **and** armed.
 
 ## FW_ARM (`23`)
 
-`on` = `01` arms, `00` disarms (`FwCardArm`). ACK `{23 on}`. Arming without an
+`on` = `01` arms, `00` disarms (`FwCardArm`). ACK `{23 on}`; any `on` other than 0 or 1 is **NAK 2 UNKNOWN_CMD**. Arming without an
 image on flash is allowed (it is the same flag the console `M` key toggles)
 but there will be nothing to serve; read FW_STATUS to see `len`. The arm takes
 effect at the **next boot**.
+
+While armed, serving starts about 0.3 s after reset, before USB is up.
 
 **The arm is one-shot.** Once the module has read the whole image (the TOC
 data end) and the bus has then been quiet for **30 s**, the device disarms
@@ -215,7 +234,7 @@ F0 7D 62 35 02 64 <armed> <serving> <kind> <served0 served1 served2> <age_lo age
 | 8..10 | `len0..2` | length of the image on flash, 21 bits |
 | 11 | `ver_addr` | address of the module whose version frame was last seen (0 if none) |
 | 12 | `ver_valid` | 0/1: `v0..v6` hold a real frame |
-| 13..19 | `v0..v6` | the seven ASCII bytes of the last `0x13` frame seen from `ver_addr` (zeros if `ver_valid` is 0) |
+| 13..19 | `v0..v6` | the seven ASCII bytes of the last `0x13` frame seen from `ver_addr` (spaces, `20`, if `ver_valid` is 0); the device masks every one to 7 bits (`& 0x7F`) |
 
 Example — armed, serving a v2 image of 54,186 bytes, 12,345 bytes read
 (`12345 = 39 + 96×128` → `39 60 00`), 4 s since the first read, module `0x42`
@@ -224,6 +243,11 @@ reporting `"31.0b1 "`:
 ```
 F0 7D 62 35 02 64 01 01 02 39 60 00 04 00 2A 27 03 42 01 33 31 2E 30 62 31 20 F7
 ```
+
+With nothing on flash and nothing read, FW_STATUS_R is: `kind` 00, `len` 0,
+`served` 0, `age` `7F 7F`, `ver_addr` 0, `ver_valid` 0 and `v0..v6` seven
+`20` (spaces). `served` and `age` reset at boot; `age` saturates at `0x3FFE`
+(`7E 7F`), so `7F 7F` always means "never".
 
 A host watches `served` climb to `len` to know the module has read the whole
 image, and `ver_*` to see the new version after the module reboots.
@@ -248,7 +272,7 @@ SCAN_END: F0 7D 62 35 02 66 <n_found> F7
 | `count` | **always `7F` ("unknown") at this protocol level.** The device cannot know the responder count before the sweep ends. The real total is `SCAN_END`'s `n_found` |
 | `addr` | the module address that answered |
 | `ver_valid` | 0/1: `v0..v6` hold a real version frame |
-| `v0..v6` | the seven ASCII bytes of that module's last `0x13` frame |
+| `v0..v6` | the seven ASCII bytes of that module's last `0x13` frame, masked to 7 bits |
 
 Example — one responder at `0x42`, then the end:
 
@@ -265,8 +289,12 @@ wait; there is no scan-cancel command at level 1).
 ## POLL_DONE (`26`)
 
 Asks the device to send the bus's POLL_DONE now (the message the boot sequence
-holds back while firmware-card mode is armed). ACK `{26}`. Use it after a flash
-to restore normal bus behaviour without a power cycle.
+holds back while firmware-card mode is armed). The device masters the bus frame
+`04 00 22 14 FF` (PresetBus `kPollDone`) once the bus is quiet, and ACKs
+`{26}` **after the frame has gone out**. If it cannot be sent within 2 s the
+answer is **NAK 8 SEND_TIMEOUT**; during a firmware load it is **NAK 10
+FW_BUSY**; during a scan or master job it is **NAK 5 BUSY**. Use it after a
+flash to restore normal bus behaviour without a power cycle.
 
 ## BUS_STATUS (`27`) → BUS_STATUS_R (`67`)
 
@@ -278,10 +306,10 @@ F0 7D 62 35 02 67 <wpm_present> <bus_quiet> <dialect> <last_error> F7
 |---|---|
 | `wpm_present` | 0/1: something answers `0x50` (the reason FW_BEGIN would answer NAK 7) |
 | `bus_quiet` | 0/1: the bus is quiet enough to master a frame (the `tx_gate_open` condition) |
-| `dialect` | framing last seen on the bus: `00` none yet, `01` short/V2, `02` long/v1 (PRIMO). Append-only; unknown values mean "newer than you" |
+| `dialect` | framing last seen on the bus: `00` none yet, `01` long/PRIMO (v1), `02` short/V2. Append-only; unknown values mean "newer than you" |
 | `last_error` | `Bus200eMasterLastError()`: `0` none, `1` busy, `2` bad args, `3` no free card, `4` send timeout, `5` no response |
 
-Example: `F0 7D 62 35 02 67 00 01 01 00 F7` — no WPM, bus quiet, short framing,
+Example: `F0 7D 62 35 02 67 00 01 02 00 F7` — no WPM, bus quiet, short/V2 framing,
 no error.
 
 ## State diagram — a firmware load
@@ -317,7 +345,7 @@ Transitions, with their NAKs:
 | FW_RECEIVING | FW_END, count or xor7 wrong | IDLE (aborted) | NAK 6 CHECKSUM |
 | FW_RECEIVING | FW_END, `FwCardCommit` fails | IDLE (aborted) | NAK 11 / 12 / 13 / 14 / 15 (table above) |
 | FW_RECEIVING | FW_END, commit ok | IDLE, **image on flash, armed** | ACK `{22 n}` |
-| FW_RECEIVING | 10 s with no FW_DATA/FW_END | IDLE (aborted) | none; the next FW_DATA gets NAK 16 |
+| FW_RECEIVING | 10 s with no FW_DATA/FW_END from the host (FW_STATUS and other polls do not count) | IDLE (aborted) | none; the next FW_DATA gets NAK 16 |
 
 **Every NAK exit calls `FwCardAbort()` (`fw_abort`) and returns the device to
 IDLE** — a failed or stalled load never leaves a half-written image armed,
@@ -333,7 +361,8 @@ the master commands answer NAK 10 FW_BUSY.
 - **60-byte ceiling** including `F0`/`F7`; FW_DATA is 59 at full chunk (42 raw
   bytes).
 - **10 s stall rule.** In FW_RECEIVING the device aborts if 10 s pass with no
-  frame from the host. The host's own per-reply timeout must be shorter.
+  FW_DATA or FW_END from the host. FW_STATUS polls (or any other command) do
+  **not** keep a load alive. The host's own per-reply timeout must be shorter.
 - **14-bit counters** (`seq`, `total`, `n`): 16383 packets max; at 42 bytes
   that is 687,846 bytes, far past any 200e image.
 - **21-bit length, 35-bit CRC** as septets, low first, as laid out above.
