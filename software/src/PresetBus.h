@@ -117,6 +117,7 @@ uint8_t  FwCardImageKind();                           // 1 (v1 8051) / 2 (v2 AVR
 bool BusQuiet();                                      // the master paths' TX gate is open
 uint8_t BusDialect();                                 // 1 long/PRIMO, 2 short/V2, 0 none yet
 uint8_t LastVersionAddr();                            // address of the last 0x13 version frame, 0 = none
+uint16_t FwVersionFrames();                           // count of ALL 0x13 frames seen since boot (identical re-announcements included)
 int SendPollDone();                                   // raw POLL_DONE frame: 0 ok, <0 not sent
 void FwCardPush(uint8_t b);                           // next image byte
 int  FwCardCommit(uint32_t len, uint32_t crc32);      // verify + write FWCARD.BIN + arm: 0 ok
@@ -281,6 +282,7 @@ inline uint8_t FwCardImageKind() { return 0; }
 inline bool BusQuiet() { return true; }
 inline uint8_t BusDialect() { return 0; }
 inline uint8_t LastVersionAddr() { return 0; }
+inline uint16_t FwVersionFrames() { return 0; }
 inline int SendPollDone() { return -1; }
 inline void FwCardPush(uint8_t) {}
 inline int  FwCardCommit(uint32_t, uint32_t) { return -1; }

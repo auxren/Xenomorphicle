@@ -92,7 +92,7 @@ static int op_send_poll_done() { return OC::PresetBus::SendPollDone(); }
 static int op_bus_quiet() { return OC::PresetBus::BusQuiet() ? 1 : 0; }
 static uint8_t op_bus_dialect() { return OC::PresetBus::BusDialect(); }
 static uint8_t op_last_version_addr() { return OC::PresetBus::LastVersionAddr(); }
-static uint16_t op_fw_version_gen() { return (uint16_t) (Buchla200eFwVersionGeneration() & 0x3FFF); }
+static uint16_t op_fw_version_gen() { return OC::PresetBus::FwVersionFrames(); }
 
 // card_mark_dirty is deliberately NULL. PresetBus.h flags it as an open
 // design question that a foreign-module capture shares PBCARD.BIN with

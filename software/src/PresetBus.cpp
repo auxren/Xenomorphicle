@@ -230,8 +230,10 @@ static void cb_query_reply(uint8_t from_addr, const uint8_t *ver, uint8_t n) {
 // it in full every time; the debug ring keeps only its first three
 // characters.
 static uint8_t last_version_addr = 0;   // address of the most recent 0x13 frame (0 = none)
+static uint16_t fw_version_frames = 0;  // EVERY 0x13 frame seen since boot (wraps), unlike the cache generation
 static void cb_fw_version(uint8_t from_addr, const uint8_t *ver, uint8_t n) {
   Buchla200eFwVersionNote(from_addr, ver, n);
+  ++fw_version_frames;
   last_version_addr = from_addr;
   Serial.printf("PresetBus: version frame from %02X (%u bytes) \"", from_addr, n);
   for (uint8_t i = 0; i < n; ++i)
@@ -1590,6 +1592,7 @@ uint8_t BusDialect() {
 }
 
 uint8_t LastVersionAddr() { return last_version_addr; }
+uint16_t FwVersionFrames() { return fw_version_frames; }
 
 static constexpr uint8_t kPollDone[] = { 0x04, 0x00, 0x22, 0x14, 0xFF };
 FLASHMEM int SendPollDone() { return SendRawFrame(kPollDone, sizeof(kPollDone)); }
