@@ -34,7 +34,7 @@ Six controls, and the app teaches one grammar throughout:
 
 | screen | what it is |
 |---|---|
-| **Module select** | pick an address. `encL` scans the bus, `B` probes one address, `encR` enters. |
+| **Module select** | pick an address. `encL` scans the bus, `B` probes one address, `encR` enters. Each responder row ends with the firmware version that module has shown (see below). |
 | **Module home** | the slot you are looking at, its sequence, and the action row. |
 | **Edit** | per-stage editor. `encL` picks the stage, `encR` the value, `A` toggles the loop point, `X`/`Y` shift an octave. |
 | **Gen** | Euclidean generator. `encR` applies and stays put, drawing the result below the parameters. |
@@ -44,6 +44,22 @@ Six controls, and the app teaches one grammar throughout:
 The action row on the module home is `Read · Edit · Gen · Rec · Save`. `encL`
 moves the cursor along it; `encR` runs whatever it sits on. `A` is a shortcut
 straight to arming a write.
+
+## Firmware versions
+
+The responder list shows, at the right of each row, the firmware version that
+module has **shown** — `5C 251e A` on the left, `30.7` on the right. The word
+"shown" is exact: the 200e bus has no command that asks a module for its
+revision. The only frame that carries one is the module's own firmware-display
+broadcast, which a module sends when you **hold a button on its front panel
+for about 3.5 seconds** (the same hold that makes the Buchla preset manager's
+web page say "Firmware 30.7"). Nothing the Xenomorpher sends can draw it out,
+so a scan does not fill the column — a hold on each module does.
+
+A version, once heard, is remembered with the scan set across power cycles,
+and a module that announces its firmware is added to the responder list even
+if it has never been scanned. Hold the button again after a reflash and the
+row updates; the console also prints every version frame in full.
 
 ## Reading
 

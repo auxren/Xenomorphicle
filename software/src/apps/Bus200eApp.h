@@ -49,6 +49,7 @@
 //   X / Y = per-screen context
 // ---------------------------------------------------------------------------
 
+#include "../Buchla200eFwVersions.h"
 #include "../Buchla200eModuleTable.h"
 #include "../Buchla200eUiGate.h"
 #include "../Buchla200eWriteGuard.h"
@@ -167,6 +168,14 @@ static constexpr uint32_t kConfirmDeadMs = 350;
 // manifests). Two keys -- the 64-bit found bitmap, and addr/target/table-size.
 static constexpr uint16_t kScanSetKey  = (8 << 8) | 0x20;
 static constexpr uint16_t kScanMetaKey = (8 << 8) | 0x21;
+// Firmware versions the modules have shown us: one key per bus ADDRESS (not
+// table index, so a table edit cannot reassign them), 0x80|addr in the low
+// byte -- addresses are 7-bit, so 0x80-0xFF is theirs alone and clear of
+// every other key in this namespace (0x00-0x03, 0x10-0x13, 0x20-0x21).
+// Written beside the scan set, by the same quiescent path.
+static constexpr uint16_t FwVerKey(uint8_t addr) {
+  return (uint16_t)((8 << 8) | 0x80 | (addr & 0x7F));
+}
 
 // Stage strip geometry. 50 stages at 2px each = 100px, left-aligned.
 static constexpr int kStripX = 4;
@@ -307,6 +316,12 @@ private:
   int remembered_count_ = 0;
   bool scan_kept_ = false;     // the last scan heard nobody; showing the old set
   void KeepRememberedIfEmpty();
+
+  // The version cache's generation as of the last Loop() that looked. A
+  // module announcing its firmware is a module on the bus: the frame marks
+  // its address found and queues the set (and the versions) for persisting.
+  uint32_t fw_gen_seen_ = 0;
+  void AbsorbFwVersions();
 
   // single-address probe (works for off-table addresses too, unlike the scan)
   uint8_t probe_addr_ = 0;
@@ -1516,8 +1531,8 @@ void AppBus200e::DrawModuleSelect() const {
   // every row, distinguished nothing and read as "unknown" / display fault
   // (Oren, at the bench: "there are ? in front of the module names"). A
   // worded hedge does not fit either: 13 columns remain after "Addr 5C" and
-  // "285 FS A" alone is 8. So the name is plain and the address printed
-  // beside it is the disclosure -- "5C 251 A" says exactly what is known,
+  // "285e FS A" alone is 9. So the name is plain and the address printed
+  // beside it is the disclosure -- "5C 251e A" says exactly what is known,
   // which is also how Studio H's own manager presents it. Only an address
   // the table has no name for says so.
   graphics.print(model ? model : "unknown");
@@ -1557,6 +1572,19 @@ void AppBus200e::DrawModuleSelect() const {
     graphics.setPrintPos(4, y);
     graphics.printf("%02X %s", e->addr, e->name);
     if (e->addr == addr_) graphics.drawRect(0, y + 2, 3, 3);
+    // The firmware version this module has SHOWN us (a panel hold on the
+    // module sends it; nothing on the bus can ask), right-aligned so the
+    // column reads down the list. The longest name ("285e BM A", 12 columns
+    // with the address) ends at x=76 and the longest version (7 chars)
+    // starts at x=86, so the two can never touch. A module that has not
+    // shown one gets no placeholder: the column is blank until it does,
+    // which is the plain truth and matches how the WPM's homepage behaves.
+    char ver[BUCHLA200E_FWVER_LEN + 1];
+    const int vn = Buchla200eFwVersionGet(e->addr, ver, sizeof(ver));
+    if (vn > 0) {
+      graphics.setPrintPos(128 - vn * weegfx::Graphics::kFixedFontW, y);
+      graphics.print(ver);
+    }
   }
 }
 
@@ -2507,6 +2535,17 @@ FLASHMEM void AppBus200e::ConsumeScanDirty() {
   OC::BuildGlobalSettingsValues();
   PhzConfig::setValue(Bus200eAppNS::kScanSetKey, bits);
   PhzConfig::setValue(Bus200eAppNS::kScanMetaKey, meta);
+  // The firmware versions the modules have shown us, one key per address.
+  // Only addresses the table names are written: the list can only ever show
+  // those, and an off-table module's version is kept for the session anyway.
+  int versions = 0;
+  for (int i = 0, n = Buchla200eModuleCount(); i < n; ++i) {
+    const uint8_t a = Buchla200eModuleAt(i)->addr;
+    const uint64_t v = Buchla200eFwVersionPack(a);
+    if (!v) continue;
+    PhzConfig::setValue(Bus200eAppNS::FwVerKey(a), v);
+    ++versions;
+  }
   PhzConfig::save_config();
   OC::CORE::app_isr_enabled = true;
 
@@ -2514,7 +2553,8 @@ FLASHMEM void AppBus200e::ConsumeScanDirty() {
   // is expected to leave it belonging to the active app; the next app to save
   // a file would otherwise inherit GLOBALS.
   OC::app_switcher.current_app()->DispatchAppEvent(OC::APP_EVENT_RESUME);
-  serial_printf("200e: scan set persisted (%d modules)\n", found_count_);
+  serial_printf("200e: scan set persisted (%d modules, %d versions)\n",
+                found_count_, versions);
 #endif
 }
 
@@ -2539,6 +2579,17 @@ FLASHMEM void AppBus200e::LoadScanSet() {
   // built in this session) must not make a LATER background RESUME "first".
   const bool first_resume = !landed_;
   landed_ = true;
+
+  // Versions first, and independently of the scan set below: they are keyed
+  // by address, so they survive a table change that refuses the set. Restore
+  // never overrides a version heard this session, and never counts as news
+  // (no generation bump), so a background RESUME cannot queue a write.
+  for (int i = 0, n = Buchla200eModuleCount(); i < n; ++i) {
+    const uint8_t a = Buchla200eModuleAt(i)->addr;
+    uint64_t v = 0;
+    if (PhzConfig::getValue(Bus200eAppNS::FwVerKey(a), v))
+      Buchla200eFwVersionRestore(a, v);
+  }
 
   uint64_t bits = 0, meta = 0;
   if (!PhzConfig::getValue(Bus200eAppNS::kScanSetKey, bits)) return;
@@ -2587,7 +2638,39 @@ FLASHMEM void AppBus200e::Loop() {
   PumpProbe();
   PumpRead();
   PumpWrite();
-  ConsumeScanDirty();   // no-op unless a scan just finished
+  // A version frame can land at any time -- it is a human holding a button
+  // on some module -- and arrives through the bus layer whether or not this
+  // app is in front. Only the generation is polled here; the work is rare.
+  const uint32_t g = Buchla200eFwVersionGeneration();
+  if (g != fw_gen_seen_) {
+    fw_gen_seen_ = g;
+    AbsorbFwVersions();
+  }
+  ConsumeScanDirty();   // no-op unless a scan just finished or a version came in
+}
+
+// Fold what the version cache knows into the responder set. Every address
+// with a version is, by that very frame, a module on the bus -- a stronger
+// proof of presence than a QUERY reply, since no clone or echo makes one --
+// so it is marked found without a scan. The versions themselves live in the
+// cache; what is queued here is their persistence, through the same
+// quiescent-moment write as the scan set.
+FLASHMEM void AppBus200e::AbsorbFwVersions() {
+  const int n = Buchla200eModuleCount();
+  bool set_changed = false;
+  for (int i = 0; i < n; ++i) {
+    const Buchla200eModuleEntry *e = Buchla200eModuleAt(i);
+    if (!e || !Buchla200eFwVersionKnown(e->addr)) continue;
+    if (IsFound(found_, i)) continue;
+    SetFound(found_, i);
+    ++found_count_;
+    set_changed = true;
+  }
+  if (set_changed) {
+    scan_kept_ = false;    // the set on screen is no longer the kept one
+    SyncListToAddr();
+  }
+  found_dirty_ = true;
 }
 
 FLASHMEM void AppBus200e::DrawMenu() const {

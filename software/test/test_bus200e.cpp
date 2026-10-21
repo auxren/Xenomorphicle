@@ -94,9 +94,21 @@ static int n_lack = 0;
 static uint8_t lack_from;
 static void f_load_ack(uint8_t from_addr) { lack_from = from_addr; n_lack++; }
 
+static int n_fwver = 0;
+static uint8_t fwver_from;
+static uint8_t fwver_bytes[16];
+static uint8_t fwver_len;
+static void f_fw_version(uint8_t from_addr, const uint8_t *ver, uint8_t n) {
+  fwver_from = from_addr;
+  fwver_len = n;
+  if (fwver_len > sizeof(fwver_bytes)) fwver_len = sizeof(fwver_bytes);
+  memcpy(fwver_bytes, ver, fwver_len);
+  n_fwver++;
+}
+
 static const Bus200eOps fake_ops = {
   f_save, f_recall, kRecSize, f_slot_read, f_slot_write, f_card_write, f_card_read,
-  f_midi, f_query_reply, f_xfer_done, f_load_ack,
+  f_midi, f_query_reply, f_xfer_done, f_load_ack, f_fw_version,
 };
 
 static void reset(const Bus200eOps *ops) {
@@ -110,7 +122,11 @@ static void reset(const Bus200eOps *ops) {
   xdone_from = 0;
   n_lack = 0;
   lack_from = 0;
+  n_fwver = 0;
+  fwver_from = 0;
+  fwver_len = 0;
   memset(qreply_ver, 0, sizeof(qreply_ver));
+  memset(fwver_bytes, 0, sizeof(fwver_bytes));
   fail_card_write = 0;
   reject_odd_writes = 0;
 }
@@ -618,6 +634,48 @@ static void test_query_reply_parse(void) {
   CHECK(last_op() == BUS200E_OP_QUERY_REPLY);
 }
 
+// The firmware-display frame (0x13) reaches the fw_version hook as well as
+// query_reply; the QUERY reply (0x1C) reaches only query_reply. The 0x1C
+// payload is a literal 0xFF on every module traced, so showing it as a
+// version would be showing a constant.
+static void test_fw_version_hook(void) {
+  printf("test_fw_version_hook\n");
+  reset(&fake_ops);
+
+  // what a 251e v307 at 0x5C sends on a 3.5 s panel hold (Buchla_FW docs,
+  // 251e dispatch §6): [0A 22 5C 13] "30.7   "
+  FRAME(0x0A, 0x22, 0x5C, 0x13, '3', '0', '.', '7', ' ', ' ', ' ');
+  CHECK(last_op() == BUS200E_OP_QUERY_REPLY);
+  CHECK(n_fwver == 1 && fwver_from == 0x5C && fwver_len == 7);
+  CHECK(memcmp(fwver_bytes, "30.7   ", 7) == 0);
+  CHECK(n_qreply == 1);                       // the legacy route still sees it
+
+  // the real QUERY reply: not a version
+  reset(&fake_ops);
+  FRAME(0x04, 0x22, 0x5C, 0x1C, 0xFF);
+  CHECK(last_op() == BUS200E_OP_QUERY_REPLY);
+  CHECK(n_qreply == 1);
+  CHECK(n_fwver == 0);
+
+  // a bare 0x13 with no text still fires (the hook decides what to do with
+  // an empty one), and a command-shaped 0x13 (srcAddr 0x22) never does
+  reset(&fake_ops);
+  FRAME(0x03, 0x22, 0x29, 0x13);
+  CHECK(n_fwver == 1 && fwver_from == 0x29 && fwver_len == 0);
+  reset(&fake_ops);
+  FRAME(0x04, 0x22, 0x22, 0x13, 0xFF);
+  CHECK(n_fwver == 0);
+
+  // hookless build: decoded and logged, nothing called, query_reply intact
+  Bus200eOps no_fw = fake_ops;
+  no_fw.fw_version = 0;
+  reset(&no_fw);
+  FRAME(0x0A, 0x22, 0x5C, 0x13, '3', '0', '.', '7', ' ', ' ', ' ');
+  CHECK(n_fwver == 0);
+  CHECK(n_qreply == 1);
+  CHECK(last_op() == BUS200E_OP_QUERY_REPLY);
+}
+
 // The reply branch is checked ahead of the long/PRIMO command branch, so it
 // must not be able to swallow anything that used to parse as a command.
 // The frame a Buchla 251e at 0x5C mastered right after the last byte of a
@@ -797,6 +855,7 @@ int main() {
   test_build_query_frame();
   test_build_query_frame_round_trips_through_parser();
   test_query_reply_parse();
+  test_fw_version_hook();
   test_xfer_done_parse();
   test_load_ack_parse();
   test_query_reply_does_not_shadow_commands();

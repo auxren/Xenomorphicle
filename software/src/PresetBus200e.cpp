@@ -197,6 +197,10 @@ BUS_CODE static void parse_frame(void) {
     c.mem_off = (uint16_t) (((vn > 1) ? f[5] : 0) |   // debug ring (field
                             (((vn > 2) ? f[6] : 0) << 8));  // reuse, as above)
     if (bus_ops && bus_ops->query_reply) bus_ops->query_reply(f[2], f + 4, vn);
+    // 0x13 alone is a firmware version. 0x1C's one byte is a literal 0xFF
+    // on every module traced, and must never be shown as a version.
+    if (f[3] == 0x13 && bus_ops && bus_ops->fw_version)
+      bus_ops->fw_version(f[2], f + 4, vn);
     dispatch(&c);
     return;
   }

@@ -62,6 +62,7 @@ suite test_buchla251e_recorder      ../src/Buchla251eSlotCodec.cpp ../src/Buchla
 suite test_buchla259e_slot_codec    ../src/Buchla259eSlotCodec.cpp
 suite test_buchla227e_slot_codec    ../src/Buchla227eSlotCodec.cpp
 suite test_buchla200e_module_table  ../src/Buchla200eModuleTable.cpp
+suite test_buchla200e_fw_versions   ../src/Buchla200eFwVersions.cpp
 suite test_buchla200e_write_guard   ../src/Buchla200eWriteGuard.cpp
 suite test_buchla200e_uigate        ../src/Buchla200eUiGate.cpp
 suite test_buchla251e_editgenrec    -I host_stubs ../src/Buchla251eSlotCodec.cpp \

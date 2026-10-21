@@ -133,6 +133,16 @@ typedef struct {
   // BUS200E_OP_LOAD_ACK). `from_addr` is the module that followed. NULL =
   // log-only. Appended at the end of the struct, as the two above were.
   void (*load_ack)(uint8_t from_addr);
+  // A module's firmware-display frame (cmd 0x13 -- the only frame on this
+  // bus that names a firmware revision, sent on a front-panel hold and never
+  // in answer to anything; see the note above BUS200E_QUERY_FRAME_LEN).
+  // `from_addr` is the module; `ver` is the text as sent, NOT NUL-terminated,
+  // `n` bytes (7 on a real module: four version characters and three
+  // spaces), valid only for the duration of the call. Fired IN ADDITION to
+  // query_reply, which still sees every 0x13 for the older-Xenomorpher
+  // reason given in parse_frame(); a 0x1C never reaches this hook. NULL =
+  // log-only. Appended at the end of the struct, as the three above were.
+  void (*fw_version)(uint8_t from_addr, const uint8_t *ver, uint8_t n);
 } Bus200eOps;
 
 typedef struct {
