@@ -754,12 +754,21 @@ static void test_fw_status_r_roundtrip(void) {
   CHECK(r2.armed == 1 && r2.serving == 0 && r2.kind == 1 && r2.ver_addr == 0x7F);
   CHECK(memcmp(r2.ver, "31.2C2 ", 7) == 0);
 
-  // No version seen: ver_valid 0 -> bytes zeroed on the wire.
+  // Idle device: no version seen -> seven spaces on the wire, age 7F 7F.
   Bus200eFwStatus z = {};
+  z.first_read_age_s = 0x3FFF;
   memcpy(z.ver, "junk!!!", 7);  // ver_valid is 0, so this must not leak out
   n = Bus200eSysExBuildFwStatusR(&z, out, sizeof(out));
-  CHECK(n == 25 && out[17] == 0);
-  for (int i = 18; i < 25; ++i) CHECK(out[i] == 0);
+  const uint8_t idle[25] = { 0x7D, 0x62, 0x35, 0x02, 0x64, 0, 0, 0, 0, 0, 0, 0x7F, 0x7F,
+                             0, 0, 0, 0, 0, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20 };
+  CHECK(n == 25 && memcmp(out, idle, 25) == 0);
+  record("FW_STATUS_R_idle", out, n);
+
+  // A version byte >= 0x80 is masked to 7 bits, not rejected.
+  Bus200eFwStatus mk = s; mk.ver[2] = 0xAE;
+  n = Bus200eSysExBuildFwStatusR(&mk, out, sizeof(out));
+  CHECK(n == 25 && out[5 + 13 + 2] == 0x2E);
+  for (int i = 0; i < n; ++i) CHECK(!(out[i] & 0x80));
 
   // Error paths.
   CHECK(Bus200eSysExBuildFwStatusR(&s, out, 24) < 0);
@@ -769,8 +778,6 @@ static void test_fw_status_r_roundtrip(void) {
   big = s; big.first_read_age_s = 0x4000;
   CHECK(Bus200eSysExBuildFwStatusR(&big, out, sizeof(out)) < 0);
   big = s; big.ver_addr = 0x80;
-  CHECK(Bus200eSysExBuildFwStatusR(&big, out, sizeof(out)) < 0);
-  big = s; big.ver[2] = 0x80;
   CHECK(Bus200eSysExBuildFwStatusR(&big, out, sizeof(out)) < 0);
   CHECK(Bus200eSysExBuildFwStatusR(&s, out, sizeof(out)) == 25);
   CHECK(Bus200eSysExParseFwStatusR(out + 5, 19, &r) < 0);
@@ -792,10 +799,15 @@ static void test_scan_r_layout(void) {
 
   n = Bus200eSysExBuildScanR(3, 0x7F, 0x51, 0, nullptr, out, sizeof(out));  // no version frame
   CHECK(n == 16 && out[5] == 3 && out[7] == 0x51 && out[8] == 0);
-  for (int i = 9; i < 16; ++i) CHECK(out[i] == 0);
+  for (int i = 9; i < 16; ++i) CHECK(out[i] == 0x20);  // no version: seven spaces
+
+  const uint8_t hi[7] = { 0xB3, '1', '.', '0', 'b', '1', ' ' };
+  n = Bus200eSysExBuildScanR(0, 0x7F, 0x42, 1, hi, out, sizeof(out));
+  CHECK(n == 16 && out[9] == 0x33);  // masked
 
   CHECK(Bus200eSysExBuildScanR(0, 0x7F, 0x42, 1, ver, out, 15) < 0);
   CHECK(Bus200eSysExBuildScanR(0, 0x7F, 0x42, 1, nullptr, out, sizeof(out)) < 0);
+  CHECK(Bus200eSysExBuildScanR(0, 0x7F, 0x42, 0, nullptr, out, sizeof(out)) == 16);
   CHECK(Bus200eSysExBuildScanR(0x80, 0x7F, 0x42, 1, ver, out, sizeof(out)) < 0);
   CHECK(Bus200eSysExBuildScanR(0, 0x7F, 0x80, 1, ver, out, sizeof(out)) < 0);
 }
@@ -815,23 +827,57 @@ static void test_bus_status_r_layout(void) {
 
 static void test_vectors_written(void) {
   printf("test_vectors_written\n");
-  const char *path = "fixtures/bus200e_sysex_vectors.json";
-  if (!getenv("BUS200E_WRITE_VECTORS")) { CHECK(true); return; }  // nothing to assert
+  // Path relative to this source file, so it works from any cwd.
+  char path[512];
+  snprintf(path, sizeof(path), "%s", __FILE__);
+  char *slash = strrchr(path, '/');
+  if (slash) *(slash + 1) = 0; else path[0] = 0;
+  strncat(path, "fixtures/bus200e_sysex_vectors.json", sizeof(path) - strlen(path) - 1);
+  FILE *f = fopen(path, "r");
+  if (!f) f = fopen("fixtures/bus200e_sysex_vectors.json", "r");  // cwd fallback
+  const bool writing = getenv("BUS200E_WRITE_VECTORS") != nullptr;
   CHECK(g_nvecs >= 14);
-  FILE *f = fopen(path, "w");
+  if (writing) {
+    if (f) fclose(f);
+    f = fopen(path, "w");
+    if (!f) f = fopen("fixtures/bus200e_sysex_vectors.json", "w");
+    CHECK(f != nullptr);
+    if (!f) return;
+    fprintf(f, "[\n");
+    for (int i = 0; i < g_nvecs; ++i) {
+      fprintf(f, "  {\"name\": \"%s\", \"cmd\": %d, \"hex\": \"", g_vecs[i].name, g_vecs[i].cmd);
+      for (uint32_t k = 0; k < g_vecs[i].len; ++k) fprintf(f, "%02X", g_vecs[i].bytes[k]);
+      fprintf(f, "\"}%s\n", (i + 1 < g_nvecs) ? "," : "");
+    }
+    fprintf(f, "]\n");
+    fclose(f);
+    f = fopen(path, "r");
+    CHECK(f != nullptr);
+    if (f) { CHECK(fgetc(f) == '['); fclose(f); }
+    return;
+  }
+  // Normal run: the committed file must match what the codec builds today.
   CHECK(f != nullptr);
   if (!f) return;
-  fprintf(f, "[\n");
-  for (int i = 0; i < g_nvecs; ++i) {
-    fprintf(f, "  {\"name\": \"%s\", \"cmd\": %d, \"hex\": \"", g_vecs[i].name, g_vecs[i].cmd);
-    for (uint32_t k = 0; k < g_vecs[i].len; ++k) fprintf(f, "%02X", g_vecs[i].bytes[k]);
-    fprintf(f, "\"}%s\n", (i + 1 < g_nvecs) ? "," : "");
-  }
-  fprintf(f, "]\n");
+  static char buf[16384];
+  const size_t got = fread(buf, 1, sizeof(buf) - 1, f);
   fclose(f);
-  f = fopen(path, "r");
-  CHECK(f != nullptr);
-  if (f) { CHECK(fgetc(f) == '['); fclose(f); }
+  buf[got] = 0;
+  CHECK(buf[0] == '[');
+  int entries = 0;
+  for (const char *p = buf; (p = strstr(p, "{\"name\": \"")) != nullptr; ++p) ++entries;
+  CHECK(entries == g_nvecs);
+  for (int i = 0; i < g_nvecs; ++i) {
+    char key[128], want[160];
+    snprintf(key, sizeof(key), "{\"name\": \"%s\", \"cmd\": %d, \"hex\": \"", g_vecs[i].name, g_vecs[i].cmd);
+    const char *e = strstr(buf, key);
+    CHECK(e != nullptr);
+    if (!e) continue;
+    e += strlen(key);
+    size_t w = 0;
+    for (uint32_t k = 0; k < g_vecs[i].len; ++k) w += (size_t) snprintf(want + w, sizeof(want) - w, "%02X", g_vecs[i].bytes[k]);
+    CHECK(strncmp(e, want, w) == 0 && e[w] == '"');
+  }
 }
 
 int main() {

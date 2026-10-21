@@ -307,8 +307,8 @@ typedef struct {
   uint16_t first_read_age_s;  // seconds since the first read (14 bits); 0x3FFF = none yet
   uint32_t image_len;         // length of the image on flash (21 bits)
   uint8_t  ver_addr;          // module whose version frame was last seen
-  uint8_t  ver_valid;         // 0/1: ver[] holds a real frame (else sent as zeros)
-  uint8_t  ver[7];            // ASCII bytes of the last 0x13 frame
+  uint8_t  ver_valid;         // 0/1: ver[] holds a real frame (else sent as seven spaces)
+  uint8_t  ver[7];            // ASCII bytes of the last 0x13 frame (masked & 0x7F on the wire)
 } Bus200eFwStatus;
 
 #define BUS200E_SYSEX_FW_BEGIN_FIELDS     9   // kind + 3 length septets + 5 CRC septets

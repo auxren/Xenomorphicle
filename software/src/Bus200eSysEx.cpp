@@ -211,7 +211,6 @@ SYSEX_CODE int Bus200eSysExBuildFwStatusR(const Bus200eFwStatus *s, uint8_t *out
   if (!s) return -1;
   if (s->served > 0x1FFFFFu || s->image_len > 0x1FFFFFu || s->first_read_age_s > 0x3FFF) return -1;
   if ((s->armed | s->serving | s->kind | s->ver_addr) & 0x80) return -1;
-  if (s->ver_valid && !all7(s->ver, 7)) return -1;
   const int o = begin_message(BUS200E_SYSEX_CMD_FW_STATUS_R, BUS200E_SYSEX_FW_STATUS_R_FIELDS, out, cap);
   if (o < 0) return -1;
   uint8_t *p = out + o;
@@ -223,7 +222,7 @@ SYSEX_CODE int Bus200eSysExBuildFwStatusR(const Bus200eFwStatus *s, uint8_t *out
   Bus200eSysExToSeptets(s->image_len, p + 8, 3);
   p[11] = s->ver_addr;
   p[12] = s->ver_valid ? 1 : 0;
-  for (int i = 0; i < 7; ++i) p[13 + i] = s->ver_valid ? s->ver[i] : 0;
+  for (int i = 0; i < 7; ++i) p[13 + i] = s->ver_valid ? (uint8_t) (s->ver[i] & 0x7F) : 0x20;
   return o + BUS200E_SYSEX_FW_STATUS_R_FIELDS;
 }
 
@@ -244,14 +243,14 @@ SYSEX_CODE int Bus200eSysExParseFwStatusR(const uint8_t *payload, uint32_t len, 
 SYSEX_CODE int Bus200eSysExBuildScanR(uint8_t idx, uint8_t count, uint8_t addr, uint8_t ver_valid,
                                        const uint8_t ver[7], uint8_t *out, uint32_t cap) {
   if ((idx | count | addr) & 0x80) return -1;
-  if (ver_valid && (!ver || !all7(ver, 7))) return -1;
+  if (ver_valid && !ver) return -1;
   const int o = begin_message(BUS200E_SYSEX_CMD_SCAN_R, 11, out, cap);
   if (o < 0) return -1;
   out[o] = idx;
   out[o + 1] = count;
   out[o + 2] = addr;
   out[o + 3] = ver_valid ? 1 : 0;
-  for (int i = 0; i < 7; ++i) out[o + 4 + i] = ver_valid ? ver[i] : 0;
+  for (int i = 0; i < 7; ++i) out[o + 4 + i] = ver_valid ? (uint8_t) (ver[i] & 0x7F) : 0x20;
   return o + 11;
 }
 
