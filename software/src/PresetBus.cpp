@@ -24,6 +24,9 @@
 
 extern volatile uint32_t loop_counter;  // Main.cpp (global scope)
 
+// Boot timestamps taken in the core start-up hooks (Main.cpp).
+extern volatile uint32_t boot_ms_middle_hook, boot_ms_late_hook;
+
 namespace OC {
 namespace PresetBus {
 
@@ -1671,6 +1674,7 @@ FLASHMEM void DebugDump() {
   Serial.printf("isr=%lu starts=%lu stops=%lu bytes=%lu ring_ovf=%lu\n",
                 stats.isr_count, stats.starts, stats.stops, stats.bytes,
                 stats.ring_ovf);
+  Serial.printf("diag: core middle hook +%lu ms, late hook +%lu ms\n", (unsigned long)::boot_ms_middle_hook, (unsigned long)::boot_ms_late_hook);
   Serial.printf("diag: first slave isr at +%lu ms; addresses seen (sasr@ms):", (unsigned long)diag_first_isr_ms);
   for (uint8_t i = 0; i < 8 && i < diag_addr_n; ++i) {
     const uint8_t k = (diag_addr_n > 8) ? (uint8_t)((diag_addr_n + i) & 7) : i;

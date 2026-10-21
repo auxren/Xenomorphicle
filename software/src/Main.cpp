@@ -267,8 +267,17 @@ FLASHMEM __attribute__((noinline)) void BootMenu() {
 // clear and BEFORE __libc_init_array (C++ ctors). .bss.dma is the first
 // section in RAM2 (origin 0x20200000) and ends at _heap_start per the .ld.
 extern unsigned long _heap_start;
+// Boot timestamps for the firmware-card race (bench 2026-10-20: setup() is
+// entered at ~+300 ms whatever the core's USB delays are set to): millis()
+// at the core's middle hook (before the USB delays and the C++ constructors)
+// and at its late hook (after the USB delays, before the constructors).
+volatile uint32_t boot_ms_middle_hook = 0, boot_ms_late_hook = 0;
 extern "C" FLASHMEM void startup_middle_hook(void) {
+  boot_ms_middle_hook = millis();
   memset((void *)0x20200000, 0, (uint32_t)&_heap_start - 0x20200000u);
+}
+extern "C" FLASHMEM void startup_late_hook(void) {
+  boot_ms_late_hook = millis();
 }
 
 FLASHMEM static void print_build_stamp(Print &out);  // defined with SelfTest
