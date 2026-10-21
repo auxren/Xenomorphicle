@@ -776,9 +776,29 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   // under test either way.
   delayMicroseconds(200);
   Wire.beginTransmission(addr7);
-  const uint8_t at_card = Wire.endTransmission();
+  uint8_t at_card = Wire.endTransmission();
   Wire.beginTransmission(0x29);
-  const uint8_t at_other = Wire.endTransmission();
+  uint8_t at_other = Wire.endTransmission();
+  // A firmware card is served from the first moments of power-up, and some
+  // module bootloaders (227e, bench 2026-10-20) start polling 0x50 at once,
+  // so the probe can find the bus busy (endTransmission 5 = timeout) rather
+  // than answered. That is not a mislaid slave address: keep probing for a
+  // while, and if the bus never frees up, serve anyway -- the only thing this
+  // self-test guards against is a wrong SAMR field, which would show as a
+  // NACK (2) or an unexpected ACK of 0x29, never as a timeout.
+  if (fw_mode) {
+    for (int i = 0; i < 40 && at_card == 5; ++i) {
+      delay(25);
+      Wire.beginTransmission(addr7);
+      at_card = Wire.endTransmission();
+      Wire.beginTransmission(0x29);
+      at_other = Wire.endTransmission();
+    }
+    if (at_card == 5 && at_other != 0) {
+      Serial.println("PresetBus: card serve self-test skipped, bus busy (a module is already polling the card)");
+      at_card = 0;
+    }
+  }
   if (at_card != 0 || at_other == 0) {
     card_serving = false;
     in_card_txn = false;
