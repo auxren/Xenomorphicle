@@ -9,6 +9,7 @@
 //      ../src/Bus200eSysEx.cpp && ./build/test_bus200e_sysex
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 
@@ -533,6 +534,306 @@ static void test_whole_251e_bank_streams_and_reassembles(void) {
   CHECK(memcmp(end_msg, kEndFrame, sizeof(kEndFrame)) == 0);
 }
 
+// ---- firmware-card / scan / bus-status codec (docs/bus200e-sysex-fw.md) -------
+
+// Every message the suite builds is recorded here, so test_vectors_written can
+// dump them as golden vectors for the Rust implementation to decode and
+// re-encode byte-identically.
+struct Vec { char name[40]; uint8_t cmd; uint8_t bytes[64]; uint32_t len; };
+static Vec g_vecs[32];
+static int g_nvecs = 0;
+static void record(const char *name, const uint8_t *msg, int len) {
+  CHECK(len >= 5 && len <= 64 && g_nvecs < 32);
+  if (len < 5 || len > 64 || g_nvecs >= 32) return;
+  Vec &v = g_vecs[g_nvecs++];
+  snprintf(v.name, sizeof(v.name), "%s", name);
+  v.cmd = msg[4];
+  memcpy(v.bytes, msg, (size_t) len);
+  v.len = (uint32_t) len;
+}
+
+// The same synthetic image every FW_DATA vector slices: 54,186 bytes, last six
+// are the doc's DE AD BE EF 00 7F.
+static const uint32_t kImgLen = 54186;
+static uint8_t g_img[kImgLen];
+static void fill_img(void) {
+  for (uint32_t i = 0; i < kImgLen; ++i) g_img[i] = (uint8_t) (i * 31 + (i >> 8) * 7 + 3);
+  const uint8_t tail[6] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x7F };
+  memcpy(g_img + kImgLen - 6, tail, 6);
+}
+
+static int build_fw_data(uint32_t seq, uint8_t *out, uint32_t cap) {
+  const uint32_t total = (kImgLen + 41) / 42;
+  const uint32_t off = seq * 42;
+  const uint32_t n = (kImgLen - off < 42) ? (kImgLen - off) : 42;
+  const uint8_t hdr[4] = { BUS200E_SYSEX_LO7(seq), BUS200E_SYSEX_HI7(seq),
+                           BUS200E_SYSEX_LO7(total), BUS200E_SYSEX_HI7(total) };
+  return Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_FW_DATA, hdr, 4, g_img + off, n, out, cap);
+}
+
+static void test_septets_35bit(void) {
+  printf("test_septets_35bit\n");
+  uint8_t s[5];
+  Bus200eSysExToSeptets(0xFFFFFFFFu, s, 5);
+  const uint8_t want[5] = { 0x7F, 0x7F, 0x7F, 0x7F, 0x0F };
+  CHECK(memcmp(s, want, 5) == 0);
+  CHECK(Bus200eSysExSeptets(s, 5) == 0xFFFFFFFFu);
+
+  Bus200eSysExToSeptets(0x12345678u, s, 5);
+  const uint8_t want2[5] = { 0x78, 0x2C, 0x51, 0x11, 0x01 };
+  CHECK(memcmp(s, want2, 5) == 0);
+  CHECK(Bus200eSysExSeptets(s, 5) == 0x12345678u);
+
+  uint8_t t[3];
+  Bus200eSysExToSeptets(54186, t, 3);
+  CHECK(t[0] == 0x2A && t[1] == 0x27 && t[2] == 0x03);
+  CHECK(Bus200eSysExSeptets(t, 3) == 54186u);
+  Bus200eSysExToSeptets(0x200000u + 5, t, 3);  // 22nd bit is dropped, not smeared
+  CHECK(Bus200eSysExSeptets(t, 3) == 5u);
+  CHECK(Bus200eSysExSeptets(s, 0) == 0u);
+}
+
+static void test_fw_begin_roundtrip(void) {
+  printf("test_fw_begin_roundtrip\n");
+  uint8_t out[32];
+  const int n = Bus200eSysExBuildFwBegin(2, 0x2B + 123456, 0xDEADBEEFu, out, sizeof(out));
+  CHECK(n == 5 + 9);
+  CHECK(out[0] == 0x7D && out[1] == 0x62 && out[2] == 0x35 && out[3] == 0x02);
+  CHECK(out[4] == 0x20 && out[4] == BUS200E_SYSEX_CMD_FW_BEGIN);
+  for (int i = 0; i < n; ++i) CHECK(!(out[i] & 0x80));
+  uint8_t kind = 0; uint32_t len = 0, crc = 0;
+  CHECK(Bus200eSysExParseFwBegin(out + 5, 9, &kind, &len, &crc) == 0);
+  CHECK(kind == 2 && len == 0x2B + 123456 && crc == 0xDEADBEEFu);
+
+  // The contract's worked example (54,186 bytes, CRC 0x12345678, kind 2).
+  const int m = Bus200eSysExBuildFwBegin(2, 54186, 0x12345678u, out, sizeof(out));
+  const uint8_t doc[14] = { 0x7D, 0x62, 0x35, 0x02, 0x20, 0x02, 0x2A, 0x27, 0x03,
+                            0x78, 0x2C, 0x51, 0x11, 0x01 };
+  CHECK(m == 14 && memcmp(out, doc, 14) == 0);
+  record("FW_BEGIN", out, m);
+
+  // Error paths.
+  CHECK(Bus200eSysExBuildFwBegin(2, 54186, 1, out, 13) < 0);               // cap too small
+  CHECK(Bus200eSysExBuildFwBegin(2, 0x200000u, 1, out, sizeof(out)) < 0);  // > 21 bits
+  CHECK(Bus200eSysExBuildFwBegin(2, 1, 1, nullptr, sizeof(out)) < 0);
+  CHECK(Bus200eSysExParseFwBegin(out + 5, 8, &kind, &len, &crc) < 0);      // short
+  CHECK(Bus200eSysExParseFwBegin(out + 5, 10, &kind, &len, &crc) < 0);     // long
+  uint8_t bad[9]; memcpy(bad, out + 5, 9); bad[3] = 0x80;
+  CHECK(Bus200eSysExParseFwBegin(bad, 9, &kind, &len, &crc) < 0);          // not 7-bit
+  memcpy(bad, out + 5, 9); bad[8] = 0x10;                                  // crc4 > 15
+  CHECK(Bus200eSysExParseFwBegin(bad, 9, &kind, &len, &crc) < 0);
+  CHECK(Bus200eSysExParseFwBegin(nullptr, 9, &kind, &len, &crc) < 0);
+}
+
+static void test_fw_data_uses_fw_cmd_byte(void) {
+  printf("test_fw_data_uses_fw_cmd_byte\n");
+  fill_img();
+  uint8_t out[64], raw[64];
+  const uint32_t last = (kImgLen + 41) / 42 - 1;
+  CHECK(last == 1290);
+  const uint32_t picks[3] = { 0, 600, last };
+  const char *names[3] = { "FW_DATA_first", "FW_DATA_middle", "FW_DATA_last" };
+  for (int k = 0; k < 3; ++k) {
+    const int n = build_fw_data(picks[k], out, sizeof(out));
+    CHECK(n > 0);
+    CHECK(out[4] == 0x21 && out[4] == BUS200E_SYSEX_CMD_FW_DATA);
+    for (int i = 0; i < n; ++i) CHECK(!(out[i] & 0x80));
+    uint8_t cmd = 0; uint16_t seq = 0, total = 0; uint32_t rl = 0;
+    CHECK(Bus200eSysExParseMessage(out, (uint32_t) n, &cmd, &seq, &total, raw, sizeof(raw), &rl) == 0);
+    CHECK(cmd == 0x21 && seq == picks[k] && total == 1291);
+    const uint32_t want = (k == 2) ? 6 : 42;
+    CHECK(rl == want);
+    CHECK(memcmp(raw, g_img + picks[k] * 42, want) == 0);
+    record(names[k], out, n);
+  }
+  CHECK(build_fw_data(0, out, sizeof(out)) == 5 + 4 + 48);  // 59 with F0/F7
+
+  // Exact bytes of the contract's last-packet example.
+  const int n = build_fw_data(last, out, sizeof(out));
+  const uint8_t doc[16] = { 0x7D, 0x62, 0x35, 0x02, 0x21, 0x0A, 0x0A, 0x0B, 0x0A,
+                            0x0F, 0x5E, 0x2D, 0x3E, 0x6F, 0x00, 0x7F };
+  CHECK(n == 16 && memcmp(out, doc, 16) == 0);
+
+  // The chunk limit and header-size rule apply to FW_DATA as to DUMP_DATA.
+  const uint8_t hdr[4] = { 0, 0, 1, 0 };
+  const uint8_t big[43] = {};
+  CHECK(Bus200eSysExBuildMessage(0x21, hdr, 4, big, 43, out, sizeof(out)) < 0);
+  CHECK(Bus200eSysExBuildMessage(0x21, hdr, 2, big, 7, out, sizeof(out)) < 0);
+  CHECK(Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_FW_END, hdr, 3, big, 7, out, sizeof(out)) < 0);
+}
+
+static void test_fw_end_arm_and_plain_commands(void) {
+  printf("test_fw_end_arm_and_plain_commands\n");
+  uint8_t out[64];
+  const uint32_t total = 1291;
+  const uint8_t endf[3] = { BUS200E_SYSEX_LO7(total), BUS200E_SYSEX_HI7(total), 0x5A };
+  int n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_FW_END, endf, 3, nullptr, 0, out, sizeof(out));
+  const uint8_t doc_end[8] = { 0x7D, 0x62, 0x35, 0x02, 0x22, 0x0B, 0x0A, 0x5A };
+  CHECK(n == 8 && memcmp(out, doc_end, 8) == 0);
+  record("FW_END", out, n);
+
+  const uint8_t on = 1, off = 0;
+  n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_FW_ARM, &on, 1, nullptr, 0, out, sizeof(out));
+  CHECK(n == 6 && out[4] == 0x23 && out[5] == 1);
+  record("FW_ARM_on", out, n);
+  n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_FW_ARM, &off, 1, nullptr, 0, out, sizeof(out));
+  CHECK(n == 6 && out[4] == 0x23 && out[5] == 0);
+  record("FW_ARM_off", out, n);
+
+  n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_FW_STATUS, nullptr, 0, nullptr, 0, out, sizeof(out));
+  CHECK(n == 5 && out[4] == 0x24);
+  record("FW_STATUS", out, n);
+
+  const uint8_t sc[2] = { 0x10, 0x5F };
+  n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_SCAN, sc, 2, nullptr, 0, out, sizeof(out));
+  CHECK(n == 7 && out[4] == 0x25 && out[5] == 0x10 && out[6] == 0x5F);
+  record("SCAN", out, n);
+
+  const uint8_t found = 1;
+  n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_SCAN_END, &found, 1, nullptr, 0, out, sizeof(out));
+  const uint8_t doc_se[6] = { 0x7D, 0x62, 0x35, 0x02, 0x66, 0x01 };
+  CHECK(n == 6 && memcmp(out, doc_se, 6) == 0);
+  record("SCAN_END", out, n);
+
+  n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_POLL_DONE, nullptr, 0, nullptr, 0, out, sizeof(out));
+  CHECK(n == 5 && out[4] == 0x26);
+  record("POLL_DONE", out, n);
+  n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_BUS_STATUS, nullptr, 0, nullptr, 0, out, sizeof(out));
+  CHECK(n == 5 && out[4] == 0x27);
+  record("BUS_STATUS", out, n);
+
+  // INFO_R with the appended bridge level.
+  const uint8_t info[11] = { 2, 30, 16, 0x50, 0x6D, 0x03, 42, 0x7F, 0x7F,
+                             1, BUS200E_SYSEX_BRIDGE_LEVEL };
+  n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_INFO_R, info, 11, nullptr, 0, out, sizeof(out));
+  CHECK(n == 16 && out[15] == 1 && out[4] == 0x41);
+  record("INFO_R_level1", out, n);
+
+  // ACK / NAK for the new commands.
+  const uint8_t ack[3] = { 0x21, 0x0A, 0x0A };
+  n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_ACK, ack, 3, nullptr, 0, out, sizeof(out));
+  CHECK(n == 8 && out[4] == 0x40);
+  record("ACK_fw_data", out, n);
+  const uint8_t nak[2] = { BUS200E_SYSEX_CMD_FW_BEGIN, BUS200E_SYSEX_NAK_FW_SEQUENCE };
+  n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_NAK, nak, 2, nullptr, 0, out, sizeof(out));
+  CHECK(n == 7 && out[4] == 0x7E && out[5] == 0x20 && out[6] == 16);
+  record("NAK_fw_sequence", out, n);
+}
+
+static void test_fw_status_r_roundtrip(void) {
+  printf("test_fw_status_r_roundtrip\n");
+  Bus200eFwStatus s = {};
+  s.armed = 1; s.serving = 1; s.kind = 2; s.served = 12345; s.first_read_age_s = 4;
+  s.image_len = 54186; s.ver_addr = 0x42; s.ver_valid = 1;
+  memcpy(s.ver, "31.0b1 ", 7);
+  uint8_t out[40];
+  int n = Bus200eSysExBuildFwStatusR(&s, out, sizeof(out));
+  const uint8_t doc[25] = { 0x7D, 0x62, 0x35, 0x02, 0x64, 0x01, 0x01, 0x02, 0x39, 0x60, 0x00,
+                            0x04, 0x00, 0x2A, 0x27, 0x03, 0x42, 0x01,
+                            0x33, 0x31, 0x2E, 0x30, 0x62, 0x31, 0x20 };
+  CHECK(n == 25 && memcmp(out, doc, 25) == 0);
+  record("FW_STATUS_R", out, n);
+  Bus200eFwStatus r = {};
+  CHECK(Bus200eSysExParseFwStatusR(out + 5, 20, &r) == 0);
+  CHECK(r.armed == 1 && r.serving == 1 && r.kind == 2 && r.served == 12345);
+  CHECK(r.first_read_age_s == 4 && r.image_len == 54186 && r.ver_addr == 0x42);
+  CHECK(r.ver_valid == 1 && memcmp(r.ver, "31.0b1 ", 7) == 0);
+
+  // Extremes: age 0x3FFF ("no read yet"), 21-bit maxima, "31.2C2 ".
+  Bus200eFwStatus e = {};
+  e.armed = 1; e.kind = 1; e.served = 0x1FFFFF; e.first_read_age_s = 0x3FFF;
+  e.image_len = 0x1FFFFF; e.ver_addr = 0x7F; e.ver_valid = 1;
+  memcpy(e.ver, "31.2C2 ", 7);
+  n = Bus200eSysExBuildFwStatusR(&e, out, sizeof(out));
+  CHECK(n == 25);
+  CHECK(out[11] == 0x7F && out[12] == 0x7F);
+  for (int i = 0; i < n; ++i) CHECK(!(out[i] & 0x80));
+  Bus200eFwStatus r2 = {};
+  CHECK(Bus200eSysExParseFwStatusR(out + 5, 20, &r2) == 0);
+  CHECK(r2.first_read_age_s == 0x3FFF && r2.served == 0x1FFFFF && r2.image_len == 0x1FFFFF);
+  CHECK(r2.armed == 1 && r2.serving == 0 && r2.kind == 1 && r2.ver_addr == 0x7F);
+  CHECK(memcmp(r2.ver, "31.2C2 ", 7) == 0);
+
+  // No version seen: ver_valid 0 -> bytes zeroed on the wire.
+  Bus200eFwStatus z = {};
+  memcpy(z.ver, "junk!!!", 7);  // ver_valid is 0, so this must not leak out
+  n = Bus200eSysExBuildFwStatusR(&z, out, sizeof(out));
+  CHECK(n == 25 && out[17] == 0);
+  for (int i = 18; i < 25; ++i) CHECK(out[i] == 0);
+
+  // Error paths.
+  CHECK(Bus200eSysExBuildFwStatusR(&s, out, 24) < 0);
+  CHECK(Bus200eSysExBuildFwStatusR(nullptr, out, sizeof(out)) < 0);
+  Bus200eFwStatus big = s; big.served = 0x200000u;
+  CHECK(Bus200eSysExBuildFwStatusR(&big, out, sizeof(out)) < 0);
+  big = s; big.first_read_age_s = 0x4000;
+  CHECK(Bus200eSysExBuildFwStatusR(&big, out, sizeof(out)) < 0);
+  big = s; big.ver_addr = 0x80;
+  CHECK(Bus200eSysExBuildFwStatusR(&big, out, sizeof(out)) < 0);
+  big = s; big.ver[2] = 0x80;
+  CHECK(Bus200eSysExBuildFwStatusR(&big, out, sizeof(out)) < 0);
+  CHECK(Bus200eSysExBuildFwStatusR(&s, out, sizeof(out)) == 25);
+  CHECK(Bus200eSysExParseFwStatusR(out + 5, 19, &r) < 0);
+  CHECK(Bus200eSysExParseFwStatusR(out + 5, 21, &r) < 0);
+  CHECK(Bus200eSysExParseFwStatusR(out + 5, 20, nullptr) < 0);
+}
+
+static void test_scan_r_layout(void) {
+  printf("test_scan_r_layout\n");
+  const uint8_t ver[7] = { '3', '1', '.', '0', 'b', '1', ' ' };
+  uint8_t out[32];
+  int n = Bus200eSysExBuildScanR(0, 0x7F, 0x42, 1, ver, out, sizeof(out));
+  CHECK(n == 5 + 11);
+  CHECK(out[4] == 0x65 && out[5] == 0);
+  const uint8_t doc[16] = { 0x7D, 0x62, 0x35, 0x02, 0x65, 0x00, 0x7F, 0x42, 0x01,
+                            0x33, 0x31, 0x2E, 0x30, 0x62, 0x31, 0x20 };
+  CHECK(memcmp(out, doc, 16) == 0);
+  record("SCAN_R", out, n);
+
+  n = Bus200eSysExBuildScanR(3, 0x7F, 0x51, 0, nullptr, out, sizeof(out));  // no version frame
+  CHECK(n == 16 && out[5] == 3 && out[7] == 0x51 && out[8] == 0);
+  for (int i = 9; i < 16; ++i) CHECK(out[i] == 0);
+
+  CHECK(Bus200eSysExBuildScanR(0, 0x7F, 0x42, 1, ver, out, 15) < 0);
+  CHECK(Bus200eSysExBuildScanR(0, 0x7F, 0x42, 1, nullptr, out, sizeof(out)) < 0);
+  CHECK(Bus200eSysExBuildScanR(0x80, 0x7F, 0x42, 1, ver, out, sizeof(out)) < 0);
+  CHECK(Bus200eSysExBuildScanR(0, 0x7F, 0x80, 1, ver, out, sizeof(out)) < 0);
+}
+
+static void test_bus_status_r_layout(void) {
+  printf("test_bus_status_r_layout\n");
+  uint8_t out[16];
+  int n = Bus200eSysExBuildBusStatusR(0, 1, 1, 0, out, sizeof(out));
+  const uint8_t doc[9] = { 0x7D, 0x62, 0x35, 0x02, 0x67, 0x00, 0x01, 0x01, 0x00 };
+  CHECK(n == 9 && memcmp(out, doc, 9) == 0);
+  record("BUS_STATUS_R", out, n);
+  n = Bus200eSysExBuildBusStatusR(1, 0, 2, 5, out, sizeof(out));
+  CHECK(n == 9 && out[5] == 1 && out[6] == 0 && out[7] == 2 && out[8] == 5);
+  CHECK(Bus200eSysExBuildBusStatusR(0, 1, 1, 0, out, 8) < 0);
+  CHECK(Bus200eSysExBuildBusStatusR(0, 1, 0x80, 0, out, sizeof(out)) < 0);
+}
+
+static void test_vectors_written(void) {
+  printf("test_vectors_written\n");
+  const char *path = "fixtures/bus200e_sysex_vectors.json";
+  if (!getenv("BUS200E_WRITE_VECTORS")) { CHECK(true); return; }  // nothing to assert
+  CHECK(g_nvecs >= 14);
+  FILE *f = fopen(path, "w");
+  CHECK(f != nullptr);
+  if (!f) return;
+  fprintf(f, "[\n");
+  for (int i = 0; i < g_nvecs; ++i) {
+    fprintf(f, "  {\"name\": \"%s\", \"cmd\": %d, \"hex\": \"", g_vecs[i].name, g_vecs[i].cmd);
+    for (uint32_t k = 0; k < g_vecs[i].len; ++k) fprintf(f, "%02X", g_vecs[i].bytes[k]);
+    fprintf(f, "\"}%s\n", (i + 1 < g_nvecs) ? "," : "");
+  }
+  fprintf(f, "]\n");
+  fclose(f);
+  f = fopen(path, "r");
+  CHECK(f != nullptr);
+  if (f) { CHECK(fgetc(f) == '['); fclose(f); }
+}
+
 int main() {
   test_pack_unpack_round_trip();
   test_pack_exact_bytes();
@@ -558,6 +859,15 @@ int main() {
   test_full_dump_stream_shape();
   test_worked_frame_from_a_real_251e_bank();
   test_whole_251e_bank_streams_and_reassembles();
+
+  test_septets_35bit();
+  test_fw_begin_roundtrip();
+  test_fw_data_uses_fw_cmd_byte();
+  test_fw_end_arm_and_plain_commands();
+  test_fw_status_r_roundtrip();
+  test_scan_r_layout();
+  test_bus_status_r_layout();
+  test_vectors_written();
 
   printf("\ntest_bus200e_sysex: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;

@@ -291,4 +291,43 @@ int Bus200eSysExParseMessage(const uint8_t *in, uint32_t in_len,
 // without buffering the whole dump; 0 to start a fresh accumulation.
 uint8_t Bus200eSysExXor7(uint8_t acc, const uint8_t *raw, uint32_t len);
 
+// ---- firmware-card / scan / bus-status codec (docs/bus200e-sysex-fw.md) -----
+// All Build* functions write the whole message payload (the 5 header bytes
+// plus the command's fields, between F0 and F7) and return its length, or -1
+// on a null pointer, an undersized cap or a field that does not fit its
+// septets. All Parse* functions take the FIELD payload (the bytes after the
+// 5 header bytes, as Bus200eSysExParseMessage hands them back) and return 0,
+// or -1 on a wrong length, a null pointer or a non-7-bit byte.
+
+typedef struct {
+  uint8_t  armed;             // FwCardArmed()
+  uint8_t  serving;           // FwCardMode(): answering 0x50 right now
+  uint8_t  kind;              // 0 none on flash, 1 v1, 2 v2
+  uint32_t served;            // bytes the module has read (21 bits)
+  uint16_t first_read_age_s;  // seconds since the first read (14 bits); 0x3FFF = none yet
+  uint32_t image_len;         // length of the image on flash (21 bits)
+  uint8_t  ver_addr;          // module whose version frame was last seen
+  uint8_t  ver_valid;         // 0/1: ver[] holds a real frame (else sent as zeros)
+  uint8_t  ver[7];            // ASCII bytes of the last 0x13 frame
+} Bus200eFwStatus;
+
+#define BUS200E_SYSEX_FW_BEGIN_FIELDS     9   // kind + 3 length septets + 5 CRC septets
+#define BUS200E_SYSEX_FW_STATUS_R_FIELDS  20
+
+// n septets, low first <-> value. Five septets carry 35 bits, enough for a
+// CRC-32; ToSeptets drops bits above 7*n, Septets reads at most n <= 5.
+uint32_t Bus200eSysExSeptets(const uint8_t *p, int n);
+void     Bus200eSysExToSeptets(uint32_t v, uint8_t *out, int n);
+
+int Bus200eSysExBuildFwBegin(uint8_t kind, uint32_t len, uint32_t crc32,
+                              uint8_t *out, uint32_t cap);
+int Bus200eSysExParseFwBegin(const uint8_t *payload, uint32_t len,
+                              uint8_t *kind, uint32_t *image_len, uint32_t *crc32);
+int Bus200eSysExBuildFwStatusR(const Bus200eFwStatus *s, uint8_t *out, uint32_t cap);
+int Bus200eSysExParseFwStatusR(const uint8_t *payload, uint32_t len, Bus200eFwStatus *s);
+int Bus200eSysExBuildScanR(uint8_t idx, uint8_t count, uint8_t addr, uint8_t ver_valid,
+                            const uint8_t ver[7], uint8_t *out, uint32_t cap);
+int Bus200eSysExBuildBusStatusR(uint8_t wpm, uint8_t quiet, uint8_t dialect, uint8_t err,
+                                 uint8_t *out, uint32_t cap);
+
 #endif  // BUS200ESYSEX_H_
