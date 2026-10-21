@@ -8,6 +8,7 @@
 #include <LittleFS.h>
 
 #include "RtStats.h"
+#include "Buchla200eFwVersions.h"
 #include "Buchla200eWriteGuard.h"
 #include "Bus200eMaster.h"
 #include "MidiTxRing.h"
@@ -200,9 +201,19 @@ static void cb_midi(uint8_t status, uint8_t d1, uint8_t d2) {
 // whether it is the answer to the question WE asked (see Bus200eMaster.h).
 static void cb_query_reply(uint8_t from_addr, const uint8_t *ver, uint8_t n) {
   Bus200eMasterQueryReply(from_addr, ver, n);
-  // A module's version frame (0x13, sent on a front-panel hold and at boot)
-  // is rare and is the one thing a firmware flash is checked by, so print it
-  // in full every time; the debug ring keeps only its first three characters.
+  if (verbose) {
+    Serial.printf("PresetBus: QUERY reply from %02X (%u bytes)\n", from_addr, n);
+  }
+}
+
+// A module's firmware-display frame (0x13, sent on a front-panel hold --
+// nothing on the bus can ask for it). Remembered per address for the 200e
+// Modules app's responder list, the way the WPM keeps its last one in FRAM.
+// It is rare and is the one thing a firmware flash is checked by, so print
+// it in full every time; the debug ring keeps only its first three
+// characters.
+static void cb_fw_version(uint8_t from_addr, const uint8_t *ver, uint8_t n) {
+  Buchla200eFwVersionNote(from_addr, ver, n);
   Serial.printf("PresetBus: version frame from %02X (%u bytes) \"", from_addr, n);
   for (uint8_t i = 0; i < n; ++i)
     Serial.printf("%c", (ver[i] >= 0x20 && ver[i] < 0x7F) ? (char)ver[i] : '.');
@@ -271,6 +282,7 @@ static const Bus200eOps kOps = {
   cb_query_reply,
   cb_xfer_done,
   cb_load_ack,
+  cb_fw_version,
 };
 
 static bool tx_gate_open();  // defined with Task() below
@@ -484,6 +496,7 @@ static constexpr uint32_t kFwCardMaxSize = kFwCardV2Size;
 static uint32_t fw_size = BUSCARD_SIZE;  // bytes served (window) while fw_mode
 static uint8_t  fw_addr_bytes = 2;       // pointer bytes the module sends
 static uint32_t card_image_cap = 0;      // bytes allocated at card_image
+static bool     card_image_fw = false;   // card_image holds FWCARD.BIN (read-only, reloaded at every enable)
 
 // Read the card geometry off an image header. `used` is how much the module
 // has to read before the image is complete: v1 = the TOC's data-end word,
@@ -730,6 +743,7 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   // and that is the whole record of what the file holds. (Preset card only:
   // a firmware card is read-only and never flushed, see card_image_flush.)
   if (!fw_mode && got == BUSCARD_SIZE) card_sectors.adopt(card_image, Buchla200eCrc32);
+  card_image_fw = fw_mode;
   else card_sectors.forget();
   if (BusCardInitEx(card_image, size, abytes) != 0) {
     Serial.println("PresetBus: card serve failed - bad geometry");
@@ -803,6 +817,14 @@ FLASHMEM void FwCardArm(bool on) {
 FLASHMEM int FwCardBegin() {
   if (card_serving) return -1;
   if (fw_buf) { free(fw_buf); fw_buf = nullptr; }
+  // The receive buffer is sized for the 224 KB v2 card. After a firmware card
+  // has been served, its 64 KB image stays resident and RAM2 no longer has
+  // room for both (seen on the bench: 196 KB free, malloc fails, "no memory").
+  // That image is read-only and is reloaded from FWCARD.BIN at the next
+  // enable, so drop it; a preset-card capture (card_sectors) is never freed here.
+  if (card_image && card_image_fw) {
+    free(card_image); card_image = nullptr; card_image_cap = 0; card_image_fw = false;
+  }
   fw_buf = (uint8_t *)malloc(kFwCardMaxSize);
   if (!fw_buf) return -2;
   memset(fw_buf, 0xFF, kFwCardMaxSize);
