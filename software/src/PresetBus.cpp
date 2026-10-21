@@ -200,9 +200,15 @@ static void cb_midi(uint8_t status, uint8_t d1, uint8_t d2) {
 // whether it is the answer to the question WE asked (see Bus200eMaster.h).
 static void cb_query_reply(uint8_t from_addr, const uint8_t *ver, uint8_t n) {
   Bus200eMasterQueryReply(from_addr, ver, n);
-  if (verbose) {
-    Serial.printf("PresetBus: QUERY reply from %02X (%u bytes)\n", from_addr, n);
-  }
+  // A module's version frame (0x13, sent on a front-panel hold and at boot)
+  // is rare and is the one thing a firmware flash is checked by, so print it
+  // in full every time; the debug ring keeps only its first three characters.
+  Serial.printf("PresetBus: version frame from %02X (%u bytes) \"", from_addr, n);
+  for (uint8_t i = 0; i < n; ++i)
+    Serial.printf("%c", (ver[i] >= 0x20 && ver[i] < 0x7F) ? (char)ver[i] : '.');
+  Serial.print("\" hex:");
+  for (uint8_t i = 0; i < n; ++i) Serial.printf(" %02X", ver[i]);
+  Serial.println();
 }
 
 // A module saying it is done with the card -- the 251e's [04 22 5C 0A 5C]
