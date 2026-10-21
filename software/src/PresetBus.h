@@ -109,7 +109,15 @@ bool CardServing();
 // Load an image over the console with 'H' (see docs/bench-console.md).
 void NoteBoot(uint8_t slot);                          // boot-timeline checkpoint (slot 0..3), shown by the bus dump
 void FwCardEarlyServe();                              // call right after Wire.begin(): serve FWCARD.BIN if armed
-int  FwCardBegin();                                   // start a load: 0 ok, <0 refused
+int  FwCardBegin(uint8_t kind = 0);                   // start a load: 0 ok, <0 refused; kind 1/2 sizes the buffer now, 0 from the magic
+uint32_t FwCardServedBytes();                         // bytes the module has read of the served image
+uint32_t FwCardFirstReadAgeS();                       // seconds since its first read, 0xFFFFFFFF = never
+uint32_t FwCardImageLen();                            // bytes the module reads of FWCARD.BIN, 0 = no image
+uint8_t  FwCardImageKind();                           // 1 (v1 8051) / 2 (v2 AVR32) from the magic, 0 = none
+bool BusQuiet();                                      // the master paths' TX gate is open
+uint8_t BusDialect();                                 // 1 long/PRIMO, 2 short/V2, 0 none yet
+uint8_t LastVersionAddr();                            // address of the last 0x13 version frame, 0 = none
+int SendPollDone();                                   // raw POLL_DONE frame: 0 ok, <0 not sent
 void FwCardPush(uint8_t b);                           // next image byte
 int  FwCardCommit(uint32_t len, uint32_t crc32);      // verify + write FWCARD.BIN + arm: 0 ok
 void FwCardAbort();
@@ -265,7 +273,15 @@ inline int CardServeEnable(bool) { return -1; }
 inline bool CardServing() { return false; }
 inline void NoteBoot(uint8_t) {}
 inline void FwCardEarlyServe() {}
-inline int  FwCardBegin() { return -1; }
+inline int  FwCardBegin(uint8_t = 0) { return -1; }
+inline uint32_t FwCardServedBytes() { return 0; }
+inline uint32_t FwCardFirstReadAgeS() { return 0xFFFFFFFFu; }
+inline uint32_t FwCardImageLen() { return 0; }
+inline uint8_t FwCardImageKind() { return 0; }
+inline bool BusQuiet() { return true; }
+inline uint8_t BusDialect() { return 0; }
+inline uint8_t LastVersionAddr() { return 0; }
+inline int SendPollDone() { return -1; }
 inline void FwCardPush(uint8_t) {}
 inline int  FwCardCommit(uint32_t, uint32_t) { return -1; }
 inline void FwCardAbort() {}

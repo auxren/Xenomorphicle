@@ -229,8 +229,10 @@ static void cb_query_reply(uint8_t from_addr, const uint8_t *ver, uint8_t n) {
 // It is rare and is the one thing a firmware flash is checked by, so print
 // it in full every time; the debug ring keeps only its first three
 // characters.
+static uint8_t last_version_addr = 0;   // address of the most recent 0x13 frame (0 = none)
 static void cb_fw_version(uint8_t from_addr, const uint8_t *ver, uint8_t n) {
   Buchla200eFwVersionNote(from_addr, ver, n);
+  last_version_addr = from_addr;
   Serial.printf("PresetBus: version frame from %02X (%u bytes) \"", from_addr, n);
   for (uint8_t i = 0; i < n; ++i)
     Serial.printf("%c", (ver[i] >= 0x20 && ver[i] < 0x7F) ? (char)ver[i] : '.');
@@ -862,7 +864,9 @@ FLASHMEM void FwCardArm(bool on) {
                 FwCardArmed() ? "ARMED" : "disarmed");
 }
 
-FLASHMEM int FwCardBegin() {
+// kind: 1 = v1 (64 KB) or 2 = v2 (0x38000) sizes the buffer up front; 0 sizes
+// it from the image magic as the bytes arrive (the bench console's H path).
+FLASHMEM int FwCardBegin(uint8_t kind) {
   if (card_serving) return -1;
   if (fw_buf) { free(fw_buf); fw_buf = nullptr; }
   // The receive buffer is sized for the 224 KB v2 card. After a firmware card
@@ -882,6 +886,13 @@ FLASHMEM int FwCardBegin() {
   fw_idx = 0;
   fw_cap = 0;
   fw_nomem = false;
+  if (kind == 1 || kind == 2) {
+    const uint32_t cap = (kind == 2) ? kFwCardV2Size : BUSCARD_SIZE;
+    fw_buf = (uint8_t *)malloc(cap);
+    if (!fw_buf) return -6;
+    memset(fw_buf, 0xFF, cap);
+    fw_cap = cap;
+  }
   return 0;
 }
 
@@ -899,6 +910,32 @@ void FwCardPush(uint8_t b) {
     return;
   }
   if (fw_idx < fw_cap) fw_buf[fw_idx++] = b;
+}
+
+// Bytes the module has read from the served image so far.
+uint32_t FwCardServedBytes() { return (fw_mode && card_serving) ? BusCardGetStats()->bytes_read : 0; }
+
+// Seconds since the module's first read of the served card, 0xFFFFFFFF if none.
+uint32_t FwCardFirstReadAgeS() {
+  if (!fw_mode || !fw_first_read_ms) return 0xFFFFFFFFu;
+  return (millis() - fw_first_read_ms) / 1000u;
+}
+
+// Header of FWCARD.BIN: kind 1/2 from the magic, length = bytes the module reads.
+FLASHMEM static bool fw_file_geometry(uint32_t *size, uint8_t *abytes, uint32_t *used) {
+  uint8_t hdr[0x2B];
+  File h = PhzConfig::myfs.open(kFwCardFile, FILE_READ);
+  const bool got = h && h.read(hdr, sizeof(hdr)) == sizeof(hdr);
+  if (h) h.close();
+  return got && fw_geometry(hdr, size, abytes, used);
+}
+FLASHMEM uint32_t FwCardImageLen() {
+  uint32_t s, u; uint8_t a;
+  return fw_file_geometry(&s, &a, &u) ? u : 0;
+}
+FLASHMEM uint8_t FwCardImageKind() {
+  uint32_t s, u; uint8_t a;
+  return fw_file_geometry(&s, &a, &u) ? (a == 3 ? 2 : 1) : 0;
 }
 
 FLASHMEM void FwCardAbort() {
@@ -1543,6 +1580,20 @@ FLASHMEM static bool tx_gate_open() {
   return true;
 }
 
+bool BusQuiet() { return tx_gate_open(); }
+
+// 1 = long/PRIMO framing seen most, 2 = short/V2, 0 = no frame parsed yet.
+uint8_t BusDialect() {
+  const Bus200eStats *d = Bus200eGetStats();
+  if (!d->frames_long && !d->frames_short) return 0;
+  return d->frames_long >= d->frames_short ? 1 : 2;
+}
+
+uint8_t LastVersionAddr() { return last_version_addr; }
+
+static constexpr uint8_t kPollDone[] = { 0x04, 0x00, 0x22, 0x14, 0xFF };
+FLASHMEM int SendPollDone() { return SendRawFrame(kPollDone, sizeof(kPollDone)); }
+
 static uint32_t loop_rate_hz = 0;
 
 // ---- boot-time POLL_DONE (WPM-less case) ----
@@ -1568,8 +1619,7 @@ FLASHMEM static void pump_boot_poll() {
   if (wpm_present) { done = true; return; }
   if (last_try_ms && millis() - last_try_ms < BOOT_POLL_RETRY_MS) return;
   last_try_ms = millis() ? millis() : 1;
-  static const uint8_t kPollDone[] = { 0x04, 0x00, 0x22, 0x14, 0xFF };
-  const int err = SendRawFrame(kPollDone, sizeof(kPollDone));
+  const int err = SendPollDone();
   if (err == 0) {
     done = true;
     if (verbose) Serial.println("PresetBus: sent boot POLL_DONE (no WPM)");

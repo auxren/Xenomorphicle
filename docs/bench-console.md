@@ -256,6 +256,8 @@ an afternoon went missing on 2026-08-27.
 
 ## Firmware-card mode: flash a 200e module with no WPM and no USB card
 
+The USB-MIDI SysEx bridge now performs the `H` (load an image), `M` (arm/disarm) and `b` (progress) functions for a host app, so a flash no longer needs this console; see `docs/bus200e-sysex-fw.md`.
+
 A module's bootloader (power on with its Remote / load button held) reads a v1
 firmware card image from address 0x50 **once, right after power-up**. A WPM
 answers instantly because it is always on; the Xenomorpher used to start

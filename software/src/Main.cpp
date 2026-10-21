@@ -1714,7 +1714,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
             break;
           case 'b': OC::PresetBus::DebugDump(); break;
           case 'H':  // load a firmware-card image into FWCARD.BIN (host tool streams it)
-            if (OC::PresetBus::FwCardBegin() == 0) {
+            if (OC::PresetBus::FwCardBegin(0) == 0) {
               fwload_pending = true;
               fwload_phase = 0;
               fwload_nib = -1;

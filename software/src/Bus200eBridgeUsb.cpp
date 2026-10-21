@@ -10,6 +10,7 @@
 #include "Bus200eMaster.h"
 #include "PresetBus.h"
 #include "PresetBusCard.h"
+#include "Buchla200eFwVersions.h"
 
 namespace OC {
 namespace Bus200eBridgeUsb {
@@ -65,6 +66,33 @@ static void op_send_message(const uint8_t *payload, uint32_t len) {
   usbMIDI.sendSysEx(len + 2, frame, true);
 }
 
+static int op_fw_begin(uint8_t kind) { return OC::PresetBus::FwCardBegin(kind); }
+static void op_fw_push(uint8_t b) { OC::PresetBus::FwCardPush(b); }
+static int op_fw_commit(uint32_t len, uint32_t crc) { return OC::PresetBus::FwCardCommit(len, crc); }
+static void op_fw_abort() { OC::PresetBus::FwCardAbort(); }
+static int op_fw_armed() { return OC::PresetBus::FwCardArmed() ? 1 : 0; }
+static void op_fw_arm(int on) { OC::PresetBus::FwCardArm(on != 0); }
+static int op_fw_serving() { return OC::PresetBus::FwCardMode() ? 1 : 0; }
+static uint32_t op_fw_served_bytes() { return OC::PresetBus::FwCardServedBytes(); }
+static uint32_t op_fw_first_read_age_s() { return OC::PresetBus::FwCardFirstReadAgeS(); }
+static uint32_t op_fw_image_len() { return OC::PresetBus::FwCardImageLen(); }
+static uint8_t op_fw_image_kind() { return OC::PresetBus::FwCardImageKind(); }
+static int op_wpm_present() { return OC::PresetBus::WpmPresent() ? 1 : 0; }
+static int op_query_start(uint8_t addr) { return OC::PresetBus::MasterQuery(addr); }
+static Bus200eQueryState op_query_state() { return OC::PresetBus::MasterQueryState(); }
+static void op_query_reset() { OC::PresetBus::MasterQueryReset(); }
+static int op_fw_version_get(uint8_t addr, uint8_t out[7]) {
+  char s[16];
+  if (Buchla200eFwVersionGet(addr, s, sizeof(s)) <= 0) return 0;
+  memset(out, ' ', 7);
+  for (int i = 0; i < 7 && s[i]; ++i) out[i] = (uint8_t) s[i];
+  return 1;
+}
+static int op_send_poll_done() { return OC::PresetBus::SendPollDone(); }
+static int op_bus_quiet() { return OC::PresetBus::BusQuiet() ? 1 : 0; }
+static uint8_t op_bus_dialect() { return OC::PresetBus::BusDialect(); }
+static uint8_t op_last_version_addr() { return OC::PresetBus::LastVersionAddr(); }
+
 // card_mark_dirty is deliberately NULL. PresetBus.h flags it as an open
 // design question that a foreign-module capture shares PBCARD.BIN with
 // ordinary local card serving; leaving the image undirtied means the bytes a
@@ -77,6 +105,11 @@ static const Bus200eBridgeOps kOps = {
   op_master_backup, op_master_restore, op_master_state, op_master_error,
   op_master_bytes, op_master_reset,
   op_send_message,
+  op_fw_begin, op_fw_push, op_fw_commit, op_fw_abort, op_fw_armed, op_fw_arm,
+  op_fw_serving, op_fw_served_bytes, op_fw_first_read_age_s, op_fw_image_len,
+  op_fw_image_kind, op_wpm_present,
+  op_query_start, op_query_state, op_query_reset, op_fw_version_get,
+  op_send_poll_done, op_bus_quiet, op_bus_dialect, op_last_version_addr,
 };
 
 // ---- public ----------------------------------------------------------------
