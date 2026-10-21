@@ -72,9 +72,17 @@ static volatile uint8_t card_addr7 = BUS200E_CARD_BASE;
 static volatile bool in_card_txn = false;   // current txn targets card_addr7
 static volatile bool card_tx_open = false;  // read leg started (stats only)
 static volatile uint16_t staged_addr = 0xFFFF;  // latest SASR RADDR (addr<<1|R)
+// Diagnostics for a module bootloader that never reads the card (251e, bench
+// 2026-10-20): when the first slave interrupt of any kind came, and the last
+// eight addresses this slave was called at (SASR value: addr<<1 | R).
+static volatile uint32_t diag_first_isr_ms = 0;
+static volatile uint16_t diag_addr[8];
+static volatile uint32_t diag_addr_ms[8];
+static volatile uint8_t  diag_addr_n = 0;
 
 static void lpi2c1_slave_isr() {
   stats.isr_count++;
+  if (!diag_first_isr_ms) diag_first_isr_ms = millis() ? millis() : 1;
   uint32_t status = LPI2C1_SSR;
   const uint32_t w1c = status & 0xF00;
   if (w1c) LPI2C1_SSR = w1c;
@@ -84,7 +92,13 @@ static void lpi2c1_slave_isr() {
   // txn raises TDF before any routing decision is consumed below.
   if (card_serving && (status & LPI2C_SSR_AVF)) {
     const uint32_t sasr = LPI2C1_SASR;
-    if (!(sasr & LPI2C_SASR_ANV)) staged_addr = sasr & 0x7FF;
+    if (!(sasr & LPI2C_SASR_ANV)) {
+      staged_addr = sasr & 0x7FF;
+      const uint8_t k = diag_addr_n & 7;
+      diag_addr[k] = staged_addr;
+      diag_addr_ms[k] = millis();
+      diag_addr_n++;
+    }
   }
 
   if (status & LPI2C_SSR_RDF) {
@@ -537,7 +551,15 @@ FLASHMEM static void slave_reconfig(bool serve, uint8_t addr7 = BUS200E_CARD_BAS
   uint32_t cfg1 = LPI2C_SCFGR1_GCEN | LPI2C_SCFGR1_RXSTALL;
   uint32_t samr = LPI2C_SAMR_ADDR0(0);  // belt and braces alongside GCEN
   uint32_t sier = LPI2C_SIER_RDIE | LPI2C_SIER_SDIE | LPI2C_SIER_RSIE;
-  if (serve) {
+  if (serve && fw_mode) {
+    // Firmware card: answer the whole 0x50..0x57 block range (a 24LC1025-style
+    // card selects its upper half by address bit), log which address the
+    // module's bootloader actually uses (diag_addr), and serve only addr7.
+    cfg1 |= LPI2C_SCFGR1_ADDRCFG(6)   // 7-bit, ADDR0 through ADDR1 inclusive
+          | LPI2C_SCFGR1_TXDSTALL;
+    samr = LPI2C_SAMR_ADDR0(addr7 & 0x78) | LPI2C_SAMR_ADDR1((addr7 & 0x78) | 0x07);
+    sier |= LPI2C_SIER_TDIE;
+  } else if (serve) {
     cfg1 |= LPI2C_SCFGR1_ADDRCFG(2)   // match ADDR0 (7-bit) OR ADDR1 (7-bit)
           | LPI2C_SCFGR1_TXDSTALL;    // stretch SCL until STDR is fed
     samr |= LPI2C_SAMR_ADDR1(addr7 & 0x7F);
@@ -1649,6 +1671,12 @@ FLASHMEM void DebugDump() {
   Serial.printf("isr=%lu starts=%lu stops=%lu bytes=%lu ring_ovf=%lu\n",
                 stats.isr_count, stats.starts, stats.stops, stats.bytes,
                 stats.ring_ovf);
+  Serial.printf("diag: first slave isr at +%lu ms; addresses seen (sasr@ms):", (unsigned long)diag_first_isr_ms);
+  for (uint8_t i = 0; i < 8 && i < diag_addr_n; ++i) {
+    const uint8_t k = (diag_addr_n > 8) ? (uint8_t)((diag_addr_n + i) & 7) : i;
+    Serial.printf(" %02X@%lu", diag_addr[k], (unsigned long)diag_addr_ms[k]);
+  }
+  Serial.println();
   Serial.printf("hw: ring=%lu/%u midi_rx=%lu/%u midi_tx=%lu/%u | stuck=%lu recovered=%lu\n",
                 stats.ring_hw, kRingSize, stats.midi_rx_hw, kMidiRingRx,
                 stats.midi_tx_hw, kMidiRingTx, stats.bus_stuck,
