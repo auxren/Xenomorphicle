@@ -104,12 +104,40 @@ static void f_send(const uint8_t *payload, uint32_t len) {
   sent.push_back(m);
 }
 
+// ---- fake firmware-card side (docs/bus200e-sysex-fw.md) ----------------------
+static int fw_begin_result, fw_begin_calls, fw_commit_result, fw_commit_calls;
+static uint8_t fw_begin_kind;
+static uint32_t fw_commit_len, fw_commit_crc;
+static int fw_abort_calls, fw_armed_calls;
+static int fw_armed_v, fw_serving_v, fw_wpm_v;
+static std::vector<uint8_t> fw_pushed;
+static int fw_arm_calls, fw_arm_last;
+static uint32_t fw_served_v, fw_age_v, fw_len_v;
+static uint8_t fw_kind_v;
+
+static int f_fw_begin(uint8_t k) { fw_begin_calls++; fw_begin_kind = k; return fw_begin_result; }
+static void f_fw_push(uint8_t b) { fw_pushed.push_back(b); }
+static int f_fw_commit(uint32_t l, uint32_t c) {
+  fw_commit_calls++; fw_commit_len = l; fw_commit_crc = c; return fw_commit_result;
+}
+static void f_fw_abort() { fw_abort_calls++; }
+static int f_fw_armed() { fw_armed_calls++; return fw_armed_v; }
+static void f_fw_arm(int on) { fw_arm_calls++; fw_arm_last = on; }
+static int f_fw_serving() { return fw_serving_v; }
+static uint32_t f_fw_served() { return fw_served_v; }
+static uint32_t f_fw_age() { return fw_age_v; }
+static uint32_t f_fw_len() { return fw_len_v; }
+static uint8_t f_fw_kind() { return fw_kind_v; }
+static int f_wpm() { return fw_wpm_v; }
+
 static const Bus200eBridgeOps fake_ops = {
   f_now,
   f_card_serving, f_card_serve_enable, f_card_image, f_card_size, f_card_dirty,
   f_master_backup, f_master_restore, f_master_state, f_master_error,
   f_master_bytes, f_master_reset,
   f_send,
+  f_fw_begin, f_fw_push, f_fw_commit, f_fw_abort, f_fw_armed, f_fw_arm,
+  f_fw_serving, f_fw_served, f_fw_age, f_fw_len, f_fw_kind, f_wpm,
 };
 
 static void reset_all(uint32_t card_size = kFakeCardSmall) {
@@ -129,6 +157,13 @@ static void reset_all(uint32_t card_size = kFakeCardSmall) {
   fake_bytes = 0;
   fake_reset_calls = 0;
   fake_dirty_calls = 0;
+  fw_begin_result = 0; fw_begin_calls = 0; fw_commit_result = 0; fw_commit_calls = 0;
+  fw_begin_kind = 0; fw_commit_len = 0; fw_commit_crc = 0;
+  fw_abort_calls = 0; fw_armed_calls = 0;
+  fw_armed_v = fw_serving_v = fw_wpm_v = 0;
+  fw_pushed.clear();
+  fw_arm_calls = 0; fw_arm_last = -1;
+  fw_served_v = fw_age_v = fw_len_v = 0; fw_kind_v = 0;
   sent.clear();
   Bus200eBridgeInit(&fake_ops);
 }
@@ -699,6 +734,454 @@ static void test_uninitialised_is_inert() {
   Bus200eBridgeInit(&fake_ops);
 }
 
+// ---- firmware-card load session ------------------------------------------------
+
+// FW_BEGIN for `kind`, `len`, `crc`, through the codec (what the app sends).
+static void feed_fw_begin(uint8_t kind, uint32_t len, uint32_t crc) {
+  uint8_t msg[BUS200E_SYSEX_MAX_MESSAGE];
+  const int n = Bus200eSysExBuildFwBegin(kind, len, crc, msg, sizeof(msg));
+  assert(n > 0);
+  Bus200eBridgeHandleSysEx(msg, (uint32_t) n);
+}
+
+static void feed_fw_data(uint16_t seq, uint16_t total, const uint8_t *chunk, uint32_t n) {
+  const uint8_t hdr[BUS200E_SYSEX_DUMP_HDR_BYTES] = {
+    BUS200E_SYSEX_LO7(seq), BUS200E_SYSEX_HI7(seq),
+    BUS200E_SYSEX_LO7(total), BUS200E_SYSEX_HI7(total),
+  };
+  uint8_t msg[BUS200E_SYSEX_MAX_MESSAGE];
+  const int r = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_FW_DATA, hdr, sizeof(hdr),
+                                         chunk, n, msg, sizeof(msg));
+  assert(r > 0);
+  Bus200eBridgeHandleSysEx(msg, (uint32_t) r);
+}
+
+static void feed_fw_end(uint16_t n, uint8_t xor7) {
+  feed(BUS200E_SYSEX_CMD_FW_END, { BUS200E_SYSEX_LO7(n), BUS200E_SYSEX_HI7(n), xor7 });
+}
+
+static bool is_ack(const SentMsg *m, std::initializer_list<uint8_t> want) {
+  return m && m->cmd == BUS200E_SYSEX_CMD_ACK &&
+         m->raw == std::vector<uint8_t>(want);
+}
+
+// n raw bytes of a deterministic pattern with high bits set.
+static std::vector<uint8_t> fw_image(uint32_t n) {
+  std::vector<uint8_t> v(n);
+  for (uint32_t i = 0; i < n; ++i) v[i] = (uint8_t) (i * 37u + 0x91u);
+  return v;
+}
+
+// Begin a kind-2 load of `len` bytes; returns with the device FW_RECEIVING.
+static void begin_ok(uint32_t len = 126, uint32_t crc = 0x12345678) {
+  feed_fw_begin(2, len, crc);
+  assert(is_ack(last_sent(), { BUS200E_SYSEX_CMD_FW_BEGIN }));
+  assert(Bus200eBridgeGetState() == BUS200E_BRIDGE_FW_RECEIVING);
+  sent.clear();
+}
+
+static void test_fw_begin_acks_and_enters_receiving() {
+  printf("test_fw_begin_acks_and_enters_receiving\n");
+  reset_all();
+  feed_fw_begin(2, 54186, 0x12345678);
+  CHECK(is_ack(last_sent(), { 0x20 }));
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_FW_RECEIVING);
+  CHECK(fw_begin_calls == 1 && fw_begin_kind == 2);
+  CHECK(fw_abort_calls == 0);
+}
+
+static void test_fw_begin_naks_busy_when_serving() {
+  printf("test_fw_begin_naks_busy_when_serving\n");
+  reset_all();
+  fake_serving = 1;
+  feed_fw_begin(2, 1000, 1);
+  CHECK(nak_code(last_sent()) == 10);
+  CHECK(last_sent()->raw[0] == BUS200E_SYSEX_CMD_FW_BEGIN);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(fw_begin_calls == 0);
+  // firmware-card serving counts too
+  reset_all();
+  fw_serving_v = 1;
+  feed_fw_begin(2, 1000, 1);
+  CHECK(nak_code(last_sent()) == 10);
+  CHECK(fw_begin_calls == 0);
+  // and so does a running master job / another session
+  reset_all();
+  fake_state = BUS200E_MASTER_SENDING;
+  feed_fw_begin(2, 1000, 1);
+  CHECK(nak_code(last_sent()) == 10);
+  CHECK(fw_begin_calls == 0);
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x5C });
+  sent.clear();
+  feed_fw_begin(2, 1000, 1);
+  CHECK(nak_code(last_sent()) == 10);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_RECEIVING);
+}
+
+static void test_fw_begin_naks_no_free_card_when_wpm() {
+  printf("test_fw_begin_naks_no_free_card_when_wpm\n");
+  reset_all();
+  fw_wpm_v = 1;
+  feed_fw_begin(1, 1000, 1);
+  CHECK(nak_code(last_sent()) == 7);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(fw_begin_calls == 0);
+}
+
+static void test_fw_begin_naks_nomem() {
+  printf("test_fw_begin_naks_nomem\n");
+  reset_all();
+  fw_begin_result = -6;
+  feed_fw_begin(2, 1000, 1);
+  CHECK(nak_code(last_sent()) == 11);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  // any other refusal is FW_BUSY
+  reset_all();
+  fw_begin_result = -1;
+  feed_fw_begin(2, 1000, 1);
+  CHECK(nak_code(last_sent()) == 10);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+}
+
+static void test_fw_begin_rejects_oversize_len() {
+  printf("test_fw_begin_rejects_oversize_len\n");
+  reset_all();
+  feed_fw_begin(1, 65537, 1);
+  CHECK(nak_code(last_sent()) == 12);
+  feed_fw_begin(2, 0x38001, 1);
+  CHECK(nak_code(last_sent()) == 12);
+  feed_fw_begin(2, 0x5F, 1);
+  CHECK(nak_code(last_sent()) == 12);
+  feed_fw_begin(2, 0, 1);
+  CHECK(nak_code(last_sent()) == 12);
+  CHECK(fw_begin_calls == 0);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  // the edges are accepted
+  feed_fw_begin(1, 65536, 1);
+  CHECK(is_ack(last_sent(), { 0x20 }));
+  Bus200eBridgeAbort();
+  feed_fw_begin(2, 0x38000, 1);
+  CHECK(is_ack(last_sent(), { 0x20 }));
+  Bus200eBridgeAbort();
+  feed_fw_begin(2, 0x60, 1);
+  CHECK(is_ack(last_sent(), { 0x20 }));
+  CHECK(fw_begin_calls == 3);
+}
+
+static void test_fw_begin_rejects_bad_kind() {
+  printf("test_fw_begin_rejects_bad_kind\n");
+  reset_all();
+  feed_fw_begin(0, 1000, 1);
+  CHECK(nak_code(last_sent()) == 13);
+  feed_fw_begin(3, 1000, 1);
+  CHECK(nak_code(last_sent()) == 13);
+  CHECK(fw_begin_calls == 0);
+}
+
+static void test_fw_begin_again_while_receiving_aborts() {
+  printf("test_fw_begin_again_while_receiving_aborts\n");
+  reset_all();
+  begin_ok();
+  feed_fw_begin(2, 126, 1);
+  CHECK(nak_code(last_sent()) == 10);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(fw_abort_calls == 1);
+  CHECK(fw_begin_calls == 1);
+}
+
+static void test_fw_data_streams_bytes_in_order() {
+  printf("test_fw_data_streams_bytes_in_order\n");
+  reset_all();
+  begin_ok(126);
+  const std::vector<uint8_t> img = fw_image(126);
+  for (uint16_t i = 0; i < 3; ++i) {
+    feed_fw_data(i, 3, img.data() + i * 42, 42);
+    CHECK(is_ack(last_sent(), { 0x21, BUS200E_SYSEX_LO7(i), BUS200E_SYSEX_HI7(i) }));
+  }
+  CHECK(fw_pushed == img);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_FW_RECEIVING);
+  CHECK(fw_abort_calls == 0);
+}
+
+static void test_fw_data_short_last_packet() {
+  printf("test_fw_data_short_last_packet\n");
+  reset_all();
+  begin_ok(96);   // 3 packets: 42 + 42 + 12
+  const std::vector<uint8_t> img = fw_image(126);
+  feed_fw_data(0, 3, img.data(), 42);
+  feed_fw_data(1, 3, img.data() + 42, 42);
+  feed_fw_data(2, 3, img.data() + 84, 12);
+  CHECK(is_ack(last_sent(), { 0x21, 2, 0 }));
+  CHECK(fw_pushed == std::vector<uint8_t>(img.begin(), img.begin() + 96));
+  // a short NON-last packet is a sequence error
+  reset_all();
+  begin_ok(126);
+  feed_fw_data(0, 3, img.data(), 41);
+  CHECK(nak_code(last_sent()) == 16);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(fw_abort_calls == 1);
+}
+
+static void test_fw_data_out_of_sequence_naks() {
+  printf("test_fw_data_out_of_sequence_naks\n");
+  const std::vector<uint8_t> img = fw_image(126);
+  reset_all();
+  begin_ok(126);
+  feed_fw_data(0, 3, img.data(), 42);
+  sent.clear();
+  feed_fw_data(2, 3, img.data() + 84, 42);
+  CHECK(nak_code(last_sent()) == 16);
+  CHECK(last_sent()->raw[0] == BUS200E_SYSEX_CMD_FW_DATA);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(fw_abort_calls == 1);
+  CHECK(fw_pushed.size() == 42);   // nothing from the bad packet
+  // a changed total
+  reset_all();
+  begin_ok(126);
+  feed_fw_data(0, 4, img.data(), 42);
+  CHECK(nak_code(last_sent()) == 16);
+  CHECK(fw_abort_calls == 1 && fw_pushed.empty());
+  // a repeated packet
+  reset_all();
+  begin_ok(126);
+  feed_fw_data(0, 3, img.data(), 42);
+  feed_fw_data(0, 3, img.data(), 42);
+  CHECK(nak_code(last_sent()) == 16);
+  CHECK(fw_abort_calls == 1);
+  // a packet past len (total 3 -> len 126; 4th packet)
+  reset_all();
+  begin_ok(126);
+  for (uint16_t i = 0; i < 3; ++i) feed_fw_data(i, 3, img.data() + i * 42, 42);
+  feed_fw_data(3, 3, img.data(), 42);
+  CHECK(nak_code(last_sent()) == 16);
+  CHECK(fw_pushed.size() == 126);
+  CHECK(fw_abort_calls == 1);
+  // a last packet that would run past len
+  reset_all();
+  begin_ok(96);
+  feed_fw_data(0, 3, img.data(), 42);
+  feed_fw_data(1, 3, img.data() + 42, 42);
+  feed_fw_data(2, 3, img.data() + 84, 13);
+  CHECK(nak_code(last_sent()) == 16);
+  CHECK(fw_pushed.size() == 84);
+  // FW_DATA with no FW_BEGIN
+  reset_all();
+  feed_fw_data(0, 3, img.data(), 42);
+  CHECK(nak_code(last_sent()) == 16);
+  CHECK(fw_pushed.empty());
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+}
+
+static void test_fw_data_malformed_chunk_naks() {
+  printf("test_fw_data_malformed_chunk_naks\n");
+  reset_all();
+  begin_ok(126);
+  // seq 0, total 3, then a lone hi-bits byte with no data after it
+  const uint8_t bad[] = { BUS200E_SYSEX_MFR_ID, BUS200E_SYSEX_FAMILY_ID,
+                          BUS200E_SYSEX_APP_ID, BUS200E_SYSEX_PROTO_VER,
+                          BUS200E_SYSEX_CMD_FW_DATA, 0, 0, 3, 0, 0x01 };
+  Bus200eBridgeHandleSysEx(bad, sizeof(bad));
+  CHECK(nak_code(last_sent()) == 16);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(fw_abort_calls == 1);
+}
+
+static void test_fw_end_commits_and_arms() {
+  printf("test_fw_end_commits_and_arms\n");
+  reset_all();
+  begin_ok(126, 0x12345678);
+  const std::vector<uint8_t> img = fw_image(126);
+  for (uint16_t i = 0; i < 3; ++i) feed_fw_data(i, 3, img.data() + i * 42, 42);
+  sent.clear();
+  const uint8_t x = Bus200eSysExXor7(0, img.data(), 126);
+  feed_fw_end(3, x);
+  CHECK(is_ack(last_sent(), { 0x22, 3, 0 }));
+  CHECK(fw_commit_calls == 1 && fw_commit_len == 126 && fw_commit_crc == 0x12345678u);
+  CHECK(fw_armed_calls == 0);
+  CHECK(fw_abort_calls == 0);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+}
+
+static void test_fw_end_short_leaves_unarmed() {
+  printf("test_fw_end_short_leaves_unarmed\n");
+  const std::vector<uint8_t> img = fw_image(126);
+  reset_all();
+  begin_ok(126);
+  feed_fw_data(0, 3, img.data(), 42);
+  feed_fw_data(1, 3, img.data() + 42, 42);
+  feed_fw_end(2, Bus200eSysExXor7(0, img.data(), 84));   // n != total
+  CHECK(nak_code(last_sent()) == 6);
+  CHECK(last_sent()->raw[0] == BUS200E_SYSEX_CMD_FW_END);
+  CHECK(fw_commit_calls == 0);
+  CHECK(fw_abort_calls == 1);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  // right n as claimed, but fewer received
+  reset_all();
+  begin_ok(126);
+  feed_fw_data(0, 3, img.data(), 42);
+  feed_fw_end(3, Bus200eSysExXor7(0, img.data(), 42));
+  CHECK(nak_code(last_sent()) == 6);
+  CHECK(fw_commit_calls == 0 && fw_abort_calls == 1);
+  // bad xor7
+  reset_all();
+  begin_ok(126);
+  for (uint16_t i = 0; i < 3; ++i) feed_fw_data(i, 3, img.data() + i * 42, 42);
+  feed_fw_end(3, (uint8_t) (Bus200eSysExXor7(0, img.data(), 126) ^ 1));
+  CHECK(nak_code(last_sent()) == 6);
+  CHECK(fw_commit_calls == 0 && fw_abort_calls == 1);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  // FW_END with no load
+  reset_all();
+  feed_fw_end(3, 0);
+  CHECK(nak_code(last_sent()) == 16);
+  CHECK(fw_commit_calls == 0);
+}
+
+static void test_fw_end_maps_commit_codes() {
+  printf("test_fw_end_maps_commit_codes\n");
+  const std::vector<uint8_t> img = fw_image(126);
+  const struct { int rc; int nak; } map[] = {
+    { -1, 11 }, { -2, 12 }, { -3, 13 }, { -4, 14 }, { -5, 15 }, { -6, 11 },
+  };
+  for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); ++i) {
+    reset_all();
+    fw_commit_result = map[i].rc;
+    begin_ok(126);
+    for (uint16_t k = 0; k < 3; ++k) feed_fw_data(k, 3, img.data() + k * 42, 42);
+    feed_fw_end(3, Bus200eSysExXor7(0, img.data(), 126));
+    CHECK(nak_code(last_sent()) == map[i].nak);
+    CHECK(last_sent()->raw[0] == BUS200E_SYSEX_CMD_FW_END);
+    CHECK(fw_commit_calls == 1);
+    CHECK(fw_abort_calls == 1);
+    CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  }
+}
+
+static void test_fw_arm_off_calls_fw_arm_0() {
+  printf("test_fw_arm_off_calls_fw_arm_0\n");
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_FW_ARM, { 0 });
+  CHECK(is_ack(last_sent(), { 0x23, 0 }));
+  CHECK(fw_arm_calls == 1 && fw_arm_last == 0);
+  feed(BUS200E_SYSEX_CMD_FW_ARM, { 1 });
+  CHECK(is_ack(last_sent(), { 0x23, 1 }));
+  CHECK(fw_arm_calls == 2 && fw_arm_last == 1);
+  feed(BUS200E_SYSEX_CMD_FW_ARM, { 2 });
+  CHECK(nak_code(last_sent()) == 2);
+  feed(BUS200E_SYSEX_CMD_FW_ARM, {});
+  CHECK(nak_code(last_sent()) == 2);
+  CHECK(fw_arm_calls == 2);
+  // allowed mid-load, and does not disturb it
+  begin_ok();
+  feed(BUS200E_SYSEX_CMD_FW_ARM, { 1 });
+  CHECK(is_ack(last_sent(), { 0x23, 1 }));
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_FW_RECEIVING);
+  CHECK(fw_abort_calls == 0);
+}
+
+static void test_fw_status_r_reports_ops() {
+  printf("test_fw_status_r_reports_ops\n");
+  reset_all();
+  fw_armed_v = 1; fw_serving_v = 1; fw_kind_v = 2;
+  fw_served_v = 54186; fw_age_v = 7; fw_len_v = 54186;
+  feed(BUS200E_SYSEX_CMD_FW_STATUS, {});
+  const SentMsg *m = last_sent();
+  CHECK(m && m->cmd == BUS200E_SYSEX_CMD_FW_STATUS_R);
+  Bus200eFwStatus s = {};
+  CHECK(m && Bus200eSysExParseFwStatusR(m->raw.data(), (uint32_t) m->raw.size(), &s) == 0);
+  CHECK(s.armed == 1 && s.serving == 1 && s.kind == 2);
+  CHECK(s.served == 54186 && s.first_read_age_s == 7 && s.image_len == 54186);
+  CHECK(s.ver_addr == 0 && s.ver_valid == 0);
+  for (int i = 0; i < 7; ++i) CHECK(s.ver[i] == 0x20);
+  // never read -> 0x3FFF; large age saturates at 0x3FFE; nothing on flash
+  reset_all();
+  fw_age_v = 0xFFFFFFFFu;
+  feed(BUS200E_SYSEX_CMD_FW_STATUS, {});
+  m = last_sent();
+  CHECK(m && Bus200eSysExParseFwStatusR(m->raw.data(), (uint32_t) m->raw.size(), &s) == 0);
+  CHECK(s.first_read_age_s == 0x3FFF && s.kind == 0 && s.image_len == 0 && s.served == 0);
+  fw_age_v = 100000;
+  feed(BUS200E_SYSEX_CMD_FW_STATUS, {});
+  m = last_sent();
+  CHECK(m && Bus200eSysExParseFwStatusR(m->raw.data(), (uint32_t) m->raw.size(), &s) == 0);
+  CHECK(s.first_read_age_s == 0x3FFE);
+  // served / len are 21-bit
+  fw_served_v = 0xFFFFFFFFu; fw_len_v = 0x200000u;
+  feed(BUS200E_SYSEX_CMD_FW_STATUS, {});
+  m = last_sent();
+  CHECK(m && Bus200eSysExParseFwStatusR(m->raw.data(), (uint32_t) m->raw.size(), &s) == 0);
+  CHECK(s.served == 0x1FFFFFu && s.image_len == 0x1FFFFFu);
+}
+
+static void test_fw_receiving_stall_aborts() {
+  printf("test_fw_receiving_stall_aborts\n");
+  const std::vector<uint8_t> img = fw_image(126);
+  reset_all();
+  begin_ok(126);
+  fake_now += 10000;
+  Bus200eBridgeTask();
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_FW_RECEIVING);
+  fake_now += 1;
+  Bus200eBridgeTask();
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(fw_abort_calls == 1);
+  CHECK(sent.empty());
+  feed_fw_data(0, 3, img.data(), 42);
+  CHECK(nak_code(last_sent()) == 16);
+  CHECK(fw_abort_calls == 1);   // already idle: no second abort
+  // FW_STATUS polls do not keep a load alive; FW_DATA does
+  reset_all();
+  begin_ok(126);
+  fake_now += 6000;
+  feed(BUS200E_SYSEX_CMD_FW_STATUS, {});
+  fake_now += 6000;
+  Bus200eBridgeTask();
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(fw_abort_calls == 1);
+  reset_all();
+  begin_ok(126);
+  fake_now += 6000;
+  feed_fw_data(0, 3, img.data(), 42);
+  fake_now += 6000;
+  Bus200eBridgeTask();
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_FW_RECEIVING);
+  CHECK(fw_abort_calls == 0);
+}
+
+static void test_fw_receiving_blocks_dump_commands() {
+  printf("test_fw_receiving_blocks_dump_commands\n");
+  reset_all();
+  begin_ok();
+  feed(BUS200E_SYSEX_CMD_GET_DUMP, { 0x5C });
+  CHECK(nak_code(last_sent()) == 10);
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x5C });
+  CHECK(nak_code(last_sent()) == 10);
+  CHECK(fake_backup_calls == 0);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_FW_RECEIVING);
+}
+
+static void test_fw_commands_nak_unknown_without_ops() {
+  printf("test_fw_commands_nak_unknown_without_ops\n");
+  reset_all();
+  Bus200eBridgeOps bare = fake_ops;
+  bare.fw_begin = nullptr;
+  Bus200eBridgeInit(&bare);
+  feed_fw_begin(2, 1000, 1);
+  CHECK(nak_code(last_sent()) == 2);
+  feed_fw_data(0, 3, fw_image(42).data(), 42);
+  CHECK(nak_code(last_sent()) == 2);
+  feed_fw_end(3, 0);
+  CHECK(nak_code(last_sent()) == 2);
+  feed(BUS200E_SYSEX_CMD_FW_ARM, { 1 });
+  CHECK(nak_code(last_sent()) == 2);
+  feed(BUS200E_SYSEX_CMD_FW_STATUS, {});
+  CHECK(nak_code(last_sent()) == 2);
+  CHECK(fw_begin_calls == 0 && fw_arm_calls == 0);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  Bus200eBridgeInit(&fake_ops);
+}
+
 int main() {
   test_get_dump_round_trip();
   test_get_dump_needs_an_address();
@@ -721,6 +1204,26 @@ int main() {
   test_dump_data_outside_a_session();
   test_dump_data_out_of_range_seq();
   test_dump_end_needs_the_full_three_byte_payload();
+
+  test_fw_begin_acks_and_enters_receiving();
+  test_fw_begin_naks_busy_when_serving();
+  test_fw_begin_naks_no_free_card_when_wpm();
+  test_fw_begin_naks_nomem();
+  test_fw_begin_rejects_oversize_len();
+  test_fw_begin_rejects_bad_kind();
+  test_fw_begin_again_while_receiving_aborts();
+  test_fw_data_streams_bytes_in_order();
+  test_fw_data_short_last_packet();
+  test_fw_data_out_of_sequence_naks();
+  test_fw_data_malformed_chunk_naks();
+  test_fw_end_commits_and_arms();
+  test_fw_end_short_leaves_unarmed();
+  test_fw_end_maps_commit_codes();
+  test_fw_arm_off_calls_fw_arm_0();
+  test_fw_status_r_reports_ops();
+  test_fw_receiving_stall_aborts();
+  test_fw_receiving_blocks_dump_commands();
+  test_fw_commands_nak_unknown_without_ops();
 
   test_info_and_status();
   test_unknown_command_and_bad_version();

@@ -40,6 +40,19 @@ static uint16_t g_tx_seq = 0;
 static uint16_t g_tx_total = 0;
 static uint8_t g_tx_xor = 0;
 
+// firmware-card load (FW_BEGIN .. FW_END)
+#define FW_MIN_LEN        0x60u
+#define FW_CAP_V1         65536u
+#define FW_CAP_V2         0x38000u
+static uint8_t  g_fw_kind = 0;
+static uint32_t g_fw_len = 0;       // announced image length
+static uint32_t g_fw_crc = 0;
+static uint16_t g_fw_total = 0;     // ceil(len / 42)
+static uint16_t g_fw_next = 0;      // next expected seq == packets received
+static uint32_t g_fw_pushed = 0;    // raw bytes handed to fw_push
+static uint8_t  g_fw_xor = 0;
+static uint32_t g_fw_last_ms = 0;   // last FW_DATA/FW_END (polls do not count)
+
 // ---- small helpers -------------------------------------------------------------
 
 BRIDGE_CODE static int ops_ok(void) {
@@ -100,6 +113,14 @@ BRIDGE_CODE static void session_reset(void) {
   g_tx_seq = 0;
   g_tx_total = 0;
   g_tx_xor = 0;
+  g_fw_kind = 0;
+  g_fw_len = 0;
+  g_fw_crc = 0;
+  g_fw_total = 0;
+  g_fw_next = 0;
+  g_fw_pushed = 0;
+  g_fw_xor = 0;
+  g_fw_last_ms = 0;
 }
 
 BRIDGE_CODE static int busy(void) { return g_state != BUS200E_BRIDGE_IDLE; }
@@ -165,6 +186,10 @@ BRIDGE_CODE static void handle_status(void) {
 }
 
 BRIDGE_CODE static void handle_get_dump(const uint8_t *payload, uint32_t len) {
+  if (g_state == BUS200E_BRIDGE_FW_RECEIVING) {
+    send_nak(BUS200E_SYSEX_CMD_GET_DUMP, BUS200E_SYSEX_NAK_FW_BUSY);
+    return;
+  }
   if (busy()) { send_nak(BUS200E_SYSEX_CMD_GET_DUMP, BUS200E_SYSEX_NAK_BUSY); return; }
   if (len < 1) {
     // No default module: guessing which 200e on the bus to master a BACKUP
@@ -186,6 +211,10 @@ BRIDGE_CODE static void handle_get_dump(const uint8_t *payload, uint32_t len) {
 }
 
 BRIDGE_CODE static void handle_put_dump(const uint8_t *payload, uint32_t len) {
+  if (g_state == BUS200E_BRIDGE_FW_RECEIVING) {
+    send_nak(BUS200E_SYSEX_CMD_PUT_DUMP, BUS200E_SYSEX_NAK_FW_BUSY);
+    return;
+  }
   if (busy()) { send_nak(BUS200E_SYSEX_CMD_PUT_DUMP, BUS200E_SYSEX_NAK_BUSY); return; }
   if (len < 1) {
     send_nak(BUS200E_SYSEX_CMD_PUT_DUMP, BUS200E_SYSEX_NAK_UNKNOWN_CMD);
@@ -294,6 +323,155 @@ BRIDGE_CODE static void handle_dump_end(const uint8_t *payload, uint32_t len) {
   send_ack14(BUS200E_SYSEX_CMD_DUMP_END, n_packets);
 }
 
+// ---- firmware-card load (docs/bus200e-sysex-fw.md) -----------------------------
+
+BRIDGE_CODE static int fw_ops_ok(void) {
+  return g_ops->fw_begin && g_ops->fw_push && g_ops->fw_commit && g_ops->fw_abort &&
+         g_ops->fw_armed && g_ops->fw_arm && g_ops->fw_serving &&
+         g_ops->fw_served_bytes && g_ops->fw_first_read_age_s &&
+         g_ops->fw_image_len && g_ops->fw_image_kind && g_ops->wpm_present;
+}
+
+// Every NAK exit of a load: abort the card side, drop to IDLE, then NAK.
+BRIDGE_CODE static void fw_fail(uint8_t cmd, uint8_t err) {
+  g_ops->fw_abort();
+  session_reset();
+  send_nak(cmd, err);
+}
+
+BRIDGE_CODE static void handle_fw_begin(const uint8_t *payload, uint32_t len) {
+  if (g_state == BUS200E_BRIDGE_FW_RECEIVING) {   // a load is already in flight
+    fw_fail(BUS200E_SYSEX_CMD_FW_BEGIN, BUS200E_SYSEX_NAK_FW_BUSY);
+    return;
+  }
+  uint8_t kind = 0;
+  uint32_t image_len = 0, crc = 0;
+  if (Bus200eSysExParseFwBegin(payload, len, &kind, &image_len, &crc) != 0) {
+    send_nak(BUS200E_SYSEX_CMD_FW_BEGIN, BUS200E_SYSEX_NAK_FW_LENGTH);
+    return;
+  }
+  if (kind != 1 && kind != 2) {
+    send_nak(BUS200E_SYSEX_CMD_FW_BEGIN, BUS200E_SYSEX_NAK_FW_MAGIC);
+    return;
+  }
+  const uint32_t cap = (kind == 1) ? FW_CAP_V1 : FW_CAP_V2;
+  if (image_len < FW_MIN_LEN || image_len > cap) {
+    send_nak(BUS200E_SYSEX_CMD_FW_BEGIN, BUS200E_SYSEX_NAK_FW_LENGTH);
+    return;
+  }
+  if (g_ops->card_serving() || g_ops->fw_serving() || busy() ||
+      g_ops->master_state() != BUS200E_MASTER_IDLE) {
+    send_nak(BUS200E_SYSEX_CMD_FW_BEGIN, BUS200E_SYSEX_NAK_FW_BUSY);
+    return;
+  }
+  if (g_ops->wpm_present()) {
+    send_nak(BUS200E_SYSEX_CMD_FW_BEGIN, BUS200E_SYSEX_NAK_NO_FREE_CARD);
+    return;
+  }
+  const int rc = g_ops->fw_begin(kind);
+  if (rc < 0) {
+    send_nak(BUS200E_SYSEX_CMD_FW_BEGIN,
+             rc == -6 ? BUS200E_SYSEX_NAK_FW_NOMEM : BUS200E_SYSEX_NAK_FW_BUSY);
+    return;
+  }
+  session_reset();
+  g_fw_kind = kind;
+  g_fw_len = image_len;
+  g_fw_crc = crc;
+  g_fw_total = (uint16_t) ((image_len + BUS200E_SYSEX_CHUNK_BYTES - 1) / BUS200E_SYSEX_CHUNK_BYTES);
+  g_fw_last_ms = g_ops->now_ms();
+  g_state = BUS200E_BRIDGE_FW_RECEIVING;
+  const uint8_t p[1] = { BUS200E_SYSEX_CMD_FW_BEGIN };
+  send_msg(BUS200E_SYSEX_CMD_ACK, p, 1);
+}
+
+BRIDGE_CODE static void handle_fw_data(uint16_t seq, uint16_t total,
+                                        const uint8_t *raw, uint32_t raw_len) {
+  if (g_state != BUS200E_BRIDGE_FW_RECEIVING) {
+    send_nak(BUS200E_SYSEX_CMD_FW_DATA, BUS200E_SYSEX_NAK_FW_SEQUENCE);
+    return;
+  }
+  const int last = (g_fw_total != 0 && seq == g_fw_total - 1);
+  if (seq != g_fw_next || total != g_fw_total || seq >= g_fw_total ||
+      raw_len > BUS200E_SYSEX_CHUNK_BYTES ||
+      (!last && raw_len != BUS200E_SYSEX_CHUNK_BYTES) ||
+      g_fw_pushed + raw_len > g_fw_len) {
+    fw_fail(BUS200E_SYSEX_CMD_FW_DATA, BUS200E_SYSEX_NAK_FW_SEQUENCE);
+    return;
+  }
+  for (uint32_t i = 0; i < raw_len; ++i) g_ops->fw_push(raw[i]);
+  g_fw_xor = Bus200eSysExXor7(g_fw_xor, raw, raw_len);
+  g_fw_pushed += raw_len;
+  g_fw_next++;
+  g_fw_last_ms = g_ops->now_ms();
+  send_ack14(BUS200E_SYSEX_CMD_FW_DATA, seq);   // after the whole chunk is pushed
+}
+
+BRIDGE_CODE static void handle_fw_end(const uint8_t *payload, uint32_t len) {
+  if (g_state != BUS200E_BRIDGE_FW_RECEIVING) {
+    send_nak(BUS200E_SYSEX_CMD_FW_END, BUS200E_SYSEX_NAK_FW_SEQUENCE);
+    return;
+  }
+  if (len != 3) { fw_fail(BUS200E_SYSEX_CMD_FW_END, BUS200E_SYSEX_NAK_CHECKSUM); return; }
+  const uint16_t n = BUS200E_SYSEX_FROM14(payload[0], payload[1]);
+  if (n != g_fw_total || n != g_fw_next || payload[2] != g_fw_xor) {
+    fw_fail(BUS200E_SYSEX_CMD_FW_END, BUS200E_SYSEX_NAK_CHECKSUM);
+    return;
+  }
+  const uint32_t image_len = g_fw_len, crc = g_fw_crc;
+  const int rc = g_ops->fw_commit(image_len, crc);
+  if (rc == 0) {
+    session_reset();
+    send_ack14(BUS200E_SYSEX_CMD_FW_END, n);
+    return;
+  }
+  uint8_t err;
+  switch (rc) {
+    case -2: err = BUS200E_SYSEX_NAK_FW_LENGTH; break;
+    case -3: err = BUS200E_SYSEX_NAK_FW_MAGIC;  break;
+    case -4: err = BUS200E_SYSEX_NAK_FW_CRC;    break;
+    case -5: err = BUS200E_SYSEX_NAK_FW_WRITE;  break;
+    case -1:
+    case -6:
+    default: err = BUS200E_SYSEX_NAK_FW_NOMEM;  break;
+  }
+  fw_fail(BUS200E_SYSEX_CMD_FW_END, err);
+}
+
+BRIDGE_CODE static void handle_fw_arm(const uint8_t *payload, uint32_t len) {
+  if (len != 1 || payload[0] > 1) {
+    send_nak(BUS200E_SYSEX_CMD_FW_ARM, BUS200E_SYSEX_NAK_UNKNOWN_CMD);
+    return;
+  }
+  g_ops->fw_arm(payload[0]);
+  const uint8_t p[2] = { BUS200E_SYSEX_CMD_FW_ARM, payload[0] };
+  send_msg(BUS200E_SYSEX_CMD_ACK, p, 2);
+}
+
+BRIDGE_CODE static void handle_fw_status(void) {
+  Bus200eFwStatus st;
+  memset(&st, 0, sizeof(st));
+  st.armed = g_ops->fw_armed() ? 1 : 0;
+  st.serving = g_ops->fw_serving() ? 1 : 0;
+  st.kind = (uint8_t) (g_ops->fw_image_kind() & 0x7F);
+  uint32_t served = g_ops->fw_served_bytes();
+  st.served = served > 0x1FFFFFu ? 0x1FFFFFu : served;
+  const uint32_t age = g_ops->fw_first_read_age_s();
+  st.first_read_age_s = (age == 0xFFFFFFFFu) ? 0x3FFF : (age > 0x3FFE ? 0x3FFE : (uint16_t) age);
+  const uint32_t il = g_ops->fw_image_len();
+  st.image_len = il > 0x1FFFFFu ? 0x1FFFFFu : il;
+  // No version source yet (the version cache is wired separately): none seen.
+  st.ver_addr = 0;
+  st.ver_valid = 0;
+  uint8_t out[BUS200E_SYSEX_MAX_MESSAGE];
+  const int n = Bus200eSysExBuildFwStatusR(&st, out, sizeof(out));
+  if (n < 0) return;
+  // The contract sends seven spaces (0x20) when ver_valid is 0; the codec
+  // zero-fills, so patch the version bytes here.
+  if (!st.ver_valid) memset(out + 5 + 13, 0x20, 7);
+  g_ops->send_message(out, (uint32_t) n);
+}
+
 // ---- RX entry point --------------------------------------------------------------
 
 BRIDGE_CODE void Bus200eBridgeHandleSysEx(const uint8_t *sysex, uint32_t len) {
@@ -319,6 +497,12 @@ BRIDGE_CODE void Bus200eBridgeHandleSysEx(const uint8_t *sysex, uint32_t len) {
     // -1 malformed, -4 bad packed chunk, -5 oversized payload. Everything
     // else in this protocol is small and fixed, so an oversized/garbled
     // frame can only be a dump packet gone wrong.
+    if (sysex[4] == BUS200E_SYSEX_CMD_FW_DATA) {
+      // A garbled FW_DATA chunk is a sequence failure and ends the load.
+      if (g_state == BUS200E_BRIDGE_FW_RECEIVING) fw_fail(sysex[4], BUS200E_SYSEX_NAK_FW_SEQUENCE);
+      else send_nak(sysex[4], BUS200E_SYSEX_NAK_FW_SEQUENCE);
+      return;
+    }
     send_nak(len >= 5 ? sysex[4] : 0, BUS200E_SYSEX_NAK_CHECKSUM);
     if (g_state == BUS200E_BRIDGE_RECEIVING) session_reset();
     return;
@@ -331,6 +515,18 @@ BRIDGE_CODE void Bus200eBridgeHandleSysEx(const uint8_t *sysex, uint32_t len) {
     case BUS200E_SYSEX_CMD_PUT_DUMP:  handle_put_dump(raw, raw_len); break;
     case BUS200E_SYSEX_CMD_DUMP_DATA: handle_dump_data(seq, total, raw, raw_len); break;
     case BUS200E_SYSEX_CMD_DUMP_END:  handle_dump_end(raw, raw_len); break;
+    case BUS200E_SYSEX_CMD_FW_BEGIN:
+    case BUS200E_SYSEX_CMD_FW_DATA:
+    case BUS200E_SYSEX_CMD_FW_END:
+    case BUS200E_SYSEX_CMD_FW_ARM:
+    case BUS200E_SYSEX_CMD_FW_STATUS:
+      if (!fw_ops_ok()) { send_nak(cmd, BUS200E_SYSEX_NAK_UNKNOWN_CMD); break; }
+      if (cmd == BUS200E_SYSEX_CMD_FW_BEGIN)       handle_fw_begin(raw, raw_len);
+      else if (cmd == BUS200E_SYSEX_CMD_FW_DATA)   handle_fw_data(seq, total, raw, raw_len);
+      else if (cmd == BUS200E_SYSEX_CMD_FW_END)    handle_fw_end(raw, raw_len);
+      else if (cmd == BUS200E_SYSEX_CMD_FW_ARM)    handle_fw_arm(raw, raw_len);
+      else                                         handle_fw_status();
+      break;
     default:
       send_nak(cmd, BUS200E_SYSEX_NAK_UNKNOWN_CMD);
       break;
@@ -434,6 +630,13 @@ BRIDGE_CODE void Bus200eBridgeTask(void) {
     case BUS200E_BRIDGE_RECEIVING:
       if (g_ops->now_ms() - g_rx_last_ms > BUS200E_BRIDGE_RX_TIMEOUT_MS) {
         send_nak(BUS200E_SYSEX_CMD_PUT_DUMP, BUS200E_SYSEX_NAK_SEND_TIMEOUT);
+        session_reset();
+      }
+      break;
+    case BUS200E_BRIDGE_FW_RECEIVING:
+      // Stall: no FW_DATA/FW_END for 10 s. Silent; the next FW_DATA gets NAK 16.
+      if (g_ops->now_ms() - g_fw_last_ms > BUS200E_BRIDGE_RX_TIMEOUT_MS) {
+        if (g_ops->fw_abort) g_ops->fw_abort();
         session_reset();
       }
       break;

@@ -142,6 +142,7 @@ typedef enum {
   BUS200E_BRIDGE_SENDING,    // capture done; streaming DUMP_DATA out
   BUS200E_BRIDGE_RECEIVING,  // PUT_DUMP accepted; collecting DUMP_DATA
   BUS200E_BRIDGE_RESTORING,  // DUMP_END was clean; MasterRestore running
+  BUS200E_BRIDGE_FW_RECEIVING,  // FW_BEGIN accepted; collecting FW_DATA
 } Bus200eBridgeState;
 
 // Everything platform-specific. All fields must be non-NULL except
@@ -170,6 +171,22 @@ typedef struct {
   // Send one built message payload (the bytes BETWEEN F0 and F7 -- adding
   // those, and everything else about USB, belongs to the caller).
   void (*send_message)(const uint8_t *payload, uint32_t len);
+
+  // ---- firmware-card load (docs/bus200e-sysex-fw.md), APPEND-ONLY ----------
+  // Optional as a group: when fw_begin is NULL (or any of these is), every
+  // FW_* command answers NAK 2 UNKNOWN_CMD.
+  int (*fw_begin)(uint8_t kind);                  // 0 ok, -6 nomem, other <0 refused
+  void (*fw_push)(uint8_t b);
+  int (*fw_commit)(uint32_t len, uint32_t crc32); // FwCardCommit: 0,-1..-6
+  void (*fw_abort)(void);
+  int (*fw_armed)(void);
+  void (*fw_arm)(int on);
+  int (*fw_serving)(void);
+  uint32_t (*fw_served_bytes)(void);
+  uint32_t (*fw_first_read_age_s)(void);          // 0xFFFFFFFF = never
+  uint32_t (*fw_image_len)(void);
+  uint8_t (*fw_image_kind)(void);
+  int (*wpm_present)(void);
 } Bus200eBridgeOps;
 
 // Store `ops` and reset all session state. Safe to call again to re-arm.
