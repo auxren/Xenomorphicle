@@ -130,6 +130,39 @@ static uint32_t f_fw_len() { return fw_len_v; }
 static uint8_t f_fw_kind() { return fw_kind_v; }
 static int f_wpm() { return fw_wpm_v; }
 
+// ---- fake scan / poll-done / bus-status side ----------------------------------
+// query_start resolves at once: DONE for an address in fake_q_done, else FAILED
+// (set fake_q_hold to leave it SENDING until the test flips fake_q_state).
+struct QStart { uint8_t addr; uint32_t at; };
+static std::vector<QStart> q_starts;
+static Bus200eQueryState fake_q_state;
+static int fake_q_start_rc, fake_q_hold, fake_q_reset_calls;
+static bool fake_q_done[256];
+static int fake_poll_rc, fake_poll_calls;
+static int fake_quiet_v, fake_dialect_v;
+static uint8_t fake_ver_addr;            // last_version_addr
+static bool fake_ver_known[256];
+static uint8_t fake_ver_bytes[7];
+
+static int f_query_start(uint8_t a) {
+  if (fake_q_start_rc != 0) return fake_q_start_rc;
+  q_starts.push_back({ a, fake_now });
+  fake_q_state = fake_q_hold ? BUS200E_QUERY_SENDING
+                             : (fake_q_done[a] ? BUS200E_QUERY_DONE : BUS200E_QUERY_FAILED);
+  return 0;
+}
+static Bus200eQueryState f_query_state() { return fake_q_state; }
+static void f_query_reset() { fake_q_reset_calls++; fake_q_state = BUS200E_QUERY_IDLE; }
+static int f_version_get(uint8_t a, uint8_t out[7]) {
+  if (!fake_ver_known[a]) return 0;
+  memcpy(out, fake_ver_bytes, 7);
+  return 1;
+}
+static int f_send_poll_done() { fake_poll_calls++; return fake_poll_rc; }
+static int f_bus_quiet() { return fake_quiet_v; }
+static uint8_t f_bus_dialect() { return (uint8_t) fake_dialect_v; }
+static uint8_t f_last_ver_addr() { return fake_ver_addr; }
+
 static const Bus200eBridgeOps fake_ops = {
   f_now,
   f_card_serving, f_card_serve_enable, f_card_image, f_card_size, f_card_dirty,
@@ -138,9 +171,14 @@ static const Bus200eBridgeOps fake_ops = {
   f_send,
   f_fw_begin, f_fw_push, f_fw_commit, f_fw_abort, f_fw_armed, f_fw_arm,
   f_fw_serving, f_fw_served, f_fw_age, f_fw_len, f_fw_kind, f_wpm,
+  f_query_start, f_query_state, f_query_reset, f_version_get,
+  f_send_poll_done, f_bus_quiet, f_bus_dialect, f_last_ver_addr,
 };
 
 static void reset_all(uint32_t card_size = kFakeCardSmall) {
+  // Drop whatever the previous test left in flight BEFORE the counters are
+  // zeroed: Abort() releases the far side (fw_abort / query_reset).
+  Bus200eBridgeAbort();
   memset(fake_card, 0xFF, sizeof(fake_card));
   fake_card_size = card_size;
   fake_now = 1000;
@@ -164,6 +202,15 @@ static void reset_all(uint32_t card_size = kFakeCardSmall) {
   fw_pushed.clear();
   fw_arm_calls = 0; fw_arm_last = -1;
   fw_served_v = fw_age_v = fw_len_v = 0; fw_kind_v = 0;
+  q_starts.clear();
+  fake_q_state = BUS200E_QUERY_IDLE;
+  fake_q_start_rc = 0; fake_q_hold = 0; fake_q_reset_calls = 0;
+  memset(fake_q_done, 0, sizeof(fake_q_done));
+  fake_poll_rc = 0; fake_poll_calls = 0;
+  fake_quiet_v = 1; fake_dialect_v = 0;
+  fake_ver_addr = 0;
+  memset(fake_ver_known, 0, sizeof(fake_ver_known));
+  memcpy(fake_ver_bytes, "31.2C2 ", 7);
   sent.clear();
   Bus200eBridgeInit(&fake_ops);
 }
@@ -1182,6 +1229,369 @@ static void test_fw_commands_nak_unknown_without_ops() {
   Bus200eBridgeInit(&fake_ops);
 }
 
+// ---- SCAN / POLL_DONE / BUS_STATUS / INFO_R level ----------------------------------
+
+static std::vector<uint8_t> bytes(std::initializer_list<uint8_t> l) { return std::vector<uint8_t>(l); }
+
+// Task() until the bridge is IDLE, 200 ms of fake time per tick (> the gap).
+static void scan_run(int max_ticks = 600) {
+  while (max_ticks-- > 0 && Bus200eBridgeGetState() != BUS200E_BRIDGE_IDLE) {
+    Bus200eBridgeTask();
+    fake_now += 200;
+  }
+}
+
+static const std::vector<uint8_t> kSpaces7 = { 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20 };
+
+static void test_scan_acks_then_walks_addresses() {
+  printf("test_scan_acks_then_walks_addresses\n");
+  reset_all();
+  fake_q_done[0x28] = true; fake_q_done[0x2A] = true;
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x2B });
+  CHECK(sent.size() == 1);
+  CHECK(is_ack(last_sent(), { 0x25, 0x28, 0x2B }));
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_SCANNING);
+  CHECK(q_starts.empty());                       // nothing mastered before Task()
+  scan_run();
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(q_starts.size() == 4);
+  if (q_starts.size() == 4)
+    CHECK(q_starts[0].addr == 0x28 && q_starts[1].addr == 0x29 &&
+          q_starts[2].addr == 0x2A && q_starts[3].addr == 0x2B);
+  CHECK(fake_q_reset_calls == 4);
+  CHECK(sent.size() == 4);                       // ACK, SCAN_R, SCAN_R, SCAN_END
+  if (sent.size() == 4) {
+    std::vector<uint8_t> r0 = bytes({ 0x00, 0x7F, 0x28, 0x00 });
+    r0.insert(r0.end(), kSpaces7.begin(), kSpaces7.end());
+    std::vector<uint8_t> r1 = r0;
+    r1[0] = 0x01; r1[2] = 0x2A;
+    CHECK(sent[1].cmd == BUS200E_SYSEX_CMD_SCAN_R && sent[1].raw == r0);
+    CHECK(sent[2].cmd == BUS200E_SYSEX_CMD_SCAN_R && sent[2].raw == r1);
+    CHECK(sent[3].cmd == BUS200E_SYSEX_CMD_SCAN_END && sent[3].raw == bytes({ 0x02 }));
+  }
+  // an empty sweep (first > last) is ACK then SCAN_END [0]
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x30, 0x2F });
+  scan_run();
+  CHECK(sent.size() == 2 && is_ack(&sent[0], { 0x25, 0x30, 0x2F }));
+  CHECK(sent.size() == 2 && sent[1].cmd == BUS200E_SYSEX_CMD_SCAN_END &&
+        sent[1].raw == bytes({ 0x00 }));
+  CHECK(q_starts.empty());
+  // a failed query makes no SCAN_R; FAILED still advances
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x10, 0x11 });
+  scan_run();
+  CHECK(sent.size() == 2 && sent[1].cmd == BUS200E_SYSEX_CMD_SCAN_END &&
+        sent[1].raw == bytes({ 0x00 }));
+  CHECK(fake_q_reset_calls == 2);
+  // malformed SCAN requests
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x10 });
+  CHECK(nak_code(last_sent()) == 2);
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x10, 0x11, 0x12 });
+  CHECK(nak_code(last_sent()) == 2);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+}
+
+static void test_scan_r_carries_cached_version() {
+  printf("test_scan_r_carries_cached_version\n");
+  reset_all();
+  fake_q_done[0x28] = true; fake_q_done[0x29] = true;
+  fake_ver_known[0x28] = true;                   // 0x29 has no cached version
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x29 });
+  scan_run();
+  CHECK(sent.size() == 4);
+  if (sent.size() == 4) {
+    CHECK(sent[1].raw == bytes({ 0x00, 0x7F, 0x28, 0x01, '3', '1', '.', '2', 'C', '2', ' ' }));
+    std::vector<uint8_t> r1 = bytes({ 0x01, 0x7F, 0x29, 0x00 });
+    r1.insert(r1.end(), kSpaces7.begin(), kSpaces7.end());
+    CHECK(sent[2].raw == r1);
+    CHECK(sent[3].raw == bytes({ 0x02 }));
+  }
+}
+
+static void test_scan_naks_busy_during_master_job() {
+  printf("test_scan_naks_busy_during_master_job\n");
+  reset_all();
+  fake_state = BUS200E_MASTER_TRANSFERRING;        // a master job is running
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x2B });
+  CHECK(nak_code(last_sent()) == 5);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  // a GET_DUMP / PUT_DUMP session
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x5C });
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x2B });
+  CHECK(nak_code(last_sent()) == 5);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_RECEIVING);
+  // a firmware load in flight is FW_BUSY (docs: "SCAN ... answer NAK 10"), and is untouched
+  reset_all();
+  begin_ok();
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x2B });
+  CHECK(nak_code(last_sent()) == 10);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_FW_RECEIVING);
+  CHECK(fw_abort_calls == 0);
+  // a second SCAN during a scan, and every master command during a scan
+  reset_all();
+  fake_q_hold = 1;
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x2B });
+  Bus200eBridgeTask();                              // query in flight
+  sent.clear();
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x30, 0x31 });
+  CHECK(nak_code(last_sent()) == 5);
+  feed(BUS200E_SYSEX_CMD_GET_DUMP, { 0x5C });
+  CHECK(nak_code(last_sent()) == 5);
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x5C });
+  CHECK(nak_code(last_sent()) == 5);
+  feed_fw_begin(2, 1000, 1);
+  CHECK(nak_code(last_sent()) == 5);
+  feed(BUS200E_SYSEX_CMD_POLL_DONE, {});
+  CHECK(nak_code(last_sent()) == 5);
+  CHECK(fake_backup_calls == 0 && fw_begin_calls == 0 && fake_poll_calls == 0);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_SCANNING);
+  // INFO / STATUS / BUS_STATUS / FW_STATUS still answer mid-scan
+  sent.clear();
+  feed(BUS200E_SYSEX_CMD_BUS_STATUS, {});
+  CHECK(last_sent() && last_sent()->cmd == BUS200E_SYSEX_CMD_BUS_STATUS_R);
+  // no query support -> NAK 2
+  reset_all();
+  Bus200eBridgeOps bare = fake_ops;
+  bare.query_start = nullptr;
+  Bus200eBridgeInit(&bare);
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x2B });
+  CHECK(nak_code(last_sent()) == 2);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  Bus200eBridgeInit(&fake_ops);
+}
+
+static void test_scan_gap_150ms() {
+  printf("test_scan_gap_150ms\n");
+  reset_all();
+  fake_q_done[0x28] = true; fake_q_done[0x29] = true;
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x29 });
+  Bus200eBridgeTask();                              // first query starts at once
+  CHECK(q_starts.size() == 1 && q_starts[0].addr == 0x28 && q_starts[0].at == 1000);
+  Bus200eBridgeTask();                              // resolved at now = 1000
+  CHECK(q_starts.size() == 1);
+  fake_now = 1149;
+  Bus200eBridgeTask();
+  CHECK(q_starts.size() == 1);                      // 149 ms: still waiting
+  fake_now = 1150;
+  Bus200eBridgeTask();
+  CHECK(q_starts.size() == 2 && q_starts[1].addr == 0x29 && q_starts[1].at == 1150);
+  // the gap runs from the query's COMPLETION, not its start
+  reset_all();
+  fake_q_hold = 1;
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x29 });
+  Bus200eBridgeTask();
+  CHECK(q_starts.size() == 1);
+  fake_now = 5000;                                  // reply still pending
+  Bus200eBridgeTask();
+  CHECK(q_starts.size() == 1);
+  fake_q_state = BUS200E_QUERY_DONE;                // completes at 5000
+  Bus200eBridgeTask();
+  fake_now = 5149;
+  Bus200eBridgeTask();
+  CHECK(q_starts.size() == 1);
+  fake_q_hold = 0;
+  fake_now = 5150;
+  Bus200eBridgeTask();
+  CHECK(q_starts.size() == 2 && q_starts[1].at == 5150);
+  // a busy query_start is retried on later ticks, not skipped
+  reset_all();
+  fake_q_start_rc = -(int) BUS200E_MASTER_ERR_BUSY;
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x28 });
+  Bus200eBridgeTask();
+  fake_now += 10;
+  Bus200eBridgeTask();
+  CHECK(q_starts.empty() && Bus200eBridgeGetState() == BUS200E_BRIDGE_SCANNING);
+  fake_q_start_rc = 0;
+  fake_q_done[0x28] = true;
+  scan_run();
+  CHECK(q_starts.size() == 1 && q_starts[0].addr == 0x28);
+  CHECK(sent.size() == 3 && sent[2].cmd == BUS200E_SYSEX_CMD_SCAN_END &&
+        sent[2].raw == bytes({ 0x01 }));
+  // any other refusal skips the address (no SCAN_R) and the sweep still ends
+  reset_all();
+  fake_q_start_rc = -(int) BUS200E_MASTER_ERR_BAD_ARGS;
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x00, 0x01 });
+  scan_run();
+  CHECK(sent.size() == 2 && sent[1].cmd == BUS200E_SYSEX_CMD_SCAN_END &&
+        sent[1].raw == bytes({ 0x00 }));
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+}
+
+static void test_scan_abort_releases_query() {
+  printf("test_scan_abort_releases_query\n");
+  reset_all();
+  fake_q_hold = 1;
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x2B });
+  Bus200eBridgeTask();
+  CHECK(fake_q_reset_calls == 0);
+  Bus200eBridgeAbort();
+  CHECK(fake_q_reset_calls == 1);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  Bus200eBridgeTask();
+  CHECK(q_starts.size() == 1);                      // nothing more is mastered
+  // Init() while scanning does the same, against the previous ops
+  reset_all();
+  fake_q_hold = 1;
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x2B });
+  Bus200eBridgeInit(&fake_ops);
+  CHECK(fake_q_reset_calls == 1);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  // an abort of a finished/idle bridge touches nothing
+  Bus200eBridgeAbort();
+  CHECK(fake_q_reset_calls == 1 && fw_abort_calls == 0);
+}
+
+static void test_abort_and_init_release_fw_load() {
+  printf("test_abort_and_init_release_fw_load\n");
+  reset_all();
+  begin_ok();
+  Bus200eBridgeAbort();
+  CHECK(fw_abort_calls == 1);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  Bus200eBridgeAbort();
+  CHECK(fw_abort_calls == 1);                       // idle: no second abort
+  reset_all();
+  begin_ok();
+  Bus200eBridgeInit(&fake_ops);
+  CHECK(fw_abort_calls == 1);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+}
+
+static void test_poll_done_sends_frame_and_acks() {
+  printf("test_poll_done_sends_frame_and_acks\n");
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_POLL_DONE, {});
+  CHECK(fake_poll_calls == 1);
+  CHECK(sent.size() == 1 && is_ack(last_sent(), { 0x26 }));
+  // the 2 s send timeout is NAK 8, with no ACK
+  reset_all();
+  fake_poll_rc = -1;
+  feed(BUS200E_SYSEX_CMD_POLL_DONE, {});
+  CHECK(fake_poll_calls == 1);
+  CHECK(sent.size() == 1 && nak_code(last_sent()) == 8);
+  // during a firmware load: NAK 10, nothing sent, load untouched
+  reset_all();
+  begin_ok();
+  feed(BUS200E_SYSEX_CMD_POLL_DONE, {});
+  CHECK(nak_code(last_sent()) == 10);
+  CHECK(fake_poll_calls == 0 && fw_abort_calls == 0);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_FW_RECEIVING);
+  // during a master job: NAK 5
+  reset_all();
+  fake_state = BUS200E_MASTER_SENDING;
+  feed(BUS200E_SYSEX_CMD_POLL_DONE, {});
+  CHECK(nak_code(last_sent()) == 5 && fake_poll_calls == 0);
+  // no op -> NAK 2
+  reset_all();
+  Bus200eBridgeOps bare = fake_ops;
+  bare.send_poll_done = nullptr;
+  Bus200eBridgeInit(&bare);
+  feed(BUS200E_SYSEX_CMD_POLL_DONE, {});
+  CHECK(nak_code(last_sent()) == 2);
+  Bus200eBridgeInit(&fake_ops);
+}
+
+static void test_bus_status_r_fields() {
+  printf("test_bus_status_r_fields\n");
+  reset_all();
+  fw_wpm_v = 1; fake_quiet_v = 0; fake_dialect_v = 1;
+  feed(BUS200E_SYSEX_CMD_BUS_STATUS, {});
+  CHECK(sent.size() == 1);
+  CHECK(last_sent() && last_sent()->cmd == BUS200E_SYSEX_CMD_BUS_STATUS_R &&
+        last_sent()->raw == bytes({ 1, 0, 1, 0 }));
+  // short/V2 framing, quiet bus, a last master error of 5 (no response)
+  reset_all();
+  fake_quiet_v = 1; fake_dialect_v = 2; fake_error = BUS200E_MASTER_ERR_NO_RESPONSE;
+  feed(BUS200E_SYSEX_CMD_BUS_STATUS, {});
+  CHECK(last_sent() && last_sent()->raw == bytes({ 0, 1, 2, 5 }));
+  // no bus_quiet / bus_dialect ops: quiet 1, dialect 0
+  reset_all();
+  Bus200eBridgeOps bare = fake_ops;
+  bare.bus_quiet = nullptr; bare.bus_dialect = nullptr;
+  Bus200eBridgeInit(&bare);
+  feed(BUS200E_SYSEX_CMD_BUS_STATUS, {});
+  CHECK(last_sent() && last_sent()->cmd == BUS200E_SYSEX_CMD_BUS_STATUS_R &&
+        last_sent()->raw == bytes({ 0, 1, 0, 0 }));
+  Bus200eBridgeInit(&fake_ops);
+  // answers during a firmware load without touching it
+  reset_all();
+  begin_ok();
+  feed(BUS200E_SYSEX_CMD_BUS_STATUS, {});
+  CHECK(last_sent() && last_sent()->cmd == BUS200E_SYSEX_CMD_BUS_STATUS_R);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_FW_RECEIVING && fw_abort_calls == 0);
+}
+
+static void test_info_r_appends_bridge_level() {
+  printf("test_info_r_appends_bridge_level\n");
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_INFO, {});
+  const SentMsg *m = last_sent();
+  CHECK(m && m->cmd == BUS200E_SYSEX_CMD_INFO_R);
+  // schema, n_seq, max_steps, dump len x3, chunk, max packets lo/hi, serving, LEVEL
+  CHECK(m && m->raw == bytes({ 2, 0, 0, 0, 0, 0, 42, 25, 12, 0, 1 }));
+  CHECK(m && m->raw.size() == 11 && m->raw[10] == BUS200E_SYSEX_BRIDGE_LEVEL);
+}
+
+static void test_fw_status_r_reports_last_version() {
+  printf("test_fw_status_r_reports_last_version\n");
+  reset_all();
+  fake_ver_addr = 0x28; fake_ver_known[0x28] = true;
+  feed(BUS200E_SYSEX_CMD_FW_STATUS, {});
+  Bus200eFwStatus s = {};
+  const SentMsg *m = last_sent();
+  CHECK(m && Bus200eSysExParseFwStatusR(m->raw.data(), (uint32_t) m->raw.size(), &s) == 0);
+  CHECK(s.ver_addr == 0x28 && s.ver_valid == 1 && memcmp(s.ver, "31.2C2 ", 7) == 0);
+  // an address with no cached frame: spaces, ver_valid 0 (the addr is still reported)
+  fake_ver_known[0x28] = false;
+  feed(BUS200E_SYSEX_CMD_FW_STATUS, {});
+  m = last_sent();
+  CHECK(m && Bus200eSysExParseFwStatusR(m->raw.data(), (uint32_t) m->raw.size(), &s) == 0);
+  CHECK(s.ver_addr == 0x28 && s.ver_valid == 0);
+  for (int i = 0; i < 7; ++i) CHECK(s.ver[i] == 0x20);
+  // bytes past 7 bits are masked
+  fake_ver_known[0x28] = true;
+  fake_ver_bytes[0] = 0xB3;
+  feed(BUS200E_SYSEX_CMD_FW_STATUS, {});
+  m = last_sent();
+  CHECK(m && Bus200eSysExParseFwStatusR(m->raw.data(), (uint32_t) m->raw.size(), &s) == 0);
+  CHECK(s.ver_valid == 1 && s.ver[0] == 0x33);
+}
+
+static void test_fw_end_commit_failure_after_short_image() {
+  printf("test_fw_end_commit_failure_after_short_image\n");
+  reset_all();
+  begin_ok(126);                                    // announced 126, packets 42/42/41
+  const std::vector<uint8_t> img = fw_image(126);
+  feed_fw_data(0, 3, img.data(), 42);
+  feed_fw_data(1, 3, img.data() + 42, 42);
+  feed_fw_data(2, 3, img.data() + 84, 41);
+  CHECK(fw_pushed.size() == 125);
+  fw_commit_result = -2;
+  feed_fw_end(3, Bus200eSysExXor7(0, img.data(), 125));
+  CHECK(fw_commit_calls == 1);
+  CHECK(nak_code(last_sent()) == 12);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(fw_abort_calls == 1);
+}
+
+static void test_garbled_fw_data_without_fw_ops_naks_unknown() {
+  printf("test_garbled_fw_data_without_fw_ops_naks_unknown\n");
+  reset_all();
+  Bus200eBridgeOps bare = fake_ops;
+  bare.fw_begin = nullptr;
+  Bus200eBridgeInit(&bare);
+  const uint8_t bad[] = { BUS200E_SYSEX_MFR_ID, BUS200E_SYSEX_FAMILY_ID,
+                          BUS200E_SYSEX_APP_ID, BUS200E_SYSEX_PROTO_VER,
+                          BUS200E_SYSEX_CMD_FW_DATA, 0, 0, 3, 0, 0x01 };
+  Bus200eBridgeHandleSysEx(bad, sizeof(bad));
+  CHECK(nak_code(last_sent()) == 2);
+  CHECK(fw_abort_calls == 0);
+  Bus200eBridgeInit(&fake_ops);
+}
+
 int main() {
   test_get_dump_round_trip();
   test_get_dump_needs_an_address();
@@ -1224,6 +1634,19 @@ int main() {
   test_fw_receiving_stall_aborts();
   test_fw_receiving_blocks_dump_commands();
   test_fw_commands_nak_unknown_without_ops();
+  test_fw_end_commit_failure_after_short_image();
+  test_garbled_fw_data_without_fw_ops_naks_unknown();
+  test_abort_and_init_release_fw_load();
+
+  test_scan_acks_then_walks_addresses();
+  test_scan_r_carries_cached_version();
+  test_scan_naks_busy_during_master_job();
+  test_scan_gap_150ms();
+  test_scan_abort_releases_query();
+  test_poll_done_sends_frame_and_acks();
+  test_bus_status_r_fields();
+  test_info_r_appends_bridge_level();
+  test_fw_status_r_reports_last_version();
 
   test_info_and_status();
   test_unknown_command_and_bad_version();

@@ -53,6 +53,14 @@ static uint32_t g_fw_pushed = 0;    // raw bytes handed to fw_push
 static uint8_t  g_fw_xor = 0;
 static uint32_t g_fw_last_ms = 0;   // last FW_DATA/FW_END (polls do not count)
 
+// sweep (SCAN .. SCAN_END)
+static uint8_t  g_scan_next = 0;    // address to query next (may reach last + 1)
+static uint8_t  g_scan_last = 0;
+static uint8_t  g_scan_found = 0;   // responders reported so far == next SCAN_R idx
+static uint8_t  g_scan_active = 0;  // a query_start was accepted and is unresolved
+static uint8_t  g_scan_have_done = 0;
+static uint32_t g_scan_done_ms = 0; // when the previous query was resolved
+
 // ---- small helpers -------------------------------------------------------------
 
 BRIDGE_CODE static int ops_ok(void) {
@@ -121,6 +129,22 @@ BRIDGE_CODE static void session_reset(void) {
   g_fw_pushed = 0;
   g_fw_xor = 0;
   g_fw_last_ms = 0;
+  g_scan_next = 0;
+  g_scan_last = 0;
+  g_scan_found = 0;
+  g_scan_active = 0;
+  g_scan_have_done = 0;
+  g_scan_done_ms = 0;
+}
+
+// Leaving a session from outside its own handlers (Abort, re-Init): release
+// whatever the session holds on the far side, then drop to IDLE.
+BRIDGE_CODE static void end_session(void) {
+  if (g_ops) {
+    if (g_state == BUS200E_BRIDGE_FW_RECEIVING && g_ops->fw_abort) g_ops->fw_abort();
+    if (g_state == BUS200E_BRIDGE_SCANNING && g_ops->query_reset) g_ops->query_reset();
+  }
+  session_reset();
 }
 
 BRIDGE_CODE static int busy(void) { return g_state != BUS200E_BRIDGE_IDLE; }
@@ -128,6 +152,7 @@ BRIDGE_CODE static int busy(void) { return g_state != BUS200E_BRIDGE_IDLE; }
 // ---- public API ----------------------------------------------------------------
 
 BRIDGE_CODE void Bus200eBridgeInit(const Bus200eBridgeOps *ops) {
+  end_session();   // against the PREVIOUS ops, before they are replaced
   g_ops = ops;
   g_mod_addr = 0;
   g_dump_bytes = 0;
@@ -135,7 +160,7 @@ BRIDGE_CODE void Bus200eBridgeInit(const Bus200eBridgeOps *ops) {
   session_reset();
 }
 
-BRIDGE_CODE void Bus200eBridgeAbort(void) { session_reset(); }
+BRIDGE_CODE void Bus200eBridgeAbort(void) { end_session(); }
 
 BRIDGE_CODE Bus200eBridgeState Bus200eBridgeGetState(void) { return g_state; }
 BRIDGE_CODE uint8_t Bus200eBridgeModAddr(void) { return g_mod_addr; }
@@ -143,6 +168,13 @@ BRIDGE_CODE uint32_t Bus200eBridgeDumpBytes(void) { return g_dump_bytes; }
 BRIDGE_CODE uint8_t Bus200eBridgeLastNak(void) { return g_last_nak; }
 
 // ---- command handlers ----------------------------------------------------------
+
+// Cached version frame of `addr`: 1 and ver[7] filled if known, else 0.
+BRIDGE_CODE static int version_for(uint8_t addr, uint8_t ver[7]) {
+  memset(ver, 0, 7);
+  if (addr == 0 || !g_ops->fw_version_get) return 0;
+  return g_ops->fw_version_get(addr, ver) == 1 ? 1 : 0;
+}
 
 BRIDGE_CODE static void handle_info(void) {
   // Field order is fixed by Bus200eSysEx.h's INFO_R note; extra fields are
@@ -170,6 +202,7 @@ BRIDGE_CODE static void handle_info(void) {
     BUS200E_SYSEX_LO7(BUS200E_BRIDGE_MAX_PACKETS),   // appended: packet ceiling,
     BUS200E_SYSEX_HI7(BUS200E_BRIDGE_MAX_PACKETS),   //           lo/hi septets
     (uint8_t) (g_ops->card_serving() ? 1 : 0),
+    BUS200E_SYSEX_BRIDGE_LEVEL,            // appended: bridge feature level
   };
   send_msg(BUS200E_SYSEX_CMD_INFO_R, info, sizeof(info));
 }
@@ -359,6 +392,10 @@ BRIDGE_CODE static void handle_fw_begin(const uint8_t *payload, uint32_t len) {
     send_nak(BUS200E_SYSEX_CMD_FW_BEGIN, BUS200E_SYSEX_NAK_FW_LENGTH);
     return;
   }
+  if (g_state == BUS200E_BRIDGE_SCANNING) {
+    send_nak(BUS200E_SYSEX_CMD_FW_BEGIN, BUS200E_SYSEX_NAK_BUSY);
+    return;
+  }
   if (g_ops->card_serving() || g_ops->fw_serving() || busy() ||
       g_ops->master_state() != BUS200E_MASTER_IDLE) {
     send_nak(BUS200E_SYSEX_CMD_FW_BEGIN, BUS200E_SYSEX_NAK_FW_BUSY);
@@ -460,16 +497,71 @@ BRIDGE_CODE static void handle_fw_status(void) {
   st.first_read_age_s = (age == 0xFFFFFFFFu) ? 0x3FFF : (age > 0x3FFE ? 0x3FFE : (uint16_t) age);
   const uint32_t il = g_ops->fw_image_len();
   st.image_len = il > 0x1FFFFFu ? 0x1FFFFFu : il;
-  // No version source yet (the version cache is wired separately): none seen.
-  st.ver_addr = 0;
-  st.ver_valid = 0;
+  // The LAST 0x13 version frame seen on the bus, from the version cache. The
+  // codec sends seven spaces when ver_valid is 0.
+  const uint8_t va = g_ops->last_version_addr ? g_ops->last_version_addr() : 0;
+  st.ver_addr = va;
+  st.ver_valid = (uint8_t) version_for(va, st.ver);
   uint8_t out[BUS200E_SYSEX_MAX_MESSAGE];
   const int n = Bus200eSysExBuildFwStatusR(&st, out, sizeof(out));
   if (n < 0) return;
-  // The contract sends seven spaces (0x20) when ver_valid is 0; the codec
-  // zero-fills, so patch the version bytes here.
-  if (!st.ver_valid) memset(out + 5 + 13, 0x20, 7);
   g_ops->send_message(out, (uint32_t) n);
+}
+
+// ---- SCAN / POLL_DONE / BUS_STATUS (docs/bus200e-sysex-fw.md) -------------------
+
+BRIDGE_CODE static void handle_scan(const uint8_t *payload, uint32_t len) {
+  if (!g_ops->query_start || !g_ops->query_state || !g_ops->query_reset ||
+      len != 2 || payload[0] > 0x7F || payload[1] > 0x7F) {
+    send_nak(BUS200E_SYSEX_CMD_SCAN, BUS200E_SYSEX_NAK_UNKNOWN_CMD);
+    return;
+  }
+  if (g_state == BUS200E_BRIDGE_FW_RECEIVING) {   // the doc: a load in flight is FW_BUSY
+    send_nak(BUS200E_SYSEX_CMD_SCAN, BUS200E_SYSEX_NAK_FW_BUSY);
+    return;
+  }
+  if (busy() || g_ops->master_state() != BUS200E_MASTER_IDLE) {
+    send_nak(BUS200E_SYSEX_CMD_SCAN, BUS200E_SYSEX_NAK_BUSY);
+    return;
+  }
+  session_reset();
+  g_scan_next = payload[0];
+  g_scan_last = payload[1];
+  g_state = BUS200E_BRIDGE_SCANNING;
+  const uint8_t p[3] = { BUS200E_SYSEX_CMD_SCAN, payload[0], payload[1] };
+  send_msg(BUS200E_SYSEX_CMD_ACK, p, 3);
+}
+
+BRIDGE_CODE static void handle_poll_done(void) {
+  if (!g_ops->send_poll_done) {
+    send_nak(BUS200E_SYSEX_CMD_POLL_DONE, BUS200E_SYSEX_NAK_UNKNOWN_CMD);
+    return;
+  }
+  if (g_state == BUS200E_BRIDGE_FW_RECEIVING) {
+    send_nak(BUS200E_SYSEX_CMD_POLL_DONE, BUS200E_SYSEX_NAK_FW_BUSY);
+    return;
+  }
+  if (busy() || g_ops->master_state() != BUS200E_MASTER_IDLE) {
+    send_nak(BUS200E_SYSEX_CMD_POLL_DONE, BUS200E_SYSEX_NAK_BUSY);
+    return;
+  }
+  if (g_ops->send_poll_done() != 0) {
+    send_nak(BUS200E_SYSEX_CMD_POLL_DONE, BUS200E_SYSEX_NAK_SEND_TIMEOUT);
+    return;
+  }
+  const uint8_t p[1] = { BUS200E_SYSEX_CMD_POLL_DONE };
+  send_msg(BUS200E_SYSEX_CMD_ACK, p, 1);
+}
+
+BRIDGE_CODE static void handle_bus_status(void) {
+  const uint8_t wpm = (g_ops->wpm_present && g_ops->wpm_present()) ? 1 : 0;
+  const uint8_t quiet = (!g_ops->bus_quiet || g_ops->bus_quiet()) ? 1 : 0;
+  const uint8_t dialect = g_ops->bus_dialect ? (uint8_t) (g_ops->bus_dialect() & 0x7F) : 0;
+  uint8_t out[BUS200E_SYSEX_MAX_MESSAGE];
+  const int n = Bus200eSysExBuildBusStatusR(wpm, quiet, dialect,
+                                            (uint8_t) g_ops->master_error(),
+                                            out, sizeof(out));
+  if (n > 0) g_ops->send_message(out, (uint32_t) n);
 }
 
 // ---- RX entry point --------------------------------------------------------------
@@ -499,7 +591,8 @@ BRIDGE_CODE void Bus200eBridgeHandleSysEx(const uint8_t *sysex, uint32_t len) {
     // frame can only be a dump packet gone wrong.
     if (sysex[4] == BUS200E_SYSEX_CMD_FW_DATA) {
       // A garbled FW_DATA chunk is a sequence failure and ends the load.
-      if (g_state == BUS200E_BRIDGE_FW_RECEIVING) fw_fail(sysex[4], BUS200E_SYSEX_NAK_FW_SEQUENCE);
+      if (!fw_ops_ok()) send_nak(sysex[4], BUS200E_SYSEX_NAK_UNKNOWN_CMD);
+      else if (g_state == BUS200E_BRIDGE_FW_RECEIVING) fw_fail(sysex[4], BUS200E_SYSEX_NAK_FW_SEQUENCE);
       else send_nak(sysex[4], BUS200E_SYSEX_NAK_FW_SEQUENCE);
       return;
     }
@@ -515,6 +608,9 @@ BRIDGE_CODE void Bus200eBridgeHandleSysEx(const uint8_t *sysex, uint32_t len) {
     case BUS200E_SYSEX_CMD_PUT_DUMP:  handle_put_dump(raw, raw_len); break;
     case BUS200E_SYSEX_CMD_DUMP_DATA: handle_dump_data(seq, total, raw, raw_len); break;
     case BUS200E_SYSEX_CMD_DUMP_END:  handle_dump_end(raw, raw_len); break;
+    case BUS200E_SYSEX_CMD_SCAN:       handle_scan(raw, raw_len); break;
+    case BUS200E_SYSEX_CMD_POLL_DONE:  handle_poll_done(); break;
+    case BUS200E_SYSEX_CMD_BUS_STATUS: handle_bus_status(); break;
     case BUS200E_SYSEX_CMD_FW_BEGIN:
     case BUS200E_SYSEX_CMD_FW_DATA:
     case BUS200E_SYSEX_CMD_FW_END:
@@ -621,12 +717,58 @@ BRIDGE_CODE static void pump_restore(void) {
   session_reset();
 }
 
+// One step of the sweep. Timeouts (2 s send + 1 s reply) live inside the
+// master query; the only timer here is the gap between two queries.
+BRIDGE_CODE static void pump_scan(void) {
+  if (!g_ops->query_start || !g_ops->query_state || !g_ops->query_reset) {
+    end_session();   // ops swapped under us: nothing left to drive
+    return;
+  }
+  const uint32_t now = g_ops->now_ms();
+  if (g_scan_active) {
+    const Bus200eQueryState qs = g_ops->query_state();
+    if (qs == BUS200E_QUERY_SENDING || qs == BUS200E_QUERY_WAITING) return;
+    if (qs == BUS200E_QUERY_DONE) {
+      uint8_t ver[7];
+      const int valid = version_for(g_scan_next, ver);
+      uint8_t out[BUS200E_SYSEX_MAX_MESSAGE];
+      const int n = Bus200eSysExBuildScanR(g_scan_found, 0x7F, g_scan_next,
+                                           (uint8_t) valid, ver, out, sizeof(out));
+      if (n > 0) g_ops->send_message(out, (uint32_t) n);
+      g_scan_found++;
+    }
+    // DONE, FAILED, or an IDLE that should not happen: resolved either way.
+    g_ops->query_reset();
+    g_scan_active = 0;
+    g_scan_have_done = 1;
+    g_scan_done_ms = now;
+    g_scan_next++;
+  }
+  if (g_scan_next > g_scan_last) {
+    const uint8_t n_found = g_scan_found;
+    session_reset();
+    send_msg(BUS200E_SYSEX_CMD_SCAN_END, &n_found, 1);
+    return;
+  }
+  if (g_scan_have_done && (uint32_t) (now - g_scan_done_ms) < BUS200E_BRIDGE_SCAN_GAP_MS) return;
+  const int rc = g_ops->query_start(g_scan_next);
+  if (rc == 0) {
+    g_scan_active = 1;
+  } else if (-rc != (int) BUS200E_MASTER_ERR_BUSY) {
+    // Refused outright (bad address, ...): skip it, no SCAN_R.
+    g_scan_have_done = 1;
+    g_scan_done_ms = now;
+    g_scan_next++;
+  }   // else busy: retry on the next tick
+}
+
 BRIDGE_CODE void Bus200eBridgeTask(void) {
   if (!ops_ok()) return;
   switch (g_state) {
     case BUS200E_BRIDGE_CAPTURING: pump_capture(); break;
     case BUS200E_BRIDGE_SENDING:   pump_send(); break;
     case BUS200E_BRIDGE_RESTORING: pump_restore(); break;
+    case BUS200E_BRIDGE_SCANNING:  pump_scan(); break;
     case BUS200E_BRIDGE_RECEIVING:
       if (g_ops->now_ms() - g_rx_last_ms > BUS200E_BRIDGE_RX_TIMEOUT_MS) {
         send_nak(BUS200E_SYSEX_CMD_PUT_DUMP, BUS200E_SYSEX_NAK_SEND_TIMEOUT);

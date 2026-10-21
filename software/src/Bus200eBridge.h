@@ -143,6 +143,7 @@ typedef enum {
   BUS200E_BRIDGE_RECEIVING,  // PUT_DUMP accepted; collecting DUMP_DATA
   BUS200E_BRIDGE_RESTORING,  // DUMP_END was clean; MasterRestore running
   BUS200E_BRIDGE_FW_RECEIVING,  // FW_BEGIN accepted; collecting FW_DATA
+  BUS200E_BRIDGE_SCANNING,      // SCAN accepted; Task() walks first..last
 } Bus200eBridgeState;
 
 // Everything platform-specific. All fields must be non-NULL except
@@ -187,7 +188,25 @@ typedef struct {
   uint32_t (*fw_image_len)(void);
   uint8_t (*fw_image_kind)(void);
   int (*wpm_present)(void);
+
+  // ---- SCAN / POLL_DONE / BUS_STATUS (docs/bus200e-sysex-fw.md), APPEND-ONLY --
+  // Each is optional on its own: query_start NULL -> SCAN answers NAK 2;
+  // send_poll_done NULL -> POLL_DONE answers NAK 2; bus_quiet NULL ->
+  // BUS_STATUS_R reports quiet = 1; bus_dialect NULL -> dialect 0;
+  // fw_version_get / last_version_addr NULL -> "no version known".
+  int (*query_start)(uint8_t addr);               // MasterQuery: 0 accepted, <0 negated Bus200eMasterError (BUSY = retry)
+  Bus200eQueryState (*query_state)(void);
+  void (*query_reset)(void);
+  int (*fw_version_get)(uint8_t addr, uint8_t out[7]);  // 1 if known (Buchla200eFwVersionGet)
+  int (*send_poll_done)(void);                    // SendRawFrame(04 00 22 14 FF): 0 ok, <0 not sent
+  int (*bus_quiet)(void);
+  uint8_t (*bus_dialect)(void);                   // 1 = long/PRIMO, 2 = short/V2, 0 = none yet
+  uint8_t (*last_version_addr)(void);             // address of the last 0x13 frame seen, 0 = none
 } Bus200eBridgeOps;
+
+// Gap between one scan query finishing and the next starting. The device's
+// quiet gate paces the bus; this keeps a 0x08..0x72 sweep under about 30 s.
+#define BUS200E_BRIDGE_SCAN_GAP_MS 150
 
 // Store `ops` and reset all session state. Safe to call again to re-arm.
 void Bus200eBridgeInit(const Bus200eBridgeOps *ops);
