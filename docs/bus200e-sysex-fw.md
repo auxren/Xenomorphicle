@@ -221,7 +221,7 @@ survives a successful flash; re-arm to flash again.
 ## FW_STATUS (`24`) → FW_STATUS_R (`64`)
 
 ```
-F0 7D 62 35 02 64 <armed> <serving> <kind> <served0 served1 served2> <age_lo age_hi> <len0 len1 len2> <ver_addr> <ver_valid> <v0..v6> F7
+F0 7D 62 35 02 64 <armed> <serving> <kind> <served0 served1 served2> <age_lo age_hi> <len0 len1 len2> <ver_addr> <ver_valid> <v0..v6> <gen_lo gen_hi> F7
 ```
 
 | offset | field | meaning |
@@ -235,22 +235,23 @@ F0 7D 62 35 02 64 <armed> <serving> <kind> <served0 served1 served2> <age_lo age
 | 11 | `ver_addr` | address of the module whose version frame was last seen (0 if none) |
 | 12 | `ver_valid` | 0/1: `v0..v6` hold a real frame |
 | 13..19 | `v0..v6` | the seven ASCII bytes of the last `0x13` frame seen from `ver_addr` (spaces, `20`, if `ver_valid` is 0); the device masks every one to 7 bits (`& 0x7F`) |
+| 20..21 | `gen_lo gen_hi` | version-frame generation, **14 bits**, low first: incremented by the device every time it sees a `0x13` frame from any module (folded to 14 bits, `gen & 0x3FFF`; 0 at boot before any frame). A host records it before a load and treats a later version as fresh only when it has grown |
 
 Example — armed, serving a v2 image of 54,186 bytes, 12,345 bytes read
 (`12345 = 39 + 96×128` → `39 60 00`), 4 s since the first read, module `0x42`
-reporting `"31.0b1 "`:
+reporting `"31.0b1 "`, generation 5:
 
 ```
-F0 7D 62 35 02 64 01 01 02 39 60 00 04 00 2A 27 03 42 01 33 31 2E 30 62 31 20 F7
+F0 7D 62 35 02 64 01 01 02 39 60 00 04 00 2A 27 03 42 01 33 31 2E 30 62 31 20 05 00 F7
 ```
 
 With nothing on flash and nothing read, FW_STATUS_R is: `kind` 00, `len` 0,
 `served` 0, `age` `7F 7F`, `ver_addr` 0, `ver_valid` 0 and `v0..v6` seven
-`20` (spaces). `served` and `age` reset at boot; `age` saturates at `0x3FFE`
+`20` (spaces), `gen` `00 00`. `served` and `age` reset at boot; `age` saturates at `0x3FFE`
 (`7E 7F`), so `7F 7F` always means "never".
 
 A host watches `served` climb to `len` to know the module has read the whole
-image, and `ver_*` to see the new version after the module reboots.
+image, and `ver_*` to see the new version after the module reboots; the new version counts only if `gen` has grown since before the load, so a module that announces the same string again (a rollback, a retry) is still told apart from a stale cache.
 
 ## SCAN (`25`) → SCAN_R (`65`) × n, SCAN_END (`66`)
 

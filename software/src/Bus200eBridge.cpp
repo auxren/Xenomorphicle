@@ -506,6 +506,7 @@ BRIDGE_CODE static void handle_fw_status(void) {
   const uint8_t va = g_ops->last_version_addr ? g_ops->last_version_addr() : 0;
   st.ver_addr = va;
   st.ver_valid = (uint8_t) version_for(va, st.ver);
+  st.ver_gen = g_ops->fw_version_gen ? (uint16_t) (g_ops->fw_version_gen() & 0x3FFF) : 0;
   uint8_t out[BUS200E_SYSEX_MAX_MESSAGE];
   const int n = Bus200eSysExBuildFwStatusR(&st, out, sizeof(out));
   if (n < 0) return;

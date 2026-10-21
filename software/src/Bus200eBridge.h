@@ -204,6 +204,7 @@ typedef struct {
   int (*bus_quiet)(void);
   uint8_t (*bus_dialect)(void);                   // 1 = long/PRIMO, 2 = short/V2, 0 = none yet
   uint8_t (*last_version_addr)(void);             // address of the last 0x13 frame seen, 0 = none
+  uint16_t (*fw_version_gen)(void);               // version-frame generation, 14 bits (Buchla200eFwVersionGeneration() & 0x3FFF); NULL -> 0
 } Bus200eBridgeOps;
 
 // Gap between one scan query finishing and the next starting. The device's

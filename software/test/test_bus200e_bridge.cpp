@@ -162,6 +162,8 @@ static int f_send_poll_done() { fake_poll_calls++; return fake_poll_rc; }
 static int f_bus_quiet() { return fake_quiet_v; }
 static uint8_t f_bus_dialect() { return (uint8_t) fake_dialect_v; }
 static uint8_t f_last_ver_addr() { return fake_ver_addr; }
+static uint16_t fake_ver_gen;
+static uint16_t f_ver_gen() { return fake_ver_gen; }
 
 static const Bus200eBridgeOps fake_ops = {
   f_now,
@@ -173,6 +175,7 @@ static const Bus200eBridgeOps fake_ops = {
   f_fw_serving, f_fw_served, f_fw_age, f_fw_len, f_fw_kind, f_wpm,
   f_query_start, f_query_state, f_query_reset, f_version_get,
   f_send_poll_done, f_bus_quiet, f_bus_dialect, f_last_ver_addr,
+  f_ver_gen,
 };
 
 static void reset_all(uint32_t card_size = kFakeCardSmall) {
@@ -209,6 +212,7 @@ static void reset_all(uint32_t card_size = kFakeCardSmall) {
   fake_poll_rc = 0; fake_poll_calls = 0;
   fake_quiet_v = 1; fake_dialect_v = 0;
   fake_ver_addr = 0;
+  fake_ver_gen = 0;
   memset(fake_ver_known, 0, sizeof(fake_ver_known));
   memcpy(fake_ver_bytes, "31.2C2 ", 7);
   sent.clear();
@@ -1579,6 +1583,21 @@ static void test_fw_status_r_reports_last_version() {
   m = last_sent();
   CHECK(m && Bus200eSysExParseFwStatusR(m->raw.data(), (uint32_t) m->raw.size(), &s) == 0);
   CHECK(s.ver_valid == 1 && s.ver[0] == 0x33);
+  // the version-frame generation is carried (1234 = 0x4D2 -> 52 09), 0 when unset
+  CHECK(s.ver_gen == 0);
+  fake_ver_gen = 1234;
+  feed(BUS200E_SYSEX_CMD_FW_STATUS, {});
+  m = last_sent();
+  CHECK(m && Bus200eSysExParseFwStatusR(m->raw.data(), (uint32_t) m->raw.size(), &s) == 0);
+  CHECK(s.ver_gen == 1234 && m->raw.size() == 22 && m->raw[20] == 0x52 && m->raw[21] == 0x09);
+  Bus200eBridgeOps nogen = fake_ops;
+  nogen.fw_version_gen = nullptr;
+  Bus200eBridgeInit(&nogen);
+  feed(BUS200E_SYSEX_CMD_FW_STATUS, {});
+  m = last_sent();
+  CHECK(m && Bus200eSysExParseFwStatusR(m->raw.data(), (uint32_t) m->raw.size(), &s) == 0);
+  CHECK(s.ver_gen == 0);
+  Bus200eBridgeInit(&fake_ops);
 }
 
 static void test_fw_end_commit_failure_after_short_image() {

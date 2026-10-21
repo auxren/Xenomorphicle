@@ -169,7 +169,7 @@ typedef enum {
   // Firmware-card / scan / bus-status commands (docs/bus200e-sysex-fw.md).
   // 0x20-0x27 and 0x64-0x67 clear every byte hOC and this enum already use.
   BUS200E_SYSEX_CMD_FW_BEGIN   = 0x20,  // H->D [kind, len0,len1,len2, crc0..crc4]
-  BUS200E_SYSEX_CMD_FW_DATA    = 0x21,  // H->D [seq_lo,seq_hi,total_lo,total_hi, packed(<=42)]
+  BUS200E_SYSEX_CMD_FW_DATA    = 0x21,  // H->D [seq_lo,seq_hi,total_lo,total_hi, raw<=42 / packed<=48]
   BUS200E_SYSEX_CMD_FW_END     = 0x22,  // H->D [n_lo,n_hi, xor7]
   BUS200E_SYSEX_CMD_FW_ARM     = 0x23,  // H->D [on]
   BUS200E_SYSEX_CMD_FW_STATUS  = 0x24,  // H->D none
@@ -181,7 +181,7 @@ typedef enum {
   BUS200E_SYSEX_CMD_DUMP_DATA = 0x44,
   BUS200E_SYSEX_CMD_DUMP_END  = 0x45,
   BUS200E_SYSEX_CMD_STATUS_R  = 0x50,
-  BUS200E_SYSEX_CMD_FW_STATUS_R  = 0x64, // [armed, serving, kind, served0..2, age_lo, age_hi, len0..2, ver_addr, ver_valid, v0..v6]
+  BUS200E_SYSEX_CMD_FW_STATUS_R  = 0x64, // [armed, serving, kind, served0..2, age_lo, age_hi, len0..2, ver_addr, ver_valid, v0..v6, gen_lo, gen_hi]
   BUS200E_SYSEX_CMD_SCAN_R       = 0x65, // one per responder: [idx, count(0x7F=unknown), addr, ver_valid, v0..v6]
   BUS200E_SYSEX_CMD_SCAN_END     = 0x66, // [n_found]
   BUS200E_SYSEX_CMD_BUS_STATUS_R = 0x67, // [wpm_present, bus_quiet, dialect, last_error]
@@ -309,10 +309,11 @@ typedef struct {
   uint8_t  ver_addr;          // module whose version frame was last seen
   uint8_t  ver_valid;         // 0/1: ver[] holds a real frame (else sent as seven spaces)
   uint8_t  ver[7];            // ASCII bytes of the last 0x13 frame (masked & 0x7F on the wire)
+  uint16_t ver_gen;           // version-frame generation (14 bits; 0 at boot, grows per 0x13 frame seen)
 } Bus200eFwStatus;
 
 #define BUS200E_SYSEX_FW_BEGIN_FIELDS     9   // kind + 3 length septets + 5 CRC septets
-#define BUS200E_SYSEX_FW_STATUS_R_FIELDS  20
+#define BUS200E_SYSEX_FW_STATUS_R_FIELDS  22
 
 // n septets, low first <-> value. Five septets carry 35 bits, enough for a
 // CRC-32; ToSeptets drops bits above 7*n, Septets reads at most n <= 5.

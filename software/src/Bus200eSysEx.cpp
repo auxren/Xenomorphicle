@@ -209,6 +209,7 @@ SYSEX_CODE int Bus200eSysExParseFwBegin(const uint8_t *payload, uint32_t len,
 
 SYSEX_CODE int Bus200eSysExBuildFwStatusR(const Bus200eFwStatus *s, uint8_t *out, uint32_t cap) {
   if (!s) return -1;
+  if (s->ver_gen > 0x3FFF) return -1;
   if (s->served > 0x1FFFFFu || s->image_len > 0x1FFFFFu || s->first_read_age_s > 0x3FFF) return -1;
   if ((s->armed | s->serving | s->kind | s->ver_addr) & 0x80) return -1;
   const int o = begin_message(BUS200E_SYSEX_CMD_FW_STATUS_R, BUS200E_SYSEX_FW_STATUS_R_FIELDS, out, cap);
@@ -223,6 +224,7 @@ SYSEX_CODE int Bus200eSysExBuildFwStatusR(const Bus200eFwStatus *s, uint8_t *out
   p[11] = s->ver_addr;
   p[12] = s->ver_valid ? 1 : 0;
   for (int i = 0; i < 7; ++i) p[13 + i] = s->ver_valid ? (uint8_t) (s->ver[i] & 0x7F) : 0x20;
+  Bus200eSysExToSeptets(s->ver_gen, p + 20, 2);
   return o + BUS200E_SYSEX_FW_STATUS_R_FIELDS;
 }
 
@@ -237,6 +239,7 @@ SYSEX_CODE int Bus200eSysExParseFwStatusR(const uint8_t *payload, uint32_t len, 
   s->ver_addr = payload[11];
   s->ver_valid = payload[12];
   memcpy(s->ver, payload + 13, 7);
+  s->ver_gen = (uint16_t) Bus200eSysExSeptets(payload + 20, 2);
   return 0;
 }
 

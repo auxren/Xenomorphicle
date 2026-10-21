@@ -92,6 +92,7 @@ static int op_send_poll_done() { return OC::PresetBus::SendPollDone(); }
 static int op_bus_quiet() { return OC::PresetBus::BusQuiet() ? 1 : 0; }
 static uint8_t op_bus_dialect() { return OC::PresetBus::BusDialect(); }
 static uint8_t op_last_version_addr() { return OC::PresetBus::LastVersionAddr(); }
+static uint16_t op_fw_version_gen() { return (uint16_t) (Buchla200eFwVersionGeneration() & 0x3FFF); }
 
 // card_mark_dirty is deliberately NULL. PresetBus.h flags it as an open
 // design question that a foreign-module capture shares PBCARD.BIN with
@@ -110,6 +111,7 @@ static const Bus200eBridgeOps kOps = {
   op_fw_image_kind, op_wpm_present,
   op_query_start, op_query_state, op_query_reset, op_fw_version_get,
   op_send_poll_done, op_bus_quiet, op_bus_dialect, op_last_version_addr,
+  op_fw_version_gen,
 };
 
 // ---- public ----------------------------------------------------------------
