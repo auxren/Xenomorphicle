@@ -166,11 +166,25 @@ typedef enum {
   BUS200E_SYSEX_CMD_GET_DUMP  = 0x04,
   BUS200E_SYSEX_CMD_PUT_DUMP  = 0x05,
   BUS200E_SYSEX_CMD_STATUS    = 0x10,
+  // Firmware-card / scan / bus-status commands (docs/bus200e-sysex-fw.md).
+  // 0x20-0x27 and 0x64-0x67 clear every byte hOC and this enum already use.
+  BUS200E_SYSEX_CMD_FW_BEGIN   = 0x20,  // H->D [kind, len0,len1,len2, crc0..crc4]
+  BUS200E_SYSEX_CMD_FW_DATA    = 0x21,  // H->D [seq_lo,seq_hi,total_lo,total_hi, packed(<=42)]
+  BUS200E_SYSEX_CMD_FW_END     = 0x22,  // H->D [n_lo,n_hi, xor7]
+  BUS200E_SYSEX_CMD_FW_ARM     = 0x23,  // H->D [on]
+  BUS200E_SYSEX_CMD_FW_STATUS  = 0x24,  // H->D none
+  BUS200E_SYSEX_CMD_SCAN       = 0x25,  // H->D [first, last]
+  BUS200E_SYSEX_CMD_POLL_DONE  = 0x26,  // H->D none
+  BUS200E_SYSEX_CMD_BUS_STATUS = 0x27,  // H->D none
   BUS200E_SYSEX_CMD_ACK       = 0x40,
   BUS200E_SYSEX_CMD_INFO_R    = 0x41,
   BUS200E_SYSEX_CMD_DUMP_DATA = 0x44,
   BUS200E_SYSEX_CMD_DUMP_END  = 0x45,
   BUS200E_SYSEX_CMD_STATUS_R  = 0x50,
+  BUS200E_SYSEX_CMD_FW_STATUS_R  = 0x64, // [armed, serving, kind, served0..2, age_lo, age_hi, len0..2, ver_addr, ver_valid, v0..v6]
+  BUS200E_SYSEX_CMD_SCAN_R       = 0x65, // one per responder: [idx, count(0x7F=unknown), addr, ver_valid, v0..v6]
+  BUS200E_SYSEX_CMD_SCAN_END     = 0x66, // [n_found]
+  BUS200E_SYSEX_CMD_BUS_STATUS_R = 0x67, // [wpm_present, bus_quiet, dialect, last_error]
   BUS200E_SYSEX_CMD_NAK       = 0x7E,
 } Bus200eSysExCmd;
 
@@ -185,7 +199,18 @@ typedef enum {
   BUS200E_SYSEX_NAK_NO_FREE_CARD = 7,
   BUS200E_SYSEX_NAK_SEND_TIMEOUT = 8,
   BUS200E_SYSEX_NAK_NO_RESPONSE  = 9,
+  BUS200E_SYSEX_NAK_FW_BUSY      = 10,  // card serving on / load in progress
+  BUS200E_SYSEX_NAK_FW_NOMEM     = 11,  // FwCardCommit -6 / -1, FwCardBegin alloc
+  BUS200E_SYSEX_NAK_FW_LENGTH    = 12,  // FwCardCommit -2
+  BUS200E_SYSEX_NAK_FW_MAGIC     = 13,  // FwCardCommit -3 (header/geometry)
+  BUS200E_SYSEX_NAK_FW_CRC       = 14,  // FwCardCommit -4
+  BUS200E_SYSEX_NAK_FW_WRITE     = 15,  // FwCardCommit -5 (write or read-back)
+  BUS200E_SYSEX_NAK_FW_SEQUENCE  = 16,  // FW_DATA out of order / without FW_BEGIN
 } Bus200eSysExNakReason;
+
+// Appended to INFO_R: which command set this firmware speaks (1 = the
+// FW_*/SCAN/POLL_DONE/BUS_STATUS commands of docs/bus200e-sysex-fw.md).
+#define BUS200E_SYSEX_BRIDGE_LEVEL 1
 
 #define BUS200E_SYSEX_CHUNK_BYTES 42   // raw bytes per DUMP_DATA chunk
 
