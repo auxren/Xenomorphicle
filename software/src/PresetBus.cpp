@@ -743,8 +743,8 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   // and that is the whole record of what the file holds. (Preset card only:
   // a firmware card is read-only and never flushed, see card_image_flush.)
   if (!fw_mode && got == BUSCARD_SIZE) card_sectors.adopt(card_image, Buchla200eCrc32);
-  card_image_fw = fw_mode;
   else card_sectors.forget();
+  card_image_fw = fw_mode;
   if (BusCardInitEx(card_image, size, abytes) != 0) {
     Serial.println("PresetBus: card serve failed - bad geometry");
     return -3;
