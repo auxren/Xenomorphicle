@@ -187,8 +187,13 @@ Example (n = 1291, xor7 = `5A`):
 F0 7D 62 35 02 22 0B 0A 5A F7
 ```
 
-A packet-count or xor7 mismatch is **NAK 6 CHECKSUM** (abort). Otherwise the
-device calls `FwCardCommit(len, crc32)`, which verifies the length, the
+A packet-count or xor7 mismatch is **NAK 6 CHECKSUM** (abort). Next, **before
+any commit**, the bridge compares the first 8 raw bytes it received with the
+`kind` from FW_BEGIN (`#!200EFU` ⇔ 1, `#$200EFU` ⇔ 2; anything else is a
+mismatch): a disagreement is **NAK 13 FW_MAGIC** (abort, back to IDLE) and
+`FwCardCommit` is never called. (`FwCardCommit` also refuses, with -3, an image
+whose header geometry exceeds the buffer `kind` allocated: defence in depth.)
+Otherwise the device calls `FwCardCommit(len, crc32)`, which verifies the length, the
 header magic (`#!200EFU` for kind 1, `#$200EFU` for kind 2; a mismatch with
 `kind` is `FwCardCommit` -3) and the CRC-32, writes `FWCARD.BIN`, reads it back, and arms
 firmware-card mode. Its return code selects the reply; ACK `{22 n_lo n_hi}`
@@ -250,6 +255,8 @@ With nothing on flash and nothing read, FW_STATUS_R is: `kind` 00, `len` 0,
 `20` (spaces), `gen` `00 00`. `served` and `age` reset at boot; `age` saturates at `0x3FFE`
 (`7E 7F`), so `7F 7F` always means "never".
 
+The version cache (and so `last_version_addr`, `ver_addr`, `ver_valid`, `v0..v6`) is RAM only: after a device reboot FW_STATUS_R reports `ver_valid` 0 (and `ver_addr` 0) until a `0x13` frame is seen again.
+
 A host watches `served` climb to `len` to know the module has read the whole
 image, and `ver_*` to see the new version after the module reboots; the new version counts only if `gen` has grown since before the load, so a module that announces the same string again (a rollback, a retry) is still told apart from a stale cache.
 
@@ -281,6 +288,12 @@ Example — one responder at `0x42`, then the end:
 F0 7D 62 35 02 65 00 7F 42 01 33 31 2E 30 62 31 20 F7
 F0 7D 62 35 02 66 01 F7
 ```
+
+Timing: the device waits 300 ms for a QUERY reply during a scan (the master's
+normal 1000 ms reply timeout is restored at SCAN_END, abort and Init); an absent
+address therefore costs ~450 ms (300 ms + the 150 ms gap), so a 61-address table
+sweep is about 30 s. The bench (checklist H2) validates this. The host scans the
+module table's contiguous runs under its own overall deadline.
 
 The sweep is bounded by the host's `first..=last`; a full sweep of the 7-bit
 space is slow, so the host should expect `SCAN_END` to take seconds and

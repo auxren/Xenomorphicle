@@ -162,6 +162,8 @@ static int f_send_poll_done() { fake_poll_calls++; return fake_poll_rc; }
 static int f_bus_quiet() { return fake_quiet_v; }
 static uint8_t f_bus_dialect() { return (uint8_t) fake_dialect_v; }
 static uint8_t f_last_ver_addr() { return fake_ver_addr; }
+static std::vector<uint16_t> fake_timeouts;
+static void f_set_timeout(uint16_t ms) { fake_timeouts.push_back(ms); }
 static uint16_t fake_ver_gen;
 static uint16_t f_ver_gen() { return fake_ver_gen; }
 
@@ -176,6 +178,7 @@ static const Bus200eBridgeOps fake_ops = {
   f_query_start, f_query_state, f_query_reset, f_version_get,
   f_send_poll_done, f_bus_quiet, f_bus_dialect, f_last_ver_addr,
   f_ver_gen,
+  f_set_timeout,
 };
 
 static void reset_all(uint32_t card_size = kFakeCardSmall) {
@@ -206,6 +209,7 @@ static void reset_all(uint32_t card_size = kFakeCardSmall) {
   fw_arm_calls = 0; fw_arm_last = -1;
   fw_served_v = fw_age_v = fw_len_v = 0; fw_kind_v = 0;
   q_starts.clear();
+  fake_timeouts.clear();
   fake_q_state = BUS200E_QUERY_IDLE;
   fake_q_start_rc = 0; fake_q_hold = 0; fake_q_reset_calls = 0;
   memset(fake_q_done, 0, sizeof(fake_q_done));
@@ -820,6 +824,8 @@ static bool is_ack(const SentMsg *m, std::initializer_list<uint8_t> want) {
 static std::vector<uint8_t> fw_image(uint32_t n) {
   std::vector<uint8_t> v(n);
   for (uint32_t i = 0; i < n; ++i) v[i] = (uint8_t) (i * 37u + 0x91u);
+  static const char kMagic[] = "#$200EFU";   // v2 header, what begin_ok's kind 2 expects
+  for (uint32_t i = 0; i < 8 && i < n; ++i) v[i] = (uint8_t) kMagic[i];
   return v;
 }
 
@@ -1106,6 +1112,38 @@ static void test_fw_end_maps_commit_codes() {
     CHECK(fw_commit_calls == 1);
     CHECK(fw_abort_calls == 1);
     CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  }
+}
+
+static void test_fw_end_kind_magic_mismatch_naks_before_commit() {
+  printf("test_fw_end_kind_magic_mismatch_naks_before_commit\n");
+  // kind, first-8-bytes magic
+  const struct { uint8_t kind; const char *magic; int ok; } cases[] = {
+    { 1, "#$200EFU", 0 },   // v2 header on a kind-1 load: the over-read case
+    { 2, "#!200EFU", 0 },
+    { 2, "GARBAGE!", 0 },
+    { 1, "#!200EFU", 1 },
+    { 2, "#$200EFU", 1 },
+  };
+  for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
+    reset_all();
+    std::vector<uint8_t> img = fw_image(126);
+    for (int i = 0; i < 8; ++i) img[i] = (uint8_t) cases[c].magic[i];
+    feed_fw_begin(cases[c].kind, 126, 0x12345678);
+    CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_FW_RECEIVING);
+    sent.clear();
+    for (uint16_t k = 0; k < 3; ++k) feed_fw_data(k, 3, img.data() + k * 42, 42);
+    feed_fw_end(3, Bus200eSysExXor7(0, img.data(), 126));
+    if (cases[c].ok) {
+      CHECK(is_ack(last_sent(), { 0x22, 3, 0 }));
+      CHECK(fw_commit_calls == 1);
+    } else {
+      CHECK(nak_code(last_sent()) == 13);
+      CHECK(last_sent()->raw[0] == BUS200E_SYSEX_CMD_FW_END);
+      CHECK(fw_commit_calls == 0);
+      CHECK(fw_abort_calls == 1);
+      CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+    }
   }
 }
 
@@ -1445,6 +1483,28 @@ static void test_scan_busy_forever_skips_address() {
         sent[1].raw == bytes({ 0x00 }));
 }
 
+static void test_scan_sets_and_restores_reply_timeout() {
+  printf("test_scan_sets_and_restores_reply_timeout\n");
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x29 });
+  CHECK(fake_timeouts.size() == 1 && fake_timeouts[0] == 300);
+  scan_run();
+  CHECK(fake_timeouts.size() == 2 && fake_timeouts[1] == 1000);   // at SCAN_END
+  // abort mid-scan
+  reset_all();
+  fake_q_hold = 1;
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x2B });
+  Bus200eBridgeTask();
+  Bus200eBridgeAbort();
+  CHECK(fake_timeouts.size() == 2 && fake_timeouts[0] == 300 && fake_timeouts[1] == 1000);
+  // Init mid-scan
+  reset_all();
+  fake_q_hold = 1;
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x2B });
+  Bus200eBridgeInit(&fake_ops);
+  CHECK(fake_timeouts.size() == 2 && fake_timeouts[1] == 1000);
+}
+
 static void test_scan_abort_releases_query() {
   printf("test_scan_abort_releases_query\n");
   reset_all();
@@ -1669,6 +1729,7 @@ int main() {
   test_fw_end_commits_and_arms();
   test_fw_end_short_leaves_unarmed();
   test_fw_end_maps_commit_codes();
+  test_fw_end_kind_magic_mismatch_naks_before_commit();
   test_fw_arm_off_calls_fw_arm_0();
   test_fw_status_r_reports_ops();
   test_fw_receiving_stall_aborts();
@@ -1684,6 +1745,7 @@ int main() {
   test_scan_gap_150ms();
   test_scan_busy_forever_skips_address();
   test_scan_abort_releases_query();
+  test_scan_sets_and_restores_reply_timeout();
   test_poll_done_sends_frame_and_acks();
   test_bus_status_r_fields();
   test_info_r_appends_bridge_level();

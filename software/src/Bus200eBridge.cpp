@@ -51,6 +51,7 @@ static uint16_t g_fw_total = 0;     // ceil(len / 42)
 static uint16_t g_fw_next = 0;      // next expected seq == packets received
 static uint32_t g_fw_pushed = 0;    // raw bytes handed to fw_push
 static uint8_t  g_fw_xor = 0;
+static uint8_t  g_fw_magic[8];   // first 8 raw bytes of the stream, for the kind/magic check
 static uint32_t g_fw_last_ms = 0;   // last FW_DATA/FW_END (polls do not count)
 
 // sweep (SCAN .. SCAN_END)
@@ -130,6 +131,7 @@ BRIDGE_CODE static void session_reset(void) {
   g_fw_next = 0;
   g_fw_pushed = 0;
   g_fw_xor = 0;
+  memset(g_fw_magic, 0, sizeof(g_fw_magic));
   g_fw_last_ms = 0;
   g_scan_next = 0;
   g_scan_last = 0;
@@ -141,12 +143,22 @@ BRIDGE_CODE static void session_reset(void) {
   g_scan_try_ms = 0;
 }
 
+// The scan shortens the master's QUERY reply timeout; every way out of a scan
+// puts the default back (NULL-tolerant: the op is optional).
+BRIDGE_CODE static void scan_timeout_restore(void) {
+  if (g_ops && g_ops->query_set_reply_timeout_ms)
+    g_ops->query_set_reply_timeout_ms(BUS200E_MASTER_QUERY_REPLY_TIMEOUT_MS);
+}
+
 // Leaving a session from outside its own handlers (Abort, re-Init): release
 // whatever the session holds on the far side, then drop to IDLE.
 BRIDGE_CODE static void end_session(void) {
   if (g_ops) {
     if (g_state == BUS200E_BRIDGE_FW_RECEIVING && g_ops->fw_abort) g_ops->fw_abort();
-    if (g_state == BUS200E_BRIDGE_SCANNING && g_ops->query_reset) g_ops->query_reset();
+    if (g_state == BUS200E_BRIDGE_SCANNING) {
+      if (g_ops->query_reset) g_ops->query_reset();
+      scan_timeout_restore();
+    }
   }
   session_reset();
 }
@@ -440,7 +452,10 @@ BRIDGE_CODE static void handle_fw_data(uint16_t seq, uint16_t total,
     fw_fail(BUS200E_SYSEX_CMD_FW_DATA, BUS200E_SYSEX_NAK_FW_SEQUENCE);
     return;
   }
-  for (uint32_t i = 0; i < raw_len; ++i) g_ops->fw_push(raw[i]);
+  for (uint32_t i = 0; i < raw_len; ++i) {
+    if (g_fw_pushed + i < sizeof(g_fw_magic)) g_fw_magic[g_fw_pushed + i] = raw[i];
+    g_ops->fw_push(raw[i]);
+  }
   g_fw_xor = Bus200eSysExXor7(g_fw_xor, raw, raw_len);
   g_fw_pushed += raw_len;
   g_fw_next++;
@@ -457,6 +472,15 @@ BRIDGE_CODE static void handle_fw_end(const uint8_t *payload, uint32_t len) {
   const uint16_t n = BUS200E_SYSEX_FROM14(payload[0], payload[1]);
   if (n != g_fw_total || n != g_fw_next || payload[2] != g_fw_xor) {
     fw_fail(BUS200E_SYSEX_CMD_FW_END, BUS200E_SYSEX_NAK_CHECKSUM);
+    return;
+  }
+  // The card layer sizes its buffer from `kind`; a stream whose header says the
+  // other format (or neither) must never reach the commit.
+  static const uint8_t kMagicV1[8] = { '#', '!', '2', '0', '0', 'E', 'F', 'U' };
+  static const uint8_t kMagicV2[8] = { '#', '$', '2', '0', '0', 'E', 'F', 'U' };
+  const uint8_t *want = (g_fw_kind == 1) ? kMagicV1 : (g_fw_kind == 2) ? kMagicV2 : NULL;
+  if (!want || g_fw_pushed < sizeof(g_fw_magic) || memcmp(g_fw_magic, want, 8) != 0) {
+    fw_fail(BUS200E_SYSEX_CMD_FW_END, BUS200E_SYSEX_NAK_FW_MAGIC);
     return;
   }
   const uint32_t image_len = g_fw_len, crc = g_fw_crc;
@@ -533,6 +557,8 @@ BRIDGE_CODE static void handle_scan(const uint8_t *payload, uint32_t len) {
   g_scan_next = payload[0];
   g_scan_last = payload[1];
   g_state = BUS200E_BRIDGE_SCANNING;
+  if (g_ops->query_set_reply_timeout_ms)
+    g_ops->query_set_reply_timeout_ms(BUS200E_BRIDGE_SCAN_REPLY_TIMEOUT_MS);
   const uint8_t p[3] = { BUS200E_SYSEX_CMD_SCAN, payload[0], payload[1] };
   send_msg(BUS200E_SYSEX_CMD_ACK, p, 3);
 }
@@ -752,6 +778,7 @@ BRIDGE_CODE static void pump_scan(void) {
   }
   if (g_scan_next > g_scan_last) {
     const uint8_t n_found = g_scan_found;
+    scan_timeout_restore();
     session_reset();
     send_msg(BUS200E_SYSEX_CMD_SCAN_END, &n_found, 1);
     return;

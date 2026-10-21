@@ -958,6 +958,7 @@ FLASHMEM int FwCardCommit(uint32_t len, uint32_t crc32) {
   uint8_t abytes = 0;
   if (len != fw_idx || len < 0x60 || len > fw_cap) rc = -2;
   else if (!fw_geometry(fw_buf, &size, &abytes, &used)) rc = -3;
+  else if (size > fw_cap) rc = -3;   // never write more than the buffer holds
   else if (len > size) rc = -2;
   else if (Buchla200eCrc32(fw_buf, len) != crc32) rc = -4;
   if (rc == 0) {
@@ -1131,6 +1132,7 @@ uint8_t MasterQueryVersion(uint8_t *out, uint8_t cap) {
 Bus200eQueryState MasterQueryState() { return Bus200eMasterQueryGetState(); }
 Bus200eMasterError MasterQueryError() { return Bus200eMasterQueryLastError(); }
 void MasterQueryReset() { Bus200eMasterQueryReset(); }
+void MasterQuerySetReplyTimeoutMs(uint16_t ms) { Bus200eMasterQuerySetReplyTimeoutMs(ms); }
 // Declared here rather than beside report_query() below, which uses it: the
 // accessors are part of the API block and the definition has to precede them.
 static bool query_quiet = false;

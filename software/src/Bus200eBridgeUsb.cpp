@@ -81,6 +81,7 @@ static int op_wpm_present() { return OC::PresetBus::WpmPresent() ? 1 : 0; }
 static int op_query_start(uint8_t addr) { return OC::PresetBus::MasterQuery(addr); }
 static Bus200eQueryState op_query_state() { return OC::PresetBus::MasterQueryState(); }
 static void op_query_reset() { OC::PresetBus::MasterQueryReset(); }
+static void op_query_set_reply_timeout_ms(uint16_t ms) { OC::PresetBus::MasterQuerySetReplyTimeoutMs(ms); }
 static int op_fw_version_get(uint8_t addr, uint8_t out[7]) {
   char s[16];
   if (Buchla200eFwVersionGet(addr, s, sizeof(s)) <= 0) return 0;
@@ -112,6 +113,7 @@ static const Bus200eBridgeOps kOps = {
   op_query_start, op_query_state, op_query_reset, op_fw_version_get,
   op_send_poll_done, op_bus_quiet, op_bus_dialect, op_last_version_addr,
   op_fw_version_gen,
+  op_query_set_reply_timeout_ms,
 };
 
 // ---- public ----------------------------------------------------------------

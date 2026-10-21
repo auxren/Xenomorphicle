@@ -205,7 +205,14 @@ typedef struct {
   uint8_t (*bus_dialect)(void);                   // 1 = long/PRIMO, 2 = short/V2, 0 = none yet
   uint8_t (*last_version_addr)(void);             // address of the last 0x13 frame seen, 0 = none
   uint16_t (*fw_version_gen)(void);               // count of every 0x13 frame seen since boot (PresetBus FwVersionFrames); the bridge folds to 14 bits; NULL -> 0
+  // Append-only, optional. A scan sets 300 here at its start and the default
+  // (BUS200E_MASTER_QUERY_REPLY_TIMEOUT_MS) at its end, abort and Init.
+  void (*query_set_reply_timeout_ms)(uint16_t ms);
 } Bus200eBridgeOps;
+
+// QUERY reply timeout during a scan: an absent address costs this plus the
+// scan gap (~450 ms), so a 61-address sweep takes ~30 s instead of ~70 s.
+#define BUS200E_BRIDGE_SCAN_REPLY_TIMEOUT_MS 300
 
 // Gap between one scan query finishing and the next starting. The device's
 // quiet gate paces the bus; this keeps a 0x08..0x72 sweep under about 30 s.

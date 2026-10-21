@@ -288,4 +288,7 @@ uint8_t Bus200eMasterQueryVersion(uint8_t *out, uint8_t cap);
 // also implicitly does this (only from DONE/FAILED/IDLE -- see BUSY).
 void Bus200eMasterQueryReset(void);
 
+// Runtime QUERY reply timeout (ms); 0 restores BUS200E_MASTER_QUERY_REPLY_TIMEOUT_MS.
+void Bus200eMasterQuerySetReplyTimeoutMs(uint16_t ms);
+
 #endif  // BUS200EMASTER_H_

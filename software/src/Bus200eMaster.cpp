@@ -37,6 +37,7 @@ static uint8_t  q_ver_len;
 static uint32_t q_strays;
 static uint32_t q_send_start_ms;
 static uint32_t q_phase_start_ms;
+static uint16_t q_reply_timeout_ms = BUS200E_MASTER_QUERY_REPLY_TIMEOUT_MS;
 
 static int ops_complete(const Bus200eMasterOps *o) {
   return o && o->now_ms && o->tx_gate_open && o->probe_card &&
@@ -278,7 +279,7 @@ MASTER_CODE void Bus200eMasterQueryTask(void) {
 
   // BUS200E_QUERY_WAITING: nothing to do but time out. The answer arrives
   // through Bus200eMasterQueryReply(), driven by the slave RX path.
-  if (now - q_phase_start_ms > BUS200E_MASTER_QUERY_REPLY_TIMEOUT_MS) {
+  if (now - q_phase_start_ms > q_reply_timeout_ms) {
     q_state = BUS200E_QUERY_FAILED;
     q_error = BUS200E_MASTER_ERR_NO_RESPONSE;
   }
@@ -314,6 +315,10 @@ MASTER_CODE uint8_t Bus200eMasterQueryVersion(uint8_t *out, uint8_t cap) {
   const uint8_t n = (q_ver_len < cap) ? q_ver_len : cap;
   for (uint8_t i = 0; i < n; ++i) out[i] = q_ver[i];
   return n;
+}
+
+void Bus200eMasterQuerySetReplyTimeoutMs(uint16_t ms) {
+  q_reply_timeout_ms = ms ? ms : (uint16_t) BUS200E_MASTER_QUERY_REPLY_TIMEOUT_MS;
 }
 
 void Bus200eMasterQueryReset(void) {

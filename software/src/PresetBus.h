@@ -221,6 +221,7 @@ bool QueryReplyReady();        // a reply has been captured (state == DONE)
 uint8_t MasterQueryVersion(uint8_t *out, uint8_t cap);
 Bus200eQueryState MasterQueryState();
 Bus200eMasterError MasterQueryError();
+void MasterQuerySetReplyTimeoutMs(uint16_t ms);  // QUERY reply timeout (scan uses 300); 0 = default
 void MasterQueryReset();       // acknowledge a DONE/FAILED query, back to IDLE
 
 // Silence report_query()'s per-result Serial line. A UI-driven scan walks
@@ -304,6 +305,7 @@ inline uint8_t MasterQueryVersion(uint8_t *, uint8_t) { return 0; }
 inline Bus200eQueryState MasterQueryState() { return BUS200E_QUERY_IDLE; }
 inline Bus200eMasterError MasterQueryError() { return BUS200E_MASTER_ERR_NONE; }
 inline void MasterQueryReset() {}
+inline void MasterQuerySetReplyTimeoutMs(uint16_t) {}
 inline void MasterQuerySetQuiet(bool) {}
 inline bool MasterQueryQuiet() { return false; }
 inline bool LoadAckSeenSince(uint8_t, uint32_t) { return false; }
