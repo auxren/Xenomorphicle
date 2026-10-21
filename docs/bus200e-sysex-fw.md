@@ -326,6 +326,66 @@ F0 7D 62 35 02 67 <wpm_present> <bus_quiet> <dialect> <last_error> F7
 Example: `F0 7D 62 35 02 67 00 01 02 00 F7` — no WPM, bus quiet, short/V2 framing,
 no error.
 
+## STATUS (`10`) → STATUS_R (`50`)
+
+```
+F0 7D 62 35 02 50 <state> <error> <mod_addr> <is_restore> <session_state> F7
+```
+
+STATUS_R is **five** payload bytes. Older notes list four; the fifth was
+appended and a host that reads only four still works.
+
+| field | meaning |
+|---|---|
+| `state` | `Bus200eMasterState`: `0` idle, `1` finding card, `2` sending, `3` wait activity, `4` transferring, `5` done, `6` failed |
+| `error` | `Bus200eMasterError` (meaningful while `state` is 6): `0` none, `1` busy, `2` bad args, `3` no free card, `4` send timeout, `5` no response |
+| `mod_addr` | bus address of the module the current session targets |
+| `is_restore` | `1` while the bridge is RESTORING, else `0` |
+| `session_state` | the bridge's own state (`Bus200eBridgeState`): `0` IDLE, `1` CAPTURING, `2` SENDING, `3` RECEIVING, `4` RESTORING, `5` FW_RECEIVING, `6` SCANNING. Append-only; unknown values mean "newer than you" |
+
+### Restore completion
+
+A preset restore is PUT_DUMP, the DUMP_DATA packets, then DUMP_END. The ACK of
+DUMP_END means "accepted and started", **not** "finished": the bus job runs for
+seconds. A master error at that point (`master_restore` refusing the job) NAKs
+the DUMP_END itself, using the table below, and the session resets to IDLE.
+
+When the job does run, the device ends it with one **unsolicited** frame, with
+no request from the host:
+
+| outcome | frame |
+|---|---|
+| job DONE | `40` ACK `{05 addr}` — echo cmd PUT_DUMP, `addr` = the module's bus address |
+| job FAILED | `7E` NAK `{05 code}` — `code` from the table below |
+
+Timing: it is sent from the device's task loop on the first pass that sees the
+master job finished, so it arrives seconds after the DUMP_END ACK, and only
+once. Right after it the device resets the master job and the session, so
+**STATUS_R reads IDLE** (`state` 0, `is_restore` 0, `session_state` 0) whether
+the restore succeeded or failed. STATUS cannot tell you the outcome once the
+frame has gone by; the frame is the only record of it.
+
+Recommended host procedure:
+
+1. Send DUMP_END, take the ACK, then wait for the PUT_DUMP ACK/NAK frame with a
+   generous timeout (tens of seconds).
+2. As a fallback, poll STATUS. While `session_state` is 4 the restore is still
+   running. Once it reads 0 with no frame seen, the frame was lost or missed:
+   the outcome is unknown, so go to step 3.
+3. Verify by GET_DUMP and compare with what was sent. This is the only check
+   that does not depend on catching a single frame.
+
+`nak_for_master` — master error to NAK code, used for the DUMP_END NAK and the
+PUT_DUMP NAK alike:
+
+| master error | NAK code |
+|---|---|
+| busy (1) | 5 BUSY |
+| no free card (3) | 7 NO_FREE_CARD |
+| send timeout (4) | 8 SEND_TIMEOUT |
+| no response (5) | 9 NO_RESPONSE |
+| bad args (2), none (0) | 2 UNKNOWN_CMD ("refused as malformed") |
+
 ## State diagram — a firmware load
 
 ```

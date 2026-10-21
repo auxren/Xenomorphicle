@@ -144,7 +144,8 @@
 //                parameter records. H->D: ACKed or NAK 6 (packet-count/
 //                checksum mismatch).
 //   STATUS       (H->D) no payload. -> STATUS_R: [state, error, mod_addr,
-//                is_restore] (Bus200eMasterState/Error, one byte each) --
+//                is_restore, session_state] (Bus200eMasterState/Error and
+//                Bus200eBridgeState, one byte each) --
 //                no hOC analog; a foreign-module BACKUP/RESTORE runs on
 //                the bus over real time, so the browser needs somewhere
 //                to poll progress. Command bytes (0x10/0x50) are chosen

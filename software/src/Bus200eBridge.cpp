@@ -367,7 +367,8 @@ BRIDGE_CODE static void handle_dump_end(const uint8_t *payload, uint32_t len) {
     return;
   }
   // ACK means "accepted and started", not "finished": a RESTORE runs over
-  // real bus time (seconds). The host polls STATUS for the outcome.
+  // real bus time (seconds). The outcome arrives later as an unsolicited
+  // ACK/NAK PUT_DUMP frame from pump_restore (STATUS reads IDLE afterward).
   g_state = BUS200E_BRIDGE_RESTORING;
   send_ack14(BUS200E_SYSEX_CMD_DUMP_END, n_packets);
 }
