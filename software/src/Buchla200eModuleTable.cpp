@@ -17,30 +17,35 @@
 #define B200E_TABLE_CODE
 #endif
 
-// Transcribed from Studio H 2Wireless.ino getDisplayMessage(). Keep sorted by
-// address: the lookup below relies on nothing, but a sorted table is far
-// easier to diff against the source if it is ever revised.
+// Transcribed from Studio H 2Wireless.ino getDisplayMessage(), with the "e"
+// the products actually carry (251e, 272e) added to every model number --
+// their switch says "251 A", the panel says 251e, and the panel wins. 266h
+// is spelled as Studio H spells it. Keep sorted by address: the lookup below
+// relies on nothing, but a sorted table is far easier to diff against the
+// source if it is ever revised.
 static const Buchla200eModuleEntry kModules[] B200E_TABLE_DATA = {
-  // LOCAL addition, not from the 2Wireless source: Oren's MARF sits at 0x0E,
-  // in the 0x08-0x0F range the Buchla table leaves unclaimed. It runs the
-  // MARF firmware this project's bus layer was ported from, answers QUERY,
-  // and obeys broadcast RECALL/SAVE, so a bus sweep should name it.
-  {0x0E, "MARF"},
-  {0x10, "257 A"},   {0x11, "257 B"},   {0x12, "267 A"},   {0x13, "267 B"},
-  {0x20, "210"},     {0x21, "225"},     {0x23, "227"},     {0x24, "249 A"},
-  {0x25, "249 B"},   {0x28, "259 A"},   {0x29, "259 B"},   {0x2A, "259 C"},
-  {0x2B, "259 D"},   {0x2C, "261 A"},   {0x2D, "261 B"},   {0x2E, "261 C"},
-  {0x2F, "261 D"},   {0x30, "260 A"},   {0x31, "260 B"},   {0x32, "266 A"},
-  {0x33, "266 B"},   {0x34, "256 A1"},  {0x35, "256 B1"},  {0x36, "256 A2"},
-  {0x37, "256 B2"},  {0x38, "281 A1"},  {0x39, "281 A2"},  {0x3A, "281 B1"},
-  {0x3B, "281 B2"},  {0x3C, "281 C1"},  {0x3D, "281 C2"},  {0x3E, "281 D1"},
-  {0x3F, "281 D2"},  {0x40, "222 A"},   {0x41, "250 A"},   {0x42, "250 B"},
-  {0x44, "291 A"},   {0x45, "291 B"},   {0x48, "292 A"},   {0x49, "292 B"},
-  {0x4A, "292 C"},   {0x4B, "292 D"},   {0x4C, "285 FS A"},{0x4D, "285 FS B"},
-  {0x4E, "285 BM A"},{0x4F, "285 BM B"},{0x5A, "223 M"},   {0x5B, "223 A"},
-  {0x5C, "251 A"},   {0x5E, "272"},     {0x5F, "252 A"},   {0x60, "206"},
-  {0x63, "207"},     {0x64, "296 A"},   {0x65, "296 B"},   {0x66, "230 A"},
-  {0x67, "230 B"},   {0x68, "230 C"},   {0x69, "230 D"},   {0x70, "218"},
+  // LOCAL addition, not from the 2Wireless source: Oren's MARF (a 248, the
+  // Multiple Arbitrary Function generator -- no "e", it is not an e-series
+  // module) sits at 0x0E, in the 0x08-0x0F range the Buchla table leaves
+  // unclaimed. It runs the MARF firmware this project's bus layer was
+  // ported from, answers QUERY, and obeys broadcast RECALL/SAVE, so a bus
+  // sweep should name it.
+  {0x0E, "248"},
+  {0x10, "257e A"},   {0x11, "257e B"},   {0x12, "267e A"},   {0x13, "267e B"},
+  {0x20, "210e"},     {0x21, "225e"},     {0x23, "227e"},     {0x24, "249e A"},
+  {0x25, "249e B"},   {0x28, "259e A"},   {0x29, "259e B"},   {0x2A, "259e C"},
+  {0x2B, "259e D"},   {0x2C, "261e A"},   {0x2D, "261e B"},   {0x2E, "261e C"},
+  {0x2F, "261e D"},   {0x30, "260e A"},   {0x31, "260e B"},   {0x32, "266e A"},
+  {0x33, "266e B"},   {0x34, "256e A1"},  {0x35, "256e B1"},  {0x36, "256e A2"},
+  {0x37, "256e B2"},  {0x38, "281e A1"},  {0x39, "281e A2"},  {0x3A, "281e B1"},
+  {0x3B, "281e B2"},  {0x3C, "281e C1"},  {0x3D, "281e C2"},  {0x3E, "281e D1"},
+  {0x3F, "281e D2"},  {0x40, "222e A"},   {0x41, "250e A"},   {0x42, "250e B"},
+  {0x44, "291e A"},   {0x45, "291e B"},   {0x48, "292e A"},   {0x49, "292e B"},
+  {0x4A, "292e C"},   {0x4B, "292e D"},   {0x4C, "285e FS A"},{0x4D, "285e FS B"},
+  {0x4E, "285e BM A"},{0x4F, "285e BM B"},{0x5A, "223e M"},   {0x5B, "223e A"},
+  {0x5C, "251e A"},   {0x5E, "272e"},     {0x5F, "252e A"},   {0x60, "206e"},
+  {0x63, "207e"},     {0x64, "296e A"},   {0x65, "296e B"},   {0x66, "230e A"},
+  {0x67, "230e B"},   {0x68, "230e C"},   {0x69, "230e D"},   {0x70, "218e"},
   {0x72, "266h"},
 };
 

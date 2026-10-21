@@ -28,33 +28,34 @@ static void test_bench_confirmed_addresses() {
   printf("test_bench_confirmed_addresses\n");
   const char *m5c = Buchla200eModelForAddress(0x5C);
   CHECK(m5c != nullptr);
-  CHECK(m5c && strcmp(m5c, "251 A") == 0);
+  CHECK(m5c && strcmp(m5c, "251e A") == 0);
 
   const char *m28 = Buchla200eModelForAddress(0x28);
   CHECK(m28 != nullptr);
-  CHECK(m28 && strcmp(m28, "259 A") == 0);
+  CHECK(m28 && strcmp(m28, "259e A") == 0);
 }
 
 static void test_spot_checks_across_table() {
   printf("test_spot_checks_across_table\n");
   const char *first = Buchla200eModelForAddress(0x10);
-  CHECK(first && strcmp(first, "257 A") == 0);
+  CHECK(first && strcmp(first, "257e A") == 0);
 
   const char *last = Buchla200eModelForAddress(0x72);
   CHECK(last && strcmp(last, "266h") == 0);
 
   // Longest name in the table -- guards the name[10] buffer size.
   const char *longest = Buchla200eModelForAddress(0x4E);
-  CHECK(longest && strcmp(longest, "285 BM A") == 0);
+  CHECK(longest && strcmp(longest, "285e BM A") == 0);
 
   // Our own module's default address collides with a 281e C1. Documented
   // in the header; pinned here so the collision can't vanish silently.
   const char *ours = Buchla200eModelForAddress(0x3C);
-  CHECK(ours && strcmp(ours, "281 C1") == 0);
+  CHECK(ours && strcmp(ours, "281e C1") == 0);
 
-  // The local MARF entry (0x0E), the one non-Buchla address in the table.
+  // The local MARF entry (0x0E), named "248" with no e: the one address here
+  // that is not from the 2Wireless source.
   const char *marf = Buchla200eModelForAddress(0x0E);
-  CHECK(marf && strcmp(marf, "MARF") == 0);
+  CHECK(marf && strcmp(marf, "248") == 0);
 }
 
 static void test_unknown_addresses_return_null() {

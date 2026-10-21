@@ -42,7 +42,7 @@
 
 struct Buchla200eModuleEntry {
   uint8_t addr;
-  char name[10];  // longest real entry is "285 BM A" (8 chars + NUL)
+  char name[10];  // longest real entry is "285e BM A" (9 chars + NUL)
 };
 
 // Model name for a bus address, or nullptr if the address isn't in the table
