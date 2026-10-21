@@ -485,6 +485,9 @@ static uint32_t fw_init_ms = 0;          // millis() when PresetBus::Init ran
 static uint32_t fw_served_ms = 0;        // millis() when the firmware card started answering
 static uint32_t fw_first_read_ms = 0;    // millis() of the module's first read (0 = none yet)
 static uint8_t *fw_buf = nullptr;       // upload buffer, only while loading
+static uint32_t fw_cap = 0;             // its size: 64 KB for a v1 image, 224 KB for v2, decided from the magic
+static uint8_t  fw_hdr[8];              // the first bytes, held until the magic says how big the buffer must be
+static bool     fw_nomem = false;       // the buffer could not be allocated; the commit reports it
 static uint32_t fw_idx = 0;
 // Firmware-card geometry, decided from the image magic exactly as the real
 // card's firmware decides it: "#!200EFU" (v1) is the 64 KB card with a 2-byte
@@ -828,20 +831,36 @@ FLASHMEM int FwCardBegin() {
   if (card_image) {
     free(card_image); card_image = nullptr; card_image_cap = 0; card_image_fw = false;
   }
-  fw_buf = (uint8_t *)malloc(kFwCardMaxSize);
-  if (!fw_buf) return -2;
-  memset(fw_buf, 0xFF, kFwCardMaxSize);
+  // The buffer is allocated once the magic has arrived (FwCardPush): a v1 image
+  // needs 64 KB, which fits the block just freed even when the heap is
+  // fragmented; only a v2 image needs the 224 KB that a fresh boot has.
   fw_idx = 0;
+  fw_cap = 0;
+  fw_nomem = false;
   return 0;
 }
 
 void FwCardPush(uint8_t b) {
-  if (fw_buf && fw_idx < kFwCardMaxSize) fw_buf[fw_idx++] = b;
+  if (fw_nomem) return;
+  if (!fw_buf) {
+    if (fw_idx < sizeof(fw_hdr)) fw_hdr[fw_idx++] = b;
+    if (fw_idx < sizeof(fw_hdr)) return;
+    const uint32_t cap = (fw_hdr[0] == '#' && fw_hdr[1] == '$') ? kFwCardV2Size : BUSCARD_SIZE;
+    fw_buf = (uint8_t *)malloc(cap);
+    if (!fw_buf) { fw_nomem = true; return; }
+    memset(fw_buf, 0xFF, cap);
+    memcpy(fw_buf, fw_hdr, sizeof(fw_hdr));
+    fw_cap = cap;
+    return;
+  }
+  if (fw_idx < fw_cap) fw_buf[fw_idx++] = b;
 }
 
 FLASHMEM void FwCardAbort() {
   if (fw_buf) { free(fw_buf); fw_buf = nullptr; }
   fw_idx = 0;
+  fw_cap = 0;
+  fw_nomem = false;
 }
 
 // Verify the received image (length, v1/v2 header, CRC-32), write it to
@@ -850,10 +869,10 @@ FLASHMEM void FwCardAbort() {
 // never touches card_image (the resident capture) or PBCARD.BIN.
 FLASHMEM int FwCardCommit(uint32_t len, uint32_t crc32) {
   int rc = 0;
-  if (!fw_buf) return -1;
+  if (!fw_buf) { const int r = fw_nomem ? -6 : -1; fw_idx = 0; fw_cap = 0; fw_nomem = false; return r; }
   uint32_t size = 0, used = 0;
   uint8_t abytes = 0;
-  if (len != fw_idx || len < 0x60 || len > kFwCardMaxSize) rc = -2;
+  if (len != fw_idx || len < 0x60 || len > fw_cap) rc = -2;
   else if (!fw_geometry(fw_buf, &size, &abytes, &used)) rc = -3;
   else if (len > size) rc = -2;
   else if (Buchla200eCrc32(fw_buf, len) != crc32) rc = -4;
@@ -880,6 +899,7 @@ FLASHMEM int FwCardCommit(uint32_t len, uint32_t crc32) {
   free(fw_buf);
   fw_buf = nullptr;
   fw_idx = 0;
+  fw_cap = 0;
   if (rc == 0) FwCardArm(true);
   return rc;
 }

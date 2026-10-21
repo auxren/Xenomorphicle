@@ -1263,7 +1263,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.printf("fwcard: OK %lu bytes crc %08lX written, read back, ARMED\n",
                           (unsigned long)len, (unsigned long)crc);
           else
-            Serial.printf("fwcard: FAILED rc=%d (got %lu bytes; -2 length, -3 header, -4 crc, -5 file)\n",
+            Serial.printf("fwcard: FAILED rc=%d (got %lu bytes; -2 length, -3 header, -4 crc, -5 file, -6 no memory for the buffer)\n",
                           rc, (unsigned long)fwload_count);
           fwload_pending = false;
           continue;
@@ -1712,7 +1712,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
               fwload_count = 0;
               Serial.println("fwcard: send the image as hex bytes, then # and 8 hex crc32 + 8 hex length");
             } else {
-              Serial.println("fwcard: cannot start (card serving on, or no memory)");
+              Serial.println("fwcard: cannot start (card serving on)");
             }
             break;
           case 'M':  // arm/disarm serving FWCARD.BIN at every boot
