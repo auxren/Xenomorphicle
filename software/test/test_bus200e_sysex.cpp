@@ -941,15 +941,6 @@ static void test_vectors_from_rust(void) {
       h += 2;
     }
     ++entries;
-    // TODO(bus200e ver_gen): remove this tolerance when the Rust vectors are
-    // regenerated with the 22-byte FW_STATUS_R. Until then a 0x64 entry in the
-    // OLD 20-byte layout (25-byte message) is counted but not checked.
-    if (want_cmd == BUS200E_SYSEX_CMD_FW_STATUS_R && mlen == 25) {
-      printf("  skipped (stale) vector %s: old 20-byte FW_STATUS_R layout\n", name);
-      CHECK(true);
-      continue;
-    }
-
     uint8_t cmd = 0xFF;
     uint16_t seq = 0, total = 0;
     uint8_t raw[128];
