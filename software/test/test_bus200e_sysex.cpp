@@ -880,6 +880,107 @@ static void test_vectors_written(void) {
   }
 }
 
+// Every Rust-built vector (the Buccaneer app core's encode(), one of each
+// message) must parse here, carry the cmd it claims, and -- where a builder
+// exists -- rebuild byte-identically. Regenerated on the Rust side with
+// BUCCANEER_WRITE_RUST_VECTORS; synced by app/scripts/sync_contract.sh.
+static int hexval(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
+}
+
+static void test_vectors_from_rust(void) {
+  printf("test_vectors_from_rust\n");
+  char path[512];
+  snprintf(path, sizeof(path), "%s", __FILE__);
+  char *slash = strrchr(path, '/');
+  if (slash) *(slash + 1) = 0; else path[0] = 0;
+  strncat(path, "fixtures/bus200e_sysex_rust_vectors.json", sizeof(path) - strlen(path) - 1);
+  FILE *f = fopen(path, "r");
+  if (!f) f = fopen("fixtures/bus200e_sysex_rust_vectors.json", "r");  // cwd fallback
+  CHECK(f != nullptr);
+  if (!f) return;
+  static char buf[32768];
+  const size_t got = fread(buf, 1, sizeof(buf) - 1, f);
+  fclose(f);
+  buf[got] = 0;
+  CHECK(buf[0] == '[' && got < sizeof(buf) - 1);
+
+  int entries = 0;
+  for (const char *p = buf; (p = strstr(p, "{\"name\": \"")) != nullptr; ++p) {
+    p += strlen("{\"name\": \"");
+    char name[48];
+    size_t nl = 0;
+    while (p[nl] && p[nl] != '"' && nl < sizeof(name) - 1) { name[nl] = p[nl]; ++nl; }
+    name[nl] = 0;
+    const char *c = strstr(p, "\"cmd\": ");
+    const char *h = strstr(p, "\"hex\": \"");
+    CHECK(c != nullptr && h != nullptr);
+    if (!c || !h) continue;
+    const int want_cmd = atoi(c + 7);
+    h += strlen("\"hex\": \"");
+    uint8_t msg[128];
+    uint32_t mlen = 0;
+    while (hexval(h[0]) >= 0 && hexval(h[1]) >= 0 && mlen < sizeof(msg)) {
+      msg[mlen++] = (uint8_t) (hexval(h[0]) * 16 + hexval(h[1]));
+      h += 2;
+    }
+    ++entries;
+
+    uint8_t cmd = 0xFF;
+    uint16_t seq = 0, total = 0;
+    uint8_t raw[128];
+    uint32_t rawlen = 0;
+    const int rc = Bus200eSysExParseMessage(msg, mlen, &cmd, &seq, &total, raw, sizeof(raw), &rawlen);
+    if (rc != 0 || cmd != want_cmd) printf("  FAIL vector %s: rc=%d cmd=%d want=%d\n", name, rc, cmd, want_cmd);
+    CHECK(rc == 0);
+    CHECK(cmd == want_cmd);
+    if (rc != 0) continue;
+
+    uint8_t out[128];
+    int n = -2;  // -2: no builder for this command
+    const uint8_t *fields = msg + 5;
+    const uint32_t flen = mlen - 5;
+    switch (cmd) {
+      case BUS200E_SYSEX_CMD_DUMP_DATA:
+      case BUS200E_SYSEX_CMD_FW_DATA:
+        n = Bus200eSysExBuildMessage(cmd, fields, BUS200E_SYSEX_DUMP_HDR_BYTES, raw, rawlen, out, sizeof(out));
+        break;
+      case BUS200E_SYSEX_CMD_FW_BEGIN: {
+        uint8_t kind; uint32_t len, crc;
+        CHECK(Bus200eSysExParseFwBegin(fields, flen, &kind, &len, &crc) == 0);
+        n = Bus200eSysExBuildFwBegin(kind, len, crc, out, sizeof(out));
+        break;
+      }
+      case BUS200E_SYSEX_CMD_FW_STATUS_R: {
+        Bus200eFwStatus s;
+        CHECK(Bus200eSysExParseFwStatusR(fields, flen, &s) == 0);
+        n = Bus200eSysExBuildFwStatusR(&s, out, sizeof(out));
+        break;
+      }
+      case BUS200E_SYSEX_CMD_SCAN_R:
+        CHECK(flen == 11);
+        n = (flen == 11) ? Bus200eSysExBuildScanR(fields[0], fields[1], fields[2], fields[3],
+                                                   fields + 4, out, sizeof(out)) : -1;
+        break;
+      case BUS200E_SYSEX_CMD_BUS_STATUS_R:
+        CHECK(flen == 4);
+        n = (flen == 4) ? Bus200eSysExBuildBusStatusR(fields[0], fields[1], fields[2], fields[3],
+                                                       out, sizeof(out)) : -1;
+        break;
+      default:
+        n = Bus200eSysExBuildMessage(cmd, flen ? fields : nullptr, flen, nullptr, 0, out, sizeof(out));
+        break;
+    }
+    if (n != (int) mlen || memcmp(out, msg, mlen) != 0) printf("  FAIL vector %s: rebuild differs (n=%d len=%u)\n", name, n, mlen);
+    CHECK(n == (int) mlen);
+    CHECK(n == (int) mlen && memcmp(out, msg, mlen) == 0);
+  }
+  CHECK(entries >= 28);
+}
+
 int main() {
   test_pack_unpack_round_trip();
   test_pack_exact_bytes();
@@ -914,6 +1015,7 @@ int main() {
   test_scan_r_layout();
   test_bus_status_r_layout();
   test_vectors_written();
+  test_vectors_from_rust();
 
   printf("\ntest_bus200e_sysex: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
