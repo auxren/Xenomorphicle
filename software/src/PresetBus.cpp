@@ -820,9 +820,12 @@ FLASHMEM int FwCardBegin() {
   // The receive buffer is sized for the 224 KB v2 card. After a firmware card
   // has been served, its 64 KB image stays resident and RAM2 no longer has
   // room for both (seen on the bench: 196 KB free, malloc fails, "no memory").
-  // That image is read-only and is reloaded from FWCARD.BIN at the next
-  // enable, so drop it; a preset-card capture (card_sectors) is never freed here.
-  if (card_image && card_image_fw) {
+  // Serving is off here (checked above), and every enable reloads the image
+  // from its file and re-adopts the sector CRCs, so the resident copy is dead
+  // weight: drop it whatever it held. (The first fix freed only a firmware
+  // image, but the boot-time early serve does not go through the path that
+  // flags one, so the second load after a flash still failed on the bench.)
+  if (card_image) {
     free(card_image); card_image = nullptr; card_image_cap = 0; card_image_fw = false;
   }
   fw_buf = (uint8_t *)malloc(kFwCardMaxSize);
