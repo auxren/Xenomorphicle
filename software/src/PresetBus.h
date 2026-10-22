@@ -31,6 +31,7 @@ struct Stats {
   uint32_t stops;
   uint32_t bytes;
   uint32_t ring_ovf;       // events lost (frame poisoned downstream)
+  uint32_t rsf_glitches;   // repeated-START flags that data kept flowing through (see rsf_pending)
   uint32_t query_replies;
   uint32_t query_retries;
   uint32_t midi_rx;        // bus MIDI messages received

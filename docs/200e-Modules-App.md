@@ -45,6 +45,17 @@ The action row on the module home is `Read · Edit · Gen · Rec · Save`. `encL
 moves the cursor along it; `encR` runs whatever it sits on. `A` is a shortcut
 straight to arming a write.
 
+### Studio H modules and the scan
+
+A Studio H module (the CSR at `20`, presenting as a 210e) answers a scan
+query as fast as any Buchla module, but its I2C master changes the data line
+on the same edge it drops the clock. Roughly one byte in seven with a 1-to-0
+data transition is seen by the Xenomorpher's bus receiver as a repeated
+START in the middle of the reply. The bus layer now holds that flag until
+the next byte shows whether it was real, so the reply parses whole; before
+2026-10-21 it split the reply in two and the CSR dropped out of about one
+scan in six. The console's `b` dump counts these as `rsf_glitches`.
+
 ## Firmware versions
 
 The responder list shows, at the right of each row, the firmware version that

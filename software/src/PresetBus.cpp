@@ -75,6 +75,19 @@ static volatile uint8_t card_addr7 = BUS200E_CARD_BASE;
 static volatile bool in_card_txn = false;   // current txn targets card_addr7
 static volatile bool card_tx_open = false;  // read leg started (stats only)
 static volatile uint16_t staged_addr = 0xFFFF;  // latest SASR RADDR (addr<<1|R)
+// A repeated START (RSF) is not acted on when it arrives: it is held here
+// until the next event says what it was. A real one is followed by a new
+// leg for us -- a SOF byte (write) or TDF (read) -- and is closed then. A
+// plain data byte after it means there was no repeated START at all: the
+// Studio H CSR's I2C master drops SDA on the same edge it drops SCL (no
+// hold time), and about one byte in seven with a 1->0 data transition is
+// seen by this slave's input filter as SDA falling while SCL is still
+// high, which is the definition of a START. The bytes are all delivered
+// intact; only the flag is spurious. Acting on it at once split every such
+// frame in two (bench 2026-10-21: QUERY reply [04 22 20 1C FF] parsed as
+// [04] + [22 20 1C FF], so the CSR failed 1 scan in 6), and in a card
+// write it reset the pointer phase mid-stream.
+static volatile bool rsf_pending = false;
 // Diagnostics for a module bootloader that never reads the card (251e, bench
 // 2026-10-20): when the first slave interrupt of any kind came, and the last
 // eight addresses this slave was called at (SASR value: addr<<1 | R).
@@ -111,7 +124,8 @@ static void lpi2c1_slave_isr() {
       // PREVIOUS transaction (wire order: ...data STOP START addr SOF-byte).
       // Close the old one here and consume the flags, or the block below
       // would tear down the freshly opened transaction.
-      if (status & (LPI2C_SSR_SDF | LPI2C_SSR_RSF)) {
+      if ((status & (LPI2C_SSR_SDF | LPI2C_SSR_RSF)) || rsf_pending) {
+        rsf_pending = false;
         if (in_card_txn) {
           if (card_tx_open) BusCardTxRewind();  // unsent TDF prefetch
           BusCardStop();
@@ -135,6 +149,10 @@ static void lpi2c1_slave_isr() {
         stats.starts++;
       }
     }
+    if (rsf_pending) {         // data kept flowing: that RSF was a glitch
+      rsf_pending = false;
+      stats.rsf_glitches++;
+    }
     if (in_card_txn) {
       BusCardRxByte(rx & 0xFF);
     } else {
@@ -142,7 +160,12 @@ static void lpi2c1_slave_isr() {
       stats.bytes++;
     }
   }
+  if ((status & LPI2C_SSR_RSF) && !(status & LPI2C_SSR_SDF)) {
+    rsf_pending = true;        // judged by what follows, see above
+    status &= ~(uint32_t)LPI2C_SSR_RSF;
+  }
   if (status & (LPI2C_SSR_SDF | LPI2C_SSR_RSF)) {  // stop / repeated start
+    rsf_pending = false;
     if (in_card_txn) {
       // a read leg always has one unsent byte prefetched into STDR by the
       // TDF feeder; rewind so current-address chunked reads stay aligned
@@ -163,6 +186,17 @@ static void lpi2c1_slave_isr() {
   // pending with TXDSTALL stretching SCL forever and TDIE storming this
   // ISR - so an unroutable TDF is fed 0xFF (floating-bus semantics).
   if (status & LPI2C_SSR_TDF) {
+    if (rsf_pending) {         // write leg, repeated START, now the read leg
+      rsf_pending = false;
+      if (in_card_txn) {
+        if (card_tx_open) BusCardTxRewind();
+        BusCardStop();
+        card_tx_open = false;
+      } else {
+        push_event(BUS200E_EV_STOP);
+      }
+      stats.stops++;
+    }
     if (card_serving && (staged_addr >> 1) == card_addr7
         && (staged_addr & 1)) {
       if (!card_tx_open) {   // reads have no SOF: open the txn here
@@ -1726,9 +1760,9 @@ FLASHMEM void DebugDump() {
     Serial.printf("bcast: tx=%lu drop=%lu queued=%u\n",
                   bcast_tx, bcast_drop, bcast_q.size());
   }
-  Serial.printf("isr=%lu starts=%lu stops=%lu bytes=%lu ring_ovf=%lu\n",
+  Serial.printf("isr=%lu starts=%lu stops=%lu bytes=%lu ring_ovf=%lu rsf_glitches=%lu\n",
                 stats.isr_count, stats.starts, stats.stops, stats.bytes,
-                stats.ring_ovf);
+                stats.ring_ovf, stats.rsf_glitches);
   Serial.printf("diag: core middle hook +%lu ms, late hook +%lu ms\n", (unsigned long)::boot_ms_middle_hook, (unsigned long)::boot_ms_late_hook);
   Serial.printf("diag: first slave isr at +%lu ms; addresses seen (sasr@ms):", (unsigned long)diag_first_isr_ms);
   for (uint8_t i = 0; i < 8 && i < diag_addr_n; ++i) {
