@@ -56,6 +56,7 @@ FLASHMEM bool USBTMCDevice::claim(Device_t *dev, int type, const uint8_t *descri
   if (len < 9 || p[0] < 9 || p[1] != 4) return false;
   if (p[5] != 0xFE || p[6] != 0x03) return false;  // Application / USBTMC
   const uint32_t max_packet = (dev->speed == 2) ? 512 : 64;
+  const uint8_t iface = p[2];
   uint8_t in_ep = 0, out_ep = 0;
   uint16_t in_size = 0, out_size = 0;
   p += p[0];
@@ -85,11 +86,24 @@ FLASHMEM bool USBTMCDevice::claim(Device_t *dev, int type, const uint8_t *descri
   if (!tx) return false;  // rx is freed with the device's other pipes
   rx->callback_function = rx_callback;
   tx->callback_function = tx_callback;
+  // USBHost_t36 reports a failed qTD (STALL, babble, 3 transaction errors)
+  // ONLY through these; the normal callback never runs for it.
+  rx->error_callback_function = rx_error_callback;
+  tx->error_callback_function = tx_error_callback;
   rx_size_ = in_size;
   tx_size_ = out_size;
+  in_addr_ = (uint8_t)(0x80 | in_ep);
+  out_addr_ = out_ep;
+  iface_ = iface;
   rx_done_ = false;
   in_queued_ = false;
   tx_busy_ = false;
+  ctl_busy_ = false;
+  ctl_done_ = false;
+  halt_in_ = false;
+  halt_out_ = false;
+  recover_req_ = false;
+  rec_ = rNone;
   rx_len_ = 0;
   phase_ = kNone;
   state_ = QueryState::Idle;
@@ -99,20 +113,26 @@ FLASHMEM bool USBTMCDevice::claim(Device_t *dev, int type, const uint8_t *descri
   return true;
 }
 
-// ISR context. The pipes and any queued transfers are freed by the host
-// layer right after this returns; no callback will follow for them.
+// ISR context. The pipes and any queued transfers (control ones included)
+// are freed by the host layer right after this returns; no callback follows.
 void USBTMCDevice::disconnect() {
   rxpipe_ = nullptr;
   txpipe_ = nullptr;
   rx_done_ = false;
   in_queued_ = false;
   tx_busy_ = false;
+  ctl_busy_ = false;
+  ctl_done_ = false;
+  halt_in_ = false;
+  halt_out_ = false;
+  recover_req_ = false;
   rx_len_ = 0;
-  if (state_ == QueryState::Busy) {
+  if (state_ == QueryState::Busy || state_ == QueryState::Recovering) {
     err_ = "DISCONNECT";
     state_ = QueryState::Error;
   }
-  // phase_ is loop-owned; Poll() never acts on it outside Busy.
+  // phase_ and rec_ are loop-owned; Poll() drops a recovery whose device has
+  // gone, and acts on phase_ only while Busy.
 }
 
 void USBTMCDevice::rx_callback(const Transfer_t *transfer) {
@@ -121,6 +141,43 @@ void USBTMCDevice::rx_callback(const Transfer_t *transfer) {
 
 void USBTMCDevice::tx_callback(const Transfer_t *transfer) {
   if (transfer->driver) ((USBTMCDevice *)(transfer->driver))->tx_data(transfer);
+}
+
+void USBTMCDevice::rx_error_callback(const Transfer_t *transfer) {
+  if (transfer->driver) ((USBTMCDevice *)(transfer->driver))->XferError(true);
+}
+
+void USBTMCDevice::tx_error_callback(const Transfer_t *transfer) {
+  if (transfer->driver) ((USBTMCDevice *)(transfer->driver))->XferError(false);
+}
+
+// ISR context: the transfer is gone (freed by followup_Error, which also
+// reset the pipe's overlay, data toggle included, to DATA0). Release the
+// slot, end a running query, and ask for the halt to be cleared on the
+// device side too before anything else is sent.
+void USBTMCDevice::XferError(bool in) {
+  if (in) {
+    in_queued_ = false;
+    halt_in_ = true;
+  } else {
+    tx_busy_ = false;
+    halt_out_ = true;
+  }
+  recover_req_ = true;
+  if (state_ == QueryState::Busy) {
+    err_ = in ? "XFER_ERR_IN" : "XFER_ERR_OUT";
+    state_ = QueryState::Error;
+  }
+}
+
+// ISR context: one of our control requests completed (enumeration.cpp calls
+// this only for transfers whose driver is us). Its data, if any, is already
+// in ctl_buf_. A request the device STALLs never lands here (USBHost_t36
+// routes control-pipe errors to its enumeration retry); RecoverStep's step
+// deadline covers that.
+void USBTMCDevice::control(const Transfer_t *) {
+  ctl_busy_ = false;
+  ctl_done_ = true;
 }
 
 // ISR context: copy what arrived, set the flag. Parsing is Poll()'s job.
@@ -141,6 +198,8 @@ FLASHMEM void USBTMCDevice::Fail(QueryState s, const char *why) {
   err_ = why;
   phase_ = kNone;
   state_ = s;
+  // Anything that ends a query mid-exchange leaves the meter out of step.
+  if (s == QueryState::Timeout || s == QueryState::Error) recover_req_ = true;
 }
 
 FLASHMEM bool USBTMCDevice::QueueOut(uint32_t len) {
@@ -177,6 +236,132 @@ FLASHMEM bool USBTMCDevice::EnsureInQueued() {
   return true;
 }
 
+// One control request on the device's control pipe. The setup bytes are the
+// host-tested UsbTmc framing, copied as-is (setup_t is the wire layout).
+FLASHMEM bool USBTMCDevice::StartControl(const UsbTmc::Setup &s) {
+  UsbIrqGuard g;
+  Device_t *dev = device;
+  if (!dev || ctl_busy_) return false;
+  uint8_t raw[8];
+  UsbTmc::PackSetup(s, raw);
+  memcpy(&ctl_setup_, raw, sizeof(raw));
+  memset(ctl_buf_, 0, sizeof(ctl_buf_));
+  ctl_done_ = false;
+  ctl_busy_ = true;
+  if (!queue_Control_Transfer(dev, &ctl_setup_, s.wLength ? ctl_buf_ : nullptr, this)) {
+    ctl_busy_ = false;
+    return false;
+  }
+  step_ms_ = millis();
+  return true;
+}
+
+FLASHMEM void USBTMCDevice::RecoverFinish(bool ok) {
+  rec_ = rNone;
+  ctl_busy_ = false;  // a request we gave up on may still be in flight; forget it
+  if (state_ == QueryState::Recovering) {
+    if (ok) {
+      state_ = QueryState::Idle;
+      err_ = "";
+    } else {
+      state_ = QueryState::Error;
+      err_ = "RECOVER_FAILED";
+    }
+  } else if (!ok) {
+    err_ = "RECOVER_FAILED";
+  }
+}
+
+// One non-blocking step of the resync (see the header). Runs with the host
+// interrupt masked, from Poll().
+FLASHMEM void USBTMCDevice::RecoverStep() {
+  if (!connected()) {
+    rec_ = rNone;
+    recover_req_ = false;
+    return;
+  }
+  const uint32_t now = millis();
+  if (rec_ == rNone) {
+    if (!recover_req_) return;
+    recover_req_ = false;
+    rec_ = rNext;
+    rec_start_ms_ = now;
+  }
+  if (now - rec_start_ms_ >= kRecoverMs) { RecoverFinish(false); return; }
+  // Bulk-IN data arriving during the resync is the meter flushing what it
+  // had queued: drop it.
+  if (rx_done_) rx_done_ = false;
+  const bool waiting = rec_ == rHaltIn || rec_ == rHaltOut || rec_ == rInitClear ||
+                       rec_ == rCheck || rec_ == rFinalOutWait;
+  if (waiting && !ctl_done_) {
+    if (now - step_ms_ >= kCtlStepMs) RecoverFinish(false);
+    return;
+  }
+  uint8_t st = 0;
+  bool more = false;
+  switch (rec_) {
+    case rHaltIn:
+      halt_in_ = false;
+      rec_ = rNext;
+      break;
+    case rHaltOut:
+      halt_out_ = false;
+      rec_ = rNext;
+      break;
+    case rInitClear:
+      if (!UsbTmc::ParseInitiateClearReply(ctl_buf_, 1, &st) || st != UsbTmc::kStatusSuccess) {
+        // Not accepted (e.g. nothing to clear): the halts are cleared, which
+        // is as far as this meter lets us go.
+        RecoverFinish(true);
+        return;
+      }
+      rec_ = rCheckGap;
+      step_ms_ = now;
+      return;
+    case rCheck:
+      UsbTmc::ParseCheckClearReply(ctl_buf_, 2, &st, &more);
+      if (st == UsbTmc::kStatusPending) {
+        if (more) EnsureInQueued();  // the meter needs Bulk-IN read to finish
+        rec_ = rCheckGap;
+        step_ms_ = now;
+        return;
+      }
+      if (st != UsbTmc::kStatusSuccess) { RecoverFinish(true); return; }
+      rec_ = rFinalOut;
+      break;
+    case rFinalOutWait:
+      // CLEAR_FEATURE reset the meter's Bulk-OUT toggle to DATA0; do the same
+      // on our side. Safe here: no OUT transfer is queued (rFinalOut waited
+      // for that), so the controller is not using this QH's overlay.
+      if (txpipe_ && !tx_busy_) txpipe_->qh.token &= ~0x80000000u;
+      RecoverFinish(true);
+      return;
+    default:
+      break;
+  }
+  switch (rec_) {
+    case rNext:
+      if (halt_in_) {
+        rec_ = StartControl(UsbTmc::ClearEndpointHalt(in_addr_)) ? rHaltIn : rNext;
+      } else if (halt_out_) {
+        rec_ = StartControl(UsbTmc::ClearEndpointHalt(out_addr_)) ? rHaltOut : rNext;
+      } else {
+        rec_ = StartControl(UsbTmc::InitiateClear(iface_)) ? rInitClear : rNext;
+      }
+      break;
+    case rCheckGap:
+      if (now - step_ms_ < kCheckGapMs) break;
+      if (StartControl(UsbTmc::CheckClearStatus(iface_))) rec_ = rCheck;
+      break;
+    case rFinalOut:
+      if (tx_busy_) break;  // a stuck OUT must leave the controller first
+      if (StartControl(UsbTmc::ClearEndpointHalt(out_addr_))) rec_ = rFinalOutWait;
+      break;
+    default:
+      break;
+  }
+}
+
 FLASHMEM bool USBTMCDevice::BeginQuery(const char *scpi, uint32_t timeout_ms) {
   if (state_ == QueryState::Busy) return false;
   reply_[0] = 0;
@@ -201,8 +386,14 @@ FLASHMEM bool USBTMCDevice::BeginQuery(const char *scpi, uint32_t timeout_ms) {
   // between the checks and the queue call would leave a query on a dead pipe.
   UsbIrqGuard g;
   if (!connected()) { Fail(QueryState::Error, "NOT_CONNECTED"); return false; }
+  if (rec_ != rNone || recover_req_) {
+    err_ = "RECOVERING";
+    state_ = QueryState::Recovering;
+    return false;
+  }
   if (tx_busy_) { Fail(QueryState::Error, "OUT_STUCK"); return false; }
   rx_done_ = false;  // a completed-but-unread IN from an abandoned query is stale
+  stale_drained_ = 0;
   tag_ = UsbTmc::NextTag(tag_);
   const size_t len = UsbTmc::BuildMsgOut(tag_, line_, tx_buf_, sizeof(tx_buf_));
   if (!len) { Fail(QueryState::Error, "FRAME"); return false; }
@@ -215,12 +406,14 @@ FLASHMEM bool USBTMCDevice::BeginQuery(const char *scpi, uint32_t timeout_ms) {
 }
 
 FLASHMEM USBTMCDevice::QueryState USBTMCDevice::Poll() {
-  if (state_ != QueryState::Busy) return state_;  // includes disconnect -> Error
   // The whole step runs with the host interrupt masked (a few microseconds,
-  // never a wait): disconnect() clears the flags read below, and must not do
+  // never a wait): the ISR side clears the flags read below, and must not do
   // so between a read and the decision taken on it.
   UsbIrqGuard g;
-  if (state_ != QueryState::Busy) return state_;
+  if (state_ != QueryState::Busy) {
+    if (rec_ != rNone || recover_req_) RecoverStep();
+    return state_;
+  }
   switch (phase_) {
     case kOutCmd:
       if (tx_busy_) break;
@@ -240,6 +433,16 @@ FLASHMEM USBTMCDevice::QueryState USBTMCDevice::Poll() {
       if (!rx_done_) break;
       const uint32_t got = rx_len_;
       rx_done_ = false;
+      if (got <= kRxCopyLen && UsbTmc::IsStaleMsgIn(rx_copy_, got, req_tag_)) {
+        // A late answer to an abandoned request: drop it and keep waiting
+        // for ours, which the meter sends next.
+        if (++stale_drained_ > kMaxStaleDrain) {
+          Fail(QueryState::Error, "BAD_REPLY");
+          return state_;
+        }
+        if (!EnsureInQueued()) { Fail(QueryState::Error, "QUEUE"); return state_; }
+        break;
+      }
       if (got > kRxCopyLen) { Fail(QueryState::Error, "OVERFLOW"); return state_; }
       const uint8_t *payload = nullptr;
       uint32_t plen = 0;

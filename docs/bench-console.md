@@ -96,7 +96,16 @@ before a byte reaches the meter.
 
 | key | action |
 |---|---|
-| `e` | **one SCPI line to the meter**: `e<line>⏎`, e.g. `e*IDN?⏎`, `eCONF:VOLT:DC 20⏎`, `eREAD?⏎`. Printable characters up to Enter, at most 64; any control byte cancels (`METER,ERR,cancelled ...`), and an over-long line is cancelled with the rest of it swallowed up to its Enter. A line ending in `?` waits for the reply; any other completes when the meter accepts it. Answers, printed when the query ends (the console keeps working meanwhile; 5 s timeout): `METER,DONE,<reply>` (empty for a command), `METER,REFUSED` (not on the allowlist), `METER,TIMEOUT`, or `METER,ERR,<why>` with `<why>` one of `NOT_CONNECTED`, `BUSY`, `DISCONNECT` (unplugged mid-query), `BAD_REPLY`, `OVERFLOW` (reply over 255 chars), `NO_PROGRESS`, `OUT_STUCK` (an earlier command never left the controller: replug the meter), `QUEUE`, `FRAME` |
+| `e` | **one SCPI line to the meter**: `e<line>⏎`, e.g. `e*IDN?⏎`, `eCONF:VOLT:DC 20⏎`, `eREAD?⏎`. Printable characters up to Enter, at most 64; any control byte cancels (`METER,ERR,cancelled ...`), and an over-long line is cancelled with the rest of it swallowed up to its Enter. A line ending in `?` waits for the reply; any other completes when the meter accepts it. An optional `@<ms> ` prefix sets that query's timeout (1-60000 ms, default 5000), e.g. `e@200 READ?⏎`; it is console syntax and never reaches the meter. Answers, printed when the query ends (the console keeps working meanwhile; 5 s timeout): `METER,DONE,<reply>` (empty for a command), `METER,REFUSED` (not on the allowlist), `METER,TIMEOUT`, or `METER,ERR,<why>` with `<why>` one of `NOT_CONNECTED`, `BUSY`, `DISCONNECT` (unplugged mid-query), `BAD_REPLY`, `OVERFLOW` (reply over 255 chars), `NO_PROGRESS`, `OUT_STUCK` (an earlier command never left the controller), `XFER_ERR_IN` / `XFER_ERR_OUT` (a bulk transfer failed: STALL, babble or transaction errors), `RECOVERING` (the resync below is still running: retry in a moment), `RECOVER_FAILED` (the resync gave up after 3 s; the next query is allowed anyway), `QUEUE`, `FRAME` |
+
+After any query that fails mid-exchange (timeout, garbled reply, bulk
+transfer error) the driver resynchronises the meter on its own before it
+accepts the next one, without blocking anything: CLEAR_FEATURE(ENDPOINT_HALT)
+on whichever bulk endpoint errored, then USBTMC INITIATE_CLEAR and
+CHECK_CLEAR_STATUS every 10 ms (reading out anything the meter still had
+queued), then a Bulk-OUT halt clear. A late answer to an abandoned query is
+recognised by its tag and discarded, so it cannot shift every later reply by
+one. No replug is needed.
 
 The plan called this key `U`; `U` is already the audio-graph reorder
 (`docs/Timing-Budget.md`), so the meter is on `e`.
@@ -111,6 +120,8 @@ and check, then record the results here.**
 - [ ] Unplugging the meter mid-`READ?` gives `TIMEOUT` or `ERR`, and the console keeps working.
 - [ ] USB-MIDI on the host hub still works.
 - [ ] 10 meter replugs with no module USB drop (design gate 6).
+- [ ] Unplug the meter during a pending `eREAD?`, plug it back in, and the next `eREAD?` works without any further replug.
+- [ ] Forced timeout: `eVOLT:DC:NPLC 100⏎`, then `e@200 READ?⏎` gives `METER,TIMEOUT`. A query sent within ~3 s may answer `METER,ERR,RECOVERING`. After that, `eVOLT:DC:NPLC 1⏎` and `eREAD?⏎` succeed with a fresh reading (not the late one), with no replug. Repeat 3 times to make sure the replies do not drift off by one.
 
 ### Files
 | key | action |

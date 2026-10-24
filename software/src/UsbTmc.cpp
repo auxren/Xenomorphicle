@@ -215,4 +215,95 @@ USBTMC_CODE bool ParseReading(const char *reply, double *volts) {
   return true;
 }
 
+namespace {
+
+USBTMC_CODE Setup Make(uint8_t type, uint8_t req, uint16_t value, uint16_t index,
+                       uint16_t length) {
+  Setup s;
+  s.bmRequestType = type;
+  s.bRequest = req;
+  s.wValue = value;
+  s.wIndex = index;
+  s.wLength = length;
+  return s;
+}
+
+constexpr uint8_t kClassEndpointIn = 0xA2;   // device-to-host, class, endpoint
+constexpr uint8_t kClassInterfaceIn = 0xA1;  // device-to-host, class, interface
+
+}  // namespace
+
+USBTMC_CODE Setup InitiateAbortBulkOut(uint8_t tag, uint8_t ep_out) {
+  return Make(kClassEndpointIn, kInitiateAbortBulkOut, tag, ep_out & 0x0F, 2);
+}
+USBTMC_CODE Setup CheckAbortBulkOutStatus(uint8_t ep_out) {
+  return Make(kClassEndpointIn, kCheckAbortBulkOutStatus, 0, ep_out & 0x0F, 8);
+}
+USBTMC_CODE Setup InitiateAbortBulkIn(uint8_t tag, uint8_t ep_in) {
+  return Make(kClassEndpointIn, kInitiateAbortBulkIn, tag, 0x80 | (ep_in & 0x0F), 2);
+}
+USBTMC_CODE Setup CheckAbortBulkInStatus(uint8_t ep_in) {
+  return Make(kClassEndpointIn, kCheckAbortBulkInStatus, 0, 0x80 | (ep_in & 0x0F), 8);
+}
+USBTMC_CODE Setup InitiateClear(uint8_t iface) {
+  return Make(kClassInterfaceIn, kInitiateClear, 0, iface, 1);
+}
+USBTMC_CODE Setup CheckClearStatus(uint8_t iface) {
+  return Make(kClassInterfaceIn, kCheckClearStatus, 0, iface, 2);
+}
+USBTMC_CODE Setup ClearEndpointHalt(uint8_t ep_addr) {
+  return Make(0x02, 0x01, 0, ep_addr & 0x8F, 0);
+}
+
+USBTMC_CODE void PackSetup(const Setup &s, uint8_t out[8]) {
+  out[0] = s.bmRequestType;
+  out[1] = s.bRequest;
+  out[2] = (uint8_t)s.wValue;
+  out[3] = (uint8_t)(s.wValue >> 8);
+  out[4] = (uint8_t)s.wIndex;
+  out[5] = (uint8_t)(s.wIndex >> 8);
+  out[6] = (uint8_t)s.wLength;
+  out[7] = (uint8_t)(s.wLength >> 8);
+}
+
+USBTMC_CODE bool ParseInitiateAbortReply(const uint8_t *buf, size_t len, uint8_t *status,
+                                         uint8_t *tag) {
+  if (!buf || len < 2) return false;
+  if (status) *status = buf[0];
+  if (tag) *tag = buf[1];
+  return true;
+}
+
+USBTMC_CODE bool ParseCheckAbortReply(const uint8_t *buf, size_t len, uint8_t *status,
+                                      bool *more_in, uint32_t *nbytes) {
+  if (!buf || len < 8) return false;
+  if (status) *status = buf[0];
+  if (more_in) *more_in = (buf[1] & 0x01) != 0;
+  if (nbytes)
+    *nbytes = (uint32_t)buf[4] | ((uint32_t)buf[5] << 8) | ((uint32_t)buf[6] << 16) |
+              ((uint32_t)buf[7] << 24);
+  return true;
+}
+
+USBTMC_CODE bool ParseInitiateClearReply(const uint8_t *buf, size_t len, uint8_t *status) {
+  if (!buf || len < 1) return false;
+  if (status) *status = buf[0];
+  return true;
+}
+
+USBTMC_CODE bool ParseCheckClearReply(const uint8_t *buf, size_t len, uint8_t *status,
+                                      bool *more_in) {
+  if (!buf || len < 2) return false;
+  if (status) *status = buf[0];
+  if (more_in) *more_in = (buf[1] & 0x01) != 0;
+  return true;
+}
+
+USBTMC_CODE bool IsStaleMsgIn(const uint8_t *buf, size_t len, uint8_t expect_tag) {
+  if (!buf || len < kHeaderLen) return false;
+  if (buf[0] != kRequestDevDepMsgIn) return false;
+  if (buf[2] != (uint8_t)~buf[1]) return false;
+  return buf[1] != expect_tag;
+}
+
 }  // namespace UsbTmc

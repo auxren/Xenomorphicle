@@ -1027,6 +1027,7 @@ FLASHMEM static void MeterConsolePrint(USBTMCDevice::QueryState st) {
     case QS::Timeout: Serial.println("METER,TIMEOUT"); break;
     case QS::Busy:    Serial.println("METER,ERR,BUSY"); break;
     case QS::Idle:    Serial.println("METER,ERR,IDLE"); break;
+    case QS::Recovering: Serial.println("METER,ERR,RECOVERING"); break;
     case QS::Error:
       Serial.printf("METER,ERR,%s\n",
                     usbMeter.ErrorName()[0] ? usbMeter.ErrorName() : "ERROR");
@@ -1036,8 +1037,26 @@ FLASHMEM static void MeterConsolePrint(USBTMCDevice::QueryState st) {
 
 FLASHMEM static void MeterConsoleSubmit(const char *line) {
   if (meter_console_wait) { Serial.println("METER,ERR,BUSY"); return; }
-  if (!usbMeter.BeginQuery(line, kMeterConsoleTimeoutMs)) {
-    MeterConsolePrint(usbMeter.Poll());
+  // Optional "@<ms> " prefix: a per-query timeout (1-60000 ms), so a bench
+  // can force a timeout and watch the resync. Console syntax only; it never
+  // reaches the meter.
+  uint32_t timeout_ms = kMeterConsoleTimeoutMs;
+  if (line[0] == '@') {
+    uint32_t ms = 0;
+    int i = 1;
+    while (line[i] >= '0' && line[i] <= '9' && ms <= 60000) ms = ms * 10 + (line[i++] - '0');
+    if (i == 1 || line[i] != ' ' || ms == 0 || ms > 60000) {
+      Serial.println("METER,ERR,cancelled (expected @<1-60000 ms> then a space)");
+      return;
+    }
+    while (line[i] == ' ') i++;
+    timeout_ms = ms;
+    line += i;
+  }
+  if (!usbMeter.BeginQuery(line, timeout_ms)) {
+    // State(), not Poll(): Poll could advance a resync past the very state
+    // that made BeginQuery refuse.
+    MeterConsolePrint(usbMeter.State());
     return;
   }
   meter_console_wait = true;

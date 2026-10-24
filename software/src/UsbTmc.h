@@ -47,6 +47,69 @@ bool ScpiAllowed(const char *line);
 // meter's 9.9E37 overload marker (|v| >= 9.9E37).
 bool ParseReading(const char *reply, double *volts);
 
+// ---------------------------------------------------------------------------
+// Control requests: the USBTMC 1.0 class requests (section 4.2.1) and the
+// standard CLEAR_FEATURE(ENDPOINT_HALT), as setup-packet fields, plus the
+// parsers for their short status replies. The driver sends these on the
+// control pipe to resynchronise the meter after a timeout or a bulk error.
+// ---------------------------------------------------------------------------
+
+constexpr uint8_t kInitiateAbortBulkOut = 1;
+constexpr uint8_t kCheckAbortBulkOutStatus = 2;
+constexpr uint8_t kInitiateAbortBulkIn = 3;
+constexpr uint8_t kCheckAbortBulkInStatus = 4;
+constexpr uint8_t kInitiateClear = 5;
+constexpr uint8_t kCheckClearStatus = 6;
+
+// USBTMC_status values (Table 16).
+constexpr uint8_t kStatusSuccess = 0x01;
+constexpr uint8_t kStatusPending = 0x02;
+constexpr uint8_t kStatusFailed = 0x80;
+constexpr uint8_t kStatusTransferNotInProgress = 0x81;
+constexpr uint8_t kStatusSplitNotInProgress = 0x82;
+constexpr uint8_t kStatusSplitInProgress = 0x83;
+
+struct Setup {
+  uint8_t bmRequestType;
+  uint8_t bRequest;
+  uint16_t wValue;
+  uint16_t wIndex;
+  uint16_t wLength;
+};
+
+// ep_out / ep_in are endpoint numbers or addresses; the direction bit is
+// forced (0x00 OUT, 0x80 IN) in wIndex. iface is bInterfaceNumber.
+Setup InitiateAbortBulkOut(uint8_t tag, uint8_t ep_out);  // A2 01, wLength 2
+Setup CheckAbortBulkOutStatus(uint8_t ep_out);            // A2 02, wLength 8
+Setup InitiateAbortBulkIn(uint8_t tag, uint8_t ep_in);    // A2 03, wLength 2
+Setup CheckAbortBulkInStatus(uint8_t ep_in);              // A2 04, wLength 8
+Setup InitiateClear(uint8_t iface);                       // A1 05, wLength 1
+Setup CheckClearStatus(uint8_t iface);                    // A1 06, wLength 2
+// Standard request: bmRequestType 02 (endpoint), bRequest 01 CLEAR_FEATURE,
+// wValue 0 ENDPOINT_HALT, wIndex = the full endpoint address.
+Setup ClearEndpointHalt(uint8_t ep_addr);
+
+// The 8 bytes on the wire, little-endian (USB 2.0 9.3).
+void PackSetup(const Setup &s, uint8_t out[8]);
+
+// INITIATE_ABORT_BULK_OUT/IN reply: [status, bTag]. False if len < 2.
+bool ParseInitiateAbortReply(const uint8_t *buf, size_t len, uint8_t *status, uint8_t *tag);
+// CHECK_ABORT_BULK_OUT/IN_STATUS reply: [status, bmAbortBulkIn, 0, 0,
+// NBYTES (4, LE)]. more_in = bmAbortBulkIn D0 (only meaningful for IN: the
+// host must read Bulk-IN again). False if len < 8.
+bool ParseCheckAbortReply(const uint8_t *buf, size_t len, uint8_t *status, bool *more_in,
+                          uint32_t *nbytes);
+// INITIATE_CLEAR reply: [status]. False if len < 1.
+bool ParseInitiateClearReply(const uint8_t *buf, size_t len, uint8_t *status);
+// CHECK_CLEAR_STATUS reply: [status, bmClear]. more_in = bmClear D0 (the
+// device has Bulk-IN data the host must read). False if len < 2.
+bool ParseCheckClearReply(const uint8_t *buf, size_t len, uint8_t *status, bool *more_in);
+
+// True when buf is a well-formed DEV_DEP_MSG_IN header (MsgID, tag/~tag pair)
+// whose tag is NOT expect_tag: a late answer to an abandoned request, to be
+// discarded while waiting for the current one.
+bool IsStaleMsgIn(const uint8_t *buf, size_t len, uint8_t expect_tag);
+
 }  // namespace UsbTmc
 
 #endif  // USBTMC_H_
