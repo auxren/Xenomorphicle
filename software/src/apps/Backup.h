@@ -35,6 +35,8 @@
 // same button again in the same place re-armed the overwrite. Now encL only
 // ever asks or cancels, and the single irreversible commit in this app is a B
 // press on a screen that exists only to state what B will do.
+#include "../InputCurveFiles.h"
+
 OC_APP_CLASS(AppBackup, TWOCCS("BU"), "Back It Up!", "Backup / Restore"),
   public SystemExclusiveHandler {
 public:
@@ -127,6 +129,13 @@ public:
       packet = 0;
       uint8_t V[33];
 
+      // The per-input calibration curves live in LittleFS, not EEPROM. They
+      // go out first, as their own 'V' packets, so a restore has them before
+      // the calibration region's last packet ends the listen. A module with
+      // no stored curves sends none, and firmware that predates them ignores
+      // the 'V' packets (it only answers to 'B').
+      if (calibration) SendCurveRecord();
+
       uint8_t start = calibration ? 0 : (EEPROM_CALIBRATIONDATA_END / 32);
       uint8_t end = calibration ? (EEPROM_CALIBRATIONDATA_END / 32)
                              : (EEPROMStorage::LENGTH / 32);
@@ -149,7 +158,11 @@ public:
 
   void OnReceiveSysEx() {
     uint8_t V[33];
-    if (ExtractSysExData(V, 'B')) {
+    if (!ExtractSysExData(V, 'B')) {
+      if (calibration && ExtractSysExData(V, 'V')) ReceiveCurvePacket(V);
+      return;
+    }
+    {
       uint8_t ix = 0;
       uint8_t p = V[ix++]; // Get packet number
       packet = p;
@@ -171,8 +184,49 @@ public:
     }
   }
 
+  // Curve record framing: the 300-byte InputCurveRecord in kCurvePackets
+  // packets of [index, 32 data bytes] under sysex id 'V'; the last is padded.
+  static constexpr uint8_t kCurvePackets = (sizeof(InputCurveRecord) + 31) / 32;
+
+  void SendCurveRecord() {
+    InputCurveRecord rec;
+    if (!InputCurveLoadFromFlash(&rec, nullptr)) return;
+    const uint8_t *raw = (const uint8_t *)&rec;
+    for (uint8_t i = 0; i < kCurvePackets; i++) {
+      uint8_t V[33] = {0};
+      V[0] = i;
+      const size_t off = i * 32;
+      const size_t n = (sizeof(rec) - off) < 32 ? (sizeof(rec) - off) : 32;
+      memcpy(V + 1, raw + off, n);
+      UnpackedData unpacked;
+      unpacked.set_data(33, V);
+      PackedData packed = unpacked.pack();
+      SendSysEx(packed, 'V');
+    }
+  }
+
+  // ISR context: collect only. The CRC decides whether the record is kept, and
+  // the flash write waits for Loop().
+  void ReceiveCurvePacket(const uint8_t *V) {
+    if (curve_pending_ || V[0] >= kCurvePackets) return;
+    const size_t off = V[0] * 32;
+    const size_t n = (sizeof(curve_rx_) - off) < 32 ? (sizeof(curve_rx_) - off) : 32;
+    memcpy((uint8_t *)&curve_rx_ + off, V + 1, n);
+    curve_got_ |= (uint16_t)(1u << V[0]);
+    if (curve_got_ == (uint16_t)((1u << kCurvePackets) - 1)) {
+      curve_got_ = 0;
+      if (InputCurveValid(curve_rx_)) curve_pending_ = 1;
+    }
+  }
+
   // Loop context: apply a finished restore.
   void ApplyPendingReload() {
+    if (curve_pending_) {
+      // seq is reassigned by the store, so the restored curves become the
+      // newest copy and the other slot keeps the previous one.
+      InputCurveSaveToFlash(curve_rx_);
+      curve_pending_ = 0;
+    }
     const uint8_t what = reload_pending_;
     if (!what) return;
     reload_pending_ = 0;
@@ -195,6 +249,9 @@ private:
   uint8_t packet = 0;
   bool restore_armed_ = 0;
   enum : uint8_t { RELOAD_CALIBRATION = 1, RELOAD_APPDATA = 2 };
+  InputCurveRecord curve_rx_;
+  uint16_t curve_got_ = 0;
+  volatile uint8_t curve_pending_ = 0;   // a complete, CRC-valid record awaits Loop()
   volatile uint8_t reload_pending_ = 0;   // set in the ISR, consumed in Loop()
   uint32_t armed_ms_ = 0;    // millis() the confirm screen appeared
   bool b_down_solo_ = 0;     // B went down alone, after that screen appeared

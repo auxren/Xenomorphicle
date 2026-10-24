@@ -180,11 +180,14 @@ FLASHMEM bool XenoFS::begin(uint32_t size) {
 // gone. This module's whole partition is ~220 KB of content (37 files), a
 // fraction of the 512 KB OCRAM heap that is still untouched this early in
 // setup; a file that does not get its buffer is reported and skipped, never
-// silently dropped. GLOBALS.* go first so the settings are what survive if
-// anything has to give.
+// silently dropped. GLOBALS.* and ICURVE_* go first so the settings and the
+// input calibration curves are what survive if anything has to give.
 FLASHMEM bool XenoFS::migrate_legacy() {
   struct Held { char name[16]; uint8_t *data; uint32_t size; bool kept; };
   static constexpr int kMaxHeld = 96;
+  auto first_priority = [](const char *n) {
+    return strncmp(n, "GLOBALS", 7) == 0 || strncmp(n, "ICURVE_", 7) == 0;
+  };
   Held held[kMaxHeld];
   int count = 0, over = 0;
   const uint32_t partition = config.block_count * config.block_size;
@@ -201,8 +204,20 @@ FLASHMEM bool XenoFS::migrate_legacy() {
   while (lfs_dir_read(&lfs, &dir, &info) > 0) {
     if (info.type != LFS_TYPE_REG) continue;
     if (strlen(info.name) >= sizeof(held[0].name)) { ++over; continue; }
-    if (count == kMaxHeld) { ++over; continue; }
-    Held &h = held[count++];
+    int slot = count;
+    if (count == kMaxHeld) {
+      // Full: a priority file takes the place of an ordinary one, so the
+      // directory order can never decide whether the curves survive.
+      slot = -1;
+      if (first_priority(info.name))
+        for (int i = 0; i < count; ++i)
+          if (!first_priority(held[i].name)) { slot = i; break; }
+      ++over;
+      if (slot < 0) continue;
+    } else {
+      ++count;
+    }
+    Held &h = held[slot];
     strcpy(h.name, info.name);
     h.data = nullptr;
     h.size = info.size;
@@ -214,7 +229,9 @@ FLASHMEM bool XenoFS::migrate_legacy() {
   for (int pass = 0; pass < 2; ++pass) {
     for (int i = 0; i < count; ++i) {
       Held &h = held[i];
-      const bool globals = strncmp(h.name, "GLOBALS", 7) == 0;
+      // GLOBALS.* and the input-curve files (ICURVE_A/B.BIN, the calibration
+      // that must never be lost) are lifted first.
+      const bool globals = first_priority(h.name);
       if (globals != (pass == 0)) continue;
       if (h.size) {
         h.data = (uint8_t *)malloc(h.size);
@@ -252,9 +269,13 @@ FLASHMEM bool XenoFS::migrate_legacy() {
   mounted = true;
 
   int written = 0;
+  // Priority files are written back first too, ahead of anything that could
+  // run the new disk out of room.
+  for (int pass = 0; pass < 2; ++pass)
   for (int i = 0; i < count; ++i) {
     Held &h = held[i];
     if (!h.kept) continue;
+    if (first_priority(h.name) != (pass == 0)) continue;
     lfs_file_t f;
     bool ok = lfs_file_open(&lfs, &f, h.name, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC) >= 0;
     if (ok) {

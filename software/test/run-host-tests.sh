@@ -77,6 +77,7 @@ suite test_preset_op_queue
 suite test_cvmeter_math             ../src/CvMeterMath.cpp
 suite test_calroutine_math          ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp
 suite test_usbtmc                   ../src/UsbTmc.cpp
+suite test_input_curve_store        ../src/InputCurveStore.cpp
 
 # Counted, not typed: the literal that used to live here said 25 while 26
 # suites ran, which is the same hand-maintained-list drift this file exists
