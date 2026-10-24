@@ -346,6 +346,7 @@ FLASHMEM bool Save_::SaveDacTable(const uint16_t table[8][CalRoutineMath::kNodes
 // SaveLines clears too, i.e. to the shared scale), as design 6.2 says.
 FLASHMEM bool Save_::SaveCurves(const int16_t curves[8][CalRoutineMath::kCurvePoints],
                                  uint8_t valid_mask, const uint8_t source[8]) {
+  failed = "";  // an Inputs save starts here, not at SaveDacTable
   DMAMEM static InputCurveRecord rec;  // 300 bytes, out of DTCM
   memset(&rec, 0, sizeof(rec));
   for (int i = 0; i < 8; ++i) {

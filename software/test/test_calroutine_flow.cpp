@@ -238,6 +238,7 @@ struct FakeInputs : InputPort {
   bool started = false;
   uint32_t start_ms = 0;
   int windows = 0;
+  int dead_windows = 0;       // the next N windows deliver no samples
   bool short_window = false;  // WindowDone asked before 600 ms
   std::vector<uint8_t> window_mask;  // outputs held when each window started
   FakeInputs(FakeOutputs *o, FakeClock *c) : outs(o), clk(c) {}
@@ -264,8 +265,9 @@ struct FakeInputs : InputPort {
       s[i].mean_raw = float(m);
       s[i].min_raw = float(std::fmax(0.0, m - pp[i] / 2));
       s[i].max_raw = float(std::fmin(4095.0, m + pp[i] / 2));
-      s[i].samples = 3333;
+      s[i].samples = dead_windows > 0 ? 0 : 3333;
     }
+    if (dead_windows > 0) --dead_windows;
     ++windows;
     started = false;
     return true;
@@ -1295,7 +1297,7 @@ static void test_calr_lines_golden() {
   RunMode(b, sizeof(b), "SELF"); is("MODE");
   Warn(b, sizeof(b), "NO_MARKER"); is("WARN");
   Patch(b, sizeof(b), 2, 0x10, 3.25f); is("PATCH");
-  PatchResult(b, sizeof(b), false, 0x14, 0x08); is("PRES");
+  PatchResult(b, sizeof(b), "FAIL", 0x14, 0x08); is("PRES");
   // Every SUB in the fixture has a header and the example has its field count.
   std::map<std::string, size_t> nf;
   for (int i = 1; i < HeaderCount(); ++i) {
@@ -1623,6 +1625,64 @@ static void test_self_runs_both() {
   CHECK(fs.calls == want);
 }
 
+// A window with no samples (the ADC path stalled) is no reading, not raw 0:
+// the check fails as a measurement failure, never as crossings.
+static void test_patch_check_no_reading() {
+  for (int dead_at = 0; dead_at < 2; ++dead_at) {  // the all-low window, then output A's
+    Rig r;
+    r.Begin(Mode::Inputs);
+    r.flow.Continue();
+    CHECK(r.Run([&] { return r.ins.windows >= dead_at; }));
+    r.ins.dead_windows = 1;
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::PatchFailed);
+    CHECK(r.flow.patch_no_reading());
+    CHECK(r.flow.patch_crossed() == 0 && r.flow.patch_missing() == 0);
+    CHECK(count_prefix("CALR,PRES,NO_READING,00,00") == 1);
+    CHECK(r.outs.mask == 0);
+    r.flow.Skip();  // nothing to skip
+    CHECK(r.flow.stage() == Stage::PatchFailed);
+    r.flow.Continue();  // checks again, and now passes
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Results && r.flow.CanSave());
+  }
+}
+
+// Self with a patch that cannot be fixed now: the passed outputs are kept and
+// saved as an Outputs run.
+static void test_self_crossed_patch_can_save_outputs() {
+  Rig r;
+  r.ins.patch[2] = 4;
+  r.ins.patch[4] = 2;
+  r.Begin(Mode::Self);
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::PatchFailed);
+  CHECK(!r.flow.CanSave());
+  CHECK(r.flow.KeepOutputsOnly());
+  CHECK(r.flow.stage() == Stage::Results);
+  CHECK(r.outs.mask == 0);
+  const auto &res = r.flow.results();
+  CHECK(res.HasOutputs() && !res.HasInputs());
+  CHECK(r.flow.mode() == Mode::Outputs);
+  CHECK(count_prefix("CALR,MODE,OUTPUTS") == 1);
+  CHECK(count_prefix("CALR,RESULT,1,FF,00") == 1);
+  CHECK(r.flow.CanSave());
+  FakeSave fs;
+  CHECK(r.flow.Save(fs));
+  const std::vector<std::string> want = {"dac", "marker", "autotune"};
+  CHECK(fs.calls == want);
+  // Only from a failed patch check in Self.
+  Rig i;
+  i.ins.patch[3] = -1;
+  i.Begin(Mode::Inputs);
+  CHECK(i.Run() && i.flow.stage() == Stage::PatchFailed);
+  CHECK(!i.flow.KeepOutputsOnly() && i.flow.stage() == Stage::PatchFailed);
+  Rig o;
+  o.Begin(Mode::Self);
+  CHECK(o.Run([&] { return o.flow.stage() == Stage::PromptPatch; }));
+  CHECK(!o.flow.KeepOutputsOnly() && o.flow.stage() == Stage::PromptPatch);
+}
+
 int main() {
   test_happy_path_all_pass();
   test_results_match_math();
@@ -1658,6 +1718,8 @@ int main() {
   test_patch_check_catches_missing();
   test_inputs_warn_without_marker();
   test_self_runs_both();
+  test_patch_check_no_reading();
+  test_self_crossed_patch_can_save_outputs();
   printf("test_calroutine_flow: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
 }

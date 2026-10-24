@@ -46,16 +46,19 @@ If the meter is unplugged during a run, every output is released and nothing is 
 2. Plug in the meter. The screen shows when it has been found and set up.
 3. For output A, then B, up to H: patch the output to the meter (+ to the output, COM to ground, nothing else on that output) and press the right encoder. The app steps the output through its table, then checks the points in between. Leave the cables alone until the next prompt.
 
-The outputs are **actively driven**: what they put out does not depend on what they drive. They are calibrated **unloaded** (the meter's input is the reference); patching one into a module's input lowers it by about 1 mV, the same at every voltage.
+The outputs are **actively driven** and load-independent: what they put out does not depend on what they drive.
 
 ### Inputs (and the second part of Self)
 
 1. Patch **output A → input 1, B → 2, C → 3 … H → 8**: eight cables, nothing else on those inputs. The meter is not used (in Self it may stay plugged in). Press the right encoder.
 2. **Patch check.** The app raises each output alone and watches which input moves. A wrong patch stops here and the screen names the jacks:
    * "C reaches 5, not 3": output C's cable goes to input 5 (a swap, or a stacked cable). Fix it and press the right encoder to check again.
+   * "C reaches 3 inputs": output C's signal reaches three or more inputs (stacked cables).
    * "D: input 4 silent": nothing reached input 4 (no cable, or a dead one). Fix it and check again, or press **A** to go on without the silent inputs; they are then left uncalibrated.
+   * "No input reading": the inputs delivered no samples, so nothing could be judged. Press the right encoder to check again.
+   * In **Self**, press **B** to give up the inputs for now and keep the outputs just measured: you get the outputs' results and can save them as an Outputs run.
 
-   The check also proves that each input jack is the one the firmware thinks it is.
+   The check also proves that input n is reached by output n: the inputs are numbered the same way as the outputs.
 3. The app steps all eight outputs together and reads all eight inputs at each step. It takes about half a minute.
 
 **Below about 0.6 V the input curves are extrapolated.** The outputs cannot go below 0 V, and the sweep starts at 0.6 V, so the stretch from there down to an input's bottom (about −1.35 V) is an extension of the measured curve, not a measurement. At the top, each input's curve ends where that input tops out (about 10.6 V, set by its gain trimmer).

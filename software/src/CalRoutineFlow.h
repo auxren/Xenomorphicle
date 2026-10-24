@@ -265,6 +265,11 @@ class CalRoutineFlow {
   // PatchFailed with no crossing (only empty jacks): leave the inputs whose
   // outputs moved nothing uncalibrated and measure the others.
   void Skip();
+  // PatchFailed in Self: give up the inputs and keep the measured outputs.
+  // The run becomes an Outputs run (Results with the outputs part only,
+  // CanSave and Save as Outputs; CALR,MODE,OUTPUTS is logged). False and
+  // nothing changes anywhere else.
+  bool KeepOutputsOnly();
   // Any stage: releases every hold, forgets the run's results, goes to Idle.
   void Cancel();
   // Results stage only: measure output o (panel label) again -- after a
@@ -300,6 +305,9 @@ class CalRoutineFlow {
   uint8_t patch_moved(int o) const { return o >= 0 && o < 8 ? p_moved_[o] : 0; }
   uint8_t patch_crossed() const { return p_crossed_; }
   uint8_t patch_missing() const { return p_missing_; }
+  // The check stopped because a window delivered no samples (no reading:
+  // neither crossed nor missing is known).
+  bool patch_no_reading() const { return p_no_read_; }
   // NoMeter after the meter went away mid-run, and for how long (Failed
   // after kReconnectMs).
   bool meter_lost() const { return lost_; }
@@ -309,8 +317,9 @@ class CalRoutineFlow {
   // Failed stage: the reason logged with CALR,FAIL ("" otherwise).
   const char *fail_reason() const { return fail_reason_; }
   const Results &results() const { return results_; }
-  // Results stage and every output passed. Out of line: an inline copy the
-  // app does not inline would land in ITCM.
+  // Results stage and Results::CanSave() (every output passed, or for an
+  // Inputs run at least one input). Out of line: an inline copy the app does
+  // not inline would land in ITCM.
   bool CanSave() const;
 
   static const char *StageName(Stage s);
@@ -431,6 +440,7 @@ class CalRoutineFlow {
   uint8_t p_moved_[8] = {};
   uint8_t p_crossed_ = 0;
   uint8_t p_missing_ = 0;
+  bool p_no_read_ = false;
 
   Results results_;
 };
@@ -541,9 +551,10 @@ int Warn(char *buf, size_t n, const char *reason);
 // The patch check, one line per output raised: the inputs it moved (panel
 // mask) and its own input's shift in raw counts (positive = up in volts).
 int Patch(char *buf, size_t n, int out, uint8_t moved, float own_delta_raw);
-// crossed: outputs that moved another input; missing: outputs that did not
-// move their own (output masks).
-int PatchResult(char *buf, size_t n, bool pass, uint8_t crossed, uint8_t missing);
+// result: "PASS", "FAIL" (crossed / missing set) or "NO_READING" (a window
+// delivered no samples; both masks 0). crossed: outputs that moved another
+// input; missing: outputs that did not move their own (output masks).
+int PatchResult(char *buf, size_t n, const char *result, uint8_t crossed, uint8_t missing);
 
 // The console Q's lines (docs/CV-Meter.md; golden: test/fixtures/cvmeter_lines.txt).
 // out / in here are panel labels 0..7, printed 1-based.

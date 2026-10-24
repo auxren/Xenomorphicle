@@ -298,6 +298,9 @@ each output alone at 6 V; an input "moves" when its mean shifts by more than 100
 ~1960 a patched input moves, so ~900 counts of margin either way; a check that finds only empty
 jacks lets the owner go on without them, a crossing must be fixed). Each input's span is its own
 output's non-rail span, ended by the input's own top (near 10.65 V; §6.4's "0 V at the rail" and
-"≈ 12 V" are corrected in `docs/CV-Meter.md`). Bench: a patched Xenomorpher input loads
-an output by a near-constant ~1.2 mV (measured 2026-10-24 at 1.2 V and 9.6 V), under half an input
-count; outputs stay calibrated unloaded (reference condition), and the results screen/docs say so.
+"≈ 12 V" are corrected in `docs/CV-Meter.md`). The check proves that input n is reached by
+output n, i.e. the input map relative to the output map, not either map on its own. A window that
+delivers no samples stops the check as NO_READING (not as crossings); in Self the owner may then
+keep the measured outputs only (saved as an Outputs run). A ~1.2 mV shift seen when patching on the
+bench (2026-10-24, at 1.2 V and 9.6 V) is a ground/return-path effect; output impedance ≈ 0 (R108
+is inside the loop), so no loading correction or note is needed.

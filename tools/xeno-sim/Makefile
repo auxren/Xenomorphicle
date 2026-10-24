@@ -47,6 +47,7 @@ FWFLAGS = -DARDUINO_TEENSY41 -D__IMXRT1062__ -DPRESET_BUS -DNO_HEMISPHERE \
 FW_SRCS = \
   OC_ADC.cpp \
   OC_app_base.cpp \
+  OC_app_folders.cpp \
   OC_apps.cpp \
   OC_bitmaps.cpp \
   OC_calibration.cpp \

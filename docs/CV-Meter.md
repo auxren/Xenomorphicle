@@ -268,8 +268,10 @@ k ~ 0.945.
 - **0 V is not the rail.** 0 V reads raw ~3635-3685 on every input (the
   schematic predicts ~3685; the bench saw ~3635). There are about 400 counts
   of headroom below 0 V.
-- **The span is about -1.35 V to +10.65 V** (the `CVRANGE` line on input 1),
-  about **2.75 mV per count**.
+- **The span is about -1.35 V to +10.65 V.** That is `CVRANGE`'s figure on
+  input 1, computed with the stored nominal scale (≈ 2.93 mV per count). The
+  slope measured on the bench unit was ≈ **2.75 mV per count**, so the true
+  span in volts is somewhat narrower than that figure.
 - **The top is set by the MCP604's rail**, not by the ADC: the op-amp output
   runs into ground near 10.6-10.8 V at the jack. Where exactly depends on
   that input's gain trim (k), so each input tops out at a slightly

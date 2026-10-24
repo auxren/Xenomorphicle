@@ -160,7 +160,7 @@ While the Cal Routine app runs it logs one line per step on the console. The for
 - `SWEEP` one in-between check point and its residual
 - `ORES` an output's result: PASS or not, reason, worst error, rail mask
 - `PATCH` the patch check, one per output raised alone: the inputs it moved (hex mask) and its own input's shift in raw counts (about 1960 when patched)
-- `PRES` the patch check's result: PASS or FAIL, outputs that moved another input (`crossed`), outputs that did not move their own (`missing`), hex masks
+- `PRES` the patch check's result: PASS, FAIL or NO_READING (a window gave no samples; masks 00), outputs that moved another input (`crossed`), outputs that did not move their own (`missing`), hex masks
 - `IN` an input's span: its source output (output n for input n) and covered span (`lo_mv`, `hi_mv`); all 8 at the start of the sweep
 - `IPT` one input measurement point (all 8 inputs are logged for each sweep voltage)
 - `IRES` an input's result: verdict, gain, offset, hold-out and line deviation

@@ -359,11 +359,12 @@ CALR_CODE int Patch(char *buf, size_t n, int out, uint8_t moved, float own_delta
   return l.Done();
 }
 
-CALR_CODE int PatchResult(char *buf, size_t n, bool pass, uint8_t crossed, uint8_t missing) {
+CALR_CODE int PatchResult(char *buf, size_t n, const char *result, uint8_t crossed,
+                          uint8_t missing) {
   Builder l;
   l.Init(buf, n);
   l.Str("CALR,PRES");
-  l.Field(pass ? "PASS" : "FAIL");
+  l.Field(result);
   l.Hex(crossed, 2);
   l.Hex(missing, 2);
   return l.Done();
@@ -664,10 +665,23 @@ CALR_CODE void CalRoutineFlow::Continue() {
 // Only empty jacks (no crossing): the inputs whose outputs moved nothing are
 // left out, logged SKIP, and saved as not calibrated.
 CALR_CODE void CalRoutineFlow::Skip() {
-  if (!meter_ || stage_ != Stage::PatchFailed || p_crossed_) return;
+  if (!meter_ || stage_ != Stage::PatchFailed || p_crossed_ || p_no_read_) return;
   now_ = clock_->Ms();
   results_.in_skipped = p_missing_;
   StartInputs();
+}
+
+CALR_CODE bool CalRoutineFlow::KeepOutputsOnly() {
+  if (!meter_ || stage_ != Stage::PatchFailed || mode_ != Mode::Self) return false;
+  now_ = clock_->Ms();
+  out_->ReleaseAll();
+  mode_ = Mode::Outputs;
+  results_.mode = uint8_t(Mode::Outputs);
+  results_.in_skipped = 0;
+  for (int i = 0; i < 8; ++i) results_.in_pass[i] = false;
+  CALR_LOG(RunMode, ModeName(mode_));
+  FinishRun();
+  return true;
 }
 
 CALR_CODE void CalRoutineFlow::Cancel() {
@@ -1081,6 +1095,7 @@ CALR_CODE void CalRoutineFlow::StartPatchCheck() {
   out_->ReleaseAll();
   p_i_ = -1;
   p_crossed_ = p_missing_ = 0;
+  p_no_read_ = false;
   memset(p_moved_, 0, sizeof(p_moved_));
   results_.in_skipped = 0;
   SetStage(Stage::CheckPatch);
@@ -1095,15 +1110,23 @@ CALR_CODE void CalRoutineFlow::HoldPatch() {
 
 CALR_CODE void CalRoutineFlow::TickPatch() {
   if (!iwin_.Tick(istats_)) return;
+  // No samples is no reading, not raw 0: comparing it would call every
+  // output crossed. The check stops as a measurement failure.
+  for (int i = 0; i < 8; ++i)
+    if (!istats_[i].samples) p_no_read_ = true;
+  if (p_no_read_) {
+    FinishPatchCheck();
+    return;
+  }
   if (p_i_ < 0) {
-    for (int i = 0; i < 8; ++i) p_low_[i] = istats_[i].samples ? istats_[i].mean_raw : 0.f;
+    for (int i = 0; i < 8; ++i) p_low_[i] = istats_[i].mean_raw;
   } else {
     const int o = p_i_;
     uint8_t moved = 0;
     float own = 0.f;
     for (int i = 0; i < 8; ++i) {
       // Volts rise as raw falls: a positive shift is the input going up.
-      const float d = istats_[i].samples ? p_low_[i] - istats_[i].mean_raw : 0.f;
+      const float d = p_low_[i] - istats_[i].mean_raw;
       if (fabsf(d) > kPatchMoveCounts) moved = uint8_t(moved | (1u << i));
       if (i == o) own = d;
     }
@@ -1122,8 +1145,9 @@ CALR_CODE void CalRoutineFlow::TickPatch() {
 CALR_CODE void CalRoutineFlow::FinishPatchCheck() {
   out_->ReleaseAll();
   p_i_ = -1;
-  const bool pass = !p_crossed_ && !p_missing_;
-  CALR_LOG(PatchResult, pass, p_crossed_, p_missing_);
+  if (p_no_read_) p_crossed_ = p_missing_ = 0;  // unknown, not "everything wrong"
+  const bool pass = !p_no_read_ && !p_crossed_ && !p_missing_;
+  CALR_LOG(PatchResult, p_no_read_ ? "NO_READING" : pass ? "PASS" : "FAIL", p_crossed_, p_missing_);
   if (pass) StartInputs();
   else SetStage(Stage::PatchFailed);
 }

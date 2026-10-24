@@ -33,9 +33,12 @@
 // would throw away a finished run, it asks first and a second encL within
 // 3 s discards), encR press = go on.
 // A = go on without the empty input jacks after a failed patch check, or
-// retry the output under the Results cursor. The one write -- Save -- is a B press on a confirm screen of its
+// retry the output under the Results cursor. B on a failed patch check in
+// Self = keep the outputs only (Results with the outputs part; nothing is
+// written). The one write -- Save -- is a B press on a confirm screen of its
 // own (Backup.h's two-step confirm: kConfirmDeadMs, B down solo, nothing
-// else held), reached only from a Results screen whose outputs all passed.
+// else held), reached only from a Results screen that can save (every output
+// passed; for Inputs, at least one input).
 //
 // Inversion marks what encR will act on (docs/ui-redesign/Established-Rules.md,
 // L-06): the menu entry encR opens (either encoder turns the menu). The Results cursor, which encL moves and
@@ -322,6 +325,7 @@ FLASHMEM void AppCalRoutine::HandlePress(const UI::Event &event) {
   const bool l = event.control == OC::CONTROL_BUTTON_L;
   const bool r = event.control == OC::CONTROL_BUTTON_R;
   const bool a = event.control == OC::CONTROL_BUTTON_A;
+  const bool b = event.control == OC::CONTROL_BUTTON_B;
   switch (screen_) {
     case SCR_MENU:
       if (r) OpenMenuEntry();
@@ -362,6 +366,8 @@ FLASHMEM void AppCalRoutine::HandlePress(const UI::Event &event) {
           s == Stage::PatchFailed) {
         if (r) CalRoutinePorts::Flow().Continue();  // PatchFailed: check again
         else if (a && s == Stage::PatchFailed) CalRoutinePorts::Flow().Skip();
+        else if (b && s == Stage::PatchFailed && CalRoutinePorts::Flow().KeepOutputsOnly())
+          mode_ = Mode::Outputs;  // the run is an Outputs run now: its rows, confirm, saved
       } else if (s == Stage::Results) {
         if (r && CalRoutinePorts::Flow().CanSave()) ArmSave();
         else if (a && CursorOnFailedOutput()) CalRoutinePorts::Flow().RetryOutput(cursor_);
@@ -590,6 +596,16 @@ FLASHMEM void AppCalRoutine::DrawPatchFailed() const {
   const CalRoutineFlow &f = CalRoutinePorts::Flow();
   char b[40], list[20];  // Row() cuts every line at 21 columns
   Title("Patch check FAILED");
+  const bool self = f.mode() == Mode::Self;
+  if (f.patch_no_reading()) {
+    Row(0, "No input reading:");
+    Row(1, "the inputs gave no");
+    Row(2, "samples. Nothing was");
+    Row(3, "judged; check again.");
+    if (self) Row(4, "B: outputs only");
+    Footer("L:cancel     R:again");
+    return;
+  }
   const uint8_t bad = uint8_t(f.patch_crossed() | f.patch_missing());
   int nbad = 0;
   for (int o = 0; o < 8; ++o) nbad += (bad >> o) & 1;
@@ -601,12 +617,21 @@ FLASHMEM void AppCalRoutine::DrawPatchFailed() const {
     if (!moved) {
       snprintf(b, sizeof(b), "%c: input %d silent", 'A' + o, o + 1);
     } else {
-      int len = 0;
-      list[0] = 0;
-      for (int i = 0; i < 8; ++i)
-        if (moved & (1u << i)) len += snprintf(list + len, sizeof(list) - size_t(len), len ? ",%d" : "%d", i + 1);
-      if (moved & (1u << o)) snprintf(b, sizeof(b), "%c reaches %s", 'A' + o, list);
-      else snprintf(b, sizeof(b), "%c reaches %s, not %d", 'A' + o, list, o + 1);
+      int count = 0;
+      for (int i = 0; i < 8; ++i) count += (moved >> i) & 1;
+      if (count >= 3) {
+        // A list would not fit: "C reaches 8 inputs" (18 columns at most).
+        snprintf(b, sizeof(b), "%c reaches %d inputs", 'A' + o, count);
+      } else {
+        // At most "C reaches 1,2, not 3" (20 columns).
+        int len = 0;
+        list[0] = 0;
+        for (int i = 0; i < 8; ++i)
+          if (moved & (1u << i))
+            len += snprintf(list + len, sizeof(list) - size_t(len), len ? ",%d" : "%d", i + 1);
+        if (moved & (1u << o)) snprintf(b, sizeof(b), "%c reaches %s", 'A' + o, list);
+        else snprintf(b, sizeof(b), "%c reaches %s, not %d", 'A' + o, list, o + 1);
+      }
     }
     Row(row++, b);
   }
@@ -614,11 +639,12 @@ FLASHMEM void AppCalRoutine::DrawPatchFailed() const {
     snprintf(b, sizeof(b), "...and %d more", nbad - shown);
     Row(3, b);
   }
+  // Row 4: in Self, B keeps the measured outputs; otherwise the way on.
   if (!f.patch_crossed()) {
-    Row(4, "A: skip silent ones");
+    Row(4, self ? "B: outputs only" : "A: skip silent ones");
     Footer("L:stop A:skip R:again");
   } else {
-    Row(4, "Fix, then R:again.");
+    Row(4, self ? "B: outputs only" : "Fix, then R:again.");
     Footer("L:cancel     R:again");
   }
 }
@@ -784,21 +810,21 @@ FLASHMEM void AppCalRoutine::DrawConfirm() const {
       if (uncal & (1u << i)) len += snprintf(u + len, sizeof(u) - size_t(len), " %d", i + 1);
   }
   snprintf(b, sizeof(b), "Inputs: %d new curves", ok);
+  int row = 0;
   if (!res.HasInputs()) {
-    Row(0, "Outputs A-H: new.");
-    Row(1, "Inputs: unchanged.");
-    Row(2, "Set with no load.");
+    Row(row++, "Outputs A-H: new.");
+    Row(row++, "Inputs: unchanged.");
   } else if (!res.HasOutputs()) {
-    Row(0, b);
-    Row(1, u);
-    Row(2, "Outputs: unchanged.");
+    Row(row++, b);
+    if (u[0]) Row(row++, u);
+    Row(row++, "Outputs: unchanged.");
   } else {
-    Row(0, "Outputs A-H: new.");
-    Row(1, b);
-    Row(2, u);
+    Row(row++, "Outputs A-H: new.");
+    Row(row++, b);
+    if (u[0]) Row(row++, u);
   }
-  Row(3, "Replaces the stored");
-  Row(4, "calibration.");
+  Row(row++, "Replaces the stored");
+  Row(row, "calibration.");
   // The commit sits where no other screen of this app puts anything.
   graphics.setPrintPos(0, 56);
   graphics.print("encL:no");
