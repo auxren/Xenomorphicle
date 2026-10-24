@@ -9,13 +9,65 @@
 
 #include "CalRoutineMeasure.h"
 
-#include "CalRoutineFlow.h"
+#include <stdio.h>
+
+#include "CvMeterMath.h"
 #include "UsbTmc.h"
 
+namespace CM = CvMeterMath;
 namespace CR = CalRoutineMath;
 namespace L = CalRoutineLines;
 
+// ---- the meter rule's lines ----------------------------------------------------
+// Moved from CalRoutineFlow.cpp with the same output (CALR,RETRY and
+// CALR,REREAD in test/fixtures/calr_lines.txt): fields appended with
+// CvMeterMath::Append, which truncates cleanly at n.
+
+namespace CalRoutineLines {
+
+CALR_CODE void MeasField(char *buf, size_t n, size_t *pos, const char *s) {
+  CM::Append(buf, n, pos, ",");
+  CM::Append(buf, n, pos, s);
+}
+
+CALR_CODE int Retry(char *buf, size_t n, const char *scpi, int attempt) {
+  if (!n) return 0;
+  size_t pos = 0;
+  buf[0] = 0;
+  CM::Append(buf, n, &pos, "CALR,RETRY");
+  MeasField(buf, n, &pos, scpi);
+  char t[16];
+  snprintf(t, sizeof(t), "%ld", long(attempt));
+  MeasField(buf, n, &pos, t);
+  return int(pos);
+}
+
+CALR_CODE int Reread(char *buf, size_t n, int out, int32_t target_mv, uint16_t code,
+                     double spread_mv) {
+  if (!n) return 0;
+  size_t pos = 0;
+  buf[0] = 0;
+  CM::Append(buf, n, &pos, "CALR,REREAD");
+  char t[32];
+  snprintf(t, sizeof(t), "%ld", out >= 0 && out < 8 ? long(out + 1) : 0L);  // panel label, 0 = none
+  MeasField(buf, n, &pos, t);
+  snprintf(t, sizeof(t), "%ld", long(target_mv));
+  MeasField(buf, n, &pos, t);
+  snprintf(t, sizeof(t), "%lu", (unsigned long)code);
+  MeasField(buf, n, &pos, t);
+  CM::FormatFixed(t, sizeof(t), CM::ScaleRound(spread_mv, 3), 3);
+  MeasField(buf, n, &pos, t);
+  return int(pos);
+}
+
+}  // namespace CalRoutineLines
+
 namespace CalRoutine {
+
+const char *const kMeterSetup[6] = {
+  "*CLS", "CONF:VOLT:DC 20", "VOLT:DC:NPLC 10", "VOLT:DC:AZ ON", "TRIG:SOUR IMM", "SYST:ERR?",
+};
+const char *const kErrorQuery = "SYST:ERR?";
 
 #define CALR_LOG(fn, ...) do { \
     char line_[L::kMaxLine]; \

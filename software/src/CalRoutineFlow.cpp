@@ -166,18 +166,6 @@ CALR_CODE int Node(char *buf, size_t n, int out, int k, int32_t target_mv, uint1
   return l.Done();
 }
 
-CALR_CODE int Reread(char *buf, size_t n, int out, int32_t target_mv, uint16_t code,
-                     double spread_mv) {
-  Builder l;
-  l.Init(buf, n);
-  l.Str("CALR,REREAD");
-  l.Int(Label(out));
-  l.Int(target_mv);
-  l.Uns(code);
-  l.Fix(spread_mv, 3);
-  return l.Done();
-}
-
 CALR_CODE int Sweep(char *buf, size_t n, int out, int32_t target_mv, uint16_t code,
                     double measured_mv, bool counted) {
   Builder l;
@@ -245,15 +233,6 @@ CALR_CODE int InResult(char *buf, size_t n, int in, const char *outcome, CM::Ver
   l.Fix(holdout_mv, 2);
   l.Fix(line_dev_mv, 2);
   l.Int(points);
-  return l.Done();
-}
-
-CALR_CODE int Retry(char *buf, size_t n, const char *scpi, int attempt) {
-  Builder l;
-  l.Init(buf, n);
-  l.Str("CALR,RETRY");
-  l.Field(scpi);
-  l.Int(attempt);
   return l.Done();
 }
 
@@ -422,11 +401,6 @@ namespace L = CalRoutineLines;
 // Input point (shared with the console Q)
 
 namespace CalRoutine {
-
-const char *const kMeterSetup[6] = {
-  "*CLS", "CONF:VOLT:DC 20", "VOLT:DC:NPLC 10", "VOLT:DC:AZ ON", "TRIG:SOUR IMM", "SYST:ERR?",
-};
-const char *const kErrorQuery = "SYST:ERR?";
 
 CALR_CODE void InputWindow::Start(InputPort &in, Clock &clock) {
   in_ = &in;

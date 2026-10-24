@@ -84,7 +84,7 @@ suite test_input_cal                ../src/InputCal.cpp ../src/CalRoutineMath.cp
                                     ../src/CvMeterMath.cpp ../src/InputCurveStore.cpp
 suite test_calrec                   ../src/CalRec.cpp
 suite test_cal259e_bus              ../src/Cal259eBus.cpp ../src/CalRec.cpp
-suite test_calroutine_measure       ../src/CalRoutineMeasure.cpp ../src/CalRoutineFlow.cpp \
+suite test_calroutine_measure       ../src/CalRoutineMeasure.cpp \
                                     ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
 suite test_calroutine_flow          ../src/CalRoutineFlow.cpp ../src/CalRoutineMeasure.cpp \
                                     ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp ../src/UsbTmc.cpp

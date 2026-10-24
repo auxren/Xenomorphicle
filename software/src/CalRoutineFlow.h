@@ -6,6 +6,7 @@
 
 #include "CalRoutineMath.h"
 #include "CalRoutineMeasure.h"
+#include "CalRoutineTypes.h"
 #include "CvMeterMath.h"
 
 struct InputCurveRecord;
@@ -44,35 +45,6 @@ namespace CalRoutine {
 // Which routine runs. Self is 0, so zeroed Results are a Self run's.
 enum class Mode : uint8_t { Self = 0, Outputs = 1, Inputs = 2 };
 
-// The USB DMM. Implemented over USBTMCDevice (src/drivers/USBTMCDevice.h):
-// Begin = BeginQuery, Poll maps Done -> 1 (reply = Reply()), Busy -> 0,
-// Refused / Timeout / Error -> < 0, Recovering -> 0 while a query was
-// started, Connected = connected(), Identity = the *IDN? reply the glue read.
-struct MeterPort {
-  // False when the query could not be started (no meter, busy, the driver
-  // resynchronising after an error): the flow waits and tries again.
-  virtual bool Begin(const char *scpi, uint32_t timeout_ms) = 0;
-  // 0 busy, 1 done (*reply valid until the next Begin), < 0 error, timeout or refused.
-  virtual int Poll(const char **reply) = 0;
-  virtual bool Connected() const = 0;
-  virtual const char *Identity() const = 0;
-};
-
-// The 8 CV outputs. The output stages hold only the output under test; the
-// input stages hold all 8 (each at its own code). ReleaseAll lets go of
-// everything this port holds (the glue may track its own holds
-// so that it does not release outputs held by someone else).
-struct OutputPort {
-  virtual void Hold(int out, uint16_t code) = 0;
-  virtual void ReleaseAll() = 0;
-  // The stored calibration table's entry k (k * 1200 mV), the iteration's start.
-  virtual uint16_t TableCode(int out, int k) const = 0;
-  // The DAC code for mv through the normal pitch-to-code path, but on `table`
-  // (the 11 entries being verified) instead of the stored one.
-  virtual uint16_t CodeForMv(int out, const uint16_t table[CalRoutineMath::kNodes],
-                             int32_t mv) const = 0;
-};
-
 // The 8 CV inputs, all in one window (the ADC samples them together).
 // StartWindow begins averaging every input; WindowDone, asked once the flow's
 // measure time has passed, fills s[0..7] (panel order) with what was gathered
@@ -80,10 +52,6 @@ struct OutputPort {
 struct InputPort {
   virtual void StartWindow() = 0;
   virtual bool WindowDone(CvMeterMath::PointStats s[8]) = 0;
-};
-
-struct Clock {
-  virtual uint32_t Ms() const = 0;  // wraps; the flow only ever subtracts
 };
 
 // Where Results go. Arrays are panel-indexed (see above).
@@ -99,12 +67,12 @@ struct SavePort {
   virtual void ReloadInputs() = 0;
 };
 
-// LogFn and the meter rule's timings (kOutSettleMs, kReadings, kFinalReadings,
-// kReadTimeoutMs, the retry limits) live in CalRoutineMeasure.h.
+// MeterPort, OutputPort, Clock, LogFn, the meter rule's timings (kOutSettleMs,
+// kReadings, kFinalReadings, kReadTimeoutMs, the retry limits) and the meter
+// setup (kMeterSetup, kErrorQuery, kConfigTimeoutMs) live in CalRoutineTypes.h.
 
 // ---- timings and limits ------------------------------------------------------
 
-constexpr uint32_t kConfigTimeoutMs = 1000;
 constexpr uint32_t kReconnectMs = 20000;   // meter gone this long mid-run: Failed
 constexpr uint32_t kInSettleMs = 300;      // the console Q's settle and measure
 constexpr uint32_t kInMeasureMs = 600;
@@ -126,24 +94,11 @@ constexpr int32_t kPatchLowMv = 600;
 constexpr int32_t kPatchHighMv = 6000;
 constexpr float kPatchMoveCounts = 1000.f;
 
-// The meter setup, in order (all on UsbTmc::ScpiAllowed's list): DC volts on
-// the fixed 20 V range, NPLC 10 with autozero ON (below NPLC 10 the SDM3065X
-// returns a smoothed, stale stream; bench 2026-10-24), immediate trigger, and
-// last kErrorQuery. Sent at Begin and again after every reconnect.
-//
-// None of the setup lines has a reply, so a meter that rejected one would
-// say so only in its error queue: the last line reads it (*CLS emptied it
-// first), and the run fails METER_CONFIG (CALR,MERR names the reply) unless
-// it is empty (UsbTmc::NoScpiError). With autozero on, every reading zeroes
-// itself: there is no per-output re-zero and no per-output error query.
-//
 // Run time: each READ? is ~0.53 s, so the readings dominate. Per output:
 // 11 nodes x (iteration measurements x 4 READ? + 11 READ? final) plus 20
 // sweep points x 4 READ?. The inputs use no meter: 9 patch-check windows and
 // about 18 sweep windows of 0.9 s each. test_run_time_model prints the
 // modelled figures for each routine.
-extern const char *const kMeterSetup[6];
-extern const char *const kErrorQuery;  // "SYST:ERR?"
 
 // Waits the input settle time, then averages all 8 inputs in one window:
 // the measuring step of the routine's input part (whatever the caller set
@@ -476,7 +431,8 @@ bool CalRoutineDropCurve(InputCurveRecord &rec, int phys);
 // them at Begin().
 namespace CalRoutineLines {
 
-constexpr size_t kMaxLine = 160;
+// kMaxLine, Retry and Reread are declared in CalRoutineMeasure.h (the meter
+// rule logs them; they are defined in CalRoutineMeasure.cpp).
 
 int HeaderCount();
 // i-th header line: 0 is "CALR#,version=1", then one per SUB.
@@ -487,7 +443,6 @@ int State(char *buf, size_t n, uint32_t ms, const char *stage, int out, int in);
 int Out(char *buf, size_t n, int out);
 int Node(char *buf, size_t n, int out, int k, int32_t target_mv, uint16_t code,
          double measured_mv, int iters, bool at_rail);
-int Reread(char *buf, size_t n, int out, int32_t target_mv, uint16_t code, double spread_mv);
 int Sweep(char *buf, size_t n, int out, int32_t target_mv, uint16_t code, double measured_mv,
           bool counted);
 int OutResult(char *buf, size_t n, int out, bool pass, const char *reason, float worst_mv,
@@ -497,7 +452,6 @@ int InPoint(char *buf, size_t n, int in, int32_t mv, uint16_t code,
             const CvMeterMath::PointStats &s, bool used);
 int InResult(char *buf, size_t n, int in, const char *outcome, CvMeterMath::Verdict v,
              const CvMeterMath::Fit &line, float holdout_mv, float line_dev_mv, int points);
-int Retry(char *buf, size_t n, const char *scpi, int attempt);
 // step: "SETUP" (after kMeterSetup).
 int MeterError(char *buf, size_t n, const char *step, const char *reply);
 int Lost(char *buf, size_t n, int out);

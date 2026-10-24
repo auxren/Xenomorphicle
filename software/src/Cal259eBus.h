@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "CalRoutineFlow.h"  // CalRoutine::Clock
+#include "CalRoutineTypes.h"  // CalRoutine::Clock
 
 // ---------------------------------------------------------------------------
 // The 259e calibration request/reply client (Buchla_FW docs/cv-calibration/

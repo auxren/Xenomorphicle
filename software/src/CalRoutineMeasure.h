@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "CalRoutineMath.h"
+#include "CalRoutineTypes.h"
 
 // ---------------------------------------------------------------------------
 // The Cal Routine's meter rule, moved out of CalRoutineFlow unchanged so that
@@ -18,34 +19,11 @@
 //                 mV); one re-read set when untrusted, then NOISY.
 // Both are driven by the caller's Tick: time is passed in (the caller's one
 // per-tick sample of its clock), nothing here reads a clock or blocks.
-// The ports (MeterPort, OutputPort) are declared in CalRoutineFlow.h.
+// The ports (MeterPort, OutputPort), LogFn and the timings are in
+// CalRoutineTypes.h; this links without CalRoutineFlow.cpp.
 // ---------------------------------------------------------------------------
 
 namespace CalRoutine {
-
-struct MeterPort;
-struct OutputPort;
-
-typedef void (*LogFn)(const char *line);  // one line, no line ending
-
-// ---- timings and limits of the meter rule ------------------------------------
-
-constexpr uint32_t kOutSettleMs = 150;     // after every DAC code change
-// The measurement rule (design 9.1), one place for every target that measures
-// a held output with the meter (MeterMeasure): settle kOutSettleMs after the
-// code change, one throwaway READ? (the conversion in progress at the change
-// spans the step and is never used), then kReadings READ? -> Summarize
-// (median, spread, trusted <= 0.5 mV; one re-read set, then NOISY). A node's
-// final value takes kFinalReadings instead.
-constexpr int kReadings = 3;               // READ? per measurement -> Summarize
-constexpr int kFinalReadings = 10;         // a node's final value, after the iteration settles
-// One READ? at NPLC 10 with autozero ON is a real conversion and takes ~0.53 s
-// on the SDM3065X; 3 s is only the give-up point.
-constexpr uint32_t kReadTimeoutMs = 3000;
-constexpr uint32_t kWatchdogMs = 500;      // past the timeout a busy Poll counts as failed
-constexpr int kQueryRetries = 3;           // a failed query is retried this often
-constexpr uint32_t kRetryWaitMs = 200;     // ... after this wait
-constexpr uint32_t kBeginGiveUpMs = 5000;  // Begin() refused for this long: failed
 
 // ---- one meter query, retried ------------------------------------------------
 
@@ -117,5 +95,16 @@ class MeterMeasure {
 };
 
 }  // namespace CalRoutine
+
+// The meter rule's own lines (formats and golden examples with the rest of
+// CalRoutineLines: CalRoutineFlow.h, test/fixtures/calr_lines.txt).
+namespace CalRoutineLines {
+
+constexpr size_t kMaxLine = 160;
+
+int Retry(char *buf, size_t n, const char *scpi, int attempt);
+int Reread(char *buf, size_t n, int out, int32_t target_mv, uint16_t code, double spread_mv);
+
+}  // namespace CalRoutineLines
 
 #endif  // CALROUTINEMEASURE_H_
