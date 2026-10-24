@@ -323,7 +323,108 @@ static void stale_replies_are_dropped() {
   CHECK(g.bus.adc() == 0x1234);
 }
 
+static void AllFramesIntact(Rig &g) {
+  CHECK(g.sim.bad_frames == 0);
+  for (auto &f : g.sim.log) CHECK(CalRec::FrameAllowed(f.data(), (uint8_t)f.size()));
+}
+
+static void refused_commit_during_put_sends_nothing() {
+  Rig g;
+  uint8_t rec[30];
+  MakeRecord(rec, 1);
+  g.sim.busy_sends = -1;
+  CHECK(g.bus.PutRecord(rec));
+  for (int i = 0; i < 40; ++i) { g.bus.Tick(); ++g.clk.t; }
+  CHECK(!g.bus.Commit(RecCrc(rec), 0));
+  CHECK(!g.bus.Commit(RecCrc(rec), 1));
+  g.sim.busy_sends = 0;
+  CHECK(g.Run() == 1);
+  CHECK(g.sim.count[CalRec::kCmdCommit] == 0);
+  CHECK(g.sim.count[CalRec::kCmdPut] == 4);
+  AllFramesIntact(g);
+}
+
+static void refused_commit_during_read_sends_nothing() {
+  Rig g;
+  uint8_t rec[30];
+  MakeRecord(rec, 1);
+  g.sim.drop_replies = true;
+  CHECK(g.bus.ReadStatus());
+  while (g.sim.count[CalRec::kCmdRead] < 2) { g.bus.Tick(); ++g.clk.t; }
+  CHECK(!g.bus.Commit(RecCrc(rec), 1));
+  g.sim.drop_replies = false;
+  CHECK(g.Run() == 1);
+  CHECK(g.sim.count[CalRec::kCmdCommit] == 0);
+  AllFramesIntact(g);
+  for (auto &f : g.sim.log) CHECK(f[3] == CalRec::kCmdRead && f.size() == 8);
+}
+
+static void refused_put_during_read_sends_nothing() {
+  Rig g;
+  uint8_t rec[30];
+  MakeRecord(rec, 1);
+  g.sim.drop_replies = true;
+  CHECK(g.bus.ReadStatus());
+  while (g.sim.count[CalRec::kCmdRead] < 2) { g.bus.Tick(); ++g.clk.t; }
+  CHECK(!g.bus.PutRecord(rec));
+  CHECK(!g.bus.ReadAdc(0));
+  CHECK(!g.bus.ReadRecord());
+  g.sim.drop_replies = false;
+  CHECK(g.Run() == 1);
+  CHECK(g.sim.count[CalRec::kCmdPut] == 0 && g.sim.count[CalRec::kCmdCommit] == 0);
+  for (auto &f : g.sim.log) CHECK(f[3] == CalRec::kCmdRead && f[6] == 2);
+  AllFramesIntact(g);
+}
+
+static void post_commit_send_error_is_unknown() {
+  Rig g;
+  uint8_t rec[30];
+  MakeRecord(rec, 1);
+  g.bus.PutRecord(rec); g.Run();
+  g.bus.Commit(RecCrc(rec), 0);
+  while (g.sim.count[CalRec::kCmdCommit] < 1) { g.bus.Tick(); ++g.clk.t; }
+  g.sim.nak = 2;   // the COMMIT was ACKed; every later send fails
+  CHECK(g.Run() == E_COMMIT_UNKNOWN);
+  CHECK(g.sim.count[CalRec::kCmdCommit] == 1);
+  // ... and if the bus recovers inside the window, the verdict still arrives
+  Rig h;
+  h.bus.PutRecord(rec); h.Run();
+  h.bus.Commit(RecCrc(rec), 0);
+  while (h.sim.count[CalRec::kCmdCommit] < 1) { h.bus.Tick(); ++h.clk.t; }
+  h.sim.nak = 2;
+  for (int i = 0; i < 2500; ++i) { h.bus.Tick(); ++h.clk.t; }
+  h.sim.nak = 0;
+  CHECK(h.Run() == 1);
+  CHECK(h.sim.count[CalRec::kCmdCommit] == 1);
+}
+
+static void post_commit_malformed_status_is_unknown() {
+  Rig g;
+  uint8_t rec[30];
+  MakeRecord(rec, 1);
+  g.bus.PutRecord(rec); g.Run();
+  g.bus.Commit(RecCrc(rec), 0);
+  while (g.sim.count[CalRec::kCmdCommit] < 1) { g.bus.Tick(); ++g.clk.t; }
+  g.sim.bad_reply_len = 3;
+  CHECK(g.Run() == E_COMMIT_UNKNOWN);
+  CHECK(g.sim.count[CalRec::kCmdCommit] == 1);
+  Rig h;
+  h.bus.PutRecord(rec); h.Run();
+  h.bus.Commit(RecCrc(rec), 0);
+  while (h.sim.count[CalRec::kCmdCommit] < 1) { h.bus.Tick(); ++h.clk.t; }
+  h.sim.bad_reply_len = 3;
+  for (int i = 0; i < 2500; ++i) { h.bus.Tick(); ++h.clk.t; }
+  h.sim.bad_reply_len = -1;
+  CHECK(h.Run() == 1);
+  CHECK(h.sim.count[CalRec::kCmdCommit] == 1);
+}
+
 int main() {
+  refused_commit_during_put_sends_nothing();
+  refused_commit_during_read_sends_nothing();
+  refused_put_during_read_sends_nothing();
+  post_commit_send_error_is_unknown();
+  post_commit_malformed_status_is_unknown();
   put_commit_roundtrip();
   no_record_is_distinct_outcome();
   commit_never_resent();

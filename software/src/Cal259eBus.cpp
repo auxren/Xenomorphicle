@@ -75,11 +75,15 @@ bool Cal259eBus::PutRecord(const uint8_t rec[30]) {
 }
 
 bool Cal259eBus::Commit(uint16_t crc, uint8_t flags) {
+  // Build into a local buffer: a refused call must not touch the in-flight
+  // operation's frame_.
   uint8_t payload[4] = {(uint8_t)CalRec::kRecLen259e, (uint8_t)(crc >> 8), (uint8_t)crc, flags};
   const uint8_t plen = flags ? 4 : 3;  // n = 8 means flags = 0
-  const int n = CalRec::BuildFrame(CalRec::kCmdCommit, target_, payload, plen, frame_);
+  uint8_t local[CalRec::kMaxFrame];
+  const int n = CalRec::BuildFrame(CalRec::kCmdCommit, target_, payload, plen, local);
   if (n < 0) return false;
   if (!Start(OP_COMMIT)) return false;
+  memcpy(frame_, local, (size_t)n);
   frame_n_ = (uint8_t)n;
   cstage_ = C_SEND;
   return true;
@@ -89,6 +93,8 @@ bool Cal259eBus::Commit(uint16_t crc, uint8_t flags) {
 int Cal259eBus::SendCurrent() {
   const uint32_t now = clock_->Ms();
   if (busy_open_ && now - busy_wait_t_ < kBusyRetryMs) return 1;
+  // Never put on the wire anything the allowlist would refuse.
+  if (frame_n_ == 0 || !CalRec::FrameAllowed(frame_, frame_n_)) return E_INTERNAL;
   // A reply still queued now belongs to an earlier request: drop it.
   uint8_t junk[CalRec::kMaxFrame], jn;
   for (int i = 0; i < 8 && bus_->PopReply(junk, &jn); ++i) {}
@@ -235,11 +241,14 @@ int Cal259eBus::TickCommit() {
   }
   const int r = ReadStep();
   if (r == 0) return 0;
-  if (r == E_NO_REPLY || r == E_BUS_BUSY) {  // inside the window: ask again
-    BeginRead(2, 0);
+  if (r < 0) {
+    // The COMMIT is on the wire. Whatever went wrong with the status read (no
+    // reply, busy, a send error, a malformed reply), the only honest answers
+    // left are a verdict or E_COMMIT_UNKNOWN: keep asking until the window ends.
+    t0_ = now;
+    cstage_ = C_GAP;
     return 0;
   }
-  if (r < 0) { Finish(r); return r; }
   StoreStatus();
   const uint8_t fl = status_.flags;
   int res = 0;

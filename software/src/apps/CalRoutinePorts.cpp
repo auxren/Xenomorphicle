@@ -551,6 +551,7 @@ const char *ErrName(int e) {
     case E_NO_SLOT: return "NO_SLOT";
     case E_COMMIT_UNKNOWN: return "COMMIT_UNKNOWN";
     case E_BUS_ERROR: return "BUS_ERROR";
+    case E_INTERNAL: return "INTERNAL";
     default: return "ERROR";
   }
 }

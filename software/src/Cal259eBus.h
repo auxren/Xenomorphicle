@@ -28,6 +28,9 @@
 // wire, so it is retried every kBusyRetryMs for up to kBusyGiveUpMs
 // (E_BUS_BUSY). Any other send failure is E_BUS_ERROR and is not retried.
 //
+// After an ACKed COMMIT, status-read failures (send errors, malformed replies,
+// silence) are polled through until the window ends: E_COMMIT_UNKNOWN.
+//
 // A reply counts only if it came from the target and names the outstanding
 // request's what and arg; anything else is dropped without comment. The reply
 // length is checked per `what` (E_BAD_REPLY otherwise): what 0 carries 8 bytes
@@ -50,7 +53,10 @@ enum Error {
   E_COMMIT_REFUSED = -4,  // the module refused the record (status bit3)
   E_NO_SLOT = -5,         // all slots full and compaction not allowed (bits 3+4)
   E_COMMIT_UNKNOWN = -6,  // no verdict within the window; the commit may or may not have landed
-  E_BUS_ERROR = -7,       // a send failed other than "bus busy" (NAK, bad args)
+  E_BUS_ERROR = -7,       // a send failed other than "bus busy" (NAK, bad args). Never returned for
+                          // a Commit once its frame was ACKed: after that only ok, E_COMMIT_REFUSED,
+                          // E_NO_SLOT or E_COMMIT_UNKNOWN end the operation
+  E_INTERNAL = -8,        // a frame CalRec::FrameAllowed refuses was about to be sent; nothing was
 };
 
 struct Status { uint8_t flags, fmt; uint16_t seq; };
