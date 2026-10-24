@@ -323,3 +323,23 @@ Behaviour:
 - [ ] **Step 3: Implement** the parser and the simulated meter, then write the docs. The operator page covers what you need (a USBTMC meter on the host jack), the steps, what the results mean (1 mV = 1 cent), and what Setup / Calibrate does to a Cal Routine calibration. The checklist carries the design's gates 1–6, word for word.
 - [ ] **Step 4: Run** `python3 tools/hwqa/test_cvmeter.py` and `./run-host-tests.sh`. Expected: pass.
 - [ ] **Step 5: Commit** `docs+hwqa: Cal Routine operator page, bench checklist, CALR parser and simulated meter`.
+
+---
+
+## Addendum 2026-10-24: Tasks 9–10 (design §9)
+
+### Task 9: Meter measurement rule at NPLC 10
+**Files:** `software/src/CalRoutineFlow.{h,cpp}`, `software/test/test_calroutine_flow.cpp`, `software/test/fixtures/calr_lines.txt`, `tools/hwqa/cvmeter.py` (fixture parity), docs run-time text.
+- kMeterSetup = `*CLS`, `CONF:VOLT:DC 20`, `VOLT:DC:NPLC 10`, `VOLT:DC:AZ ON`, `TRIG:SOUR IMM`, `SYST:ERR?`; drop the per-output `AZ ONCE` re-zero (keep a per-output `SYST:ERR?` only if still meaningful, else remove with its test).
+- Measurement: settle 150 ms → one throwaway `READ?` (logged, not used) → `kReadings = 3` → median/spread/trust as now; re-read set once, then NOISY.
+- Node final value: after the iteration settles on a code, take `kFinalReadings = 10` (same throwaway first) and report/store that median as the node's measured value.
+- FakeMeter models the bench: a reading in progress at a code change returns the mid value; NPLC < 10 is not modelled as valid. Tests: `throwaway_after_code_change` (a straddling reading never reaches the median), `node_final_uses_10_readings`, run-time model updated (≈25 min target; report the modelled figure).
+
+### Task 10: Separate Outputs / Inputs / Self routines; Inputs all-8 at once (1→1 … 8→8)
+**Files:** `CalRoutineFlow.{h,cpp}` (modes + all-8 input stage), `apps/CalRoutine.h`, `apps/CalRoutinePorts.{h,cpp}` (InputPort reads all 8 in one window; OutputPort holds all 8), `CalRoutineSave` (mode-aware), tests, fixture, docs (`docs/_apps/Cal-Routine.md`, checklist).
+- `enum class Mode { Outputs, Inputs, Self }`; `Begin(..., Mode)`. Results carry which parts are present; `CanSave()` = outputs part all pass (Outputs/Self) / at least one input passed (Inputs).
+- `CalRoutineSave` writes only the present parts, keeping the existing order among them; marker only with outputs.
+- Inputs stage: patch screen "Patch out 1→in 1 … 8→8"; patch check (each output alone high → only its own input moves; else PATCH error naming the jacks); then for each sweep point hold all 8 outputs at the point voltage (each via its own table), one settle+window, record all 8 inputs; per-input BuildInputCurve; span per input = overlap of that output's non-rail span and the input's range.
+- Inputs-only warns when the marker is absent (outputs not Cal Routine-calibrated) — continue/cancel.
+- CALR lines for the new stage/patch check; fixture + hwqa parser parity.
+- Tests: `mode_outputs_saves_only_tables`, `mode_inputs_saves_only_curves`, `inputs_all8_one_sweep` (fake bent inputs per channel, all pass, curve accuracy as today), `patch_check_catches_swap`, `inputs_warn_without_marker`, `self_runs_both`.

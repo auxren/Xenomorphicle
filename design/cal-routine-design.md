@@ -261,3 +261,34 @@ input test voltages; the integer format of the per-channel pitch scale; screen l
 (pure maths and USBTMC framing in host-tested files, a simulated meter); console line formats;
 plan phasing (*suggested*: driver + console `m` test → output cal → input cal → apps switch-over →
 app UI polish).
+
+## 9. Amendment 2026-10-24 (after the first bench Self run; Oren approved)
+
+The first Self run failed NOISY on every output. Bench diagnosis (SDM3065X, firmware 3.02.01.13):
+below NPLC 10 the meter's `READ?` returns a smoothed/stale internal stream (a step reads as a linear
+ramp of exact 150 mV increments; after a step back it can stay frozen at an old value). At **NPLC 10,
+autozero ON** each `READ?` is a real conversion (~0.53 s) with ~0.03–0.05 mV spread; the reading in
+progress when the DAC code changes straddles the step, and on a large step a second one can too.
+
+### 9.1 Meter measurement (replaces §6.3's per-measurement rule and Task 7's NPLC 1 / AZ ONCE)
+Meter setup: `CONF:VOLT:DC 20`, `VOLT:DC:NPLC 10`, `VOLT:DC:AZ ON`, `TRIG:SOUR IMM`, then `SYST:ERR?`.
+After every DAC code change: settle 150 ms, **one throwaway `READ?`**, then **3** readings → median +
+spread (trusted ≤ 0.5 mV; one re-read set, then NOISY). Each output node's **final** value (the one
+reported and stored as measured) is the median of **10** readings. Sweep points use the 3-reading rule.
+Expected Outputs run ≈ 25 min (to be measured).
+
+### 9.2 Separate routines
+The Cal Routine list becomes **Outputs**, **Inputs**, **Self (both)** (later rows, e.g. bus modules,
+append below). Each saves only its own part: Outputs → DAC tables + marker + autotune reset; Inputs →
+curves + ICA1 lines + measured-with-fix masks + reload; Self → both, in the existing order. Inputs warns
+(but allows continuing) when any output it will use was not calibrated by Cal Routine (marker absent).
+
+### 9.3 Inputs: all 8 at once, patched 1→1 … 8→8
+The owner patches output n → input n for all eight (no meter needed). The routine steps **all 8
+outputs together** through the input sweep points (each output through its own calibrated table) and
+measures **all 8 inputs in one window per point** (the ADC samples all channels together). Settle and
+window as the Q flow (300 ms / 600 ms). Verdicts per input as today; a failed input does not stop the
+others. A patch check first: each output in turn is raised alone and must move only its own input
+(catches a mis-patch, and is the input-map check for free). Bench: a patched Xenomorpher input loads
+an output by a near-constant ~1.2 mV (measured 2026-10-24 at 1.2 V and 9.6 V), under half an input
+count; outputs stay calibrated unloaded (reference condition), and the results screen/docs say so.
