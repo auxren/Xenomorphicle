@@ -1,6 +1,6 @@
 # Cal Routine: closed-loop self-calibration with a USB bench DMM — design
 
-Date: 2026-10-23. Status: draft for Oren's approval (builder check done; its questions are settled in the text).
+Date: 2026-10-23. Status: approved by Oren 2026-10-23 (§6.5/§6.6 amended at approval: all voltage readers calibrated, not only pitch).
 Paths are relative to `software/src/` unless they start with `docs/`, `tools/` or `software/`.
 "*Claude's call*" marks a decision Oren did not make; everything else is his.
 
@@ -178,16 +178,21 @@ channel's `pitch_values` comes from that scale + offset in place of `value_to_pi
 scale; uncalibrated or invalid channels run the existing code unchanged. Cost: one multiply and add
 per calibrated channel per tick.
 
-*Claude's call:* `cv.values` (the raw-ish CV that apps use for modulation and thresholds) stays as
-today. Only pitch changes. Changing `values` would move every app's thresholds by a few percent for
-no pitch benefit. Gates derived from `pitch_values` (`HSIOFrame.cpp:775`) move by at most the
-calibration correction; the builder checks that this stays within the gate hysteresis.
+**`cv.values` is calibrated too** (Oren, 2026-10-23: apps that show the voltage they send or
+receive must show the calibrated one). `cv.values` and `cv.pitch_values` come from the same
+per-channel scale and offset, so they stay consistent. Thresholds and gates derived from either
+(`HSIOFrame.cpp:775`, Sequins input maps, Chords…) move to true volts, a shift of at most the
+calibration correction. The builder checks that this stays within each gate's hysteresis.
 
 ### 6.6 Direct readers
-Apps that read `ADC::value` / `value_to_pitch` directly for **pitch** (H1200 `:1152`, QQ `:1575`,
-DQ `:1461`, ASR `:191`, Calibr8or's channel meter) move onto one shared accessor that applies the
-same per-channel calibration. Raw-signal readers (Scope, Sampler, Sequins thresholds, random seed)
-stay as they are. The builder confirms each against its use.
+Every app that reads `ADC::value` / `value_to_pitch` directly for a **voltage or a pitch** moves onto
+one shared accessor that applies the same per-channel calibration. That covers anything that shows,
+quantizes, scales or thresholds a voltage: H1200 `:1152`, QQ `:1575`, DQ `:1461`, ASR `:191`,
+Calibr8or's channel meter, Sequins' input thresholds, and Scope's voltage display. Only uses where
+the value is not a voltage stay raw: the random seed (`Main.cpp:617`), and a sample stream whose
+scale is irrelevant (Sampler) if the builder confirms that. Apps that show an output voltage compute
+it from the pitch they send, which the calibrated DAC table now makes true; the builder confirms
+each against its use.
 
 ### 6.7 Setup / Calibrate coexistence
 Setup's DAC steps rewrite entries 0 and 8 and re-interpolate the rest, which would wipe a Cal Routine
