@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../src/CalReplyRing.h"
 #include "../src/PresetBus200e.h"
 
 static int checks = 0, fails = 0;
@@ -106,9 +107,19 @@ static void f_fw_version(uint8_t from_addr, const uint8_t *ver, uint8_t n) {
   n_fwver++;
 }
 
+static int n_cal = 0;
+static uint8_t cal_bytes[32];
+static uint8_t cal_len;
+static void f_cal_reply(const uint8_t *f, uint8_t n) {
+  cal_len = n;
+  if (cal_len > sizeof(cal_bytes)) cal_len = sizeof(cal_bytes);
+  memcpy(cal_bytes, f, cal_len);
+  n_cal++;
+}
+
 static const Bus200eOps fake_ops = {
   f_save, f_recall, kRecSize, f_slot_read, f_slot_write, f_card_write, f_card_read,
-  f_midi, f_query_reply, f_xfer_done, f_load_ack, f_fw_version,
+  f_midi, f_query_reply, f_xfer_done, f_load_ack, f_fw_version, f_cal_reply,
 };
 
 static void reset(const Bus200eOps *ops) {
@@ -125,6 +136,9 @@ static void reset(const Bus200eOps *ops) {
   n_fwver = 0;
   fwver_from = 0;
   fwver_len = 0;
+  n_cal = 0;
+  cal_len = 0;
+  memset(cal_bytes, 0, sizeof(cal_bytes));
   memset(qreply_ver, 0, sizeof(qreply_ver));
   memset(fwver_bytes, 0, sizeof(fwver_bytes));
   fail_card_write = 0;
@@ -829,6 +843,274 @@ static void test_query_reply_does_not_shadow_commands(void) {
   CHECK(n_qreply == 1);
 }
 
+
+// ---- frames longer than the old 12-byte limit ------------------------------
+// Snapshot of what the parser did with a 13-18-byte frame BEFORE the 0x19
+// calibration-reply branch existed (taken from the 12-byte code and kept
+// green after the change): the frame is poisoned once byte 13 arrives and
+// dropped at STOP -- one DROPPED log entry with arg = 12 (the bytes it had
+// buffered), stats.dropped + 1, stats.frames untouched, no hook called.
+// Every shape that is NOT a well-formed [n-1][22][src != 22][19] reply must
+// keep doing exactly that.
+
+static int hook_calls(void) {
+  return n_save + n_recall + n_midi + n_qreply + n_xdone + n_lack + n_fwver +
+         n_sr + n_sw + n_cw + n_cr + n_cal;
+}
+
+static void check_dropped_like_before(const uint8_t *f, int n) {
+  const Bus200eStats before = *Bus200eGetStats();
+  const uint32_t log_before = Bus200eLogTotal();
+  const int hooks_before = hook_calls();
+  frame(f, n);
+  const Bus200eStats *after = Bus200eGetStats();
+  Bus200eCmd c = {};
+  CHECK(Bus200eLogTotal() == log_before + 1);
+  CHECK(Bus200eLogRead(0, &c) == 1);
+  CHECK(c.op == BUS200E_OP_DROPPED);
+  CHECK(c.arg == 12);
+  CHECK(c.mod_addr == 0 && c.card_lo == 0 && c.mem_off == 0);
+  CHECK(after->dropped == before.dropped + 1);
+  CHECK(after->frames == before.frames);
+  CHECK(after->frames_long == before.frames_long);
+  CHECK(after->frames_short == before.frames_short);
+  CHECK(hook_calls() == hooks_before);
+}
+
+static void test_long_non_cal_frame_still_dropped(void) {
+  printf("test_long_non_cal_frame_still_dropped\n");
+  reset(&fake_ops);
+  for (int n = 13; n <= 18; n++) {
+    uint8_t f[18];
+    const uint8_t L = (uint8_t) (n - 1);
+    for (int i = 0; i < n; i++) f[i] = (uint8_t) (0x30 + i);
+    // reply-shaped, wrong command byte (a QUERY)
+    f[0] = L; f[1] = 0x22; f[2] = 0x28; f[3] = 0x1A;
+    check_dropped_like_before(f, n);
+    // reply-shaped, firmware-display command (would hit query_reply/fw_version)
+    f[3] = 0x13;
+    check_dropped_like_before(f, n);
+    f[3] = 0x1C;
+    check_dropped_like_before(f, n);
+    // cmd 0x19 but src = 0x22 in the reply position (a command, not a reply)
+    f[2] = 0x22; f[3] = 0x19;
+    check_dropped_like_before(f, n);
+    // cmd 0x19, dest not the manager
+    f[1] = 0x23; f[2] = 0x28;
+    check_dropped_like_before(f, n);
+    // cmd 0x19, length byte inconsistent with the frame
+    f[0] = (uint8_t) (L - 1); f[1] = 0x22;
+    check_dropped_like_before(f, n);
+    f[0] = (uint8_t) (L + 1);
+    check_dropped_like_before(f, n);
+    // a long/PRIMO RECALL padded past 12 bytes
+    f[0] = L; f[1] = 0x00; f[2] = 0x22; f[3] = 0x01; f[4] = 5;
+    check_dropped_like_before(f, n);
+    // short/V2 bus MIDI, status-first
+    f[0] = 0x90; f[1] = 60; f[2] = 100;
+    check_dropped_like_before(f, n);
+    // short/V2 RECALL
+    f[0] = 0x00; f[1] = 5;
+    check_dropped_like_before(f, n);
+  }
+  CHECK(n_recall == 0 && n_qreply == 0 && n_fwver == 0 && n_midi == 0);
+  // remote-enable/query state untouched by any of it
+  CHECK(Bus200eQueryPending() == 0);
+}
+
+// ---- 0x19 calibration replies ---------------------------------------------
+
+// Feed a cal reply and check it is delivered whole and logged as CAL_REPLY.
+static void check_cal_delivered(const uint8_t *f, int n) {
+  const Bus200eStats before = *Bus200eGetStats();
+  const int cal_before = n_cal;
+  frame(f, n);
+  const Bus200eStats *after = Bus200eGetStats();
+  Bus200eCmd c = {};
+  CHECK(n_cal == cal_before + 1);
+  CHECK(cal_len == n);
+  CHECK(memcmp(cal_bytes, f, (size_t) n) == 0);
+  CHECK(Bus200eLogRead(0, &c) == 1);
+  CHECK(c.op == BUS200E_OP_CAL_REPLY);
+  CHECK(c.mod_addr == f[2]);
+  CHECK(c.arg == f[4]);
+  CHECK(c.card_lo == f[5]);
+  CHECK(c.mem_off == n);
+  CHECK(after->frames == before.frames + 1);
+  CHECK(after->frames_long == before.frames_long + 1);
+  CHECK(after->dropped == before.dropped);
+}
+
+static void test_cal_reply_14_bytes_delivered(void) {
+  printf("test_cal_reply_14_bytes_delivered\n");
+  reset(&fake_ops);
+  // READ what 0: the 8-byte record window, the longest real 259e reply
+  const uint8_t f[] = { 0x0D, 0x22, 0x28, 0x19, 0x00, 0x00,
+                        0xCA, 0x01, 0x59, 0x02, 0x10, 0x20, 0x30, 0x40 };
+  check_cal_delivered(f, sizeof(f));
+  CHECK(n_cal == 1);
+  CHECK(n_qreply == 0 && n_fwver == 0 && n_recall == 0 && n_midi == 0);
+  CHECK(Bus200eLogTotal() == 1);
+}
+
+static void test_cal_reply_what2_delivered(void) {
+  printf("test_cal_reply_what2_delivered\n");
+  reset(&fake_ops);
+  // status: flags, fmt = 1, seq_hi, seq_lo -- 10 bytes, under the old limit
+  const uint8_t f[] = { 0x09, 0x22, 0x28, 0x19, 0x02, 0x00,
+                        0x03, 0x01, 0x00, 0x05 };
+  check_cal_delivered(f, sizeof(f));
+  CHECK(n_cal == 1);
+
+  // the shortest reply the contract allows (what, arg, no data): 6 bytes
+  const uint8_t g[] = { 0x05, 0x22, 0x28, 0x19, 0x01, 0x00 };
+  check_cal_delivered(g, sizeof(g));
+
+  // the longest the parser takes: 18 bytes, 12 data bytes
+  uint8_t h[18];
+  for (int i = 0; i < 18; i++) h[i] = (uint8_t) (0x80 + i);
+  h[0] = 17; h[1] = 0x22; h[2] = 0x29; h[3] = 0x19; h[4] = 0x00; h[5] = 0x08;
+  check_cal_delivered(h, sizeof(h));
+  CHECK(n_cal == 3);
+
+  // below the minimum (no arg byte): not a cal reply, parsed as before
+  // (short/V2 branch, first byte 0x04 is no short command -> UNKNOWN)
+  FRAME(0x04, 0x22, 0x28, 0x19, 0x02);
+  CHECK(n_cal == 3);
+  CHECK(last_op() == BUS200E_OP_UNKNOWN);
+
+  // a NULL hook logs only
+  reset(nullptr);
+  FRAME(0x09, 0x22, 0x28, 0x19, 0x02, 0x00, 0x03, 0x01, 0x00, 0x05);
+  CHECK(last_op() == BUS200E_OP_CAL_REPLY);
+  Bus200eOps no_cal = fake_ops;
+  no_cal.cal_reply = nullptr;
+  reset(&no_cal);
+  FRAME(0x0D, 0x22, 0x28, 0x19, 0x00, 0x00, 1, 2, 3, 4, 5, 6, 7, 8);
+  CHECK(last_op() == BUS200E_OP_CAL_REPLY);
+  CHECK(n_cal == 0);
+}
+
+static void test_cal_reply_19_bytes_dropped(void) {
+  printf("test_cal_reply_19_bytes_dropped\n");
+  reset(&fake_ops);
+  uint8_t f[24];
+  for (int i = 0; i < 24; i++) f[i] = (uint8_t) i;
+  f[1] = 0x22; f[2] = 0x28; f[3] = 0x19; f[4] = 0x00; f[5] = 0x00;
+  f[0] = 18;                       // well-formed, one byte over
+  check_dropped_like_before(f, 19);
+  f[0] = 23;
+  check_dropped_like_before(f, 24);
+  CHECK(n_cal == 0);
+
+  // a transport overflow or a repeated START still kills a cal reply, and
+  // the drop is logged with the same arg the 12-byte parser gave
+  const uint8_t g[] = { 0x0D, 0x22, 0x28, 0x19, 0x00, 0x00,
+                        1, 2, 3, 4, 5, 6, 7, 8 };
+  Bus200eCmd c = {};
+  const uint32_t d0 = Bus200eGetStats()->dropped;
+  Bus200eFeedEvent(BUS200E_EV_START);
+  for (int i = 0; i < 13; i++) Bus200eFeedEvent(g[i]);
+  Bus200eFeedEvent(BUS200E_EV_OVF);
+  Bus200eFeedEvent(g[13]);
+  Bus200eFeedEvent(BUS200E_EV_STOP);
+  CHECK(n_cal == 0);
+  CHECK(Bus200eGetStats()->dropped == d0 + 1);
+  CHECK(Bus200eLogRead(0, &c) == 1 && c.op == BUS200E_OP_DROPPED && c.arg == 12);
+
+  Bus200eFeedEvent(BUS200E_EV_START);
+  for (int i = 0; i < 14; i++) Bus200eFeedEvent(g[i]);
+  Bus200eFeedEvent(BUS200E_EV_START);   // repeated START, no STOP
+  Bus200eFeedEvent(BUS200E_EV_STOP);
+  CHECK(n_cal == 0);
+  CHECK(Bus200eGetStats()->dropped == d0 + 2);
+  CHECK(Bus200eLogRead(0, &c) == 1 && c.op == BUS200E_OP_DROPPED && c.arg == 12);
+
+  // and the parser is clean for the next one
+  check_cal_delivered(g, sizeof(g));
+}
+
+static void test_self_echo_of_cal_frame_suppressed(void) {
+  printf("test_self_echo_of_cal_frame_suppressed\n");
+  reset(&fake_ops);
+  // a 14-byte PUT the way SendRawFrame masters it: register, then hear it
+  // back through our own slave
+  const uint8_t put[] = { 0x0D, 0x00, 0x22, 0x12, 0x28, 0xCA, 0x00,
+                          1, 2, 3, 4, 5, 6, 7 };
+  Bus200eSuppressFrame(put, sizeof(put));
+  frame(put, sizeof(put));
+  CHECK(Bus200eLogTotal() == 0);
+  CHECK(Bus200eGetStats()->dropped == 0);
+  CHECK(hook_calls() == 0);
+  // once only: the same bytes again are not ours, and drop as they always did
+  check_dropped_like_before(put, sizeof(put));
+
+  // the suppression buffer holds a full 18 bytes
+  reset(&fake_ops);
+  uint8_t big[18];
+  for (int i = 0; i < 18; i++) big[i] = (uint8_t) (0x40 + i);
+  big[0] = 17; big[1] = 0x00; big[2] = 0x22; big[3] = 0x12;
+  Bus200eSuppressFrame(big, sizeof(big));
+  frame(big, sizeof(big));
+  CHECK(Bus200eLogTotal() == 0);
+  CHECK(Bus200eGetStats()->dropped == 0);
+
+  // a cal-reply-shaped echo is suppressed too, and a different reply is not
+  reset(&fake_ops);
+  const uint8_t rep[] = { 0x0D, 0x22, 0x28, 0x19, 0x00, 0x00,
+                          1, 2, 3, 4, 5, 6, 7, 8 };
+  Bus200eSuppressFrame(rep, sizeof(rep));
+  frame(rep, sizeof(rep));
+  CHECK(n_cal == 0);
+  check_cal_delivered(rep, sizeof(rep));
+
+  // over 18 cannot be registered
+  reset(&fake_ops);
+  uint8_t huge[19];
+  memset(huge, 0, sizeof(huge));
+  huge[0] = 18; huge[1] = 0x22; huge[2] = 0x28; huge[3] = 0x19;
+  Bus200eSuppressFrame(huge, sizeof(huge));
+  check_dropped_like_before(huge, sizeof(huge));
+}
+
+static void test_cal_reply_ring(void) {
+  printf("test_cal_reply_ring\n");
+  CalReplyRing r;
+  r.Clear();
+  uint8_t out[CalReplyRing::kFrameMax];
+  uint8_t n = 0;
+  CHECK(!r.Pop(out, &n));
+
+  uint8_t f[18];
+  for (int k = 0; k < 4; k++) {
+    for (int i = 0; i < 18; i++) f[i] = (uint8_t) (k * 32 + i);
+    CHECK(r.Push(f, (uint8_t) (6 + k)));
+  }
+  f[0] = 0xEE;
+  CHECK(!r.Push(f, 10));                 // full: the newest is refused
+  for (int k = 0; k < 4; k++) {
+    CHECK(r.Pop(out, &n));
+    CHECK(n == 6 + k);
+    CHECK(out[0] == k * 32 && out[n - 1] == k * 32 + n - 1);
+  }
+  CHECK(!r.Pop(out, &n));
+
+  // bad lengths are refused
+  CHECK(!r.Push(f, 0));
+  CHECK(!r.Push(f, 19));
+
+  // wrap-around keeps FIFO order
+  for (int k = 0; k < 11; k++) {
+    f[0] = (uint8_t) k;
+    CHECK(r.Push(f, 18));
+    f[0] = (uint8_t) (k + 100);
+    CHECK(r.Push(f, 7));
+    CHECK(r.Pop(out, &n) && n == 18 && out[0] == k);
+    CHECK(r.Pop(out, &n) && n == 7 && out[0] == k + 100);
+  }
+  CHECK(!r.Pop(out, &n));
+}
+
 int main() {
   test_short_recall_save();
   test_long_recall_save();
@@ -859,6 +1141,13 @@ int main() {
   test_xfer_done_parse();
   test_load_ack_parse();
   test_query_reply_does_not_shadow_commands();
+
+  test_long_non_cal_frame_still_dropped();
+  test_cal_reply_14_bytes_delivered();
+  test_cal_reply_what2_delivered();
+  test_cal_reply_19_bytes_dropped();
+  test_self_echo_of_cal_frame_suppressed();
+  test_cal_reply_ring();
 
   printf("\ntest_bus200e: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;

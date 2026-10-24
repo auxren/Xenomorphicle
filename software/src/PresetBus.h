@@ -47,6 +47,7 @@ struct Stats {
   // recovery sequence brought BBF back down
   uint32_t bus_stuck;
   uint32_t bus_recovered;
+  uint32_t cal_reply_drops;  // 0x19 replies lost: PopCalReply ring was full (newest dropped)
 };
 
 #if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
@@ -252,6 +253,13 @@ bool ReadMidiRx(uint8_t &status, uint8_t &d1, uint8_t &d2);
 // module ignoring the bus.
 bool LoadAckSeenSince(uint8_t addr, uint32_t ms_ago);
 int LoadAckCountSince(uint32_t since_ms);
+// Calibration replies (cmd 0x19, [n][0x22][src][0x19][what][arg][data...]),
+// whole frames as received, oldest first. `frame` must hold
+// BUS200E_CAL_REPLY_FRAME_MAX (18) bytes; *n gets the frame length. The ring
+// is 4 deep; when it is full the NEWEST reply is dropped and counted in
+// stats.cal_reply_drops. Loop context only (filled from Task(), never from
+// the ISR). Decode with CalRec::ParseReply. false = nothing queued.
+bool PopCalReply(uint8_t *frame, uint8_t *n);
 const Stats &GetStats();
 void DebugDump();          // print status + decoded-command ring to Serial
 void SetVerbose(bool on);
@@ -311,6 +319,7 @@ inline void MasterQuerySetQuiet(bool) {}
 inline bool MasterQueryQuiet() { return false; }
 inline bool LoadAckSeenSince(uint8_t, uint32_t) { return false; }
 inline int LoadAckCountSince(uint32_t) { return 0; }
+inline bool PopCalReply(uint8_t *, uint8_t *) { return false; }
 inline const Stats &GetStats() { static Stats s = {}; return s; }
 inline void DebugDump() {}
 inline void SetVerbose(bool) {}

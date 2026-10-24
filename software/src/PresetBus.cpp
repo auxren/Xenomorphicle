@@ -21,6 +21,8 @@
 #include "OC_core.h"
 #include "PhzConfig.h"
 #include "PresetOpQueue.h"
+#include "CalRec.h"
+#include "CalReplyRing.h"
 
 extern volatile uint32_t loop_counter;  // Main.cpp (global scope)
 
@@ -330,6 +332,24 @@ int LoadAckCountSince(uint32_t since_ms) {
   return n;
 }
 
+// A module's 0x19 calibration reply, queued whole for PopCalReply(). The
+// parser runs from drain_ring() (Task() or SendRawFrame(), loop context), so
+// this never runs in the ISR and the ring needs no locking. The parser and
+// the codec agree on the frame limits without either including the other:
+static_assert(BUS200E_CAL_REPLY_FRAME_MAX == CalRec::kMaxFrame, "cal reply frame max");
+static_assert(BUS200E_CMD_CAL_REPLY == CalRec::kCmdReply, "cal reply cmd");
+static_assert(CalReplyRing::kFrameMax == BUS200E_CAL_REPLY_FRAME_MAX, "cal ring frame max");
+static CalReplyRing cal_replies;
+static void cb_cal_reply(const uint8_t *frame, uint8_t n) {
+  if (!cal_replies.Push(frame, n)) stats.cal_reply_drops++;   // full: newest dropped
+  if (verbose) Serial.printf("PresetBus: cal reply from %02X (%u bytes)\n", frame[2], n);
+}
+
+bool PopCalReply(uint8_t *frame, uint8_t *n) {
+  if (!frame || !n) return false;
+  return cal_replies.Pop(frame, n);
+}
+
 static const Bus200eOps kOps = {
   cb_save, cb_recall,
   0, nullptr, nullptr, nullptr, nullptr,  // card transfers: phase 2
@@ -338,6 +358,7 @@ static const Bus200eOps kOps = {
   cb_xfer_done,
   cb_load_ack,
   cb_fw_version,
+  cb_cal_reply,
 };
 
 static bool tx_gate_open();  // defined with Task() below
@@ -1782,6 +1803,7 @@ FLASHMEM void DebugDump() {
   Serial.printf("midi: rx=%lu rx_ovf=%lu tx=%lu tx_drop=%lu tx_merged=%lu\n",
                 stats.midi_rx, stats.midi_rx_ovf, stats.midi_tx,
                 stats.midi_tx_drop, stats.midi_tx_merged);
+  Serial.printf("cal replies: drops=%lu\n", stats.cal_reply_drops);
   Serial.printf("engine: last_slot=%d was_save=%d busy=%d\n",
                 PresetEngine::LastSlot(), PresetEngine::LastWasSave(),
                 PresetEngine::Busy());

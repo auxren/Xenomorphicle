@@ -86,7 +86,25 @@ typedef enum {
   // 0xFF there and the 251e ships uninitialised stack. Appended at the end,
   // like the two ops above, so no existing op code shifts meaning.
   BUS200E_OP_LOAD_ACK,
+  // A module's calibration reply (cmd 0x19, module -> manager form:
+  // [n][0x22][src][0x19][what][arg][data...], 6..BUS200E_CAL_REPLY_FRAME_MAX
+  // bytes; contract in Buchla_FW docs/cv-calibration/CONTRACT.md). mod_addr
+  // = the module; arg = `what`; card_lo = `arg`; mem_off = the whole frame
+  // length (field reuse for the debug ring, as above). Appended at the end,
+  // like the ops above, so no existing op code shifts meaning.
+  BUS200E_OP_CAL_REPLY,
 } Bus200eOp;
+
+// Calibration reply framing. The cal-reply branch is the ONLY frame shape
+// the parser accepts past BUS200E_FRAME_MAX_LEGACY bytes; every other frame
+// longer than that is dropped exactly as it always was. 18 = the 259e's
+// longest reply (READ what 0, 8 data bytes, 14 bytes) with room to spare,
+// and = CalRec::kMaxFrame (static_assert'ed in PresetBus.cpp; this BSP-free
+// layer does not include the codec).
+#define BUS200E_CMD_CAL_REPLY       0x19
+#define BUS200E_CAL_REPLY_FRAME_MIN 6
+#define BUS200E_CAL_REPLY_FRAME_MAX 18
+#define BUS200E_FRAME_MAX_LEGACY    12
 
 typedef struct {
   uint8_t  op;        // Bus200eOp
@@ -143,6 +161,13 @@ typedef struct {
   // reason given in parse_frame(); a 0x1C never reaches this hook. NULL =
   // log-only. Appended at the end of the struct, as the three above were.
   void (*fw_version)(uint8_t from_addr, const uint8_t *ver, uint8_t n);
+  // A module's calibration reply (cmd 0x19, see BUS200E_OP_CAL_REPLY).
+  // `frame` is the WHOLE frame as received, length byte first, `n` bytes
+  // (BUS200E_CAL_REPLY_FRAME_MIN..BUS200E_CAL_REPLY_FRAME_MAX), valid only
+  // for the duration of the call; decode it with CalRec::ParseReply. Called
+  // from Bus200eFeedEvent()'s context (loop, never the ISR). NULL =
+  // log-only. Appended at the end of the struct, as the four above were.
+  void (*cal_reply)(const uint8_t *frame, uint8_t n);
 } Bus200eOps;
 
 typedef struct {
@@ -262,8 +287,10 @@ int Bus200eBuildTransferFrame(uint8_t op, uint8_t mod_addr, uint8_t card_lo,
 // stays accepted on RX, which now means accepted because modules really
 // send it.
 #define BUS200E_QUERY_FRAME_LEN 5
-// Longest payload a reply can carry through this parser: FRAME_MAX (12)
-// minus the 4 header bytes. Real modules use 1.
+// Longest payload a QUERY/0x13 reply can carry through this parser:
+// BUS200E_FRAME_MAX_LEGACY (12) minus the 4 header bytes -- only a 0x19
+// calibration reply may run longer (to BUS200E_CAL_REPLY_FRAME_MAX), so a
+// 0x13/0x1C frame past 12 bytes is still dropped. Real modules use 1.
 #define BUS200E_QUERY_VER_MAX 8
 
 // Build the outgoing QUERY request. cap must be >= BUS200E_QUERY_FRAME_LEN.

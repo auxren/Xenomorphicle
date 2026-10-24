@@ -18,9 +18,12 @@
 
 #include "PresetBus200e.h"
 
-// Longest meaningful general-call frame is the 8-byte long-form card command;
-// anything longer than this is not a command we know and is dropped.
-#define FRAME_MAX 12
+// Longest frame the parser buffers. Only a 0x19 calibration reply may use
+// more than BUS200E_FRAME_MAX_LEGACY (12) of it -- the shape is not known
+// until byte 4, so everything is buffered to 18 and a longer frame that turns
+// out not to be a cal reply is dropped at STOP exactly as the old 12-byte
+// limit dropped it (see Bus200eFeedEvent()). Anything past 18 is poisoned.
+#define FRAME_MAX BUS200E_CAL_REPLY_FRAME_MAX
 
 static const Bus200eOps *bus_ops;
 
@@ -152,6 +155,24 @@ BUS_CODE static void dispatch(Bus200eCmd *c) {
 
 // ---- frame parsing ---------------------------------------------------------
 
+// [n-1][0x22][src != 0x22][0x19][what][arg][data...]: a module's
+// calibration reply, the one shape allowed past the legacy 12 bytes.
+// f[2] != 0x22 keeps every command frame (srcAddr 0x22) on the long branch,
+// the same guard the QUERY-reply branch uses.
+BUS_CODE static int is_cal_reply(const uint8_t *f, uint8_t n) {
+  return n >= BUS200E_CAL_REPLY_FRAME_MIN && n <= BUS200E_CAL_REPLY_FRAME_MAX &&
+         f[0] == n - 1 && f[1] == 0x22 && f[2] != 0x22 &&
+         f[3] == BUS200E_CMD_CAL_REPLY;
+}
+
+// self-echo: our own mastered frame arrives back through our slave.
+// Expired suppressions are discarded so a stale registration can never
+// eat a genuine identical frame later (e.g. the manager's own recall).
+BUS_CODE static int is_own_echo(const uint8_t *f, uint8_t n) {
+  if (suppress_len && now_ms - suppress_at_ms > 50) suppress_len = 0;
+  return suppress_len && suppress_len == n && !memcmp(suppress_buf, f, n);
+}
+
 BUS_CODE static void parse_frame(void) {
   Bus200eCmd c = { BUS200E_OP_NONE, 0, 0, 0, 0 };
   const uint8_t *f = frame;
@@ -159,12 +180,26 @@ BUS_CODE static void parse_frame(void) {
 
   stats.frames++;
 
-  // self-echo: our own mastered frame arrives back through our slave.
-  // Expired suppressions are discarded so a stale registration can never
-  // eat a genuine identical frame later (e.g. the manager's own recall).
-  if (suppress_len && now_ms - suppress_at_ms > 50) suppress_len = 0;
-  if (suppress_len && suppress_len == n && !memcmp(suppress_buf, f, n)) {
+  if (is_own_echo(f, n)) {
     suppress_len = 0;
+    return;
+  }
+
+  // CALIBRATION REPLY (cmd 0x19, Buchla_FW docs/cv-calibration/CONTRACT.md):
+  // [n][0x22][src][0x19][what][arg][data...], up to 18 bytes. Passed up
+  // whole -- the codec (CalRec::ParseReply) lives above this layer. Checked
+  // before the long/PRIMO branch; the f[2] != 0x22 guard in is_cal_reply()
+  // means no command frame can land here. Before this branch a <= 12-byte
+  // frame of this shape fell through to the short/V2 branch as UNKNOWN.
+  if (is_cal_reply(f, n)) {
+    stats.frames_long++;
+    c.op = BUS200E_OP_CAL_REPLY;
+    c.mod_addr = f[2];     // who answered
+    c.arg = f[4];          // what
+    c.card_lo = f[5];      // arg (field reuse for the debug ring)
+    c.mem_off = n;         // whole frame length
+    if (bus_ops && bus_ops->cal_reply) bus_ops->cal_reply(f, n);
+    dispatch(&c);
     return;
   }
 
@@ -332,7 +367,11 @@ BUS_CODE static void parse_frame(void) {
   dispatch(&c);
 }
 
+// The DROPPED entry's arg is the buffered length, capped at the legacy 12:
+// the parser used to stop buffering there, and a drop must log exactly what
+// it always logged now that it can buffer more.
 BUS_CODE static void drop_frame(uint8_t why_len) {
+  if (why_len > BUS200E_FRAME_MAX_LEGACY) why_len = BUS200E_FRAME_MAX_LEGACY;
   Bus200eCmd c = { BUS200E_OP_DROPPED, why_len, 0, 0, 0 };
   log_cmd(&c);
   stats.dropped++;
@@ -353,7 +392,13 @@ BUS_CODE void Bus200eFeedEvent(uint16_t ev) {
     return;
   }
   if (ev & BUS200E_EV_STOP) {
-    if (in_frame && !frame_poisoned && frame_len > 0 && frame_len <= FRAME_MAX)
+    // Past the legacy 12 bytes only a cal reply, or our own registered echo
+    // (SendRawFrame of a calibration frame), may go on to parse_frame();
+    // everything else drops as the 12-byte parser dropped it.
+    const int ok_len = frame_len > 0 && frame_len <= FRAME_MAX &&
+        (frame_len <= BUS200E_FRAME_MAX_LEGACY ||
+         is_cal_reply(frame, frame_len) || is_own_echo(frame, frame_len));
+    if (in_frame && !frame_poisoned && ok_len)
       parse_frame();
     else if (in_frame && frame_len)
       drop_frame(frame_len);
