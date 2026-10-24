@@ -43,7 +43,7 @@ To **discard** a finished run, press the left encoder on Results; it asks, and a
 
 * Setup / Calibrate's **DAC steps replace** a Cal Routine calibration. Setup says so before you start them.
 * Inputs with a Cal Routine calibration **ignore Setup's ADC steps**. Inputs without one still use them.
-* Everything is stored with the other calibration data and is included in [Backup / Restore](Backup-and-Restore). Details are in [Saving State](../Saving-State).
+* The output tables and input curves go into a [Backup / Restore](Backup-and-Restore) dump. The "calibrated by Cal Routine" marker does not: after a restore, Setup no longer warns that its DAC steps would replace a Cal Routine calibration. Details are in [Saving State](../Saving-State).
 
 ### What every app gets
 

@@ -1,6 +1,6 @@
 # Cal Routine bench checklist
 
-Gates 1 to 6 are copied word for word from `design/cal-routine-design.md` section 7. Under each, the steps and the pass condition used on the bench. Items marked PASSED were done on 2026-10-24; the rest are open. Console keys are in [bench-console](bench-console); meter lines (`METER,...`) come from the console `e` key and run lines (`CALR,...`) from the app (`tools/hwqa/cvmeter.py` parses both).
+Gates 1 to 6 are copied word for word from `design/cal-routine-design.md` section 7. Under each, the steps and the pass condition used on the bench. Legend: `[x]` passed, `[~]` partly done (see the note), `[ ]` open. Items marked PASSED were done on 2026-10-24; the rest are open. Console keys are in [bench-console](bench-console); meter lines (`METER,...`) come from the console `e` key and run lines (`CALR,...`) from the app (`tools/hwqa/cvmeter.py` parses both).
 
 Rig: Xenomorpher on the console build, Siglent SDM3065X alone on the host jack (unless the item says otherwise), outputs patched to the meter or to the inputs as the screen asks.
 
@@ -12,7 +12,7 @@ Rig: Xenomorpher on the console build, Siglent SDM3065X alone on the host jack (
 
 Steps: calibrate all 8 inputs with the Cal Routine, load Quadrants with applets, run the `t` / `T` selftest for a few minutes. Pass: core isr max <= 40 us, missed 0.
 
-- [x] PARTIAL, 2026-10-24 (input 2 only, via `Q21`): Quadrants (Pigeons + Carpeggio): core isr max 37 us, 0 missed, 0/11 FAIL; the same applets uncalibrated: 37 / 36 us, so the calibrated path's cost is not measurable. The 3 us of headroom is the applets' load (Timing-Budget recorded 31 us for Quadrants earlier). After the input-map fix (adc3c3cc): core isr 16 us, missed 0 on an idle app.
+- [~] PARTIAL, 2026-10-24 (input 2 only, via `Q21`): Quadrants (Pigeons + Carpeggio): core isr max 37 us, 0 missed, 0/11 FAIL; the same applets uncalibrated: 37 / 36 us, so the calibrated path's cost is not measurable. The 3 us of headroom is the applets' load (Timing-Budget recorded 31 us for Quadrants earlier). After the input-map fix (adc3c3cc): core isr 16 us, missed 0 on an idle app.
 - [ ] Repeat with all 8 inputs calibrated by the Cal Routine and the heavy app.
 
 ### 2. Loop budget
@@ -32,7 +32,7 @@ Steps: during a whole run read the loop max from `T`. Pass: <= 5 ms. Note: Save 
 
 Steps: after Save, hold each output at the half-way points (`d<n><mv>`) and read the meter (`eREAD?`); loop each calibrated output into an input and read the input on `v`; feed a quantizer's pitch input. Pass: each is at or better than the figure on the results screen.
 
-- [x] PARTIAL, 2026-10-24: input 2 after `Q21` read the target within about 0.6 mV (it was 3.3 V off); against the meter it was off by output 1's own error (5 to 7.4 mV), which is why outputs are calibrated first.
+- [~] PARTIAL, 2026-10-24: input 2 after `Q21` read the target within about 0.6 mV (it was 3.3 V off); against the meter it was off by output 1's own error (5 to 7.4 mV), which is why outputs are calibrated first.
 - [ ] Full check after a Cal Routine save.
 
 ### 4. No-cal unit unchanged
@@ -54,7 +54,7 @@ Steps: start a run, unplug the meter during an output. Pass: the screen says the
 
 ### 6. Hot-plug
 
-> **Hot-plug:** plugging the meter into the host jack while the module runs does not drop the module off USB. It was seen once on 2026-10-23 during a replug and has not been reproduced. Pass = not seen in 10 replugs (*Claude's call*). If it does recur, it is an electrical or hub issue and is documented as a known issue ("plug the meter in before powering up"). It does not block the firmware.
+> **Hot-plug:** plugging the meter into the host jack while the module runs does not drop the module off USB. It was seen once on 2026-10-23 during a replug and has not been reproduced. Pass = not seen in 10 replugs. If it does recur, it is an electrical or hub issue and is documented as a known issue ("plug the meter in before powering up"). It does not block the firmware.
 
 - [x] PASSED, 2026-10-24: 9 replugs in all (1, then 8 more in 150 s). Every disconnect gave `NOT_CONNECTED` / `DISCONNECT` (mid-query), every reconnect gave DONE on the next query; the module never left USB and the console was continuous.
 

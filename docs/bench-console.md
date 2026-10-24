@@ -146,6 +146,27 @@ of them.
 | `F` | **erase ALL LittleFS files** — presets, config, CRASH.LOG, everything |
 | `Z` | **reboot into HalfKay** so a host can flash — stops playing (see "Flashing headlessly") |
 
+## Cal Routine log lines (`CALR`)
+
+While the Cal Routine app runs it logs one line per step on the console. The format is defined by `software/src/CalRoutineFlow.cpp` and the golden file `software/test/fixtures/calr_lines.txt` (its `CALR#` header lines name each kind's fields in order). Lines are `CALR,<KIND>,<field>,...`, comma-separated, outputs and inputs 1-based:
+
+- `METER` the meter's identity
+- `STATE` timestamp (ms), stage, current output and input
+- `OUT` an output starts
+- `NODE` one table entry: target, code, measured value, iterations, rail flag
+- `REREAD` a repeat reading of a table entry and its spread
+- `SWEEP` one in-between check point and its residual
+- `ORES` an output's result: PASS or not, reason, worst error, rail mask
+- `IN` an input starts: source output and covered span (`lo_mv`, `hi_mv`)
+- `IPT` one input measurement point
+- `IRES` an input's result: verdict, gain, offset, hold-out and line deviation
+- `RETRY` a meter query was repeated
+- `LOST` / `BACK` / `REDO` the meter was lost, came back, the output restarts
+- `RESULT` can-save flag and the output and input pass masks
+- `SAVE` the save result; `DISCARD`; `CANCEL` (stage); `FAIL` (reason)
+
+`tools/hwqa/cvmeter.py` parses them (`parse_calr`).
+
 ## Reading the selftest (`t`)
 
 ```
