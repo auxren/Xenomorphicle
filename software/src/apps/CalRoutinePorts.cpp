@@ -28,6 +28,7 @@
 #include "../PresetEngine.h"
 #include "../Buchla200eWriteGuard.h"
 #include "../Buchla259eSlotCodec.h"
+#include "../Cal259eBackup.h"
 #if defined(ARDUINO_TEENSY41) && !defined(XENO_SIM)
 #include "../src/drivers/USBTMCDevice.h"
 #define CALR_HAVE_METER 1
@@ -555,15 +556,21 @@ FLASHMEM Cal259eFlow &Flow259e() {
 
 // A cancel (or an app switch) after the COMMIT frame went out leaves the flow
 // waiting for the module's verdict with the app gone: that wait still counts
-// as a run, and Task259() below finishes it.
+// as a run, and CalTask() below finishes it.
 FLASHMEM bool CalRunActive() {
   return owned || (flow259 && flow259->cancel_pending());
 }
 
-// Once per loop pass, whatever app is showing: finish a cancelled run's COMMIT
-// verdict (it logs CALR,259END,CANCELLED_<result>). Bounded work per call.
-FLASHMEM static void Task259() {
-  if (flow259 && !owned && flow259->cancel_pending()) flow259->Tick();
+FLASHMEM int Cancelled259Verdict() { return flow259 ? flow259->cancelled_verdict() : 0; }
+
+// Once per loop pass, whatever app is showing and whatever the build: finish a
+// cancelled run's COMMIT verdict (it logs CALR,259END,CANCELLED_<result>).
+// Bounded work per call. Main.cpp calls it outside PRINT_DEBUG too: in the
+// T41 / T41_audio builds nothing else would ever collect the verdict, and
+// CalRunActive() would stay true for good. The app's own Loop() ticks the flow
+// as well while it is open; a second Tick() in a pass is harmless.
+FLASHMEM void CalTask() {
+  if (flow259 && flow259->cancel_pending()) flow259->Tick();
 }
 
 FLASHMEM CalRoutine::MeterPort &Meter() { return meter; }
@@ -627,46 +634,39 @@ FLASHMEM BusPort &Bus() { return bus_port; }
 // ---- the 259e flow's backup and entropy ports -------------------------------------
 
 #if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS) && !defined(XENO_SIM)
-// The master BACKUP of a 259e: the bank lands in MasterCardImage() (console
-// 'm' leaves it there); the 990-byte bank is stored in CAL259BK.BIN.
-struct Backup_ : BackupPort {
-  bool mine = false;
-  uint8_t addr = 0;
-  bool Begin(uint8_t a) override;
-  int Poll() override;
+// The master BACKUP of a 259e (Cal259eBackup.h holds the rules, host-tested): the
+// bank lands in MasterCardImage() (console 'm' leaves it there); the 990-byte bank
+// is stored in CAL259BK.BIN and read back.
+struct RealMaster : BackupMaster {
+  bool FwCardMode() override;
+  Bus200eMasterState State() override;
+  void Reset() override;
+  int Backup(uint8_t a) override;
+  uint8_t ModAddr() override;
+  bool IsRestore() override;
+  uint32_t Bytes() override;
+  const uint8_t *Image() override;
+  uint32_t Crc32(const uint8_t *d, uint32_t n) override;
+  bool Save(uint8_t a, const uint8_t *d, uint32_t n, uint32_t crc) override;
+  bool Verify(uint8_t a, uint32_t n, uint32_t crc) override;
 };
-
-FLASHMEM bool Backup_::Begin(uint8_t a) {
-  mine = false;
-  const Bus200eMasterState st = OC::PresetBus::MasterState();
-  if (st == BUS200E_MASTER_DONE || st == BUS200E_MASTER_FAILED) OC::PresetBus::MasterReset();
-  else if (st != BUS200E_MASTER_IDLE) return false;  // a job (ours, abandoned, or the console's) runs
-  if (OC::PresetBus::MasterBackup(a) != 0) return false;
-  mine = true;
-  addr = a;
-  return true;
+FLASHMEM bool RealMaster::FwCardMode() { return OC::PresetBus::FwCardMode(); }
+FLASHMEM Bus200eMasterState RealMaster::State() { return OC::PresetBus::MasterState(); }
+FLASHMEM void RealMaster::Reset() { OC::PresetBus::MasterReset(); }
+FLASHMEM int RealMaster::Backup(uint8_t a) { return OC::PresetBus::MasterBackupForCal(a); }
+FLASHMEM uint8_t RealMaster::ModAddr() { return Bus200eMasterModAddr(); }
+FLASHMEM bool RealMaster::IsRestore() { return Bus200eMasterIsRestore() != 0; }
+FLASHMEM uint32_t RealMaster::Bytes() { return Bus200eMasterBytesTransferred(); }
+FLASHMEM const uint8_t *RealMaster::Image() { return OC::PresetBus::MasterCardImage(); }
+FLASHMEM uint32_t RealMaster::Crc32(const uint8_t *d, uint32_t n) { return Buchla200eCrc32(d, n); }
+FLASHMEM bool RealMaster::Save(uint8_t a, const uint8_t *d, uint32_t n, uint32_t crc) {
+  return OC::PresetEngine::SaveCalBackup(a, d, n, crc);
 }
-
-FLASHMEM int Backup_::Poll() {
-  if (!mine) return -1;
-  const Bus200eMasterState st = OC::PresetBus::MasterState();
-  if (st == BUS200E_MASTER_FAILED) {
-    mine = false;
-    OC::PresetBus::MasterReset();
-    return -1;
-  }
-  if (st == BUS200E_MASTER_IDLE) { mine = false; return -1; }  // someone reset it under us
-  if (st != BUS200E_MASTER_DONE) return 0;
-  mine = false;
-  constexpr uint32_t kBank = kBuchla259eBankBytes;  // 990, as the 200e app expects
-  // The DONE must be this job's: the console 'm' / 'x' or the bridge share the
-  // master FSM and could have retired ours and run their own.
-  if (Bus200eMasterModAddr() != addr || Bus200eMasterIsRestore()) return -1;
-  const uint8_t *img = OC::PresetBus::MasterCardImage();
-  if (!img || Bus200eMasterBytesTransferred() < kBank) return -1;
-  if (!OC::PresetEngine::SaveCalBackup(addr, img, kBank, Buchla200eCrc32(img, kBank))) return -1;
-  return 1;
+FLASHMEM bool RealMaster::Verify(uint8_t a, uint32_t n, uint32_t crc) {
+  return OC::PresetEngine::VerifyCalBackup(a, n, crc);
 }
+static RealMaster real_master;
+static Cal259eBackup backup_port(real_master);
 #else
 struct Backup_ : BackupPort {
 #ifdef XENO_SIM
@@ -674,13 +674,14 @@ struct Backup_ : BackupPort {
   bool on = false;
   bool Begin(uint8_t) override { on = true; t0 = millis(); return sim_plant != nullptr; }
   int Poll() override { return !on ? -1 : millis() - t0 >= 300 ? 1 : 0; }
+  uint32_t Bytes() const override { return Cal259eFlow::kBackupBankBytes; }  // the sim's bank is complete
 #else
   bool Begin(uint8_t) override { return false; }
   int Poll() override { return -1; }
 #endif
 };
-#endif
 static Backup_ backup_port;
+#endif
 FLASHMEM BackupPort &Backup() { return backup_port; }
 
 struct Entropy_ : EntropyPort {
@@ -834,7 +835,6 @@ FLASHMEM void Cal259Command() {
 }
 
 FLASHMEM void Cal259Task() {
-  Task259();
   if (cjob == J_NONE) return;
   if (CalBusy()) {  // the Cal Routine started under us: let go
     Serial.printf("CALR,259E,%02X,ERR,BUSY_CAL\r\n", caddr);
@@ -887,7 +887,7 @@ FLASHMEM void Cal259Task() {
 
 FLASHMEM bool Cal259Consume(int) { return false; }
 FLASHMEM void Cal259Command() {}
-FLASHMEM void Cal259Task() { Task259(); }
+FLASHMEM void Cal259Task() {}
 
 #endif
 

@@ -22,6 +22,7 @@
 #include "PhzConfig.h"
 #include "PresetOpQueue.h"
 #include "CalRec.h"
+#include "apps/CalRunActive.h"
 #include "CalReplyRing.h"
 
 extern volatile uint32_t loop_counter;  // Main.cpp (global scope)
@@ -427,6 +428,14 @@ static uint32_t bcast_tx = 0, bcast_drop = 0;
 
 FLASHMEM static void bcast_enqueue(uint8_t cmd, uint8_t slot) {
   if (slot >= 30) return;
+  // A broadcast SAVE rewrites preset flash on every module, a RECALL reloads
+  // them: neither may land on a 259e while a Cal Routine run (or its pending
+  // COMMIT verdict) owns the bus. Dropped, not queued for later.
+  if (CalRoutinePorts::CalRunActive()) {
+    Serial.printf("PresetBus: %s %d refused, a Cal Routine run is open\n",
+                  cmd == kCmdSave ? "SAVE" : "RECALL", slot);
+    return;
+  }
   if (bcast_q.push(cmd, slot)) return;
   bcast_drop++;
   Serial.printf("PresetBus: broadcast queue full, %s %d refused\n",
@@ -1140,7 +1149,11 @@ FLASHMEM int SendRawFrame(const uint8_t *bytes, uint8_t n) {
 // ever has both 0x50 and 0x51 contested.
 static const uint8_t kMasterCardCandidates[] = { 0x00, 0x01 };
 
-FLASHMEM int MasterBackup(uint8_t mod_addr) {
+// The BACKUP itself. Never while the firmware card is served: the card image is
+// then the served firmware, and the module would write its bank over bytes
+// 0..N of it.
+FLASHMEM static int master_backup_impl(uint8_t mod_addr) {
+  if (fw_mode) return -BUS200E_MASTER_ERR_BUSY;
   uint8_t card_lo = card_addr_lo;
   if (!card_serving) {
     if (!Bus200eMasterFindFreeCard(kMasterCardCandidates,
@@ -1152,7 +1165,20 @@ FLASHMEM int MasterBackup(uint8_t mod_addr) {
   return Bus200eMasterBackup(mod_addr, card_lo);
 }
 
+// Every caller but the Cal Routine's own backup: refused while a Cal Routine run
+// is open (the master FSM and the card image are the run's, and a 259e that is
+// being written must not be read by another job).
+FLASHMEM int MasterBackup(uint8_t mod_addr) {
+  if (CalRoutinePorts::CalRunActive()) return -BUS200E_MASTER_ERR_BUSY;
+  return master_backup_impl(mod_addr);
+}
+
+FLASHMEM int MasterBackupForCal(uint8_t mod_addr) { return master_backup_impl(mod_addr); }
+
 FLASHMEM int MasterRestore(uint8_t mod_addr) {
+  // The Cal Routine never restores. While it is open nothing else may push a
+  // card image to a module.
+  if (CalRoutinePorts::CalRunActive()) return -BUS200E_MASTER_ERR_BUSY;
   if (!card_serving) return -BUS200E_MASTER_ERR_BAD_ARGS;
   return Bus200eMasterRestore(mod_addr, card_addr_lo);
 }

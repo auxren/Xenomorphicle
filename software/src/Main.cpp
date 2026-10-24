@@ -44,6 +44,7 @@
 #include "src/drivers/display.h"
 #include "src/drivers/USBTMCDevice.h"
 #include "apps/CalRoutinePorts.h"
+#include "CalRec.h"
 #include "src/drivers/ADC/OC_util_ADC.h"
 #include "util/util_debugpins.h"
 #include "HSMIDI.h"
@@ -1186,6 +1187,12 @@ FLASHMEM __attribute__((noinline)) void loop() {
 #ifdef CVMETER_ENABLED
     OC::CvMeter::Task();   // console CV stream / input calibration / counter
 #endif
+#if defined(ARDUINO_TEENSY41)
+    // A cancelled 259e run's COMMIT verdict is finished here in EVERY build: in
+    // T41 / T41_audio nothing else would collect it, and CalRunActive() (which
+    // gates every 259e write and preset restore) would stay true for good.
+    CalRoutinePorts::CalTask();
+#endif
 #if defined(ARDUINO_TEENSY41) && defined(PRINT_DEBUG)
     MeterConsoleTask();    // console 'e': print the meter's answer when it lands
     CalRoutinePorts::Cal259Task();  // console '=': 259e read-only requests
@@ -1400,6 +1407,10 @@ FLASHMEM __attribute__((noinline)) void loop() {
           master_addr_value = (uint8_t)((master_addr_value << 4) | v);
           if (++master_addr_digits < 2) continue;  // wait for the 2nd digit
           master_addr_pending = false;
+          if (CalRoutinePorts::CalRunActive()) {
+            Serial.println("master backup: refused, a Cal Routine run is open (CALR,BUSY_CAL)");
+            continue;
+          }
 #if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
           Serial.printf("master backup: targeting module %02X\n",
                         master_addr_value);
@@ -1601,6 +1612,10 @@ FLASHMEM __attribute__((noinline)) void loop() {
             continue;
           }
           destructive_arm_ms = 0;
+          if (CalRoutinePorts::CalRunActive()) {
+            Serial.println("master restore: refused, a Cal Routine run is open (CALR,BUSY_CAL)");
+            continue;
+          }
 #if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
           Serial.printf("master restore: pushing card image to module %02X "
                         "NOW\n", restore_addr_value);
@@ -1620,6 +1635,16 @@ FLASHMEM __attribute__((noinline)) void loop() {
             }
             if (rawframe_len == 0) {
               Serial.println("rawframe: no bytes, cancelled");
+              continue;
+            }
+            // While a Cal Routine run is open (or a cancelled 259e run's COMMIT
+            // verdict is pending) this port passes CAL frames only, and never a
+            // PUT (0x12) or COMMIT (0x0B), whatever the address: the run owns the
+            // 259e's record, and a second COMMIT would be a second flash rewrite.
+            if (CalRoutinePorts::CalRunActive() &&
+                !CalRec::ConsoleFrameAllowedDuringRun(rawframe_buf, rawframe_len)) {
+              Serial.println("rawframe: refused, a Cal Routine run is open (CALR,BUSY_CAL): "
+                             "CAL frames only, never PUT 12 or COMMIT 0B");
               continue;
             }
             Serial.print("rawframe: sending");
@@ -1908,6 +1933,10 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.printf("PresetBus verbose = %d\n", OC::PresetBus::Verbose());
             break;
           case 'm':  // master BACKUP from a foreign module (address: see above)
+            if (CalRoutinePorts::CalRunActive()) {
+              Serial.println("master backup: refused, a Cal Routine run is open (CALR,BUSY_CAL)");
+              break;
+            }
             Serial.println("master backup: type 2 hex digits for the target "
                            "module address");
             master_addr_pending = true;
@@ -1934,6 +1963,10 @@ FLASHMEM __attribute__((noinline)) void loop() {
           case 'x':  // MasterRestore() the resident card image to a module.
                      // 2 hex digits for the address; press 'x' + the SAME
                      // 2 digits again within 3s to actually fire.
+            if (CalRoutinePorts::CalRunActive()) {
+              Serial.println("master restore: refused, a Cal Routine run is open (CALR,BUSY_CAL)");
+              break;
+            }
             Serial.println("master restore: type 2 hex digits for the "
                            "target module address");
             restore_addr_pending = true;

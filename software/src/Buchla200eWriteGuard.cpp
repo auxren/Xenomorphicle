@@ -13,6 +13,9 @@
 
 B200E_GUARD_CODE
 Buchla200eWriteBlock Buchla200eCheckWrite(const Buchla200eWriteContext &ctx) {
+  // 0. The Cal Routine owns the bus while a run is open: no restore at all.
+  if (ctx.cal_run_active) return BUCHLA200E_WRITE_CAL_RUN;
+
   // 1. Nothing else may be using the master FSM. Checked first because a
   // write started mid-transfer corrupts both.
   if (!ctx.master_idle) return BUCHLA200E_WRITE_BUSY;
@@ -123,6 +126,7 @@ const char *Buchla200eWriteBlockText(Buchla200eWriteBlock b) {
     case BUCHLA200E_WRITE_IMAGE_CHANGED:return "Image changed-reread";
     case BUCHLA200E_WRITE_PATCH_RANGE:  return "Patch out of range";
     case BUCHLA200E_WRITE_BUILD_FAILED: return "Build check failed";
+    case BUCHLA200E_WRITE_CAL_RUN:      return "Cal Routine run open";
     default:                            return "blocked";
   }
 }

@@ -78,7 +78,7 @@ static void test_every_block_has_visible_text() {
       BUCHLA200E_READ_OK,          BUCHLA200E_READ_BUS_OFF,
       BUCHLA200E_READ_IN_FLIGHT,   BUCHLA200E_READ_WRITE_IN_FLIGHT,
       BUCHLA200E_READ_BUSY_SCAN,   BUCHLA200E_READ_BUSY_PROBE,
-      BUCHLA200E_READ_BAD_ADDR,
+      BUCHLA200E_READ_BAD_ADDR,     BUCHLA200E_READ_CAL_RUN,
   };
   for (Buchla200eReadBlock b : all) {
     const char *t = Buchla200eReadBlockText(b);
@@ -200,7 +200,21 @@ static void test_app_timeout_is_looser_than_the_master_hard_cap() {
   CHECK(BUCHLA200E_JOB_TIMEOUT_MS >= 20000u);
 }
 
+// S5: while a Cal Routine run is open every read (scan, probe, bank read) is
+// refused with its own text: the run owns the master FSM and the card image.
+static void test_cal_run_refuses_reads() {
+  printf("test_cal_run_refuses_reads\n");
+  Buchla200eReadContext c = ok_ctx();
+  CHECK(!c.cal_run_active);
+  c.cal_run_active = true;
+  CHECK(Buchla200eCheckRead(c) == BUCHLA200E_READ_CAL_RUN);
+  CHECK(strcmp(Buchla200eReadBlockText(BUCHLA200E_READ_CAL_RUN), "Cal Routine run open") == 0);
+  c.bus_enabled = false;      // bus off is still the more fundamental cause
+  CHECK(Buchla200eCheckRead(c) == BUCHLA200E_READ_BUS_OFF);
+}
+
 int main() {
+  test_cal_run_refuses_reads();
   test_clear_context_allows_read();
   test_each_blocker_is_reported();
   test_every_block_has_visible_text();

@@ -324,7 +324,8 @@ static void test_every_block_has_distinct_text() {
       BUCHLA200E_WRITE_WRONG_MODULE, BUCHLA200E_WRITE_SHORT_READ,
       BUCHLA200E_WRITE_NO_IMAGE,  BUCHLA200E_WRITE_BUSY,
       BUCHLA200E_WRITE_NO_CHANGES, BUCHLA200E_WRITE_IMAGE_CHANGED,
-      BUCHLA200E_WRITE_PATCH_RANGE, BUCHLA200E_WRITE_BUILD_FAILED};
+      BUCHLA200E_WRITE_PATCH_RANGE, BUCHLA200E_WRITE_BUILD_FAILED,
+      BUCHLA200E_WRITE_CAL_RUN};
   const int n = (int)(sizeof(all) / sizeof(all[0]));
   for (int i = 0; i < n; ++i) {
     const char *a = Buchla200eWriteBlockText(all[i]);
@@ -339,7 +340,23 @@ static void test_every_block_has_distinct_text() {
   }
 }
 
+// S5: a Cal Routine run (or a cancelled 259e run's pending COMMIT) refuses every
+// whole-bank write, ahead of every other reason.
+static void test_cal_run_refuses_the_write() {
+  printf("test_cal_run_refuses_the_write\n");
+  Buchla200eWriteContext c = Good();
+  CHECK(!c.cal_run_active);   // the default: not active
+  c.cal_run_active = true;
+  CHECK(Buchla200eCheckWrite(c) == BUCHLA200E_WRITE_CAL_RUN);
+  c.master_idle = false;      // outranks "busy" and every other cause
+  c.have_read = false;
+  CHECK(Buchla200eCheckWrite(c) == BUCHLA200E_WRITE_CAL_RUN);
+  c = Good();
+  CHECK(Buchla200eCheckWrite(c) == BUCHLA200E_WRITE_OK);
+}
+
 int main() {
+  test_cal_run_refuses_the_write();
   test_permits_only_when_everything_holds();
   test_requires_a_read();
   test_read_must_be_of_this_module();

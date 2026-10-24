@@ -53,6 +53,7 @@
 #include "../Buchla200eModuleTable.h"
 #include "../Buchla200eUiGate.h"
 #include "../Buchla200eWriteGuard.h"
+#include "CalRunActive.h"
 #include "../Buchla251eGenerator.h"
 #include "../Buchla251eNoteMap.h"
 #include "../Buchla251eRecorder.h"
@@ -574,6 +575,7 @@ void AppBus200e::StartScan() {
   rc.write_active = WriteBusy();
   rc.scan_idle = true;   // starting one is what we are here to do
   rc.probe_active = probe_active_;
+  rc.cal_run_active = CalRoutinePorts::CalRunActive();
   last_refusal_ = Buchla200eCheckRead(rc);
   if (last_refusal_ != BUCHLA200E_READ_OK) return;
 #endif
@@ -647,6 +649,7 @@ void AppBus200e::StartProbe() {
   rc.write_active = WriteBusy();
   rc.scan_idle = (scan_state_ == Bus200eAppNS::SCAN_IDLE);
   rc.probe_active = probe_active_;
+  rc.cal_run_active = CalRoutinePorts::CalRunActive();
   last_refusal_ = Buchla200eCheckRead(rc);
   if (last_refusal_ == BUCHLA200E_READ_OK &&
       (addr_ == 0 || addr_ == OC::PresetBus::ModuleAddress()))
@@ -782,6 +785,7 @@ void AppBus200e::StartRead() {
   rc.write_active = WriteBusy();
   rc.scan_idle = (scan_state_ == Bus200eAppNS::SCAN_IDLE);
   rc.probe_active = probe_active_;
+  rc.cal_run_active = CalRoutinePorts::CalRunActive();
   last_refusal_ = Buchla200eCheckRead(rc);
   if (last_refusal_ != BUCHLA200E_READ_OK) return;
 
@@ -1015,6 +1019,7 @@ Buchla200eWriteBlock AppBus200e::CheckWrite(int changed, uint32_t image_hash) co
   c.expected_bank_bytes = ExpectedBankBytes();
   c.changed_bytes = changed;
   c.patches_in_range = SlotWindowInBank(nullptr);
+  c.cal_run_active = CalRoutinePorts::CalRunActive();
 #ifdef PRESET_BUS
   c.bytes_transferred = Bus200eMasterBytesTransferred();
   c.card_serving = OC::PresetBus::CardServing();

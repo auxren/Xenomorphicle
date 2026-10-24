@@ -11,6 +11,7 @@
 #include "PresetBus.h"
 #include "PresetBusCard.h"
 #include "Buchla200eFwVersions.h"
+#include "apps/CalRunActive.h"
 
 namespace OC {
 namespace Bus200eBridgeUsb {
@@ -94,6 +95,7 @@ static int op_bus_quiet() { return OC::PresetBus::BusQuiet() ? 1 : 0; }
 static uint8_t op_bus_dialect() { return OC::PresetBus::BusDialect(); }
 static uint8_t op_last_version_addr() { return OC::PresetBus::LastVersionAddr(); }
 static uint16_t op_fw_version_gen() { return OC::PresetBus::FwVersionFrames(); }
+static int op_cal_run_active() { return CalRoutinePorts::CalRunActive() ? 1 : 0; }
 
 // card_mark_dirty is deliberately NULL. PresetBus.h flags it as an open
 // design question that a foreign-module capture shares PBCARD.BIN with
@@ -114,6 +116,7 @@ static const Bus200eBridgeOps kOps = {
   op_send_poll_done, op_bus_quiet, op_bus_dialect, op_last_version_addr,
   op_fw_version_gen,
   op_query_set_reply_timeout_ms,
+  op_cal_run_active,
 };
 
 // ---- public ----------------------------------------------------------------

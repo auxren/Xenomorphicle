@@ -167,6 +167,9 @@ static void f_set_timeout(uint16_t ms) { fake_timeouts.push_back(ms); }
 static uint16_t fake_ver_gen;
 static uint16_t f_ver_gen() { return fake_ver_gen; }
 
+static int fake_cal_run;
+static int f_cal_run() { return fake_cal_run; }
+
 static const Bus200eBridgeOps fake_ops = {
   f_now,
   f_card_serving, f_card_serve_enable, f_card_image, f_card_size, f_card_dirty,
@@ -179,6 +182,7 @@ static const Bus200eBridgeOps fake_ops = {
   f_send_poll_done, f_bus_quiet, f_bus_dialect, f_last_ver_addr,
   f_ver_gen,
   f_set_timeout,
+  f_cal_run,
 };
 
 static void reset_all(uint32_t card_size = kFakeCardSmall) {
@@ -217,6 +221,7 @@ static void reset_all(uint32_t card_size = kFakeCardSmall) {
   fake_quiet_v = 1; fake_dialect_v = 0;
   fake_ver_addr = 0;
   fake_ver_gen = 0;
+  fake_cal_run = 0;
   memset(fake_ver_known, 0, sizeof(fake_ver_known));
   memcpy(fake_ver_bytes, "31.2C2 ", 7);
   sent.clear();
@@ -351,6 +356,36 @@ static void test_get_dump_round_trip() {
 
   // every frame we sent is a legal, parseable message of ours
   for (size_t i = after_ack; i < sent.size(); ++i) CHECK(sent[i].parse_rc == 0);
+}
+
+// S5: while a Cal Routine run is open (or a cancelled 259e run's COMMIT verdict is
+// pending) the bridge neither reads nor writes any module: no BACKUP, no card
+// serving, no RESTORE of a dump that was already staged.
+static void test_cal_run_refuses_get_dump() {
+  printf("test_cal_run_refuses_get_dump\n");
+  reset_all();
+  fake_cal_run = 1;
+  feed(BUS200E_SYSEX_CMD_GET_DUMP, { 0x28 });
+  CHECK(fake_backup_calls == 0);
+  CHECK(nak_code(last_sent()) == BUS200E_SYSEX_NAK_CAL_RUN);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  fake_cal_run = 0;                     // once the run is over it works again
+  feed(BUS200E_SYSEX_CMD_GET_DUMP, { 0x28 });
+  CHECK(fake_backup_calls == 1);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_CAPTURING);
+}
+
+static void test_cal_run_refuses_put_dump() {
+  printf("test_cal_run_refuses_put_dump\n");
+  reset_all();
+  fake_cal_run = 1;
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x28 });
+  CHECK(nak_code(last_sent()) == BUS200E_SYSEX_NAK_CAL_RUN);
+  CHECK(fake_serve_enable_calls == 0 && fake_restore_calls == 0);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  fake_cal_run = 0;
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x28 });
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_RECEIVING);
 }
 
 static void test_get_dump_needs_an_address() {
@@ -554,6 +589,30 @@ static void stream_put_dump(const std::vector<uint8_t> &data, uint8_t mod_addr,
   uint8_t xor7 = Bus200eSysExXor7(0, data.data(), (uint32_t) data.size());
   if (corrupt_checksum) xor7 = (uint8_t) ((xor7 ^ 0x01) & 0x7F);
   feed_dump_end(total, xor7);
+}
+
+// A run that opens between PUT_DUMP and DUMP_END: the staged dump is dropped,
+// never restored.
+static void test_cal_run_stops_a_staged_restore() {
+  printf("test_cal_run_stops_a_staged_restore\n");
+  reset_all();
+  const std::vector<uint8_t> data = put_dump_payload(300);
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x28 });
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_RECEIVING);
+  const uint16_t total =
+      (uint16_t) ((data.size() + BUS200E_SYSEX_CHUNK_BYTES - 1) / BUS200E_SYSEX_CHUNK_BYTES);
+  for (uint16_t seq = 0; seq < total; ++seq) {
+    const uint32_t off = (uint32_t) seq * BUS200E_SYSEX_CHUNK_BYTES;
+    uint32_t chunk = (uint32_t) data.size() - off;
+    if (chunk > BUS200E_SYSEX_CHUNK_BYTES) chunk = BUS200E_SYSEX_CHUNK_BYTES;
+    feed_dump_data(seq, total, data.data() + off, chunk);
+  }
+  fake_cal_run = 1;                     // the run opens now
+  feed_dump_end(total, Bus200eSysExXor7(0, data.data(), (uint32_t) data.size()));
+  CHECK(fake_restore_calls == 0);
+  CHECK(fake_dirty_calls == 0);
+  CHECK(nak_code(last_sent()) == BUS200E_SYSEX_NAK_CAL_RUN);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
 }
 
 static void test_put_dump_round_trip() {
@@ -1693,6 +1752,9 @@ static void test_garbled_fw_data_without_fw_ops_naks_unknown() {
 }
 
 int main() {
+  test_cal_run_refuses_get_dump();
+  test_cal_run_refuses_put_dump();
+  test_cal_run_stops_a_staged_restore();
   test_get_dump_round_trip();
   test_get_dump_needs_an_address();
   test_get_dump_busy();

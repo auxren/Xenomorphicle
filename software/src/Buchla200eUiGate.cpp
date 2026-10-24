@@ -15,6 +15,7 @@ Buchla200eReadBlock Buchla200eCheckRead(const Buchla200eReadContext &c) {
   // the busy cases; among those, report the app's own in-flight work before
   // background work the user may not have started deliberately.
   if (!c.bus_enabled) return BUCHLA200E_READ_BUS_OFF;
+  if (c.cal_run_active) return BUCHLA200E_READ_CAL_RUN;
   if (c.read_active) return BUCHLA200E_READ_IN_FLIGHT;
   if (c.write_active) return BUCHLA200E_READ_WRITE_IN_FLIGHT;
   if (!c.scan_idle) return BUCHLA200E_READ_BUSY_SCAN;
@@ -38,6 +39,7 @@ const char *Buchla200eReadBlockText(Buchla200eReadBlock b) {
     case BUCHLA200E_READ_BAD_ADDR:         return "addr is us / zero";
     case BUCHLA200E_READ_UNSAVED_EDIT:     return "edited: Save or Read";
     case BUCHLA200E_READ_UNRESOLVED_WRITE: return "resolve write first";
+    case BUCHLA200E_READ_CAL_RUN:          return "Cal Routine run open";
     default:                               return "refused";
   }
 }

@@ -170,7 +170,14 @@ bool FwCardMode();                                    // serving the firmware ca
 // in Main.cpp (`m`/`c`/`w`/`x`) for the reference write-safety procedure
 // (fresh backup -> diff -> patch -> verify -> write -> verify) any new
 // caller (UI or otherwise) should preserve.
+//
+// Both refuse (-BUS200E_MASTER_ERR_BUSY) while CalRoutinePorts::CalRunActive():
+// the Cal Routine owns the master FSM and the card image for a 259e run, and
+// its pending COMMIT verdict. MasterBackup also refuses while FwCardMode() (the
+// card image would be the served firmware). MasterBackupForCal is the Cal
+// Routine's own backup: the same, without the Cal Routine gate.
 int MasterBackup(uint8_t mod_addr);
+int MasterBackupForCal(uint8_t mod_addr);
 int MasterRestore(uint8_t mod_addr);
 Bus200eMasterState MasterState();
 Bus200eMasterError MasterError();
@@ -301,6 +308,7 @@ inline bool FwCardArmed() { return false; }
 inline void FwCardArm(bool) {}
 inline bool FwCardMode() { return false; }
 inline int MasterBackup(uint8_t) { return -1; }
+inline int MasterBackupForCal(uint8_t) { return -1; }
 inline int MasterRestore(uint8_t) { return -1; }
 inline Bus200eMasterState MasterState() { return BUS200E_MASTER_IDLE; }
 inline Bus200eMasterError MasterError() { return BUS200E_MASTER_ERR_NONE; }

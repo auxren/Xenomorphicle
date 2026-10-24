@@ -6,6 +6,7 @@
 #include "../Cal259eBus.h"
 #include "../Cal259eFlow.h"
 #include "../CalRoutineFlow.h"
+#include "CalRunActive.h"
 
 // ---------------------------------------------------------------------------
 // The Cal Routine app's hardware (CalRoutinePorts.cpp): the real ports the
@@ -112,14 +113,30 @@ EntropyPort &Entropy();
 
 // True from Open() to Close(): a Cal Routine run (any target, the 259e one
 // included) is open, or a cancelled 259e run is still waiting for its COMMIT
-// verdict (Cal259Task finishes it). The console '=' refuses while it is, and Task 7's
-// SysEx cal frames must refuse COMMIT.
-bool CalRunActive();
+// verdict (CalTask finishes it). Declared in CalRunActive.h. While it is true
+// everything that can write to a 259e or restore presets refuses: the console
+// '=' (no writes anyway), 'W' (PUT 0x12 and COMMIT 0x0B frames), 'm' and 'x';
+// the USB SysEx bridge's GET_DUMP and PUT_DUMP (and the restore at DUMP_END);
+// and the 200e app's reads and writes. (There is no SysEx PUT/COMMIT path for a
+// 259e in this firmware; one added later must check this and acknowledge a COMMIT
+// at once, not at the verdict, since a host's ack timeout is shorter than the
+// ~4.5 s verdict window.)
+
+// The COMMIT verdict (Cal259eBus result: 1 ok, < 0 Error) of the last 259e run that
+// was cancelled after its COMMIT went out, 0 if none: the menu's banner. Does not
+// construct the flow engine.
+int Cancelled259Verdict();
+
+// Once per loop pass, every build (not only PRINT_DEBUG ones, which have the
+// console): finishes a cancelled 259e run's COMMIT verdict so CalRunActive()
+// drops back to false. Bounded work per call.
+void CalTask();
 
 // Console 259e read-only access, key '=' (every letter is taken in Main.cpp's
 // switch): "=<aa>s" status, "=<aa>r" record, "=<aa>a<0|1>" 8 ADC words,
 // aa = the module's bus address in two hex digits. Logs CALR,259E,... lines.
-// No PUT and no COMMIT. Refused with CALR,259E,ERR,BUSY_CAL while the Cal
+// The `=` command has no PUT and no COMMIT (the console's raw-frame sender 'W'
+// can send any frame, which main gates while CalRunActive()). Refused with CALR,259E,ERR,BUSY_CAL while the Cal
 // Routine owns the meter. Consume is called with every console byte before the
 // command switch and returns true for a byte that belonged to a pending
 // argument; Command is the switch's '='; Task runs once per loop pass.

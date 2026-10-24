@@ -27,8 +27,10 @@
 // below: later rows (bus modules) append there. The "259e pitch inputs" row
 // runs Cal259eFlow (host-tested): the Xeno's output A and the USB meter
 // calibrate a 259e's two pitch inputs over the 200e bus. Its screens are
-// Draw259 (stage by stage), Draw259Confirm (the write and the slot reset, each
-// a B press on a screen of its own) and Draw259Failed. The step machine is
+// Draw259 (stage by stage), Draw259Confirm (the write, a B press on a screen of
+// its own; the slot reset screen exists but is unreachable while
+// Cal259eFlow::kAllowCompaction is false) and Draw259Failed (text in
+// Cal259eText.cpp, host-tested). The step machine is
 // CalRoutineFlow (host-tested); this file is its screens and controls,
 // CalRoutinePorts.cpp its hardware.
 //
@@ -49,13 +51,17 @@
 // encR does not act on, is a leading '>'.
 //
 // Run time: the flow runs from Loop(); SUSPEND, SCREENSAVER_ON and the app
-// switcher (which sends SUSPEND) cancel it, so no output stays held. The
+// switcher (which sends SUSPEND) cancel it, so no output stays held. A 259e run
+// cancelled after its COMMIT went out is finished in the background by
+// CalRoutinePorts::CalTask(); the menu shows its verdict and a new 259e run
+// waits for it ("259e: please wait"). The
 // screensaver is held off while a run is open (only the Z+A chord starts it,
 // and that cancels).
 //
 // Every member is defined out of class and FLASHMEM: none of it is ISR code,
 // and every byte of ITCM comes out of DTCM in 32 KB steps.
 #include "CalRoutinePorts.h"
+#include "../Cal259eText.h"
 #include "../CalRoutineFlow.h"
 
 // The Cal Routine menu, one row per routine; a later routine (a bus module)
@@ -85,7 +91,8 @@ protected:
 private:
   using Stage = CalRoutineFlow::Stage;
   using Mode = CalRoutine::Mode;
-  enum Screen : uint8_t { SCR_MENU, SCR_UNSUPPORTED, SCR_NOTICE, SCR_RUN, SCR_CONFIRM, SCR_SAVED };
+  enum Screen : uint8_t { SCR_MENU, SCR_UNSUPPORTED, SCR_NOTICE, SCR_RUN, SCR_CONFIRM, SCR_SAVED,
+                          SCR_PENDING };
 
   // Same value and reasoning as Backup.h / the 200e write confirm.
   static constexpr uint32_t kConfirmDeadMs = 350;
@@ -136,6 +143,7 @@ private:
   void DrawMenuScreen() const;
   void DrawNotice() const;
   void DrawUnsupported() const;
+  void DrawPending() const;
   void DrawRun() const;
   void DrawInputStages(Stage s) const;
   void DrawPatchFailed() const;
@@ -212,15 +220,24 @@ FLASHMEM void AppCalRoutine::StartRun() {
   cursor_ = int8_t(mode_ == Mode::Inputs ? 8 : 0);
   top_ = cursor_;
   save_pending_ = false;
+  // A cancelled 259e run is still waiting for its COMMIT verdict: starting over
+  // would drop it. Wait (CalTask collects it); nothing is opened.
+  if (is259_ && CalRoutinePorts::Flow259e().cancel_pending()) {
+    screen_ = SCR_PENDING;
+    return;
+  }
   CalRoutinePorts::Open();
   OC::ui.preempt_screensaver(true);
   if (is259_) {
     // The run needs Output A calibrated by Cal Routine (the marker), else the
     // flow stops at NoSelfCal.
-    CalRoutinePorts::Flow259e().Begin(CalRoutinePorts::Meter(), CalRoutinePorts::Outputs(),
-                                      CalRoutinePorts::Clock(), CalRoutinePorts::Bus(),
-                                      CalRoutinePorts::Backup(), CalRoutinePorts::Entropy(),
-                                      CalRoutinePorts::MarkerSet(), CalRoutinePorts::ConsoleLog);
+    if (!CalRoutinePorts::Flow259e().Begin(CalRoutinePorts::Meter(), CalRoutinePorts::Outputs(),
+                                           CalRoutinePorts::Clock(), CalRoutinePorts::Bus(),
+                                           CalRoutinePorts::Backup(), CalRoutinePorts::Entropy(),
+                                           CalRoutinePorts::MarkerSet(), CalRoutinePorts::ConsoleLog)) {
+      EndRun(SCR_PENDING);  // (the check above makes this unreachable; never run without Begin)
+      return;
+    }
     last259_ = CalRoutinePorts::Flow259e().stage();
     screen_ = SCR_RUN;
     return;
@@ -357,8 +374,11 @@ FLASHMEM void AppCalRoutine::HandleAppEvent(OC::AppEvent event) {
       // Never leave an output held, a run half done or a save armed behind a
       // screen that is gone.
       if (is259_) {
-        // A COMMIT already on the wire cannot be waited for with the app gone:
-        // the module finishes it alone and its record is read by hand (=28s).
+        // A COMMIT already on the wire is still waited for with the app gone:
+        // the flow keeps cancel_pending(), CalRunActive() stays true, and
+        // CalRoutinePorts::CalTask() (every build, every loop pass) reads the
+        // module's verdict and logs CALR,259END,CANCELLED_<result>. Nothing is
+        // sent again; the menu shows the verdict (Cancelled259Verdict).
         CalRoutinePorts::Flow259e().Cancel();
         if (CalRoutinePorts::Flow259e().stage() != Cal259eFlow::Stage::Idle)
           CalRoutinePorts::Flow259e().Cancel();
@@ -421,6 +441,9 @@ FLASHMEM void AppCalRoutine::HandlePress(const UI::Event &event) {
       if (r) OpenMenuEntry();
       break;
     case SCR_UNSUPPORTED:
+      if (l || r) screen_ = SCR_MENU;
+      break;
+    case SCR_PENDING:
       if (l || r) screen_ = SCR_MENU;
       break;
     case SCR_NOTICE:
@@ -525,7 +548,18 @@ FLASHMEM void AppCalRoutine::DrawMenuScreen() const {
     Row(k, b);
     if (i == menu_sel_) graphics.invertRect(0, 14 + 8 * k, 128, 9);  // encR opens it
   }
-  Row(4, kCalRoutineMenu[menu_sel_].hint);
+  // The verdict of a 259e run cancelled after its COMMIT went out stays on the
+  // menu (until the next 259e run begins): the Failed screen it belongs to may
+  // never have been seen.
+  const int cv = CalRoutinePorts::Cancelled259Verdict();
+  if (cv != 0) {
+    snprintf(b, sizeof(b), "259e cancel: %s",
+             cv == 1 ? "WRITTEN" : cv == E_NO_SLOT ? "no slot" : cv == E_COMMIT_REFUSED ? "REFUSED"
+             : "UNKNOWN");
+    Row(4, b);
+  } else {
+    Row(4, kCalRoutineMenu[menu_sel_].hint);
+  }
   graphics.drawLine(0, 46, 127, 46);
   Footer("               R:open");
 }
@@ -540,6 +574,15 @@ FLASHMEM void AppCalRoutine::DrawUnsupported() const {
   Row(3, "one is not: nothing");
   Row(4, "was changed.");
   Footer("L:back");
+}
+
+FLASHMEM void AppCalRoutine::DrawPending() const {
+  Title("259e: please wait");
+  Row(0, "A cancelled run's");
+  Row(1, "COMMIT is still being");
+  Row(2, "read back. Try again");
+  Row(3, "in a few seconds.");
+  Footer("L:back           R:ok");
 }
 
 FLASHMEM void AppCalRoutine::DrawNotice() const {
@@ -1118,7 +1161,10 @@ FLASHMEM void AppCalRoutine::Draw259Results() const {
     Row(4, "Press again: discard");
     graphics.invertRect(0, 46, 128, 9);  // the banner the next encL acts on
   } else {
-    snprintf(b, sizeof(b), "Target: 259e @%02X", f.target());
+    // The age is shown because the results expire (Cal259eFlow::kResultsMaxAgeMs):
+    // the modules may have drifted or been re-patched since they were measured.
+    snprintf(b, sizeof(b), "259e @%02X, %lu min old", f.target(),
+             (unsigned long)(f.results_age_ms() / 60000u));
     Row(4, b);
   }
   graphics.drawLine(0, 46, 127, 46);
@@ -1128,43 +1174,10 @@ FLASHMEM void AppCalRoutine::Draw259Results() const {
 FLASHMEM void AppCalRoutine::Draw259Failed() const {
   using F = Cal259eFlow;
   const F &f = CalRoutinePorts::Flow259e();
-  const F::FailCode code = f.fail();
-  const char *l1 = "", *l2 = "";
-  switch (code) {
-    case F::F_NO_259E: l1 = "No 259e answered at"; l2 = "28-2B. On 31.2C4?"; break;
-    case F::F_SEVERAL_MOVED: l1 = "More than one 259e"; l2 = "moved: patch one."; break;
-    case F::F_IDENTITY: l1 = "No 259e saw A rise."; l2 = "Wrong jack patched?"; break;
-    case F::F_PATCH: l1 = "Meter and held volts"; l2 = "differ by > 50 mV."; break;
-    case F::F_NOISY: l1 = "Meter reading noisy"; l2 = "(loose lead?)"; break;
-    case F::F_SCALE: l1 = "Gain is > 10% off"; l2 = "stock: not written."; break;
-    case F::F_FIT: l1 = "The fit failed (an"; l2 = "offset out of range)."; break;
-    case F::F_VERIFY: l1 = "Verify residual"; l2 = "is over 3 cents."; break;
-    case F::F_BACKUP: l1 = "Preset backup failed"; l2 = "so nothing written."; break;
-    case F::F_BUS: l1 = "200e bus error or"; l2 = "no reply from 259e."; break;
-    case F::F_COMMIT_REFUSED: l1 = "The 259e refused"; l2 = "the record (=28s)."; break;
-    case F::F_COMMIT_UNKNOWN: l1 = "COMMIT unknown: read"; l2 = "=28s and =28r."; break;
-    case F::F_READBACK: l1 = "Read-back differs:"; l2 = "read =28r by hand."; break;
-    case F::F_CANCELLED: l1 = "Cancelled."; break;
-    case F::F_METER_LOST: l1 = "The meter was lost."; break;
-    case F::F_METER_CONFIG: l1 = "The meter refused a"; l2 = "setup command."; break;
-    case F::F_METER_TIMEOUT: l1 = "The meter stopped"; l2 = "answering."; break;
-    case F::F_NO_METER: l1 = "No meter."; break;
-    case F::F_NO_SELF_CAL: l1 = "Run Outputs first."; break;
-    default: break;
-  }
-  Title(code == F::F_CANCELLED ? "Run cancelled" : "Run stopped");
-  char b[24];
-  snprintf(b, sizeof(b), "%.21s", F::FailName(code));
-  Row(0, b);
-  Row(1, l1);
-  Row(2, l2);
-  // commit_result(): 1 ok, E_NO_SLOT and E_COMMIT_REFUSED mean the module
-  // did not take the record; any other non-zero code leaves it unknown.
-  const int cr = f.commit_result();
-  if (cr == 1) Row(3, "Record committed.");
-  else if (cr == 0 || cr == E_NO_SLOT || cr == E_COMMIT_REFUSED) Row(3, "Nothing was written.");
-  else Row(3, "Written: UNKNOWN.");
-  Row(4, "Output A released.");
+  Cal259eFailRows rows;
+  Cal259eFailText(f.fail(), f.commit_result(), f.backup_why(), f.target(), &rows);
+  Title(f.fail() == F::F_CANCELLED ? "Run cancelled" : "Run stopped");
+  for (int r = 0; r < 5; ++r) Row(r, rows.row[r]);
   Footer("L:back");
 }
 
@@ -1209,6 +1222,7 @@ FLASHMEM void AppCalRoutine::DrawMenu() const {
   switch (screen_) {
     case SCR_MENU: DrawMenuScreen(); break;
     case SCR_UNSUPPORTED: DrawUnsupported(); break;
+    case SCR_PENDING: DrawPending(); break;
     case SCR_NOTICE: DrawNotice(); break;
     case SCR_RUN: DrawRun(); break;
     case SCR_CONFIRM: DrawConfirm(); break;

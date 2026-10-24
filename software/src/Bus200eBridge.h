@@ -208,6 +208,16 @@ typedef struct {
   // Append-only, optional. A scan sets 300 here at its start and the default
   // (BUS200E_MASTER_QUERY_REPLY_TIMEOUT_MS) at its end, abort and Init.
   void (*query_set_reply_timeout_ms)(uint16_t ms);
+  // Append-only, optional (NULL: never). Nonzero while a Cal Routine run is open or a
+  // cancelled 259e run's COMMIT verdict is pending (CalRoutinePorts::CalRunActive).
+  // GET_DUMP and PUT_DUMP answer NAK 17 (CAL_RUN) and an already-received dump
+  // is NOT restored at DUMP_END (NAK 17, session dropped): the run owns the
+  // master FSM and the card image, and a 259e must not be read or rewritten by
+  // anything else meanwhile. (The bridge has no PUT/COMMIT of a 259e record; a
+  // future one must check this too, and acknowledge a COMMIT when it is SENT,
+  // not at its ~4.5 s verdict: the host's 3 s ack timeout is shorter, and a
+  // host that retries would send a second COMMIT.)
+  int (*cal_run_active)(void);
 } Bus200eBridgeOps;
 
 // QUERY reply timeout during a scan: an absent address costs this plus the

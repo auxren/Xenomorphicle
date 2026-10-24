@@ -34,6 +34,7 @@ enum Buchla200eWriteBlock : uint8_t {
   BUCHLA200E_WRITE_IMAGE_CHANGED, // image no longer the bank we read
   BUCHLA200E_WRITE_PATCH_RANGE,   // a patch offset falls outside the slot
   BUCHLA200E_WRITE_BUILD_FAILED,  // constructed bank != what was intended
+  BUCHLA200E_WRITE_CAL_RUN,       // a Cal Routine run (or its pending COMMIT) owns the bus
 };
 
 // Everything the decision depends on, gathered by the caller. Deliberately
@@ -60,6 +61,10 @@ struct Buchla200eWriteContext {
   // Every patch offset lies inside the slot being edited. A diff bug that
   // widened the list is exactly the failure that would rewrite a neighbour.
   bool     patches_in_range;
+  // CalRoutinePorts::CalRunActive(): while a Cal Routine run is open, or a
+  // cancelled 259e run's COMMIT verdict is still pending, no whole-bank restore
+  // may go to any module. Checked first.
+  bool     cal_run_active = false;
 };
 
 // The order matters: report the most fundamental problem first, so the user

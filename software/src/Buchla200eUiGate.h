@@ -54,6 +54,9 @@ enum Buchla200eReadBlock : uint8_t {
   // then fair game for the very next write, to ANY module. Same reasoning
   // as BUCHLA200E_READ_WRITE_IN_FLIGHT, one step earlier in the sequence.
   BUCHLA200E_READ_UNRESOLVED_WRITE,
+  // A Cal Routine run (or a cancelled 259e run's pending COMMIT verdict) owns the
+  // bus, the master FSM and the card image. Appended: values above are unchanged.
+  BUCHLA200E_READ_CAL_RUN,
 };
 
 struct Buchla200eReadContext {
@@ -62,6 +65,7 @@ struct Buchla200eReadContext {
   bool write_active;
   bool scan_idle;
   bool probe_active;
+  bool cal_run_active = false;  // CalRoutinePorts::CalRunActive()
 };
 
 Buchla200eReadBlock Buchla200eCheckRead(const Buchla200eReadContext &c);

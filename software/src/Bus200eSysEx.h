@@ -207,6 +207,8 @@ typedef enum {
   BUS200E_SYSEX_NAK_FW_CRC       = 14,  // FwCardCommit -4
   BUS200E_SYSEX_NAK_FW_WRITE     = 15,  // FwCardCommit -5 (write or read-back)
   BUS200E_SYSEX_NAK_FW_SEQUENCE  = 16,  // FW_DATA out of order / without FW_BEGIN
+  BUS200E_SYSEX_NAK_CAL_RUN      = 17,  // a Cal Routine run (or its pending COMMIT verdict)
+                                        // owns the bus: GET_DUMP / PUT_DUMP refused; retry later
 } Bus200eSysExNakReason;
 
 // Appended to INFO_R: which command set this firmware speaks (1 = the

@@ -234,7 +234,10 @@ BRIDGE_CODE static void handle_status(void) {
   send_msg(BUS200E_SYSEX_CMD_STATUS_R, p, sizeof(p));
 }
 
+BRIDGE_CODE static int cal_run(void) { return g_ops->cal_run_active && g_ops->cal_run_active(); }
+
 BRIDGE_CODE static void handle_get_dump(const uint8_t *payload, uint32_t len) {
+  if (cal_run()) { send_nak(BUS200E_SYSEX_CMD_GET_DUMP, BUS200E_SYSEX_NAK_CAL_RUN); return; }
   if (g_state == BUS200E_BRIDGE_FW_RECEIVING) {
     send_nak(BUS200E_SYSEX_CMD_GET_DUMP, BUS200E_SYSEX_NAK_FW_BUSY);
     return;
@@ -260,6 +263,7 @@ BRIDGE_CODE static void handle_get_dump(const uint8_t *payload, uint32_t len) {
 }
 
 BRIDGE_CODE static void handle_put_dump(const uint8_t *payload, uint32_t len) {
+  if (cal_run()) { send_nak(BUS200E_SYSEX_CMD_PUT_DUMP, BUS200E_SYSEX_NAK_CAL_RUN); return; }
   if (g_state == BUS200E_BRIDGE_FW_RECEIVING) {
     send_nak(BUS200E_SYSEX_CMD_PUT_DUMP, BUS200E_SYSEX_NAK_FW_BUSY);
     return;
@@ -357,6 +361,11 @@ BRIDGE_CODE static void handle_dump_end(const uint8_t *payload, uint32_t len) {
 
   // The bytes are in the card image and verified -- exactly the precondition
   // PresetBus.h's MasterRestore comment says the caller must establish.
+  if (cal_run()) {  // a run opened between PUT_DUMP and DUMP_END: nothing is restored
+    send_nak(BUS200E_SYSEX_CMD_DUMP_END, BUS200E_SYSEX_NAK_CAL_RUN);
+    session_reset();
+    return;
+  }
   if (g_ops->card_mark_dirty) g_ops->card_mark_dirty();
   g_dump_bytes = g_rx_len;
 
