@@ -168,6 +168,7 @@ struct FakeInputs : InputPort {
   double pp[8] = {2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0};
   int started = -1;
   uint32_t start_ms = 0;
+  const CalRoutineFlow *flow = nullptr;  // when set: only its current input may be sampled
   int windows = 0;
   bool short_window = false;  // WindowDone asked before 600 ms
   FakeInputs(FakeOutputs *o, FakeClock *c) : outs(o), clk(c) {}
@@ -176,7 +177,11 @@ struct FakeInputs : InputPort {
                bend[i] * std::sin(kPi * v / 12000.0);
     return std::fmax(0.0, std::fmin(4095.0, r));
   }
-  void StartWindow(int in) override { started = in; start_ms = clk->t; }
+  void StartWindow(int in) override {
+    if (flow) CHECK(in == flow->current_input());
+    started = in;
+    start_ms = clk->t;
+  }
   bool WindowDone(CM::PointStats *s) override {
     if (clk->t - start_ms < 600) short_window = true;
     const double v = outs->OutMv(kSourceOutput);
@@ -202,6 +207,7 @@ struct Rig {
   Rig() {
     g_log.clear();
     flow.SetLog(capture);
+    ins.flow = &flow;
   }
   void Begin() {
     t_begin = clk.t;
@@ -541,6 +547,75 @@ static void test_reconnect_restarts_current_output() {
   CHECK(count_prefix("CALR,FAIL,METER_LOST") == 1);
 }
 
+// True mV that input i's model reads as `raw` (FakeInputs::Raw inverted).
+static double true_mv_at(const FakeInputs &ins, int i, double raw) {
+  double lo = -2000, hi = 14000;
+  for (int it = 0; it < 80; ++it) {
+    const double mid = 0.5 * (lo + hi);
+    // Raw() clamps; use the unclamped model so the inversion is exact.
+    const double r = 4095.0 - mid * (4096.0 / 12000.0) * (1.0 + ins.gain[i]) - ins.offset[i] +
+                     ins.bend[i] * std::sin(kPi * mid / 12000.0);
+    if (r > raw) lo = mid; else hi = mid;
+  }
+  return 0.5 * (lo + hi);
+}
+
+static void test_input_span_capped_below_source_rail() {
+  // Output A cannot reach 12 V: its entry 10 sits at the rail, so codes
+  // interpolated towards it are too high. The input sweep must stay below
+  // that segment, and the curves must be right where they are measured.
+  for (int bottom = 0; bottom < 2; ++bottom) {
+    Rig r;
+    r.dac.clip[0] = 11900.0;
+    if (bottom) r.dac.offset[0] = 3.0;  // entry 0 at the rail too (0 V unreachable)
+    r.Begin();
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Results);
+    const auto &res = r.flow.results();
+    CHECK(res.at_rail[0][10]);
+    CHECK(res.at_rail[0][0] == (bottom == 1));
+    const int32_t lo = bottom ? 1200 : 600, hi = 10800;
+    char want[64];
+    snprintf(want, sizeof(want), "CALR,IN,1,1,%ld,%ld", (long)lo, (long)hi);
+    CHECK(count_prefix(want) == 1);
+    for (const auto &l : g_log) {
+      if (l.compare(0, 9, "CALR,IPT,") != 0) continue;
+      int in, mv;
+      if (sscanf(l.c_str(), "CALR,IPT,%d,%d,", &in, &mv) == 2) CHECK(mv >= lo && mv <= hi);
+    }
+    for (int i = 0; i < 8; ++i) {
+      CHECK(res.in_pass[i]);
+      CHECK(res.in_holdout_mv[i] <= 1.0f);
+      // Every breakpoint inside the measured span is within 1 mV of the truth.
+      double worst = 0;
+      for (int b = 0; b < CR::kCurvePoints; ++b) {
+        const double t = true_mv_at(r.ins, i, double(b << CR::kCurveShift));
+        if (t < lo || t > hi) continue;
+        worst = std::fmax(worst, std::fabs(res.curve_mv_x2[i][b] / 2.0 - t));
+      }
+      CHECK(worst <= 1.0);
+      if (worst > 1.0) printf("  input %d: worst curve error %.2f mV in %ld..%ld mV\n", i + 1,
+                              worst, (long)lo, (long)hi);
+    }
+    CHECK(r.flow.CanSave());
+  }
+}
+
+static void test_rebegin_releases() {
+  Rig r;
+  r.Begin();
+  CHECK(r.Run([&] { return r.flow.stage() == Stage::CalOutput && r.outs.held >= 0; }));
+  r.meter.connected = false;
+  r.flow.Begin(r.meter, r.outs, r.ins, r.clk);
+  CHECK(r.outs.held == -1);
+  CHECK(r.flow.stage() == Stage::NoMeter);
+  r.meter.connected = true;
+  CHECK(r.Run([&] { return r.flow.stage() == Stage::CalInput && r.outs.held >= 0; }));
+  r.flow.Begin(r.meter, r.outs, r.ins, r.clk);
+  CHECK(r.outs.held == -1);
+  CHECK(r.flow.stage() == Stage::ConfigMeter);
+}
+
 // ---- save ----------------------------------------------------------------------
 
 struct FakeSave : SavePort {
@@ -800,7 +875,7 @@ static void test_calr_lines_golden() {
   Reread(b, sizeof(b), 0, 3600, 19661, 0.734); is("REREAD");
   Sweep(b, sizeof(b), 4, 7440, 40630, 7440.4719, true); is("SWEEP");
   OutResult(b, sizeof(b), 5, true, "OK", 0.4126f, 10560, 0x400); is("ORES");
-  In(b, sizeof(b), 0, 0); is("IN");
+  In(b, sizeof(b), 0, 0, 600, 10800); is("IN");
   const CM::PointStats s = {3889.37f, 3888.25f, 3890.5f, 3333};
   InPoint(b, sizeof(b), 6, 600, 3277, s, true); is("IPT");
   const CM::Fit f = {-2.93049f, 12000.41f};
@@ -873,6 +948,8 @@ int main() {
   test_rail_does_not_block_save();
   test_rail_overshoot_remeasured();
   test_reconnect_restarts_current_output();
+  test_input_span_capped_below_source_rail();
+  test_rebegin_releases();
   test_save_sequence_order();
   test_save_refused_unless_can_save();
   test_save_stops_on_failure();

@@ -289,8 +289,7 @@ class CalRoutineFlow {
   int n_ipts_ = 0;
   int32_t ip_mv_ = 0;
   uint16_t ip_code_ = 0;
-  int32_t ip_top_mv_ = 0;
-  int32_t src_top_mv_ = 12000;  // what output A reaches (below 12 V when its top entry is at the rail)
+  int32_t ip_top_mv_ = 0;     // the input sweep's span on output A, clear of its rail segments
 
   Results results_;
 };
@@ -376,7 +375,7 @@ int Sweep(char *buf, size_t n, int out, int32_t target_mv, uint16_t code, double
           bool counted);
 int OutResult(char *buf, size_t n, int out, bool pass, const char *reason, float worst_mv,
               int32_t worst_at_mv, uint16_t rail_mask);
-int In(char *buf, size_t n, int in, int src_out);
+int In(char *buf, size_t n, int in, int src_out, int32_t lo_mv, int32_t hi_mv);
 int InPoint(char *buf, size_t n, int in, int32_t mv, uint16_t code,
             const CvMeterMath::PointStats &s, bool used);
 int InResult(char *buf, size_t n, int in, const char *outcome, CvMeterMath::Verdict v,

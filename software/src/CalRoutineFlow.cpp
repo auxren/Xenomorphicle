@@ -84,7 +84,7 @@ static const char *const kHeaders[] = {
   "CALR#,REREAD,out,target_mv,code,spread_mv",
   "CALR#,SWEEP,out,target_mv,code,measured_mv,resid_mv,counted",
   "CALR#,ORES,out,result,reason,worst_mv,worst_at_mv,rail_mask",
-  "CALR#,IN,in,src_out",
+  "CALR#,IN,in,src_out,lo_mv,hi_mv",
   "CALR#,IPT,in,mv,code,mean_raw,pp_raw,samples,used",
   "CALR#,IRES,in,result,verdict,gain_uv,offset_mv,holdout_mv,line_dev_mv,points",
   "CALR#,RETRY,scpi,attempt",
@@ -195,12 +195,14 @@ CALR_CODE int OutResult(char *buf, size_t n, int out, bool pass, const char *rea
   return l.Done();
 }
 
-CALR_CODE int In(char *buf, size_t n, int in, int src_out) {
+CALR_CODE int In(char *buf, size_t n, int in, int src_out, int32_t lo_mv, int32_t hi_mv) {
   Builder l;
   l.Init(buf, n);
   l.Str("CALR,IN");
   l.Int(Label(in));
   l.Int(Label(src_out));
+  l.Int(lo_mv);
+  l.Int(hi_mv);
   return l.Done();
 }
 
@@ -451,6 +453,7 @@ CALR_CODE void CalRoutineFlow::SetStage(Stage s) {
 }
 
 CALR_CODE void CalRoutineFlow::Begin(MeterPort &meter, OutputPort &out, InputPort &in, Clock &clock) {
+  out.ReleaseAll();  // a Begin mid-run never leaves the previous run's output held
   meter_ = &meter;
   out_ = &out;
   in_ = &in;
@@ -469,7 +472,6 @@ CALR_CODE void CalRoutineFlow::Begin(MeterPort &meter, OutputPort &out, InputPor
   resume_out_ = -1;
   cur_out_ = -1;
   cur_in_ = -1;
-  src_top_mv_ = 12000;
   for (int i = 0; i < L::HeaderCount(); ++i) Log(L::Header(i));
   if (meter.Connected()) StartConfig();
   else SetStage(Stage::NoMeter);
@@ -858,10 +860,6 @@ CALR_CODE void CalRoutineFlow::FinishOutput(OutReason reason) {
   uint16_t rails = 0;
   for (int k = 0; k < CR::kNodes; ++k)
     if (results_.at_rail[o][k]) rails = uint16_t(rails | (1u << k));
-  if (o == kSourceOutput)
-    src_top_mv_ = results_.at_rail[o][CR::kNodes - 1] && node_mv_[CR::kNodes - 1] < 12000.0
-                      ? int32_t(floor(node_mv_[CR::kNodes - 1]))
-                      : 12000;
   CALR_LOG(OutResult, o, results_.out_pass[o], OutReasonName(reason), results_.out_worst_mv[o],
            results_.out_worst_at_mv[o], rails);
   NextAfterOutput();
@@ -880,14 +878,29 @@ CALR_CODE void CalRoutineFlow::NextAfterOutput() {
 
 // ---- inputs ------------------------------------------------------------------
 
+// The source's span: only table segments whose both ends are real (not at
+// the rail). Next to a rail entry, CodeForMv interpolates towards a code
+// that does not give that entry's voltage, so a point there would be
+// labelled with a voltage the output is not producing (a 12 V entry pinned
+// at 65535 makes "11400 mV" about 11420 mV) and bend every input's curve.
 CALR_CODE void CalRoutineFlow::StartInput(int i) {
   out_->ReleaseAll();
   cur_in_ = i;
   n_ipts_ = 0;
-  ip_top_mv_ = src_top_mv_;
-  ip_mv_ = kInStepMv;
-  CALR_LOG(In, i, kSourceOutput);
+  const bool *rail = results_.at_rail[kSourceOutput];
+  int k_lo = 0;
+  while (k_lo < CR::kNodes - 1 && rail[k_lo]) ++k_lo;
+  int k_hi = k_lo;
+  while (k_hi + 1 < CR::kNodes && !rail[k_hi + 1]) ++k_hi;
+  // From kInStepMv, or from the first real entry when entry 0 is at the rail.
+  ip_mv_ = k_lo ? k_lo * CR::kNodeMv : kInStepMv;
+  ip_top_mv_ = k_hi * CR::kNodeMv;
+  CALR_LOG(In, i, kSourceOutput, ip_mv_, ip_top_mv_);
   SetStage(Stage::CalInput);
+  if (ip_top_mv_ < ip_mv_ + 3 * kInStepMv) {  // under 4 points: cannot build a curve
+    FinishInput();
+    return;
+  }
   StartInputPoint();
 }
 
@@ -896,7 +909,7 @@ CALR_CODE void CalRoutineFlow::StartInputPoint() {
   ipoint_.Start(*out_, *in_, *clock_, kSourceOutput, ip_code_, cur_in_);
 }
 
-// Every kInStepMv from kInStepMv up to what output A reaches; a point near
+// Every kInStepMv across the span StartInput chose on output A; a point near
 // raw 0 (the input's top rail) ends the sweep and is not used. Points near
 // raw 4095 are kept, so an unpatched input fails RAIL rather than vanishing.
 CALR_CODE void CalRoutineFlow::TickInput() {
