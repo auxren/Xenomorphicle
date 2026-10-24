@@ -44,6 +44,13 @@ int BuildFrame(uint8_t cmd, uint8_t target, const uint8_t *payload, uint8_t plen
 // 0x18 7; 0x0B 8..9; 0x12 7..14 with off + datalen <= 40; 0x10 8; 0x11 5.
 bool FrameAllowed(const uint8_t *f, uint8_t n);
 
+// The console's raw-frame sender ('W') while a Cal Routine run is open (or a
+// cancelled 259e run's COMMIT verdict is pending): only CAL frames the allowlist
+// knows (FrameAllowed), and of those never PUT (0x12) or COMMIT (0x0B): those two
+// are refused here whatever the address or magic, as is every frame FrameAllowed
+// does not accept. Outside a run 'W' is unrestricted, as before.
+bool ConsoleFrameAllowedDuringRun(const uint8_t *f, uint8_t n);
+
 // [n][0x22][src][0x19][what][arg][data...]; n is the array length.
 struct Reply { uint8_t src, what, arg, len; uint8_t data[kMaxReplyData]; };
 bool ParseReply(const uint8_t *f, uint8_t n, Reply *r);
@@ -60,6 +67,10 @@ FitError Fit259e(const FitPoint *p, int n, Channel *out);
 double TargetCounts(double mv);
 // (Apply259e(raw) - TargetCounts(mv)) * 1200 / 4096, in cents.
 double ResidualCents(uint16_t raw, double mv, const Channel &c);
+// The same without the 0..0x7FFF clamp. The 259e clamps its corrected code at
+// 0x7FFF = 32767, one count under the 9600 mV target (32768), so the clamped
+// residual at 9600 mV hides a positive error there; this one shows it.
+double ResidualCentsUnclamped(uint16_t raw, double mv, const Channel &c);
 
 }  // namespace CalRec
 

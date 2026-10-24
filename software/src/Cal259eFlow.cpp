@@ -32,6 +32,7 @@ static const char *const kHeaders[] = {
   "CALR#,259FIT,ch,gain_hex,offset,worst_cents,nonlin_cents",
   "CALR#,259REC,addr,rec60hex",
   "CALR#,259END,result",
+  "CALR#,259BK,addr,bytes,crc_hex,result",
   // The meter rule's own lines (MeterMeasure), as in a Self run.
   "CALR#,RETRY,scpi,attempt",
   "CALR#,REREAD,out,target_mv,code,spread_mv",
@@ -106,6 +107,19 @@ C259_CODE int End(char *buf, size_t n, const char *result) {
   return int(pos);
 }
 
+C259_CODE int Backup(char *buf, size_t n, uint8_t addr, uint32_t bytes, uint32_t crc,
+                     const char *result) {
+  if (!n) return 0;
+  char t[64];
+  snprintf(t, sizeof(t), "CALR,259BK,%02X,%lu,%08lX,", unsigned(addr), (unsigned long)bytes,
+           (unsigned long)crc);
+  size_t pos = 0;
+  buf[0] = 0;
+  CM::Append(buf, n, &pos, t);
+  CM::Append(buf, n, &pos, result ? result : "");
+  return int(pos);
+}
+
 }  // namespace Cal259eLines
 
 namespace L = Cal259eLines;
@@ -124,12 +138,21 @@ constexpr int Cal259eFlow::kSourceOutput, Cal259eFlow::kMaxCandidates, Cal259eFl
 constexpr uint8_t Cal259eFlow::kFirstAddr, Cal259eFlow::kLastAddr;
 constexpr int32_t Cal259eFlow::kIdLowMv, Cal259eFlow::kIdHighMv;
 constexpr uint16_t Cal259eFlow::kNominalGain;
-constexpr double Cal259eFlow::kGainTolerance, Cal259eFlow::kPatchTolMv, Cal259eFlow::kVerifyCents;
-constexpr uint32_t Cal259eFlow::kAdcTimeoutMs, Cal259eFlow::kBackupTimeoutMs;
+constexpr double Cal259eFlow::kGainTolerance, Cal259eFlow::kPatchTolMv, Cal259eFlow::kVerifyCents,
+    Cal259eFlow::kMaxNonlinearityCents;
+constexpr uint32_t Cal259eFlow::kResultsMaxAgeMs;
+constexpr bool Cal259eFlow::kAllowCompaction;
+constexpr uint32_t Cal259eFlow::kAdcTimeoutMs, Cal259eFlow::kBackupTimeoutMs,
+    Cal259eFlow::kBackupBankBytes;
 
 const int32_t Cal259eFlow::kPointMv[Cal259eFlow::kPoints] = {
   1200, 2400, 3600, 4800, 6000, 7200, 8400, 9600,  // fit
-  600, 3000, 5400, 7800,                           // verify (not fit points)
+  // Verify (not fit points). 600 mV lies below the lowest fit point (1200 mV): it
+  // checks the line's extrapolation toward 0 V, where a real input stage is least
+  // linear. 9000 mV is the top check: the 9600 mV fit point's target (32768)
+  // is above the 259e's 0x7FFF clamp, so its own residual cannot show a positive
+  // error, and 9000 mV (30720) is in range.
+  600, 3000, 5400, 7800, 9000,
 };
 
 C259_CODE double Cal259eFlow::IdentityThreshold() {
@@ -158,6 +181,24 @@ C259_CODE const char *Cal259eFlow::StageName(Stage s) {
   return "?";
 }
 
+C259_CODE const char *BackupWhyName(BackupWhy w) {
+  switch (w) {
+    case BK_NONE: return "FAILED";
+    case BK_FW_CARD: return "FW_CARD";
+    case BK_BUSY: return "BUSY";
+    case BK_START: return "START";
+    case BK_MASTER_FAILED: return "MASTER_FAILED";
+    case BK_LOST: return "LOST";
+    case BK_OTHER_JOB: return "OTHER_JOB";
+    case BK_NO_IMAGE: return "NO_IMAGE";
+    case BK_SIZE: return "SIZE";
+    case BK_SAVE: return "SAVE";
+    case BK_VERIFY: return "VERIFY";
+    case BK_TIMEOUT: return "TIMEOUT";
+  }
+  return "FAILED";
+}
+
 C259_CODE const char *Cal259eFlow::FailName(FailCode f) {
   switch (f) {
     case F_NONE: return "NONE";
@@ -180,6 +221,10 @@ C259_CODE const char *Cal259eFlow::FailName(FailCode f) {
     case F_METER_LOST: return "METER_LOST";
     case F_METER_CONFIG: return "METER_CONFIG";
     case F_METER_TIMEOUT: return "METER_TIMEOUT";
+    case F_NO_SLOT: return "NO_SLOT";
+    case F_NONLIN: return "NONLIN";
+    case F_EXPIRED: return "EXPIRED";
+    case F_INTERNAL: return "INTERNAL";
   }
   return "?";
 }
@@ -245,9 +290,12 @@ C259_CODE bool Cal259eFlow::MeterGone() {
   return true;
 }
 
-C259_CODE void Cal259eFlow::Begin(MeterPort &meter, OutputPort &out, Clock &clock, BusPort &bus,
+C259_CODE bool Cal259eFlow::Begin(MeterPort &meter, OutputPort &out, Clock &clock, BusPort &bus,
                                   BackupPort &backup, EntropyPort &entropy, bool self_cal_present,
                                   LogFn log) {
+  // A cancelled run still waiting for its COMMIT verdict: starting over would
+  // drop that verdict (and re-point the bus client). Refuse; nothing changes.
+  if (cancel_pending_) return false;
   out.ReleaseAll();  // a Begin mid-run never leaves the previous run's output held
   meter_ = &meter;
   out_ = &out;
@@ -274,6 +322,9 @@ C259_CODE void Cal259eFlow::Begin(MeterPort &meter, OutputPort &out, Clock &cloc
   commit_sent_ = false;
   commit_rc_ = 0;
   cancel_pending_ = false;
+  cancelled_verdict_ = 0;
+  backup_why_ = BK_NONE;
+  results_ms_ = 0;
   memset(rec_, 0, sizeof(rec_));
   memset(&result_, 0, sizeof(result_));
   memset(pts_, 0, sizeof(pts_));
@@ -282,14 +333,15 @@ C259_CODE void Cal259eFlow::Begin(MeterPort &meter, OutputPort &out, Clock &cloc
     fail_ = F_NO_SELF_CAL;
     C259_LOG(End, FailName(fail_));
     SetStage(Stage::NoSelfCal);
-    return;
+    return true;
   }
   if (!meter.Connected()) {
     fail_ = F_NO_METER;  // waits for one
     SetStage(Stage::NoMeter);
-    return;
+    return true;
   }
   StartScan();
+  return true;
 }
 
 C259_CODE void Cal259eFlow::Tick() {
@@ -314,6 +366,10 @@ C259_CODE void Cal259eFlow::Tick() {
       break;
     case Stage::Measure:
       if (!MeterGone()) TickMeasure();
+      break;
+    case Stage::Results:
+    case Stage::Confirm:
+      if (now_ - results_ms_ >= kResultsMaxAgeMs) Fail(F_EXPIRED);
       break;
     case Stage::Backup:
       TickBackup();
@@ -348,22 +404,30 @@ C259_CODE void Cal259eFlow::Continue() {
   }
 }
 
+C259_CODE uint32_t Cal259eFlow::results_age_ms() const {
+  return results_ms_ && clock_ ? clock_->Ms() - results_ms_ : 0;
+}
+
 C259_CODE void Cal259eFlow::ConfirmWrite() {
   if (!meter_ || stage_ != Stage::Confirm) return;
   now_ = clock_->Ms();
+  // Defence in depth: only a run whose two channels both passed, and are still
+  // fresh, may write. (The stage machine already guarantees the first.)
+  if (result_.valid_mask != 3) { Fail(F_INTERNAL); return; }
+  if (now_ - results_ms_ >= kResultsMaxAgeMs) { Fail(F_EXPIRED); return; }
   compact_ = false;
   SetStage(Stage::Backup);
   backup_t0_ = now_;
-  if (!backup_->Begin(target_)) Fail(F_BACKUP);
+  if (!backup_->Begin(target_)) FailBackup(backup_->Why());
 }
 
 C259_CODE void Cal259eFlow::ConfirmCompact() {
-  if (!meter_ || stage_ != Stage::ConfirmCompact) return;
+  if (!kAllowCompaction || !meter_ || stage_ != Stage::ConfirmCompact) return;
   now_ = clock_->Ms();
   compact_ = true;  // a fresh backup first, then the record again and COMMIT flags 1
   SetStage(Stage::Backup);
   backup_t0_ = now_;
-  if (!backup_->Begin(target_)) Fail(F_BACKUP);
+  if (!backup_->Begin(target_)) FailBackup(backup_->Why());
 }
 
 C259_CODE void Cal259eFlow::Cancel() {
@@ -387,8 +451,10 @@ C259_CODE void Cal259eFlow::Cancel() {
   // After a COMMIT verdict (Verify, ConfirmCompact, the compaction backup or
   // PUT) the module's flash may hold the record: say which verdict it was.
   // record() and result() keep the record put.
-  if (commit_rc_ != 0) C259_LOG(End, Cal259eCancelledName(commit_rc_));
-  else C259_LOG(End, FailName(fail_));
+  if (commit_rc_ != 0) {
+    cancelled_verdict_ = commit_rc_;
+    C259_LOG(End, Cal259eCancelledName(commit_rc_));
+  } else C259_LOG(End, FailName(fail_));
   SetStage(Stage::Failed);
 }
 
@@ -591,7 +657,8 @@ C259_CODE void Cal259eFlow::FinishChannel() {
   }
   double nonlin = 0.0, worst = 0.0;
   for (int i = 0; i < kFitPoints; ++i) {
-    const double r = CalRec::ResidualCents(fit_pts[i].raw, fit_pts[i].mv, c);
+    // Unclamped: the 9600 mV target is above the 259e's 0x7FFF clamp.
+    const double r = CalRec::ResidualCentsUnclamped(fit_pts[i].raw, fit_pts[i].mv, c);
     if (fabs(r) > nonlin) nonlin = fabs(r);
   }
   for (int i = 0; i < kVerifyPoints; ++i) {
@@ -611,25 +678,47 @@ C259_CODE void Cal259eFlow::FinishChannel() {
     Fail(F_VERIFY);
     return;
   }
+  if (double(result_.nonlin_cents[ch_]) > kMaxNonlinearityCents) {
+    Fail(F_NONLIN);
+    return;
+  }
   result_.valid_mask = uint8_t(result_.valid_mask | (1u << ch_));
   pt_ = -1;
   if (ch_ == 0) {
     ch_ = 1;
     SetStage(Stage::PromptPatch);
   } else {
+    results_ms_ = now_ ? now_ : 1;
     SetStage(Stage::Results);
   }
 }
 
 // ---- backup, write, verify ----------------------------------------------------
 
+// The backup attempt's one CALR line (bytes as transferred, the stored bank's CRC).
+C259_CODE void Cal259eFlow::BackupDone(bool ok) {
+  C259_LOG(Backup, target_, backup_->Bytes(), backup_->Crc(),
+           ok ? "OK" : BackupWhyName(backup_why_));
+}
+
+C259_CODE void Cal259eFlow::FailBackup(BackupWhy why) {
+  backup_why_ = why;
+  BackupDone(false);
+  Fail(F_BACKUP);  // nothing was sent to the module
+}
+
 C259_CODE void Cal259eFlow::TickBackup() {
   const int rc = backup_->Poll();
   if (rc == 0) {
-    if (now_ - backup_t0_ >= kBackupTimeoutMs) Fail(F_BACKUP);  // abandoned, nothing sent
+    if (now_ - backup_t0_ >= kBackupTimeoutMs) FailBackup(BK_TIMEOUT);  // abandoned, nothing sent
     return;
   }
-  if (rc < 0) { Fail(F_BACKUP); return; }
+  if (rc < 0) { FailBackup(backup_->Why()); return; }
+  // The flow's own check, whatever the port is: a backup of anything but a full
+  // 990-byte bank is not a net, and nothing is written without one.
+  if (backup_->Bytes() != kBackupBankBytes) { FailBackup(BK_SIZE); return; }
+  backup_why_ = BK_NONE;
+  BackupDone(true);
   if (compact_) StartPut();
   else StartWrite();
 }
@@ -688,6 +777,7 @@ C259_CODE void Cal259eFlow::TickWrite() {
     cancel_pending_ = false;
     ReleaseHolds();
     fail_ = F_CANCELLED;
+    cancelled_verdict_ = rc;
     C259_LOG(End, Cal259eCancelledName(rc));
     SetStage(Stage::Failed);
     return;
@@ -698,12 +788,17 @@ C259_CODE void Cal259eFlow::TickWrite() {
     return;
   }
   if (rc == E_NO_SLOT && !compact_) {
-    SetStage(Stage::ConfirmCompact);
+    if (kAllowCompaction) SetStage(Stage::ConfirmCompact);
+    else Fail(F_NO_SLOT);  // "all 8 calibration slots are used; compaction is disabled"
     return;
   }
   if (rc == E_NO_SLOT || rc == E_COMMIT_REFUSED) { Fail(F_COMMIT_REFUSED); return; }
-  if (rc == E_COMMIT_UNKNOWN) { Fail(F_COMMIT_UNKNOWN); return; }
-  Fail(F_BUS);  // busy / NAK / internal before the frame was ACKed: nothing went out
+  // Only these two mean the frame never went on the wire (the tx gate stayed
+  // closed, or the allowlist refused it). Every other COMMIT outcome, a Wire
+  // error included (a NAK on the last byte may follow a latched frame), is
+  // unknown, not "nothing went out".
+  if (rc == E_BUS_BUSY || rc == E_INTERNAL) { Fail(F_BUS); return; }
+  Fail(F_COMMIT_UNKNOWN);
 }
 
 C259_CODE void Cal259eFlow::TickVerify() {

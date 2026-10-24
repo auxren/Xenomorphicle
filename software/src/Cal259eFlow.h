@@ -35,20 +35,28 @@
 //               requested mV, then the ADC median. Fit (CalRec::Fit259e on the
 //               meter mV), gain within +-10 % of 0x9041, verify residuals
 //               within +-3 cents. Output A is released after each channel.
-//   Results     Continue -> Confirm; ConfirmWrite -> Backup.
+//   Results     Continue -> Confirm; ConfirmWrite -> Backup. The results expire
+//               kResultsMaxAgeMs after the last channel was fitted (Results and
+//               Confirm end Failed/F_EXPIRED: measure again). A channel passes
+//               only if its worst verify residual is within kVerifyCents AND its
+//               fit-point nonlinearity within kMaxNonlinearityCents.
 //   Backup      a fresh preset backup of the target (BackupPort); fails: nothing
 //               is written.
 //   Write       ReadRecord (unit ID kept, seq + 1; else EntropyPort's 8 bytes,
-//               seq 1), PutRecord, Commit(crc, 0). E_NO_SLOT: ConfirmCompact;
+//               seq 1), PutRecord, Commit(crc, 0). E_NO_SLOT: Failed/F_NO_SLOT
+//               ("all 8 calibration slots are used; compaction is disabled").
+//               With kAllowCompaction (false, see below): ConfirmCompact, then
 //               ConfirmCompact() -> a second Backup -> PutRecord -> Commit(crc, 1).
 //   Verify      ReadRecord, byte-exact with what was put: Done.
 //
-// COMMIT is sent at most once per run, except the one compaction COMMIT after
-// E_NO_SLOT and the owner's second confirm. Cancel releases every hold and
+// COMMIT is sent at most once per run (the compaction COMMIT after E_NO_SLOT and
+// the owner's second confirm exists only when kAllowCompaction). Cancel releases every hold and
 // sends nothing more; a Cancel after the COMMIT frame went out waits for its
 // status, logs it (CALR,259END,CANCELLED_<result>) and ends Failed/F_CANCELLED.
 //
-// Only Xeno output A (kSourceOutput) is ever held. The meter must stay
+// Only Xeno output A (kSourceOutput) is ever held (there is no output B in this
+// flow: the operator moves the one cable between the principal and the mod
+// pitch input when prompted). The meter must stay
 // connected until Results: a meter gone fails the run (F_METER_LOST).
 //
 // Pure and non-blocking: every port is an interface, Tick() samples the clock
@@ -59,12 +67,28 @@
 // glue. Begin false: could not start (the flow fails F_BACKUP). The port must
 // tolerate being abandoned mid-dump: a Cancel, or the flow's give-up after
 // kBackupTimeoutMs, just stops polling it (there is no abort call).
+//
+// Why a backup did not happen (BackupPort::Why, the Failed screen and the
+// CALR,259BK line). BK_NONE: the port gave no reason.
+enum BackupWhy : uint8_t {
+  BK_NONE, BK_FW_CARD, BK_BUSY, BK_START, BK_MASTER_FAILED, BK_LOST, BK_OTHER_JOB,
+  BK_NO_IMAGE, BK_SIZE, BK_SAVE, BK_VERIFY, BK_TIMEOUT
+};
+const char *BackupWhyName(BackupWhy w);  // "FAILED" for BK_NONE
+
 struct BackupPort {
   virtual bool Begin(uint8_t addr) = 0;
   virtual int Poll() = 0; /* 0 busy, 1 saved, <0 failed */
+  // After Begin false / Poll != 0: the reason, the bytes the transfer moved (a
+  // good backup is exactly kBackupBankBytes) and the CRC-32 of the stored bank.
+  virtual BackupWhy Why() const { return BK_NONE; }
+  virtual uint32_t Bytes() const { return 0; }
+  virtual uint32_t Crc() const { return 0; }
 };
 
-// The Teensy TRNG and the RTC (UnixTime 0 when the RTC was never set).
+// The 8 unit-ID bytes (OCOTP serial, cycle counter, micros(), RTC and a call
+// counter mixed; not the Teensy TRNG, whose registers are never brought up)
+// and the RTC (UnixTime 0 when the RTC was never set).
 struct EntropyPort {
   virtual void Fill(uint8_t *d, int n) = 0;
   virtual uint32_t UnixTime() = 0;
@@ -86,7 +110,11 @@ class Cal259eFlow {
   enum FailCode {
     F_NONE, F_NO_METER, F_NO_SELF_CAL, F_NO_259E, F_SEVERAL_MOVED, F_IDENTITY, F_PATCH, F_NOISY,
     F_SCALE, F_FIT, F_VERIFY, F_BACKUP, F_BUS, F_COMMIT_REFUSED, F_COMMIT_UNKNOWN, F_READBACK,
-    F_CANCELLED, F_METER_LOST, F_METER_CONFIG, F_METER_TIMEOUT
+    F_CANCELLED, F_METER_LOST, F_METER_CONFIG, F_METER_TIMEOUT,
+    F_NO_SLOT,    // COMMIT refused with bits 3+4: all 8 slots used, compaction disabled
+    F_NONLIN,     // a channel's fit-point nonlinearity is over kMaxNonlinearityCents
+    F_EXPIRED,    // Results / Confirm older than kResultsMaxAgeMs: measure again
+    F_INTERNAL    // a state the flow should never reach (nothing was sent)
   };
 
   struct Result {
@@ -100,8 +128,8 @@ class Cal259eFlow {
   static constexpr int kSourceOutput = 0;  // Xeno output A (panel label)
   static constexpr uint8_t kFirstAddr = 0x28, kLastAddr = 0x2B;
   static constexpr int kMaxCandidates = 4;
-  static constexpr int kFitPoints = 8, kVerifyPoints = 4, kPoints = kFitPoints + kVerifyPoints;
-  static const int32_t kPointMv[kPoints];  // 1200 .. 9600, then 600, 3000, 5400, 7800
+  static constexpr int kFitPoints = 8, kVerifyPoints = 5, kPoints = kFitPoints + kVerifyPoints;
+  static const int32_t kPointMv[kPoints];  // 1200 .. 9600, then 600, 3000, 5400, 7800, 9000
   static constexpr int32_t kIdLowMv = 1200, kIdHighMv = 6000;
   static constexpr uint16_t kNominalGain = 0x9041;
   // The identity threshold: half of (6000 - 1200) * 4096 / 1200 / (0x9041 / 65536)
@@ -110,13 +138,33 @@ class Cal259eFlow {
   static constexpr double kGainTolerance = 0.10;  // fitted gain vs 0x9041
   static constexpr double kPatchTolMv = 50.0;     // meter median vs requested mV
   static constexpr double kVerifyCents = 3.0;
+  // PROVISIONAL, for Oren to confirm from real bench data: the largest fit-point
+  // residual (UNCLAMPED, see CalRec::ResidualCentsUnclamped) a channel may show
+  // after the straight-line fit. Not derived from measurements of a real 259e.
+  static constexpr double kMaxNonlinearityCents = 5.0;
+  // Results older than this are not written: the owner measured them with the
+  // modules in some other state. Measure again.
+  static constexpr uint32_t kResultsMaxAgeMs = 10u * 60u * 1000u;
+  // Compaction (ConfirmCompact: reset the 8 slots to the new record alone, COMMIT
+  // flags 1) stays OFF until a tested restore path for CAL259BK.BIN exists: a
+  // power cut during the 259e's rewrite re-inits its presets, and a backup that
+  // cannot be restored is no net. The code is kept, tested with
+  // -DCAL259E_ALLOW_COMPACTION=1, and unreachable in the firmware.
+#ifdef CAL259E_ALLOW_COMPACTION
+  static constexpr bool kAllowCompaction = true;
+#else
+  static constexpr bool kAllowCompaction = false;
+#endif
   static constexpr int kAdcSamples = 8;           // fresh samples per ADC median
   static constexpr uint32_t kAdcTimeoutMs = 2000; // ... gathered within this, else F_BUS
+  static constexpr uint32_t kBackupBankBytes = 990;  // a 259e's 30 x 33-byte preset bank
   static constexpr uint32_t kBackupTimeoutMs = 60000;  // backup still busy: F_BACKUP, nothing sent
 
   // Starts a run (any earlier one is dropped and output A released). The CALR#
   // headers are logged first.
-  void Begin(MeterPort &meter, OutputPort &out, Clock &clock, BusPort &bus, BackupPort &backup,
+  // Returns false, changing nothing, while a cancelled run's COMMIT verdict is
+  // still pending (cancel_pending()): that verdict is never silently dropped.
+  bool Begin(MeterPort &meter, OutputPort &out, Clock &clock, BusPort &bus, BackupPort &backup,
              EntropyPort &entropy, bool self_cal_present, LogFn log);
   void Tick();
   // Warmup: confirmed. PromptPatch: patched. Results: on to Confirm.
@@ -125,7 +173,8 @@ class Cal259eFlow {
   // Once a COMMIT verdict came (commit_result() != 0: Verify, ConfirmCompact,
   // the compaction backup and PUT), the end line names it: CANCELLED_<result>.
   void Cancel();
-  // Confirm only: back up, then write.
+  // Confirm only: back up, then write. Re-checks that both channels passed
+  // (valid_mask == 3) and that the results are not expired.
   void ConfirmWrite();
   // ConfirmCompact only: second backup, then COMMIT with flags 1.
   void ConfirmCompact();
@@ -135,6 +184,8 @@ class Cal259eFlow {
   int channel() const { return ch_; }           // -1 when none
   const Result &result() const { return result_; }
   FailCode fail() const { return fail_; }
+  // With F_BACKUP: why the preset backup did not happen (BK_NONE otherwise).
+  BackupWhy backup_why() const { return backup_why_; }
   // Progress for the screen: the Measure point (0..kPoints-1) and its mV.
   int point_index() const { return pt_; }
   int32_t point_mv() const { return pt_ >= 0 && pt_ < kPoints ? kPointMv[pt_] : 0; }
@@ -148,7 +199,14 @@ class Cal259eFlow {
   int commit_result() const { return commit_rc_; }
   // A Cancel arrived after the COMMIT frame went out: waiting for its status.
   bool cancel_pending() const { return cancel_pending_; }
+  // The COMMIT verdict (Cal259eBus::Tick's result: 1 ok, < 0 Error) of the last
+  // run that was CANCELLED after its COMMIT went out; 0 when there was none.
+  // Kept until the next Begin, so the menu can show it. Cancelled runs are the
+  // ones whose Failed screen the owner may never see.
+  int cancelled_verdict() const { return cancelled_verdict_; }
   const uint8_t *record() const { return rec_; }  // the record put (valid from Write on)
+  // How long ago the last channel was fitted (Results, Confirm); 0 before.
+  uint32_t results_age_ms() const;
 
   static const char *StageName(Stage s);
   static const char *FailName(FailCode f);
@@ -182,6 +240,8 @@ class Cal259eFlow {
   void TickMeasure();
   void FinishChannel();
   void TickBackup();
+  void BackupDone(bool ok);
+  void FailBackup(BackupWhy why);
   void StartWrite();
   void TickWrite();
   void StartPut();
@@ -209,6 +269,7 @@ class Cal259eFlow {
   uint32_t now_ = 0;
   uint32_t t0_ = 0;
 
+  uint32_t results_ms_ = 0;                      // when Results was entered
   uint16_t table_[CalRoutineMath::kNodes] = {};  // output A's stored table, read at Begin
 
   // scan
@@ -234,6 +295,7 @@ class Cal259eFlow {
   uint8_t adc_ch_ = 0;
   uint32_t adc_t0_ = 0;
   uint32_t backup_t0_ = 0;
+  BackupWhy backup_why_ = BK_NONE;
   bool adc_base_ = false;
   uint8_t adc_last_n_ = 0;
   int adc_k_ = 0;
@@ -245,6 +307,7 @@ class Cal259eFlow {
   bool commit_sent_ = false; // a COMMIT frame was ACKed in this run
   int commit_rc_ = 0;
   bool cancel_pending_ = false;
+  int cancelled_verdict_ = 0;
   uint8_t rec_[CalRec::kRecLen259e] = {};
   uint16_t crc_ = 0;
 
@@ -273,6 +336,9 @@ int Fit(char *buf, size_t n, int ch, const CalRec::Channel &c, double worst_cent
 int Rec(char *buf, size_t n, uint8_t addr, const uint8_t rec[CalRec::kRecLen259e]);
 // result: "OK", a FailName, or "CANCELLED_<commit result>".
 int End(char *buf, size_t n, const char *result);
+// CALR,259BK,<addr>,<bytes>,<crc32 hex>,<OK or a BackupWhyName>: one line per
+// preset backup attempt, bytes as the master transferred them.
+int Backup(char *buf, size_t n, uint8_t addr, uint32_t bytes, uint32_t crc, const char *result);
 
 }  // namespace Cal259eLines
 

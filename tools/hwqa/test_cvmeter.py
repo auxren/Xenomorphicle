@@ -327,7 +327,7 @@ class ParseCal259e(unittest.TestCase):
 
     def test_every_golden_line_parses_to_its_field_count(self):
         _, lines = cal259e_fixture()
-        self.assertEqual(len(lines), 7)
+        self.assertEqual(len(lines), 8)
         for l in lines:
             d = cvmeter.parse_calr(l)
             self.assertIsNotNone(d, l)
@@ -345,6 +345,8 @@ class ParseCal259e(unittest.TestCase):
         self.assertEqual(by["259REC"]["addr"], 0x28)
         self.assertEqual(len(by["259REC"]["rec60hex"]), 60)
         self.assertEqual(by["259END"]["result"], "COMMIT_UNKNOWN")
+        self.assertEqual(by["259BK"], {"sub": "259BK", "addr": 0x28, "bytes": 990,
+                                       "crc_hex": 0x1A2B3C4D, "result": "OK"})
 
     def test_rejects_wrong_count(self):
         self.assertIsNone(cvmeter.parse_calr("CALR,259PT,0,4800,4800.123,29076"))

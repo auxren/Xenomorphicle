@@ -1888,6 +1888,22 @@ FLASHMEM bool SaveCalBackup(uint8_t addr, const uint8_t *bank, uint32_t len, uin
   return WriteBankFile("CAL_BK.TMP", "CAL259BK.BIN", addr, bank, len, crc);
 }
 
+// Reads CAL259BK.BIN back: header, address, length (file size too) and the CRC of
+// the payload as stored. The write is only good once this says so.
+FLASHMEM bool VerifyCalBackup(uint8_t addr, uint32_t len, uint32_t crc) {
+  if (!len || len > 1024) return false;
+  File f = preset_fs().open("CAL259BK.BIN", FILE_READ);
+  if (!f) return false;
+  SnapHeader h;
+  uint8_t buf[1024];
+  bool ok = f.read((uint8_t *)&h, sizeof(h)) == (int)sizeof(h) &&
+            h.fourcc == kSnapFourcc && h.addr == addr && h.length == len && h.crc == crc &&
+            (uint64_t)f.size() == (uint64_t)len + sizeof(h);
+  if (ok) ok = (uint32_t)f.read(buf, len) == len;
+  f.close();
+  return ok && Buchla200eCrc32(buf, len) == crc;
+}
+
 FLASHMEM bool SnapshotInfo(uint8_t *addr_out, uint32_t *len_out) {
   File f = preset_fs().open(kSnapFile, FILE_READ);
   if (!f) return false;

@@ -57,6 +57,11 @@ struct FakeBackup : BackupPort {
   int delay_polls = 5;  // Poll returns 0 this often first
   int begins = 0, polls = 0, left = 0;
   std::vector<uint8_t> addrs;
+  uint32_t bytes = 990;          // what the master moved (a 259e bank is exactly 990)
+  BackupWhy why = BK_NONE;
+  BackupWhy Why() const override { return why; }
+  uint32_t Bytes() const override { return bytes; }
+  uint32_t Crc() const override { return 0xA1B2C3D4u; }
   bool Begin(uint8_t a) override {
     ++begins;
     addrs.push_back(a);
@@ -120,6 +125,8 @@ struct Rig {
   Sim259e *patched = &a;
   int patch_ch = -1;
   bool wrong_jack = false;
+  int wrong_jack_ch = -1;      // with wrong_jack: only this channel's patch is wrong (-1 both)
+  bool hold_confirm = false;   // the UI leaves the write confirm unanswered
   bool both_move = false;
   bool auto_ui = true;
   bool bad_hold = false;       // an output other than A was ever held
@@ -166,11 +173,14 @@ struct Rig {
       case Stage::PromptPatch:
         if (flow.channel() >= 0 && flow.channel() < 2 && mask_at_prompt[flow.channel()] < 0)
           mask_at_prompt[flow.channel()] = outs.mask;
-        patch_ch = wrong_jack ? 1 - flow.channel() : flow.channel();
+        patch_ch = (wrong_jack && (wrong_jack_ch < 0 || wrong_jack_ch == flow.channel()))
+                       ? 1 - flow.channel() : flow.channel();
         flow.Continue();
         break;
       case Stage::Results: flow.Continue(); break;
-      case Stage::Confirm: flow.ConfirmWrite(); break;
+      case Stage::Confirm:
+        if (!hold_confirm) flow.ConfirmWrite();
+        break;
       default: break;
     }
   }
@@ -340,9 +350,9 @@ static void good_unit_passes() {
   CHECK(!r.bad_hold);
   CHECK(r.mask_at_prompt[0] == 0 && r.mask_at_prompt[1] == 0);
   CHECK(r.outs.mask == 0);
-  // The log: 12 points per channel, both fits, the record, OK.
+  // The log: kPoints (8 fit + 5 verify) per channel, both fits, the record, OK.
   CHECK(count_prefix("CALR,259START,28") == 1);
-  CHECK(count_prefix("CALR,259PT,0,") == 12 && count_prefix("CALR,259PT,1,") == 12);
+  CHECK(count_prefix("CALR,259PT,0,") == F::kPoints && count_prefix("CALR,259PT,1,") == F::kPoints);
   CHECK(count_prefix("CALR,259FIT,") == 2);
   CHECK(count_prefix("CALR,259REC,28,") == 1);
   CHECK(logged("CALR,259END,OK"));
@@ -351,7 +361,7 @@ static void good_unit_passes() {
   for (int i = 0; i < 6 && r.meter.sent.size() > 6; ++i)
     CHECK(r.meter.sent[size_t(i)] == CalRoutine::kMeterSetup[i]);
   // Each point: throwaway + 3 READ? (no noise beyond the rule).
-  CHECK(r.meter.reads == 24 * 4);
+  CHECK(r.meter.reads == 2 * F::kPoints * 4);
   check_run_lines_by_value(r);
 }
 
@@ -490,7 +500,37 @@ static void unit_id_kept() {
   }
 }
 
+// Decision a: compaction is unreachable while kAllowCompaction is false. The
+// 8-slots-full COMMIT ends in a Failed screen (F_NO_SLOT), never a confirm, and
+// ConfirmCompact() does nothing.
+static void slots_full_is_a_failed_screen() {
+#ifndef CAL259E_ALLOW_COMPACTION
+  CHECK(!F::kAllowCompaction);   // the firmware build
+#endif
+  if (F::kAllowCompaction) return;
+  Rig r;
+  good_adc(r.a);
+  install(r.a, 7, 0x31);
+  r.a.slots_used = 8;
+  r.Begin();
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_NO_SLOT);
+  CHECK(logged("CALR,259END,NO_SLOT"));
+  CHECK(r.a.count[CalRec::kCmdCommit] == 1 && last_commit_flags(r.a) == 0);
+  CHECK(r.backup.begins == 1);
+  CHECK(r.flow.commit_result() == E_NO_SLOT);
+  const int frames = int(r.a.log.size());
+  r.flow.ConfirmCompact();   // nothing, in any stage
+  r.Idle(10000);
+  CHECK(r.flow.stage() == Stage::Failed && int(r.a.log.size()) == frames);
+  CHECK(r.a.slots_used == 8);
+  CHECK(std::strcmp(F::FailName(F::F_NO_SLOT), "NO_SLOT") == 0);
+}
+
+// The compaction path itself, built and run with -DCAL259E_ALLOW_COMPACTION=1
+// (a second run in run-host-tests.sh): kept working for when a restore path exists.
 static void slots_full_needs_second_confirm() {
+  if (!F::kAllowCompaction) return;
   auto full = [](Rig &r) {
     good_adc(r.a);
     install(r.a, 7, 0x31);
@@ -650,6 +690,7 @@ static void cancel_every_stage() {
        "CALR,259END,CANCELLED_NO_SLOT", 1},
     };
     for (const After &c : after) {
+      if (c.full && !F::kAllowCompaction) continue;  // unreachable: see slots_full_is_a_failed_screen
       Rig r;
       good_adc(r.a);
       if (c.full) {
@@ -884,6 +925,7 @@ static void golden_lines() {
   Start(b, sizeof(b), 0x29); is("259START");
   Point(b, sizeof(b), 0, 4800, 4800.1234, 29076, 8); is("259PT");
   Fit(b, sizeof(b), 1, CalRec::Channel{0x8F2C, -120}, -1.2345, 0.449); is("259FIT");
+  Backup(b, sizeof(b), 0x28, 990, 0x1A2B3C4Du, "OK"); is("259BK");
   CalRec::Record rec;
   for (int i = 0; i < 8; ++i) rec.unit_id[i] = uint8_t(i + 1);
   rec.seq = 2;
@@ -939,9 +981,309 @@ static void golden_lines() {
 static void names() {
   for (int s = int(Stage::Idle); s <= int(Stage::Failed); ++s)
     CHECK(strcmp(F::StageName(Stage(s)), "?") != 0);
-  for (int f = F::F_NONE; f <= F::F_METER_TIMEOUT; ++f)
+  for (int f = F::F_NONE; f <= F::F_INTERNAL; ++f)
     CHECK(strcmp(F::FailName(F::FailCode(f)), "?") != 0);
   CHECK(std::fabs(F::IdentityThreshold() - 0.5 * 4800.0 * 4096.0 / 1200.0 / (0x9041 / 65536.0)) < 1e-6);
+}
+
+// ---- the reviewer's follow-ups ---------------------------------------------------
+
+// S4: the COMMIT's Send returns a Wire error. Not "nothing went out": the status
+// is polled, the end line is not BUS, and exactly one COMMIT is ever sent.
+static void commit_wire_error() {
+  for (int rc : {2, 3, 4, 5}) {
+    {
+      Rig r;  // the module never saw the frame
+      good_adc(r.a);
+      r.a.commit_send_rc = rc;
+      r.a.commit_latches = false;
+      r.Begin();
+      CHECK(r.Run());
+      CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_COMMIT_UNKNOWN);
+      CHECK(r.a.count[CalRec::kCmdCommit] == 1 && r.a.commits_received == 0);
+      CHECK(logged("CALR,259END,COMMIT_UNKNOWN") && !logged("CALR,259END,BUS"));
+      CHECK(r.flow.commit_result() == E_COMMIT_UNKNOWN);
+      CHECK(r.outs.mask == 0);
+    }
+    {
+      Rig r;  // a NAK on the last byte, but the module latched it: the status says so
+      good_adc(r.a);
+      r.a.commit_send_rc = rc;
+      r.a.commit_latches = true;
+      r.Begin();
+      CHECK(r.Run());
+      CHECK(r.flow.stage() == Stage::Done);
+      CHECK(r.a.count[CalRec::kCmdCommit] == 1 && r.a.commits_received == 1);
+      CHECK(logged("CALR,259END,OK"));
+    }
+  }
+  {
+    Rig r;  // cancelled while the wire-error COMMIT's status is awaited: still one COMMIT, still reported
+    good_adc(r.a);
+    r.a.commit_send_rc = 3;
+    r.a.commit_latches = true;
+    r.Begin();
+    CHECK(r.Run([&] { return r.a.count[CalRec::kCmdCommit] == 1; }));
+    r.flow.Cancel();
+    CHECK(r.flow.cancel_pending());
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_CANCELLED);
+    CHECK(r.a.count[CalRec::kCmdCommit] == 1);
+    CHECK(logged("CALR,259END,CANCELLED_OK"));
+  }
+  {
+    Rig r;  // -1 (tx gate closed) before the COMMIT goes out is still nothing sent, then retried
+    good_adc(r.a);
+    r.Begin();
+    CHECK(r.Run([&] { return r.flow.stage() == Stage::Write; }));
+    r.a.busy_sends = 5;
+    CHECK(r.Run());
+    CHECK(r.a.count[CalRec::kCmdCommit] == 1);
+  }
+}
+
+// SUSPEND (the app's Cancel, twice) after the COMMIT was ACKed: the verdict is
+// still collected by whoever ticks the flow afterwards (CalRoutinePorts::Task259),
+// one COMMIT, a CANCELLED_* line, CalRunActive-equivalent cancel_pending() until then.
+static void suspend_in_write_after_ack() {
+  Rig r;
+  good_adc(r.a);
+  r.Begin();
+  CHECK(r.Run([&] { return r.a.count[CalRec::kCmdCommit] == 1; }));
+  CHECK(r.flow.stage() == Stage::Write);
+  r.flow.Cancel();                                   // HandleAppEvent(SUSPEND)
+  if (r.flow.stage() != Stage::Idle) r.flow.Cancel();
+  CHECK(r.flow.cancel_pending());                    // CalRunActive() stays true
+  CHECK(r.outs.mask == 0);
+  r.auto_ui = false;                                 // the app is gone: only the task ticks
+  int guard = 0;
+  while (r.flow.cancel_pending() && guard++ < 20000) r.Step();
+  CHECK(!r.flow.cancel_pending());
+  CHECK(r.a.count[CalRec::kCmdCommit] == 1 && r.a.commits_received == 1);
+  CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_CANCELLED);
+  CHECK(logged("CALR,259END,CANCELLED_OK"));
+  CHECK(r.flow.commit_result() == 1);
+  // and once it is collected a new run may start
+  CHECK(r.flow.Begin(r.meter, r.outs, r.clk, r.bus, r.backup, r.ent, true, capture));
+}
+
+// S6: a new run is refused while a cancelled run's COMMIT verdict is pending.
+static void begin_refused_while_cancel_pending() {
+  Rig r;
+  good_adc(r.a);
+  r.Begin();
+  CHECK(r.Run([&] { return r.a.count[CalRec::kCmdCommit] == 1; }));
+  r.flow.Cancel();
+  CHECK(r.flow.cancel_pending());
+  const size_t logn = g_log.size();
+  CHECK(!r.flow.Begin(r.meter, r.outs, r.clk, r.bus, r.backup, r.ent, true, capture));
+  CHECK(g_log.size() == logn);                        // no headers: nothing was touched
+  CHECK(r.flow.cancel_pending() && r.flow.stage() == Stage::Write);
+  CHECK(r.a.count[CalRec::kCmdCommit] == 1);
+  r.auto_ui = false;
+  int guard = 0;
+  while (r.flow.cancel_pending() && guard++ < 20000) r.Step();
+  CHECK(logged("CALR,259END,CANCELLED_OK"));          // the verdict was not lost
+  CHECK(r.a.count[CalRec::kCmdCommit] == 1);
+}
+
+// Decision c: nonlinearity is a pass criterion. A top-of-range kink that the line
+// does not follow ends Failed/F_NONLIN, after the fit line is logged.
+static void nonlinearity_is_a_pass_criterion() {
+  CHECK(F::kMaxNonlinearityCents == 5.0);
+  // F_NONLIN needs a fit-point residual over 5 cents with the verify points
+  // within 3: a 10 mV bump at the 4800 mV fit point alone (1 mV = 1 cent at
+  // 1.2 V/oct; the verify points are elsewhere).
+  Rig r;
+  good_adc(r.a);
+  r.a.input_mv = [&r](int ch) {
+    const double mv = r.InputMv(&r.a, ch);
+    return std::fabs(mv - 4800.0) < 100.0 ? mv + 10.0 : mv;
+  };
+  r.Begin();
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Failed);
+  CHECK(r.flow.fail() == F::F_NONLIN);
+  CHECK(r.flow.result().nonlin_cents[0] > F::kMaxNonlinearityCents);
+  CHECK(std::fabs(r.flow.result().worst_verify_cents[0]) <= F::kVerifyCents);
+  CHECK(logged("CALR,259END,NONLIN"));
+  CHECK(count_prefix("CALR,259FIT,0,") == 1);
+  CHECK(r.a.count[CalRec::kCmdPut] == 0 && r.a.count[CalRec::kCmdCommit] == 0);
+  CHECK(r.flow.result().valid_mask == 0);
+}
+
+// Decision c: the nonlinearity figure is the UNCLAMPED fit-point residual. A kink at
+// the 9600 mV point pushes its corrected code past the 259e's 0x7FFF clamp; the
+// clamped residual would show about -0.3 cents there and hide it. (The run ends
+// F_VERIFY here, the kink being large enough to show at 9000 mV as well; the
+// figures are stored before that check.)
+static void nonlinearity_sees_past_the_clamp() {
+  Rig r;
+  good_adc(r.a);
+  r.a.input_mv = [&r](int ch) {
+    const double mv = r.InputMv(&r.a, ch);
+    return mv > 9300.0 ? mv + 14.0 : mv;
+  };
+  r.Begin();
+  CHECK(r.Run());
+  CHECK(r.flow.result().nonlin_cents[0] > 7.0);
+}
+
+// Decision c: 9000 mV verifies the top of the range, where the 9600 mV fit point's
+// own residual is clamped (target 32768 > 0x7FFF).
+static void top_of_range_is_verified() {
+  CHECK(F::kPointMv[F::kPoints - 1] == 9000);
+  CHECK(F::kPointMv[F::kFitPoints - 1] == 9600);
+  // The clamped residual hides a positive error at 9600 mV; the unclamped shows it.
+  const CalRec::Channel c = {0x9041, 25};
+  const uint16_t raw = uint16_t(32768.0 / (0x9041 / 65536.0));
+  CHECK(CalRec::ResidualCents(raw, 9600.0, c) < 0.5);
+  CHECK(CalRec::ResidualCentsUnclamped(raw, 9600.0, c) > 5.0);
+}
+
+// Decision d/e: results expire; ConfirmWrite re-checks valid_mask and the age.
+static void results_expire_and_confirm_rechecks() {
+  {
+    Rig r;
+    good_adc(r.a);
+    r.hold_confirm = true;
+    r.Begin();
+    CHECK(r.Run([&] { return r.flow.stage() == Stage::Confirm; }));
+    CHECK(r.flow.results_age_ms() < 100);
+    r.Idle(F::kResultsMaxAgeMs - 2000);
+    CHECK(r.flow.stage() == Stage::Confirm);
+    CHECK(r.flow.results_age_ms() >= F::kResultsMaxAgeMs - 2100);
+    r.Idle(3000);
+    CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_EXPIRED);
+    CHECK(logged("CALR,259END,EXPIRED"));
+    CHECK(r.a.count[CalRec::kCmdPut] == 0 && r.a.count[CalRec::kCmdCommit] == 0);
+    CHECK(r.backup.begins == 0);
+  }
+  {
+    Rig r;  // expired on the Results screen too
+    good_adc(r.a);
+    r.auto_ui = false;
+    r.Begin();
+    for (int i = 0; i < 2000000 && r.flow.stage() != Stage::Results; ++i) {
+      r.Step();
+      if (r.flow.stage() == Stage::Warmup || r.flow.stage() == Stage::PromptPatch) r.Ui();
+    }
+    CHECK(r.flow.stage() == Stage::Results);
+    r.Idle(F::kResultsMaxAgeMs + 1000);
+    CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_EXPIRED);
+  }
+  {
+    Rig r;  // the clock reads past the limit at the moment of the B press itself
+    good_adc(r.a);
+    r.hold_confirm = true;
+    r.Begin();
+    CHECK(r.Run([&] { return r.flow.stage() == Stage::Confirm; }));
+    r.clk.t += F::kResultsMaxAgeMs + 1;
+    r.flow.ConfirmWrite();
+    CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_EXPIRED);
+    CHECK(r.backup.begins == 0 && r.a.count[CalRec::kCmdPut] == 0);
+  }
+  {
+    Rig r;  // valid_mask != 3 at the confirm: refused, nothing backed up or sent
+    good_adc(r.a);
+    r.hold_confirm = true;
+    r.Begin();
+    CHECK(r.Run([&] { return r.flow.stage() == Stage::Confirm; }));
+    CHECK(r.flow.result().valid_mask == 3);
+    const_cast<Cal259eFlow::Result &>(r.flow.result()).valid_mask = 1;
+    r.flow.ConfirmWrite();
+    CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_INTERNAL);
+    CHECK(r.backup.begins == 0 && r.a.count[CalRec::kCmdPut] == 0 &&
+          r.a.count[CalRec::kCmdCommit] == 0);
+  }
+  {
+    Rig r;  // inside the limit the confirm goes on
+    good_adc(r.a);
+    r.hold_confirm = true;
+    r.Begin();
+    CHECK(r.Run([&] { return r.flow.stage() == Stage::Confirm; }));
+    r.flow.ConfirmWrite();
+    CHECK(r.flow.stage() == Stage::Backup);
+    r.hold_confirm = false;
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Done);
+  }
+}
+
+// Wrong jack on the second channel only (channel 0 is patched right): the
+// per-channel input model sees A on the principal input while the mod input is
+// asked: nothing moves, F_IDENTITY, nothing is written.
+static void wrong_jack_on_channel_one() {
+  Rig r;
+  good_adc(r.a);
+  r.wrong_jack = true;
+  r.wrong_jack_ch = 1;
+  r.Begin();
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_IDENTITY);
+  CHECK(r.flow.result().valid_mask == 1);
+  CHECK(count_prefix("CALR,259PT,0,") == F::kPoints && count_prefix("CALR,259PT,1,") == 0);
+  CHECK(r.a.count[CalRec::kCmdPut] == 0 && r.a.count[CalRec::kCmdCommit] == 0);
+  CHECK(r.backup.begins == 0);
+  CHECK(r.outs.mask == 0 && !r.bad_hold);
+}
+
+// Decision b and S1: the backup's reason reaches the Failed screen and the log, its
+// bytes are logged, and the flow refuses a bank that is not 990 bytes whatever the port said.
+static void backup_reason_size_and_line() {
+  {
+    Rig r;
+    good_adc(r.a);
+    r.Begin();
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Done);
+    CHECK(logged("CALR,259BK,28,990,A1B2C3D4,OK"));
+    CHECK(r.flow.backup_why() == BK_NONE);
+  }
+  {
+    Rig r;  // refused at Begin with a reason (firmware card served)
+    good_adc(r.a);
+    r.backup.begin_ok = false;
+    r.backup.why = BK_FW_CARD;
+    r.Begin();
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_BACKUP);
+    CHECK(r.flow.backup_why() == BK_FW_CARD);
+    CHECK(logged("CALR,259BK,28,990,A1B2C3D4,FW_CARD"));
+    CHECK(logged("CALR,259END,BACKUP"));
+    CHECK(r.a.count[CalRec::kCmdPut] == 0 && r.a.count[CalRec::kCmdCommit] == 0);
+  }
+  for (uint32_t n : {989u, 991u}) {
+    Rig r;  // a port that says "saved" for a bank of the wrong size
+    good_adc(r.a);
+    r.backup.bytes = n;
+    r.Begin();
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_BACKUP);
+    CHECK(r.flow.backup_why() == BK_SIZE);
+    char want[64];
+    snprintf(want, sizeof(want), "CALR,259BK,28,%u,A1B2C3D4,SIZE", unsigned(n));
+    CHECK(logged(want));
+    CHECK(r.a.count[CalRec::kCmdPut] == 0 && r.a.count[CalRec::kCmdCommit] == 0);
+  }
+  {
+    Rig r;  // the port fails during the transfer
+    good_adc(r.a);
+    r.backup.result = -1;
+    r.backup.why = BK_VERIFY;
+    r.Begin();
+    CHECK(r.Run());
+    CHECK(r.flow.fail() == F::F_BACKUP && r.flow.backup_why() == BK_VERIFY);
+    CHECK(logged("CALR,259BK,28,990,A1B2C3D4,VERIFY"));
+  }
+  {
+    Rig r;  // gives up: BK_TIMEOUT
+    good_adc(r.a);
+    r.backup.delay_polls = 1 << 30;
+    r.Begin();
+    CHECK(r.Run());
+    CHECK(r.flow.fail() == F::F_BACKUP && r.flow.backup_why() == BK_TIMEOUT);
+  }
 }
 
 int main() {
@@ -954,6 +1296,7 @@ int main() {
   noisy_meter_fails();
   backup_fails_no_write();
   unit_id_kept();
+  slots_full_is_a_failed_screen();
   slots_full_needs_second_confirm();
   cancel_every_stage();
   backup_times_out();
@@ -962,6 +1305,15 @@ int main() {
   verify_fails();
   adc_fresh_samples();
   commit_outcomes();
+  backup_reason_size_and_line();
+  commit_wire_error();
+  suspend_in_write_after_ack();
+  begin_refused_while_cancel_pending();
+  nonlinearity_is_a_pass_criterion();
+  top_of_range_is_verified();
+  nonlinearity_sees_past_the_clamp();
+  results_expire_and_confirm_rechecks();
+  wrong_jack_on_channel_one();
   golden_lines();
   names();
   printf("test_cal259e_flow: %d checks, %d failures\n", checks, fails);

@@ -144,6 +144,7 @@ bool Busy();
 // other address is the worst thing this engine could do.
 bool SnapshotBank(uint8_t addr, const uint8_t *bank, uint32_t len, uint32_t crc);
 bool SaveCalBackup(uint8_t addr, const uint8_t *bank, uint32_t len, uint32_t crc);  // CAL259BK.BIN, not PBSNAP.BIN
+bool VerifyCalBackup(uint8_t addr, uint32_t len, uint32_t crc);  // read CAL259BK.BIN back: header, length, CRC
 bool SnapshotInfo(uint8_t *addr_out, uint32_t *len_out);   // is one available?
 bool LoadSnapshot(uint8_t addr, uint8_t *dest, uint32_t cap, uint32_t *len_out);
 void DiscardSnapshot();
@@ -242,6 +243,7 @@ inline RecoverResult RecoverLegacyFromCard(uint8_t) { return RECOVER_NO_CARD; }
 inline int RecoverAllLegacyFromCard() { return -1; }
 inline bool SnapshotBank(uint8_t, const uint8_t *, uint32_t, uint32_t) { return false; }
 inline bool SaveCalBackup(uint8_t, const uint8_t *, uint32_t, uint32_t) { return false; }
+inline bool VerifyCalBackup(uint8_t, uint32_t, uint32_t) { return false; }
 inline bool SnapshotInfo(uint8_t *, uint32_t *) { return false; }
 inline bool LoadSnapshot(uint8_t, uint8_t *, uint32_t, uint32_t *) { return false; }
 inline void DiscardSnapshot() {}

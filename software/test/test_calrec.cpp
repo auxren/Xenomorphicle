@@ -251,7 +251,47 @@ static void test_target_residual() {
   CHECK(CalRec::ResidualCents(1000, 1200.0, c) == want);
 }
 
+// S5: during a run the console's raw sender passes CAL frames only, never PUT or COMMIT.
+static void test_console_gate_during_run() {
+  // READ (0x18) status of 0x28: a cal frame, allowed
+  uint8_t rd[8] = {7, 0x00, CalRec::kMaster, CalRec::kCmdRead, 0x28, CalRec::kMagic, 2, 0};
+  CHECK(CalRec::ConsoleFrameAllowedDuringRun(rd, 8));
+  // PUT and COMMIT to any address / with any magic: refused
+  for (uint8_t addr : {0x00, 0x28, 0x29, 0x2B, 0x5C, 0xFF}) {
+    for (uint8_t magic : {CalRec::kMagic, uint8_t(0x00), uint8_t(0x5A)}) {
+      uint8_t put[14] = {13, 0x00, CalRec::kMaster, CalRec::kCmdPut, addr, magic, 0,
+                         1, 2, 3, 4, 5, 6, 7};
+      CHECK(!CalRec::ConsoleFrameAllowedDuringRun(put, 14));
+      uint8_t cm[9] = {8, 0x00, CalRec::kMaster, CalRec::kCmdCommit, addr, magic, 30, 0x12, 0x34};
+      CHECK(!CalRec::ConsoleFrameAllowedDuringRun(cm, 9));
+      uint8_t cm10[10] = {9, 0x00, CalRec::kMaster, CalRec::kCmdCommit, addr, magic, 30, 0x12, 0x34, 1};
+      CHECK(!CalRec::ConsoleFrameAllowedDuringRun(cm10, 10));
+    }
+  }
+  // a wrong length byte or a non-cal frame (QUERY, preset save broadcast): refused too
+  uint8_t q[5] = {4, 0x5C, 0x22, 0x1A, 0xFF};
+  CHECK(!CalRec::ConsoleFrameAllowedDuringRun(q, 5));
+  uint8_t bad[8] = {9, 0x00, CalRec::kMaster, CalRec::kCmdRead, 0x28, CalRec::kMagic, 2, 0};
+  CHECK(!CalRec::ConsoleFrameAllowedDuringRun(bad, 8));
+  CHECK(!CalRec::ConsoleFrameAllowedDuringRun(nullptr, 8));
+  CHECK(!CalRec::ConsoleFrameAllowedDuringRun(rd, 3));
+}
+
+// The 259e clamps its corrected code at 0x7FFF, one count under the 9600 mV target
+// (32768): the clamped residual there hides a positive error, the unclamped shows it.
+static void test_unclamped_residual() {
+  const CalRec::Channel c = {0x9041, 30};
+  const uint16_t raw = 58400;
+  CHECK(CalRec::Apply259e(raw, c.gain, c.offset) == 0x7FFF);
+  CHECK(CalRec::ResidualCents(raw, 9600.0, c) < 0.3);
+  CHECK(CalRec::ResidualCentsUnclamped(raw, 9600.0, c) > 20.0);
+  // in range the two are identical
+  CHECK(CalRec::ResidualCentsUnclamped(1000, 1200.0, c) == CalRec::ResidualCents(1000, 1200.0, c));
+}
+
 int main() {
+  test_console_gate_during_run();
+  test_unclamped_residual();
   test_fixture();
   test_frame_allowlist_rejects();
   test_reply_edges();

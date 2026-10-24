@@ -106,6 +106,12 @@ uint16_t Apply259e(uint16_t x, uint16_t gain, int16_t offset) {
   return (uint16_t)v;
 }
 
+bool ConsoleFrameAllowedDuringRun(const uint8_t *f, uint8_t n) {
+  if (!f || n < 4) return false;
+  if (f[3] == kCmdPut || f[3] == kCmdCommit) return false;  // whatever the address or magic
+  return FrameAllowed(f, n);
+}
+
 double TargetCounts(double mv) { return mv * 4096.0 / 1200.0; }
 
 FitError Fit259e(const FitPoint *p, int n, Channel *out) {
@@ -137,6 +143,11 @@ FitError Fit259e(const FitPoint *p, int n, Channel *out) {
 
 double ResidualCents(uint16_t raw, double mv, const Channel &c) {
   return ((double)Apply259e(raw, c.gain, c.offset) - TargetCounts(mv)) * 1200.0 / 4096.0;
+}
+
+double ResidualCentsUnclamped(uint16_t raw, double mv, const Channel &c) {
+  const double v = (double)(int32_t)(((uint32_t)raw * c.gain) >> 16) + (double)c.offset;
+  return (v - TargetCounts(mv)) * 1200.0 / 4096.0;
 }
 
 }  // namespace CalRec

@@ -11,6 +11,8 @@
 # 4); rec60hex is the 30-byte record as 60 upper-case hex digits; n is the
 # number of fresh ADC samples in raw_median. result is OK, a fail name, or
 # CANCELLED_<commit result> when a cancel came after the COMMIT went out.
+# 259BK is one preset-backup attempt: addr, the bytes the bus master moved (990
+# for a good bank), the CRC-32 of the stored bank (8 hex digits) and OK or why not.
 # The RETRY and REREAD lines are the meter rule's (MeterMeasure), as in a Self
 # run; their headers are calr_lines.txt's.
 CALR#,version=2
@@ -19,6 +21,7 @@ CALR#,259PT,ch,mv,meter_mv,raw_median,n
 CALR#,259FIT,ch,gain_hex,offset,worst_cents,nonlin_cents
 CALR#,259REC,addr,rec60hex
 CALR#,259END,result
+CALR#,259BK,addr,bytes,crc_hex,result
 CALR#,RETRY,scpi,attempt
 CALR#,REREAD,out,target_mv,code,spread_mv
 CALR,259START,29
@@ -26,5 +29,6 @@ CALR,259PT,0,4800,4800.123,29076,8
 CALR,259FIT,1,8F2C,-120,-1.23,0.45
 CALR,259REC,28,434C015902000102030405060708000268FAC1808F2CFF889041000FB49E
 CALR,259END,COMMIT_UNKNOWN
+CALR,259BK,28,990,1A2B3C4D,OK
 CALR,RETRY,READ?,2
 CALR,REREAD,1,3600,19661,0.734

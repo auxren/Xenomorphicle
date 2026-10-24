@@ -160,6 +160,7 @@ CAL259E_FIELDS = {
     "259FIT": ("ch", "gain_hex", "offset", "worst_cents", "nonlin_cents"),
     "259REC": ("addr", "rec60hex"),
     "259END": ("result",),
+    "259BK": ("addr", "bytes", "crc_hex", "result"),
 }
 _ALL_FIELDS = dict(CALR_FIELDS, **CAL259E_FIELDS)
 _CALR_KIND = {"ms": "i", "out": "i", "in": "i", "k": "i", "target_mv": "i", "code": "i",
@@ -171,7 +172,8 @@ _CALR_KIND = {"ms": "i", "out": "i", "in": "i", "k": "i", "target_mv": "i", "cod
               "points": "i", "attempt": "i", "can_save": "i", "out_pass": "h", "in_pass": "h",
               "moved": "h", "own_delta_raw": "f", "crossed": "h", "missing": "h",
               "addr": "h", "ch": "i", "meter_mv": "f", "raw_median": "i", "n": "i",
-              "gain_hex": "h", "offset": "i", "worst_cents": "f", "nonlin_cents": "f"}
+              "gain_hex": "h", "offset": "i", "worst_cents": "f", "nonlin_cents": "f",
+              "bytes": "i", "crc_hex": "h"}
 
 
 def parse_calr(line):
