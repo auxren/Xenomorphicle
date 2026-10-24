@@ -1,6 +1,6 @@
 # Cal Routine: closed-loop self-calibration with a USB bench DMM — design
 
-Date: 2026-10-23. Status: approved by Oren 2026-10-23 (§6.5/§6.6 amended at approval: all voltage readers calibrated, not only pitch).
+Date: 2026-10-23. Status: approved by Oren 2026-10-23 (§6.5/§6.6 amended at approval: all voltage readers calibrated, not only pitch; §6.3 sweep, §6.4 multi-point inputs and §6.4a storage added after approval, at Oren's request).
 Paths are relative to `software/src/` unless they start with `docs/`, `tools/` or `software/`.
 "*Claude's call*" marks a decision Oren did not make; everything else is his.
 
@@ -42,8 +42,6 @@ interrupt IN). Oren has used it on this bench before; ground isolation is not a 
   can be added.
 - Bus Buccaneer / SysEx control of the meter. Later work.
 - Replacing Setup / Calibrate. It stays as the manual fallback for owners with no USB meter.
-- Correcting input nonlinearity. Inputs get gain + offset; the extra points measure the
-  nonlinearity and report it.
 - Meters other than USBTMC on the host jack (no serial/RS-232, no LAN from the module).
 
 ## 4. Anti-goals (failure even if it "works")
@@ -146,37 +144,63 @@ nominal ≈ 5461 codes/V for the first), re-measure; stop when within the builde
 median and spread; a spread above a threshold fails the point as a loose lead. Checks before the
 table is accepted: monotone across the 11 entries; no entry pinned at 0 or 65535 (an entry the DAC
 cannot reach — possibly 12 V — is flagged, kept at the rail and reported, not silently clipped:
-*Claude's call*); slope within a sane window of nominal. **Verify pass:** measure the half-way
-points (0.6, 1.8, … 11.4 V) through the normal pitch-to-code path and report the residual as the
-output's figure. Expected run time is a few minutes for all 8 outputs (*Claude's estimate*).
+*Claude's call*); slope within a sane window of nominal. **Verify sweep** (Oren, 2026-10-23: closed loop
+means a sweep or many points, in case the response is not linear): after the 11 nodes are set, measure
+about 4 points between each pair of nodes (≈ 0.3 V apart, 0–12 V) through the normal pitch-to-code
+path. The worst residual is the output's figure, and any point over 1 mV is named on the results
+screen with its voltage. The 11 nodes are what the table can store; the sweep makes a bend the table
+cannot follow visible rather than assumed away. Expected run time is a few minutes for all 8 outputs (*Claude's estimate*).
 
 On save, any valid autotune table is reset (`autotune_calibration_data.Reset()`) so the new base
 table takes effect on every channel (*Claude's call*; the tables are RAM-only anyway).
 
-### 6.4 Input calibration (per input, against the calibrated output)
+### 6.4 Input calibration (per input, against the calibrated output) — multi-point
 The inputs are unipolar: each is a 0–4095 window with 0 V at the rail (raw 4095) and roughly 12 V at
 the other end, ≈ 2.93 mV per count (`docs/CV-Meter.md`, "Input range"). Nothing below 0 V can be
-read, so the 0–12 V source covers the whole usable span. The source output steps through about 5
-voltages inside the overlap of the output's 0–12 V and the input's `InputRange`, kept clear of both
-rails (lowest point ≥ ≈ 0.6 V, since 0 V is the rail; builder's choice), settle + average as the `Q`
-flow does. The meter is not in the loop for part 2 (Oren: "closed loop calibrate them to the
-calibrated output voltages"); a patch cable into a high-impedance input adds no measurable error, and
-the NOISY / FLAT / SIGN verdicts catch a bad patch. **Least-squares
-gain + offset** over the points (*Claude's call*: uses every point, unlike `Q`'s 2-fit + 1-verify),
-with the per-point residual as the nonlinearity figure. The `Q` flow's verdicts (RAIL, NOISY, FLAT,
-SIGN, GAIN, RESIDUAL) apply. Stored in the existing `ICA1` page format (gain, offset_mv, verify,
-source output), so no storage change; `source_output` records the output used.
+read, so the 0–12 V source covers the whole usable span. The meter is not in the loop for part 2
+(Oren: "closed loop calibrate them to the calibrated output voltages"). A patch cable into a
+high-impedance input adds no measurable error, and the NOISY / FLAT / SIGN verdicts catch a bad
+patch.
+
+**Sweep** (Oren, 2026-10-23): the source output steps through about 20 points, every ≈ 0.6 V from
+≈ 0.6 V up to the top of the input's `InputRange`, kept clear of both rails. At each point it settles
+and averages as the `Q` flow does. From these points:
+- a **correction curve** per input: the measured points resampled onto **17 breakpoints evenly
+  spaced in raw counts** (raw 0, 256, … 4096), each holding the true millivolts at that raw value.
+  The ISR finds the segment as `raw >> 8` and does one multiply-add; there is no search
+  (*Claude's call*; the builder may choose a different power-of-two spacing).
+- a **least-squares gain + offset** over the same points, stored in the existing `ICA1` page format
+  (gain, offset_mv, verify = worst curve-vs-line deviation, source output) as the EEPROM fallback.
+Verdicts: the `Q` flow's RAIL, NOISY, FLAT, SIGN and GAIN, plus MONOTONIC across the sweep; the
+residual of the curve at points it was not built from (alternate points held out, or a second pass;
+builder's call) is the input's figure.
 
 The flow logic and the maths move out of the `PRINT_DEBUG`-only `CvMeter` into code compiled in
 every env (`CvMeterMath`-style, hardware-free and host-tested); the console `Q` command keeps
 working on top of it.
 
+### 6.4a Storing the input curves — never lost
+EEPROM is full, so the curves (8 × 17 points, a few hundred bytes) live in the flash filesystem
+(`PhzConfig` / LittleFS), with these protections (*Claude's calls*, under Oren's rule "as long as it
+isn't at risk of ever getting lost"):
+1. The **output tables stay in EEPROM** (the calibration page); only input curves are in a file.
+2. **EEPROM fallback:** the `ICA1` line fit is always written too. A missing or bad curve file →
+   inputs use the line fit, never uncalibrated.
+3. **Two copies** (A/B files), each with magic, version, sequence number and CRC. Boot uses the
+   newest valid one; a save writes the older slot, so a power cut or torn write can only damage the
+   copy being written. Writes go through `OC::RT::PersistenceWindow` (`docs/Timing-Budget.md`).
+4. **Reformat survival:** `PhzConfig` reformats when the partition will not mount
+   (`PhzConfig.cpp:150-169`). Its layout migration carries `GLOBALS.*` across a format
+   (`PhzConfig.cpp:~179-183`); the curve files join that list. The unrecoverable case is a partition
+   that is already unreadable, and there layer 2 still holds.
+5. **Export:** the curves are included in the Backup app's SysEx dump and restore.
+
 ### 6.5 All apps use the input calibration
-At load and after save, each valid `ICA1` channel is turned into a small **integer** per-channel
-pitch scale and offset held in DTCM (the floats stay out of the ISR). In `IO::Read`, a calibrated
-channel's `pitch_values` comes from that scale + offset in place of `value_to_pitch` with the shared
-scale; uncalibrated or invalid channels run the existing code unchanged. Cost: one multiply and add
-per calibrated channel per tick.
+At load and after save, each calibrated input is turned into a small **integer** per-channel
+table held in DTCM: the 17-point curve when its file is valid, else 2 points from the `ICA1` line
+fit (the floats stay out of the ISR). In `IO::Read`, a calibrated channel's values come from that
+table in place of the shared offset and scale. Uncalibrated or invalid channels run the existing code
+unchanged. Cost: one shift, one multiply and one add per calibrated channel per tick.
 
 **`cv.values` is calibrated too** (Oren, 2026-10-23: apps that show the voltage they send or
 receive must show the calibrated one). `cv.values` and `cv.pitch_values` come from the same
