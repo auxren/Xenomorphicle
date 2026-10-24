@@ -125,7 +125,7 @@ constexpr uint8_t Cal259eFlow::kFirstAddr, Cal259eFlow::kLastAddr;
 constexpr int32_t Cal259eFlow::kIdLowMv, Cal259eFlow::kIdHighMv;
 constexpr uint16_t Cal259eFlow::kNominalGain;
 constexpr double Cal259eFlow::kGainTolerance, Cal259eFlow::kPatchTolMv, Cal259eFlow::kVerifyCents;
-constexpr uint32_t Cal259eFlow::kAdcTimeoutMs;
+constexpr uint32_t Cal259eFlow::kAdcTimeoutMs, Cal259eFlow::kBackupTimeoutMs;
 
 const int32_t Cal259eFlow::kPointMv[Cal259eFlow::kPoints] = {
   1200, 2400, 3600, 4800, 6000, 7200, 8400, 9600,  // fit
@@ -276,6 +276,7 @@ C259_CODE void Cal259eFlow::Begin(MeterPort &meter, OutputPort &out, Clock &cloc
   cancel_pending_ = false;
   memset(rec_, 0, sizeof(rec_));
   memset(&result_, 0, sizeof(result_));
+  memset(pts_, 0, sizeof(pts_));
   for (int i = 0; i < L::HeaderCount(); ++i) Log(L::Header(i));
   if (!self_cal_present) {  // the output table was not meter-set: refuse
     fail_ = F_NO_SELF_CAL;
@@ -352,6 +353,7 @@ C259_CODE void Cal259eFlow::ConfirmWrite() {
   now_ = clock_->Ms();
   compact_ = false;
   SetStage(Stage::Backup);
+  backup_t0_ = now_;
   if (!backup_->Begin(target_)) Fail(F_BACKUP);
 }
 
@@ -360,6 +362,7 @@ C259_CODE void Cal259eFlow::ConfirmCompact() {
   now_ = clock_->Ms();
   compact_ = true;  // a fresh backup first, then the record again and COMMIT flags 1
   SetStage(Stage::Backup);
+  backup_t0_ = now_;
   if (!backup_->Begin(target_)) Fail(F_BACKUP);
 }
 
@@ -381,7 +384,11 @@ C259_CODE void Cal259eFlow::Cancel() {
   BusTarget(target_ ? target_ : kFirstAddr);  // drops a READ, PUT or un-ACKed COMMIT
   sub_ = S_NONE;
   fail_ = F_CANCELLED;
-  C259_LOG(End, FailName(fail_));
+  // After a COMMIT verdict (Verify, ConfirmCompact, the compaction backup or
+  // PUT) the module's flash may hold the record: say which verdict it was.
+  // record() and result() keep the record put.
+  if (commit_rc_ != 0) C259_LOG(End, Cal259eCancelledName(commit_rc_));
+  else C259_LOG(End, FailName(fail_));
   SetStage(Stage::Failed);
 }
 
@@ -564,8 +571,7 @@ C259_CODE void Cal259eFlow::TickMeasure() {
   if (r == 0) return;
   if (r < 0) { Fail(F_BUS); return; }
   const CalRec::FitPoint p = {adc_median_, meter_mv_};
-  if (pt_ < kFitPoints) fit_pts_[pt_] = p;
-  else ver_pts_[pt_ - kFitPoints] = p;
+  pts_[ch_][pt_] = p;
   C259_LOG(Point, ch_, mv, meter_mv_, adc_median_, kAdcSamples);
   if (++pt_ < kPoints) {
     StartPoint();
@@ -578,23 +584,25 @@ C259_CODE void Cal259eFlow::FinishChannel() {
   ReleaseHolds();
   sub_ = S_NONE;
   CalRec::Channel c;
-  if (CalRec::Fit259e(fit_pts_, kFitPoints, &c) != CalRec::FIT_OK) {
+  const CalRec::FitPoint *fit_pts = pts_[ch_], *ver_pts = pts_[ch_] + kFitPoints;
+  if (CalRec::Fit259e(fit_pts, kFitPoints, &c) != CalRec::FIT_OK) {
     Fail(F_FIT);
     return;
   }
   double nonlin = 0.0, worst = 0.0;
   for (int i = 0; i < kFitPoints; ++i) {
-    const double r = CalRec::ResidualCents(fit_pts_[i].raw, fit_pts_[i].mv, c);
+    const double r = CalRec::ResidualCents(fit_pts[i].raw, fit_pts[i].mv, c);
     if (fabs(r) > nonlin) nonlin = fabs(r);
   }
   for (int i = 0; i < kVerifyPoints; ++i) {
-    const double r = CalRec::ResidualCents(ver_pts_[i].raw, ver_pts_[i].mv, c);
+    const double r = CalRec::ResidualCents(ver_pts[i].raw, ver_pts[i].mv, c);
     if (fabs(r) > fabs(worst)) worst = r;
   }
-  C259_LOG(Fit, ch_, c, worst, nonlin);
   result_.ch[ch_] = c;
   result_.worst_verify_cents[ch_] = float(worst);
   result_.nonlin_cents[ch_] = float(nonlin);
+  // Logged from result(), so the line and what the app shows are the same numbers.
+  C259_LOG(Fit, ch_, c, double(result_.worst_verify_cents[ch_]), double(result_.nonlin_cents[ch_]));
   if (fabs(double(c.gain) - double(kNominalGain)) > kGainTolerance * double(kNominalGain)) {
     Fail(F_SCALE);
     return;
@@ -617,7 +625,10 @@ C259_CODE void Cal259eFlow::FinishChannel() {
 
 C259_CODE void Cal259eFlow::TickBackup() {
   const int rc = backup_->Poll();
-  if (rc == 0) return;
+  if (rc == 0) {
+    if (now_ - backup_t0_ >= kBackupTimeoutMs) Fail(F_BACKUP);  // abandoned, nothing sent
+    return;
+  }
   if (rc < 0) { Fail(F_BACKUP); return; }
   if (compact_) StartPut();
   else StartWrite();

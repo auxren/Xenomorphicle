@@ -56,7 +56,9 @@
 // ---------------------------------------------------------------------------
 
 // A preset backup of one 259e (the master BACKUP, console 'm'), stored by the
-// glue. Begin false: could not start (the flow fails F_BACKUP).
+// glue. Begin false: could not start (the flow fails F_BACKUP). The port must
+// tolerate being abandoned mid-dump: a Cancel, or the flow's give-up after
+// kBackupTimeoutMs, just stops polling it (there is no abort call).
 struct BackupPort {
   virtual bool Begin(uint8_t addr) = 0;
   virtual int Poll() = 0; /* 0 busy, 1 saved, <0 failed */
@@ -110,6 +112,7 @@ class Cal259eFlow {
   static constexpr double kVerifyCents = 3.0;
   static constexpr int kAdcSamples = 8;           // fresh samples per ADC median
   static constexpr uint32_t kAdcTimeoutMs = 2000; // ... gathered within this, else F_BUS
+  static constexpr uint32_t kBackupTimeoutMs = 60000;  // backup still busy: F_BACKUP, nothing sent
 
   // Starts a run (any earlier one is dropped and output A released). The CALR#
   // headers are logged first.
@@ -119,6 +122,8 @@ class Cal259eFlow {
   // Warmup: confirmed. PromptPatch: patched. Results: on to Confirm.
   void Continue();
   // Any stage: see the header comment. Done / Failed / NoSelfCal: back to Idle.
+  // Once a COMMIT verdict came (commit_result() != 0: Verify, ConfirmCompact,
+  // the compaction backup and PUT), the end line names it: CANCELLED_<result>.
   void Cancel();
   // Confirm only: back up, then write.
   void ConfirmWrite();
@@ -134,7 +139,12 @@ class Cal259eFlow {
   int point_index() const { return pt_; }
   int32_t point_mv() const { return pt_ >= 0 && pt_ < kPoints ? kPointMv[pt_] : 0; }
   uint8_t candidates_mask() const;              // bit i: 0x28 + i answered the scan
+  // Channel ch's measured points (read-only, for the screen and tests): the
+  // kFitPoints fit points then the kVerifyPoints verify points, in kPointMv
+  // order; {raw ADC median, meter median mV}. Valid up to the point measured.
+  const CalRec::FitPoint *points(int ch) const { return pts_[ch & 1]; }
   // The COMMIT's Cal259eBus::Tick result (1 ok, < 0 Error), 0 while none came.
+  // A Cancel once it is non-zero logs CALR,259END,CANCELLED_<result>.
   int commit_result() const { return commit_rc_; }
   // A Cancel arrived after the COMMIT frame went out: waiting for its status.
   bool cancel_pending() const { return cancel_pending_; }
@@ -217,13 +227,13 @@ class Cal259eFlow {
 
   // measure
   int pt_ = -1;
-  CalRec::FitPoint fit_pts_[kFitPoints] = {};
-  CalRec::FitPoint ver_pts_[kVerifyPoints] = {};
+  CalRec::FitPoint pts_[2][kPoints] = {};  // per channel: fit points, then verify points
   double meter_mv_ = 0.0;
 
   // ADC sampling
   uint8_t adc_ch_ = 0;
   uint32_t adc_t0_ = 0;
+  uint32_t backup_t0_ = 0;
   bool adc_base_ = false;
   uint8_t adc_last_n_ = 0;
   int adc_k_ = 0;

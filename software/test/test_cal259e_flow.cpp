@@ -20,11 +20,13 @@
 #include <vector>
 
 #include "../src/Cal259eFlow.h"
+#include "../src/CvMeterMath.h"
 #include "fake_meter.h"
 #include "sim259e.h"
 
 typedef Cal259eFlow::Stage Stage;
 typedef Cal259eFlow F;
+namespace CM = CvMeterMath;
 
 static int checks = 0, fails = 0;
 #define CHECK(cond) do { \
@@ -224,6 +226,83 @@ static void install(Sim259e &m, uint16_t seq, uint8_t id0) {
 
 // ---- tests -----------------------------------------------------------------------
 
+// The run's 259 lines checked by value, not only by field count:
+//   259FIT: gain, offset and both cents fields are result()'s, format-exact,
+//           and the fit recomputed from points() gives the same channel;
+//   259REC: the hex is record(), which is what the module now holds;
+//   259PT:  one line per point, in kPointMv order, with points()'s values, and
+//           those values agree with the sim: the meter median is the held
+//           output's voltage, the raw median is (mv + err) * k within the noise.
+static std::vector<std::string> split(const std::string &l) {
+  std::vector<std::string> f;
+  size_t a = 0;
+  for (;;) {
+    const size_t e = l.find(',', a);
+    f.push_back(l.substr(a, e == std::string::npos ? std::string::npos : e - a));
+    if (e == std::string::npos) return f;
+    a = e + 1;
+  }
+}
+static std::string fixed(double v, int d) {
+  char t[32];
+  CM::FormatFixed(t, sizeof(t), CM::ScaleRound(v, d), d);
+  return t;
+}
+static void check_run_lines_by_value(Rig &r) {
+  const F::Result &res = r.flow.result();
+  int fits = 0, recs = 0, pts[2] = {0, 0};
+  for (const auto &l : g_log) {
+    const auto f = split(l);
+    if (f.size() < 2 || f[0] != "CALR") continue;
+    if (f[1] == "259FIT") {
+      CHECK(f.size() == 7);
+      const int c = std::stoi(f[2]);
+      CHECK(c == fits);
+      ++fits;
+      char g[8];
+      snprintf(g, sizeof(g), "%04X", unsigned(res.ch[c].gain));
+      CHECK(f[3] == g);
+      CHECK(f[4] == std::to_string(res.ch[c].offset));
+      CHECK(f[5] == fixed(res.worst_verify_cents[c], 2));
+      CHECK(f[6] == fixed(res.nonlin_cents[c], 2));
+      CalRec::Channel again;
+      CHECK(CalRec::Fit259e(r.flow.points(c), F::kFitPoints, &again) == CalRec::FIT_OK);
+      CHECK(again.gain == res.ch[c].gain && again.offset == res.ch[c].offset);
+    } else if (f[1] == "259REC") {
+      ++recs;
+      CHECK(f.size() == 4 && f[2] == "28");
+      std::string hex;
+      char h[3];
+      for (int i = 0; i < 30; ++i) { snprintf(h, sizeof(h), "%02X", r.flow.record()[i]); hex += h; }
+      CHECK(f[3] == hex);
+      CHECK(memcmp(r.flow.record(), r.a.active, 30) == 0);
+      uint8_t enc[30];
+      CalRec::Record rec;
+      CHECK(CalRec::Decode259e(r.flow.record(), 30, &rec));
+      CHECK(rec.ch[0].gain == res.ch[0].gain && rec.ch[1].offset == res.ch[1].offset);
+      CalRec::Encode259e(rec, enc);
+      CHECK(memcmp(enc, r.flow.record(), 30) == 0);
+    } else if (f[1] == "259PT") {
+      CHECK(f.size() == 7);
+      const int c = std::stoi(f[2]);
+      const int i = pts[c & 1]++;
+      if (i >= F::kPoints) { CHECK(false); continue; }
+      const CalRec::FitPoint &p = r.flow.points(c)[i];
+      const int32_t mv = F::kPointMv[i];
+      CHECK(f[3] == std::to_string(mv));
+      CHECK(f[4] == fixed(p.mv, 3));
+      CHECK(f[5] == std::to_string(p.raw));
+      CHECK(f[6] == "8");
+      // Independent of the flow: the sim's own model.
+      const uint16_t code = r.outs.CodeForMv(0, r.outs.stored[0], mv);
+      CHECK(std::fabs(p.mv - r.dac.Mv(0, code)) < 0.1);
+      const double raw = (p.mv + r.a.adc_err_mv[c]) * r.a.adc_k[c];
+      CHECK(std::fabs(double(p.raw) - raw) <= 3.0);
+    }
+  }
+  CHECK(fits == 2 && recs == 1 && pts[0] == F::kPoints && pts[1] == F::kPoints);
+}
+
 static void good_unit_passes() {
   Rig r;
   good_adc(r.a);
@@ -273,6 +352,7 @@ static void good_unit_passes() {
     CHECK(r.meter.sent[size_t(i)] == CalRoutine::kMeterSetup[i]);
   // Each point: throwaway + 3 READ? (no noise beyond the rule).
   CHECK(r.meter.reads == 24 * 4);
+  check_run_lines_by_value(r);
 }
 
 static void scale_off_fails() {
@@ -547,6 +627,58 @@ static void cancel_every_stage() {
     CHECK(!logged("CALR,259END,CANCELLED"));
   }
   {
+    // After a COMMIT verdict: the end line names it, no further COMMIT goes
+    // out, and record() / result() still describe what was put.
+    struct After {
+      const char *name;
+      bool full;  // slots full: the compaction path
+      std::function<bool(Rig &)> at;
+      const char *end;
+      int commits;
+    };
+    const std::vector<After> after = {
+      {"Verify", false, [](Rig &r) { return r.flow.stage() == Stage::Verify; }, "CALR,259END,CANCELLED_OK", 1},
+      {"ConfirmCompact", true, [](Rig &r) { return r.flow.stage() == Stage::ConfirmCompact; },
+       "CALR,259END,CANCELLED_NO_SLOT", 1},
+      {"CompactBackup", true, [](Rig &r) {
+         if (r.flow.stage() == Stage::ConfirmCompact) r.flow.ConfirmCompact();
+         return r.flow.stage() == Stage::Backup && r.backup.begins == 2; },
+       "CALR,259END,CANCELLED_NO_SLOT", 1},
+      {"CompactPut", true, [](Rig &r) {
+         if (r.flow.stage() == Stage::ConfirmCompact) r.flow.ConfirmCompact();
+         return r.a.count[CalRec::kCmdPut] == 6; },
+       "CALR,259END,CANCELLED_NO_SLOT", 1},
+    };
+    for (const After &c : after) {
+      Rig r;
+      good_adc(r.a);
+      if (c.full) {
+        install(r.a, 7, 0x31);
+        r.a.slots_used = 8;
+      }
+      r.backup.delay_polls = 50;
+      r.Begin();
+      const bool reached = r.Run([&] { return c.at(r); });
+      CHECK(reached);
+      if (!reached) { printf("  case %s not reached (stage %s)\n", c.name, F::StageName(r.flow.stage())); continue; }
+      uint8_t put[30];
+      memcpy(put, r.flow.record(), 30);
+      const uint16_t g0 = r.flow.result().ch[0].gain;
+      const int puts = r.a.count[CalRec::kCmdPut];
+      r.flow.Cancel();
+      CHECK(r.outs.mask == 0);
+      r.Idle(20000);
+      const bool ok = r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_CANCELLED &&
+                      logged(c.end) && !logged("CALR,259END,CANCELLED") &&
+                      r.a.count[CalRec::kCmdCommit] == c.commits && r.a.count[CalRec::kCmdPut] == puts;
+      CHECK(ok);
+      if (!ok) printf("  after-commit case %s: stage %s commits %d last %s\n", c.name,
+                      F::StageName(r.flow.stage()), r.a.count[CalRec::kCmdCommit], g_log.back().c_str());
+      CHECK(memcmp(put, r.flow.record(), 30) == 0 && r.flow.result().ch[0].gain == g0);
+      CHECK(r.flow.result().valid_mask == 3);
+    }
+  }
+  {
     // NoSelfCal and Done: Cancel goes back to Idle and sends nothing.
     Rig r;
     r.Begin(false);
@@ -554,6 +686,21 @@ static void cancel_every_stage() {
     r.flow.Cancel();
     CHECK(r.flow.stage() == Stage::Idle && r.a.log.empty());
   }
+}
+
+static void backup_times_out() {
+  Rig r;
+  good_adc(r.a);
+  r.backup.delay_polls = 1 << 30;  // Poll returns 0 forever
+  r.Begin();
+  CHECK(r.Run([&] { return r.flow.stage() == Stage::Backup; }));
+  const uint32_t t0 = r.clk.Abs();
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_BACKUP);
+  const uint32_t took = r.clk.Abs() - t0;
+  CHECK(took >= F::kBackupTimeoutMs && took <= F::kBackupTimeoutMs + 5);
+  CHECK(r.a.count[CalRec::kCmdPut] == 0 && r.a.count[CalRec::kCmdCommit] == 0);
+  CHECK(logged("CALR,259END,BACKUP"));
 }
 
 static void preconditions() {
@@ -809,6 +956,7 @@ int main() {
   unit_id_kept();
   slots_full_needs_second_confirm();
   cancel_every_stage();
+  backup_times_out();
   preconditions();
   meter_lost_fails();
   verify_fails();
