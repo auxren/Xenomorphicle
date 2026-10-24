@@ -1,5 +1,15 @@
 #include "UsbTmc.h"
 
+// Firmware: run from flash, not ITCM. Nothing here is on a hot path, and the
+// T41 images are close to their next 32 KB ITCM step (each step is taken out
+// of DTCM). A bare section attribute rather than FLASHMEM, so this file keeps
+// no Arduino dependency and the host suite builds it unchanged.
+#if defined(__IMXRT1062__)
+#define USBTMC_CODE __attribute__((section(".flashmem")))
+#else
+#define USBTMC_CODE
+#endif
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -7,7 +17,7 @@ namespace UsbTmc {
 
 namespace {
 
-void PutHeader(uint8_t *h, uint8_t id, uint8_t tag, uint32_t size) {
+USBTMC_CODE void PutHeader(uint8_t *h, uint8_t id, uint8_t tag, uint32_t size) {
   h[0] = id;
   h[1] = tag;
   h[2] = (uint8_t)~tag;
@@ -22,7 +32,7 @@ void PutHeader(uint8_t *h, uint8_t id, uint8_t tag, uint32_t size) {
 char Up(char c) { return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c; }
 
 // Case-insensitive match of [s, s+n) against an uppercase literal.
-bool EqN(const char *s, size_t n, const char *lit) {
+USBTMC_CODE bool EqN(const char *s, size_t n, const char *lit) {
   if (strlen(lit) != n) return false;
   for (size_t i = 0; i < n; i++)
     if (Up(s[i]) != lit[i]) return false;
@@ -31,7 +41,7 @@ bool EqN(const char *s, size_t n, const char *lit) {
 
 // Strictly [+-]digits[.digits][E[+-]digits] over [s, s+n), at least one
 // mantissa digit. No hex, nan, inf or stray characters for strtod to accept.
-bool IsNumber(const char *s, size_t n) {
+USBTMC_CODE bool IsNumber(const char *s, size_t n) {
   size_t i = 0;
   if (i < n && (s[i] == '+' || s[i] == '-')) i++;
   size_t digits = 0;
@@ -74,7 +84,7 @@ const Entry kEntries[] = {
 };
 
 // Does head [h, h+hn) match the entry's path (keywords short or long)?
-bool HeadMatches(const char *h, size_t hn, const char *path) {
+USBTMC_CODE bool HeadMatches(const char *h, size_t hn, const char *path) {
   const char *p = path;
   size_t i = 0;
   for (;;) {
@@ -117,7 +127,7 @@ bool HeadMatches(const char *h, size_t hn, const char *path) {
   }
 }
 
-bool ArgOk(Arg a, const char *s, size_t n) {
+USBTMC_CODE bool ArgOk(Arg a, const char *s, size_t n) {
   switch (a) {
     case kNumberOrKeyword:
       return IsNumber(s, n) || EqN(s, n, "AUTO") || EqN(s, n, "MIN") ||
@@ -132,7 +142,7 @@ bool ArgOk(Arg a, const char *s, size_t n) {
 
 }  // namespace
 
-size_t BuildMsgOut(uint8_t tag, const char *scpi, uint8_t *out, size_t cap) {
+USBTMC_CODE size_t BuildMsgOut(uint8_t tag, const char *scpi, uint8_t *out, size_t cap) {
   if (!scpi || !out) return 0;
   size_t n = strlen(scpi);
   if (n > 0xFFFFFFFFu - 3 - kHeaderLen) return 0;
@@ -145,12 +155,12 @@ size_t BuildMsgOut(uint8_t tag, const char *scpi, uint8_t *out, size_t cap) {
   return total;
 }
 
-size_t BuildRequestIn(uint8_t tag, uint32_t max_len, uint8_t *out) {
+USBTMC_CODE size_t BuildRequestIn(uint8_t tag, uint32_t max_len, uint8_t *out) {
   PutHeader(out, kRequestDevDepMsgIn, tag, max_len);
   return kHeaderLen;
 }
 
-bool ParseMsgIn(const uint8_t *buf, size_t len, uint8_t expect_tag,
+USBTMC_CODE bool ParseMsgIn(const uint8_t *buf, size_t len, uint8_t expect_tag,
                 const uint8_t **payload, uint32_t *payload_len, bool *eom) {
   if (!buf || len < kHeaderLen) return false;
   if (buf[0] != kRequestDevDepMsgIn) return false;
@@ -164,9 +174,9 @@ bool ParseMsgIn(const uint8_t *buf, size_t len, uint8_t expect_tag,
   return true;
 }
 
-uint8_t NextTag(uint8_t tag) { return tag >= 255 ? 1 : (uint8_t)(tag + 1); }
+USBTMC_CODE uint8_t NextTag(uint8_t tag) { return tag >= 255 ? 1 : (uint8_t)(tag + 1); }
 
-bool ScpiAllowed(const char *line) {
+USBTMC_CODE bool ScpiAllowed(const char *line) {
   if (!line) return false;
   size_t n = strlen(line);
   if (n && line[n - 1] == '\n') n--;
@@ -189,7 +199,7 @@ bool ScpiAllowed(const char *line) {
   return false;
 }
 
-bool ParseReading(const char *reply, double *volts) {
+USBTMC_CODE bool ParseReading(const char *reply, double *volts) {
   if (!reply || !volts) return false;
   size_t n = strlen(reply);
   while (n && (reply[n - 1] == '\n' || reply[n - 1] == '\r')) n--;

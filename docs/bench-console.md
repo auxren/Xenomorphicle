@@ -29,7 +29,7 @@ stray typing is harmless but will spew capture bytes.
 | `D` | toggle display redraw |
 | `L` | toggle app loop |
 | `i` | scan all I2C addresses |
-| `u` | dump USB host port device identities (VID/PID/product) + the Captain MIDI per-device profile table |
+| `u` | dump USB host port device identities (VID/PID/product), then the bench DMM line `meter: vid=XXXX pid=XXXX connected=<0\|1>` (see `e` below; `0000` when none is attached), then the Captain MIDI per-device profile table |
 | `j` | **press the panel** — then one key: `l` `r` `a` `b` `z` `x` `y` tap that button (capitals hold it), `[` `]` turn encL one detent, `-` `+` turn encR. Goes through the real UI event queue, so it reaches whatever screen is up; any other key cancels. This is how a headless bench walks the 200e app (`jl` on the module list starts a scan; `jr` picks the target) |
 
 ### Preset engine / bus
@@ -84,6 +84,33 @@ all of it from a host and logs CSV.
 | `d` | **hold an output** at a calibrated voltage until released, overriding the app on that output only: `d<o><mV>` then Enter (`o` = `1`-`8` or `a`-`h`, mV signed, e.g. `d3-1500⏎`) answers `DAC,<o>,HOLD,<mV>,<code>`; `d<o>x` releases one, `dx` all (`DAC,...,RELEASED`). RAM only |
 | `Q` | **per-input calibration** against a DAC output: `Q<i><o>` one input, `Qa<o>` inputs 1-8 in turn; the module prompts for the patch, sets three voltages itself, fits, verifies, and stores only on `y` with the residual under 10 mV. `Qp` prints it, `Qc` twice within 3 s clears it. While the dialog is open **every byte belongs to it**; any key but `y` aborts |
 | `n` | toggle the **frequency counter** on TR1: `FREQ,<ms>,<hz>,<periods>,<note>,<cents>` every 250 ms (or `FREQ,<ms>,NOSIG`). Refuses while an app owns the counter; TR1 is not a trigger input while it runs |
+
+### USB bench DMM (USBTMC)
+A USBTMC meter on the USB host port (or the host hub) is claimed by class
+(interface `FE/03`), not by VID/PID; verified with a Siglent SDM3065X
+(`F4EC:1203`). Only the allowlisted SCPI lines the calibration routine needs
+can be sent: `*IDN?`, `*CLS`, `CONF:VOLT:DC <range>`, `VOLT:DC:NPLC <n>`,
+`VOLT:DC:AZ <ON|OFF|ONCE>`, `TRIG:SOUR IMM`, `READ?`, `SYST:ERR?` (short or
+long forms, any case). Everything else, every `CAL...` above all, is refused
+before a byte reaches the meter.
+
+| key | action |
+|---|---|
+| `e` | **one SCPI line to the meter**: `e<line>⏎`, e.g. `e*IDN?⏎`, `eCONF:VOLT:DC 20⏎`, `eREAD?⏎`. Printable characters up to Enter, at most 64; any control byte cancels (`METER,ERR,cancelled ...`), and an over-long line is cancelled with the rest of it swallowed up to its Enter. A line ending in `?` waits for the reply; any other completes when the meter accepts it. Answers, printed when the query ends (the console keeps working meanwhile; 5 s timeout): `METER,DONE,<reply>` (empty for a command), `METER,REFUSED` (not on the allowlist), `METER,TIMEOUT`, or `METER,ERR,<why>` with `<why>` one of `NOT_CONNECTED`, `BUSY`, `DISCONNECT` (unplugged mid-query), `BAD_REPLY`, `OVERFLOW` (reply over 255 chars), `NO_PROGRESS`, `OUT_STUCK` (an earlier command never left the controller: replug the meter), `QUEUE`, `FRAME` |
+
+The plan called this key `U`; `U` is already the audio-graph reorder
+(`docs/Timing-Budget.md`), so the meter is on `e`.
+
+**Bench pending (Oren, with the bench owner's agreement): flash `T41_console`
+and check, then record the results here.**
+
+- [ ] `u` shows `meter: vid=F4EC pid=1203 connected=1`.
+- [ ] `e*IDN?⏎` prints `METER,DONE,Siglent Technologies,SDM3065X,...`.
+- [ ] `eCONF:VOLT:DC 20⏎` then `eREAD?⏎` returns a reading.
+- [ ] `eCAL:VAL 1⏎` prints `METER,REFUSED`.
+- [ ] Unplugging the meter mid-`READ?` gives `TIMEOUT` or `ERR`, and the console keeps working.
+- [ ] USB-MIDI on the host hub still works.
+- [ ] 10 meter replugs with no module USB drop (design gate 6).
 
 ### Files
 | key | action |

@@ -42,6 +42,7 @@
 #include "OC_ui.h"
 #include "OC_options.h"
 #include "src/drivers/display.h"
+#include "src/drivers/USBTMCDevice.h"
 #include "src/drivers/ADC/OC_util_ADC.h"
 #include "util/util_debugpins.h"
 #include "HSMIDI.h"
@@ -69,6 +70,9 @@ MIDIDevice_BigBuffer usbHostMIDI[2] {
   MIDIDevice_BigBuffer(thisUSB),
   MIDIDevice_BigBuffer(thisUSB)
 };
+// Bench DMM over USBTMC (calibration). Same rule, same reason: its member
+// arrays are EHCI DMA buffers and qTD/QH pools, so it lives here in DTCM.
+USBTMCDevice usbMeter(thisUSB);
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial8, MIDI1);
 #include "AudioIO.h"
 #include "AudioGraphOrder.h"
@@ -1001,6 +1005,53 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
 }
 #endif
 
+#if defined(ARDUINO_TEENSY41) && defined(PRINT_DEBUG)
+// Console 'e': one SCPI line to the bench DMM (USBTMCDevice). The line is
+// collected by the console reader below; the answer is printed from loop()
+// when the query finishes, so the console keeps working while it runs.
+//   METER,DONE,<reply>   METER,REFUSED   METER,TIMEOUT   METER,ERR,<why>
+static constexpr uint32_t kMeterConsoleTimeoutMs = 5000;
+static bool meter_console_wait = false;
+
+FLASHMEM static void MeterConsolePrint(USBTMCDevice::QueryState st) {
+  using QS = USBTMCDevice::QueryState;
+  switch (st) {
+    case QS::Done: {
+      const char *r = usbMeter.Reply();
+      size_t n = strlen(r);
+      while (n && (r[n - 1] == '\n' || r[n - 1] == '\r')) n--;
+      Serial.printf("METER,DONE,%.*s\n", (int)n, r);
+      break;
+    }
+    case QS::Refused: Serial.println("METER,REFUSED"); break;
+    case QS::Timeout: Serial.println("METER,TIMEOUT"); break;
+    case QS::Busy:    Serial.println("METER,ERR,BUSY"); break;
+    case QS::Idle:    Serial.println("METER,ERR,IDLE"); break;
+    case QS::Error:
+      Serial.printf("METER,ERR,%s\n",
+                    usbMeter.ErrorName()[0] ? usbMeter.ErrorName() : "ERROR");
+      break;
+  }
+}
+
+FLASHMEM static void MeterConsoleSubmit(const char *line) {
+  if (meter_console_wait) { Serial.println("METER,ERR,BUSY"); return; }
+  if (!usbMeter.BeginQuery(line, kMeterConsoleTimeoutMs)) {
+    MeterConsolePrint(usbMeter.Poll());
+    return;
+  }
+  meter_console_wait = true;
+}
+
+FLASHMEM static void MeterConsoleTask() {
+  if (!meter_console_wait) return;
+  const USBTMCDevice::QueryState st = usbMeter.Poll();
+  if (st == USBTMCDevice::QueryState::Busy) return;
+  meter_console_wait = false;
+  MeterConsolePrint(st);
+}
+#endif
+
 FLASHMEM __attribute__((noinline)) void loop() {
   using namespace OC;
   CORE::app_isr_enabled = true;
@@ -1024,6 +1075,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
 #endif
 #if defined(ARDUINO_TEENSY41)
     thisUSB.Task();
+    usbMeter.Poll();   // USBTMC meter query, never waits
 #endif
 
     // Refresh display
@@ -1094,6 +1146,9 @@ FLASHMEM __attribute__((noinline)) void loop() {
     HS::ClockRoutingPump();
 #ifdef CVMETER_ENABLED
     OC::CvMeter::Task();   // console CV stream / input calibration / counter
+#endif
+#if defined(ARDUINO_TEENSY41) && defined(PRINT_DEBUG)
+    MeterConsoleTask();    // console 'e': print the meter's answer when it lands
 #endif
 
     // UI events
@@ -1228,6 +1283,17 @@ FLASHMEM __attribute__((noinline)) void loop() {
       static uint64_t fwload_tr = 0;
       static uint8_t fwload_trn = 0;
       static uint32_t fwload_count = 0;
+#if defined(ARDUINO_TEENSY41) && defined(PRINT_DEBUG)
+      // 'e' bench DMM query: printable bytes up to Enter form one SCPI line
+      // (at most 64 chars, the allowlist's own cap). Any control byte
+      // cancels, as for 'd'; an over-long line cancels and the rest of it,
+      // up to its Enter, is swallowed rather than run as commands.
+      static bool meter_line_pending = false;
+      static bool meter_line_discard = false;
+      static bool meter_swallow_lf = false;   // the LF of a CR LF that submitted
+      static char meter_line[USBTMCDevice::kMaxLine + 1];
+      static uint8_t meter_line_len = 0;
+#endif
       do {
         int cmd = Serial.read();
         if (!console_unlocked) {
@@ -1567,6 +1633,45 @@ FLASHMEM __attribute__((noinline)) void loop() {
           }
           continue;
         }
+#if defined(ARDUINO_TEENSY41) && defined(PRINT_DEBUG)
+        if (meter_swallow_lf) {
+          meter_swallow_lf = false;
+          if (cmd == '\n') continue;
+        }
+        if (meter_line_discard) {
+          if (cmd == '\r' || cmd == '\n') {
+            meter_line_discard = false;
+            meter_swallow_lf = (cmd == '\r');
+          }
+          continue;
+        }
+        if (meter_line_pending) {
+          if (cmd == '\r' || cmd == '\n') {
+            meter_line_pending = false;
+            meter_swallow_lf = (cmd == '\r');
+            if (!meter_line_len) {
+              Serial.println("METER,ERR,cancelled (empty line)");
+              continue;
+            }
+            meter_line[meter_line_len] = 0;
+            MeterConsoleSubmit(meter_line);
+            continue;
+          }
+          if (cmd < 0x20 || cmd > 0x7E) {
+            meter_line_pending = false;
+            Serial.println("METER,ERR,cancelled (control byte)");
+            continue;
+          }
+          if (meter_line_len >= USBTMCDevice::kMaxLine) {
+            meter_line_pending = false;
+            meter_line_discard = true;
+            Serial.println("METER,ERR,cancelled (line over 64 chars)");
+            continue;
+          }
+          meter_line[meter_line_len++] = (char)cmd;
+          continue;
+        }
+#endif
 #ifdef CVMETER_ENABLED
         // 'd' and 'Q' arguments, and the input-calibration dialog, which
         // owns every byte while it is open (CvMeter.h).
@@ -1588,6 +1693,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
 #if defined(__IMXRT1062__)
 #if defined(ARDUINO_TEENSY41)
             Serial.println("i i2c scan   u host devices + MIDI profiles   g save globals+app data");
+            Serial.println("e<SCPI line>Enter one allowlisted query to the USB bench DMM (METER,...)");
             Serial.println("-- preset bus --");
             Serial.println("local:  ( save0  ) recall0  { save1  } recall1");
 #if defined(PRESET_BUS)
@@ -1704,8 +1810,18 @@ FLASHMEM __attribute__((noinline)) void loop() {
                             usbHostMIDI[hp].idVendor(), usbHostMIDI[hp].idProduct(),
                             (usbHostMIDI[hp].idVendor() && pn) ? pn : "-");
             }
+            Serial.printf("meter: vid=%04X pid=%04X connected=%d\n",
+                          usbMeter.idVendor(), usbMeter.idProduct(),
+                          usbMeter.connected() ? 1 : 0);
             CaptainDumpProfiles();
             break;
+#if defined(ARDUINO_TEENSY41) && defined(PRINT_DEBUG)
+          case 'e':  // bench DMM: e<SCPI line>Enter (collected above)
+            // Not 'U': that key is AudioGraph::Reorder (docs/Timing-Budget.md).
+            meter_line_pending = true;
+            meter_line_len = 0;
+            break;
+#endif
           case 'p':  // toggle the preset-bus overlay (remote UI inspection)
             if (OC::PresetBusUI::Active()) OC::PresetBusUI::Exit();
             else OC::PresetBusUI::Enter();
