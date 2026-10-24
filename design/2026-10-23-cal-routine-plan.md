@@ -201,6 +201,37 @@
 - [ ] **Step 4: Run** `./run-host-tests.sh && SAN=1 ./run-host-tests.sh` and build all 4 envs. **Bench (Oren):** on `T41_console`, with a heavy app (Quadrants with applets) and all 8 inputs calibrated, the core ISR max is ≤ 40 µs with 0 missed ticks (`docs/Timing-Budget.md` method). Record the before and after figures.
 - [ ] **Step 5: Commit** `inputs: per-input calibration curves applied for every app (IO::Read + shared accessor)`.
 
+### Task 5a: Input channel rotation fix (bench finding, 2026-10-24)
+
+**Background (bench, 2026-10-24).** On the Xenomorpher, a CV into **panel input n** arrives at firmware `ADC_CHANNEL_n+1`. Panel 8 arrives at channel 1. The `v` stream shows it, and so do apps: Oren saw a CV into panel 3 show up as CV4 in Quadrants. It is stable across three reboots. The outputs are correct. The slot table at `software/src/OC_ADC.cpp:~451-458` (`update<ADC_CHANNEL_5>(sum[0]) … update<ADC_CHANNEL_4>(sum[7])`) assigns each frame slot to the channel one past the jack it carries.
+
+**Files:**
+- Modify: `software/src/OC_ADC.cpp` (the slot→channel map, on the ADC33131D/FlexIO path only), with a migration hook at load (`software/src/OC_calibration.cpp`)
+- Create: `software/src/AdcSlotMap.h/.cpp` (pure map plus migration helpers)
+- Modify: `software/src/apps/Backup.h` (restoring a pre-fix dump)
+- Test: `software/test/test_adc_slot_map.cpp`, `run-host-tests.sh`
+
+**Interfaces:**
+- Produces:
+  - `int AdcSlotForPanelInput(int panel /*0-7*/)`: the frame slot that carries panel input n.
+  - `void RotateLegacyInputData(uint16_t offset[8], CvMeterMath::InputCalibration &ica, InputCurveRecord *curves /*nullable*/)`: moves legacy per-channel entries so that index n describes panel input n. It rotates arrays and `valid_mask` bits; `source_output` values are output labels and stay as they are.
+  - EEPROM marker `[4144,4148)` = `'A','M',1,0` ("input map v1"), written once the migration has run.
+
+- [ ] **Step 1: Root cause.**
+  - Using the ADC33131D datasheet and the FlexIO/DMA setup (`OC_ADC.cpp` FlexIO init), establish why the frame is rotated by one reading, for example one-conversion pipeline latency or the first-reading phase.
+  - Record the finding in a comment at the map.
+  - If the root cause is per-boot phase rather than fixed latency, stop and report.
+- [ ] **Step 2: Write failing tests:**
+  - `map_matches_bench` (panel n → slot per the bench observation, for all 8).
+  - `rotate_moves_each_entry_one_place`.
+  - `rotate_moves_mask_bits`.
+  - `rotate_idempotent_guarded` (the migration runs only when the marker is absent).
+  - `fresh_unit_no_rotation_needed` (a unit with no stored per-input data writes the marker and changes nothing).
+  - `prefix_backup_restore_rotated` (calibration bytes restored from a dump without the marker are rotated).
+- [ ] **Step 3: Implement** the map fix (FlexIO path only). On the first boot after the fix, when the marker is absent, rotate `calibration_data.adc.offset[]`, the `ICA1` page and both curve files, then write the marker. Save each page through its normal save path, curves last. Backup: a restore of the calibration region from a dump that predates the fix is rotated before it is applied. The dump carries no map marker, so a new dump must add one; old dumps are treated as legacy.
+- [ ] **Step 4: Run** host tests normally and with SAN, and build all 4 envs. **Bench (Oren):** for every panel input 1–8, holding output 1 at 8.4 V into it shows on `v` column n and as CVn in Quadrants. Input 2's existing `Q` fit (made on panel 1) now reports as input 1.
+- [ ] **Step 5: Commit** `inputs: fix the one-slot input channel rotation on the ADC33131D path; migrate stored per-input data once`.
+
 ### Task 6: The calibration flow engine (pure, injectable)
 
 **Files:**
