@@ -374,9 +374,9 @@ class SimModule:
                 if i in self.cal:
                     g, off = self.cal[i]
                     self._say(f"INCAL,CH,{i + 1},C,gain_uv={g * 1000:.1f},offset_mv={off:.2f},"
-                              f"verify_mv=0.3,src={i + 1},range=0..12000")
+                              f"verify_mv=0.3,src={i + 1},range=0..12000,apps=line")
                 else:
-                    self._say(f"INCAL,CH,{i + 1},S,adc_offset=4095,range=0..11997")
+                    self._say(f"INCAL,CH,{i + 1},S,adc_offset=4095,range=0..11997,apps=shared")
             self.pending = ""
         elif re.fullmatch(r"Q[1-8a][1-8]", p):
             a = p[1] == "a"

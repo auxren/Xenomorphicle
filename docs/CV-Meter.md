@@ -187,7 +187,8 @@ The per-input calibration, in every app, from the moment it is stored.
   `cv.values` and `cv.pitch_values`, and `OC::ADC::calibrated_value()` /
   `calibrated_pitch()`, the one accessor for the apps that read the ADC
   directly (QQ and DQ's CV bars, ASR's slew CV, Sequins' 10 V input map,
-  Passencore's chord CVs, Scope's CV trace and readout, H1200's debug view).
+  Passencore's chord CVs, the Sampler's gate and rate CV, Scope's CV trace
+  and the counts it prints, H1200's debug view).
   The console meter (`v`, `Qp` ranges) uses the same tables. Both values the
   apps get move together, so a voltage an app shows is the calibrated one.
 - **How.** At load and after every save the calibration is turned into one
@@ -198,8 +199,7 @@ The per-input calibration, in every app, from the moment it is stored.
   `pitch_cv_scale`.
 - **Unchanged.** An input with no calibration runs the stock code
   (`ADC::value()`, `value_to_pitch()`) with the same arithmetic; a unit with
-  nothing stored behaves exactly as before. The random seed at boot, the
-  Sampler's gate and rate CV (a coarse comparator and a linear speed depth),
+  nothing stored behaves exactly as before. The random seed at boot,
   Setup / Calibrate's own screens and the debug screens stay on the raw
   reading.
 - **Gates from CV inputs** (Quadrants and every applet, via

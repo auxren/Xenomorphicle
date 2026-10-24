@@ -638,8 +638,9 @@ FLASHMEM bool Consume(int cmd) {
     if (cmd == 'c') {
       if (millis() - q_clear_arm_ms >= 3000 || !q_clear_arm_ms) {
         q_clear_arm_ms = millis() | 1;
-        Serial.println("INCAL,ARMED,Qc again within 3s clears every input's calibration "
-                       "(inputs fall back to the shared scale + offset)");
+        Serial.println("INCAL,ARMED,Qc again within 3s clears every input's Q calibration "
+                       "(an input with a curve file keeps its curve until the curve is "
+                       "cleared; the rest fall back to the shared scale + offset)");
         return true;
       }
       q_clear_arm_ms = 0;
