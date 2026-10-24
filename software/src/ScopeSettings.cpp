@@ -7,13 +7,11 @@
 #endif
 
 #include "ScopeSettings.h"
+#include "ScopeRange.h"
 
 using namespace ScopeSources;
 
 namespace {
-
-constexpr uint8_t kDefaultTimeIdx = 3;  // replaced by ScopeRange's table index
-constexpr uint8_t kDefaultVoltIdx = 6;
 
 // The old Scope's flat channel numbering: 0..7 CV in, 8..15 CV out,
 // 16..19 audio in L, in R, out L, out R.
@@ -36,9 +34,9 @@ SCOPE_CODE void ScopeSettingsDefaults(ScopeSettings *s) {
   s->trig_src = 0;
   s->trig_mode = 0;
   s->trig_level_mv = 0;
-  s->time_idx = kDefaultTimeIdx;
+  s->time_idx = ScopeRange::kDefaultTimeIdx;
   s->time_auto = 1;
-  s->volt_idx = kDefaultVoltIdx;
+  s->volt_idx = ScopeRange::kDefaultVoltIdx;
   s->volt_auto = 1;
   s->screensaver_trace = 0;
 }
@@ -91,9 +89,9 @@ SCOPE_CODE bool ScopeSettingsUnpack(const uint8_t *in, size_t n, ScopeSettings *
   s.trig_src = in[7] < kMaxTraces ? in[7] : 0;
   s.trig_mode = in[8] < 6 ? in[8] : 0;
   s.trig_level_mv = (int16_t)((uint16_t)in[9] | ((uint16_t)in[10] << 8));
-  s.time_idx = in[11];
+  s.time_idx = (uint8_t)ScopeRange::ClampTime(in[11]);
   s.time_auto = in[12] ? 1 : 0;
-  s.volt_idx = in[13];
+  s.volt_idx = (uint8_t)ScopeRange::ClampVolt(in[13]);
   s.volt_auto = in[14] ? 1 : 0;
   s.screensaver_trace = in[15] ? 1 : 0;
   *out = s;
