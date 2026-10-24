@@ -1149,8 +1149,9 @@ void AppH1200::DrawScreensaver() const {
 
 void AppH1200::DrawDebugInfo() const {
 #ifdef H1200_DEBUG
-  int cv = OC::ADC::value<ADC_CHANNEL_4>();
-  int scaled = ((OC::ADC::value<ADC_CHANNEL_4>() + 127) >> 8);
+  // The calibrated reading where CV4 has a per-input calibration (InputCal.h).
+  int cv = OC::ADC::calibrated_value(ADC_CHANNEL_4);
+  int scaled = ((cv + 127) >> 8);
 
   graphics.setPrintPos(2, 12);
   graphics.printf("I: %4d %4d", cv, scaled);

@@ -81,6 +81,8 @@ FW_SRCS = \
   Buchla259eSlotCodec.cpp \
   Bus200eMaster.cpp \
   CvMeterMath.cpp \
+  CalRoutineMath.cpp \
+  InputCal.cpp \
   PresetBus200e.cpp \
   src/drivers/display.cpp \
   src/drivers/SH1106_128x64_driver.cpp \

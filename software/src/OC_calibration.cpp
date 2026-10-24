@@ -15,6 +15,7 @@
 #include "OC_storage.h"
 #include "OC_calibration.h"
 #include "CvMeterMath.h"
+#include "InputCal.h"
 #include "OC_digital_inputs.h"
 #include "OC_menus.h"
 #include "OC_strings.h"
@@ -208,6 +209,10 @@ FLASHMEM void calibration_load() {
   } else {
     CvMeterMath::InputCalReset(OC::input_calibration);
   }
+  // What the apps see (InputCal.h): rebuilt from the page just loaded and the
+  // curve files. At boot LittleFS is not mounted yet, so only ICA1 counts
+  // here; setup() reloads once it is.
+  InputCal::Reload();
 #endif
 }
 
@@ -216,6 +221,7 @@ FLASHMEM void input_calibration_save() {
   OC::input_calibration.version = CvMeterMath::InputCalibration::kVersion;
   input_calibration_storage.Save(OC::input_calibration);
   input_calibration_loaded = true;
+  InputCal::Reload();  // the apps follow the new page at once
 }
 #endif
 

@@ -188,7 +188,8 @@ public:
 
   uint8_t get_slew() const {
     if (get_slew_cv_source())
-      return constrain(values_[ASR_SETTING_SLEW] + ((OC::ADC::value(get_slew_cv_source() - 1) + 15) >> 5), 0, 100);
+      // Calibrated where the input has a per-input calibration (InputCal.h).
+      return constrain(values_[ASR_SETTING_SLEW] + ((OC::ADC::calibrated_value(get_slew_cv_source() - 1) + 15) >> 5), 0, 100);
     return values_[ASR_SETTING_SLEW];
   }
   uint8_t get_slew_cv_source() const {

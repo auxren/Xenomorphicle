@@ -259,7 +259,9 @@ FLASHMEM void AppScope::Render() const {
   if (!frozen_) {
     switch (kind) {
       case KIND_CV_IN:
-        last_raw_ = OC::ADC::value(ScopeAppNS::AdcChannelForSub(sub));
+        // Calibrated where the input has a per-input calibration
+        // (InputCal.h), so the trace and its voltage readout are true volts.
+        last_raw_ = OC::ADC::calibrated_value(ScopeAppNS::AdcChannelForSub(sub));
         cv_ring_[cv_head_] = (int16_t)last_raw_;
         cv_head_ = (uint8_t)((cv_head_ + 1) % kRingSize);
         break;

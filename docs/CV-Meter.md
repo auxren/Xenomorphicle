@@ -8,9 +8,9 @@ pitch in cents. Everything is driven from the [bench console](bench-console)
 (unlock with `pew!`); `tools/hwqa/cvmeter.py` does the same from a host and
 logs CSV.
 
-None of this changes how apps read their inputs. The per-input calibration is
-used by the meter only; apps stay on the shared scale and offset they always
-used (see [What apps see](#what-apps-see)).
+Every app reads an input through the same per-input calibration the meter
+uses, once one is stored; an input without one reads exactly as it always did
+(see [What apps see](#what-apps-see)).
 
 ## Commands
 
@@ -66,7 +66,7 @@ CV,123456,7,2,4095.00,3685.50,...,0.0,1000.2,...,CCSSSSSS,H..L...H
 | `dropped` | lines dropped so far because the host was not reading |
 | `raw1..8` | ADC counts (0-4095, two decimals): the mean of every reading in the 20 ms window, inputs in panel order |
 | `mv1..8` | millivolts, one decimal |
-| `cal` | 8 characters: `C` = this input has its own calibration, `S` = shared scale + offset |
+| `cal` | 8 characters: `C` = this input has its own calibration (its curve file or its `Q` line, the same one the apps use), `S` = shared scale + offset |
 | `clip` | 8 characters: `L` a reading reached raw 0-1, `H` reached 4094-4095, `.` neither. Raw goes **down** as volts go up on this hardware, so `L` is the top of the voltage range and `H` the bottom |
 
 `v` again stops it and prints `CV#,stopped,lines=<n>,dropped=<n>`.
@@ -93,8 +93,8 @@ INCAL,RESULT,in=<i>,out=<o>,gain_uv=<uV/count>,offset_mv=<mV>,resid_mv=<mV>,nois
 INCAL,SAVED,in=<i>          INCAL,DISCARDED,in=<i>
 INCAL,ABORT,in=<i>,<why>    INCAL,ERR,...     INCAL,DONE     (end of Qa)
 INCAL#,version=1,mask=<hex>,stored=<yes|no>,scale=<pitch scale>,octave_mv=<1000|1200>
-INCAL,CH,<i>,C,gain_uv=..,offset_mv=..,verify_mv=..,src=<o>,range=<lo>..<hi>
-INCAL,CH,<i>,S,adc_offset=..,range=<lo>..<hi>
+INCAL,CH,<i>,C,gain_uv=..,offset_mv=..,verify_mv=..,src=<o>,range=<lo>..<hi>,apps=<curve|line|shared>
+INCAL,CH,<i>,S,adc_offset=..,range=<lo>..<hi>,apps=<curve|line|shared>
 ```
 
 Lines that start with two spaces are prose for a person and can be ignored by
@@ -153,8 +153,10 @@ A fit is stored only if every check passes:
 | `MONOTONIC` | the verification reading does not lie between the two fit readings |
 | `RESIDUAL` | the line misses the verification point by more than **10 mV** |
 
-`Qp` prints what is stored; `Qc` twice clears it (inputs go back to the
-shared scale and offset).
+`Qp` prints what is stored, and in `apps=` what the apps use for each input;
+`Qc` twice clears the `Q` lines. An input that also has a Cal Routine curve
+keeps using its curve: the curve takes precedence over the line, and `Qc`
+does not touch the curve files.
 
 ### Where it is stored
 
@@ -172,11 +174,40 @@ factory reset leaves it alone, as it leaves the DAC/ADC page alone.
 
 ## What apps see
 
-Nothing new. Apps read `OC::ADC::value()` and the pitch from the shared scale
-in the ADC interrupt, and that path is unchanged: the per-input calibration
-feeds the console meter only. Switching apps over would change every app's
-pitch response at once, from an ISR, on the strength of a calibration taken
-against the DAC rather than a meter; that wants its own bench check first.
+The per-input calibration, in every app, from the moment it is stored.
+
+- **Which calibration.** Per input: its Cal Routine curve (17 points, in
+  `ICURVE_A.BIN` / `ICURVE_B.BIN`) when the file is valid and holds one for
+  that input; else its `Q` line (`ICA1`); else the shared scale and offset
+  from Setup / Calibrate, exactly as before. Anything out of range in either
+  store (a curve that is not strictly falling, a line outside the sanity
+  window, a table that would overflow) is ignored for that input rather than
+  trusted. `Qp` shows the choice per input (`apps=`).
+- **Where it applies.** `IO::Read` in the core ISR, which fills every app's
+  `cv.values` and `cv.pitch_values`, and `OC::ADC::calibrated_value()` /
+  `calibrated_pitch()`, the one accessor for the apps that read the ADC
+  directly (QQ and DQ's CV bars, ASR's slew CV, Sequins' 10 V input map,
+  Passencore's chord CVs, Scope's CV trace and readout, H1200's debug view).
+  The console meter (`v`, `Qp` ranges) uses the same tables. Both values the
+  apps get move together, so a voltage an app shows is the calibrated one.
+- **How.** At load and after every save the calibration is turned into one
+  17-point integer table per input in DTCM (`InputCal.h`), and the ISR
+  interpolates it: integers only, a shift, two multiplies and a few adds per
+  calibrated input per tick. A calibrated input's pitch uses the nominal
+  1536 pitch units per 1.2 V on true volts, in place of the shared
+  `pitch_cv_scale`.
+- **Unchanged.** An input with no calibration runs the stock code
+  (`ADC::value()`, `value_to_pitch()`) with the same arithmetic; a unit with
+  nothing stored behaves exactly as before. The random seed at boot, the
+  Sampler's gate and rate CV (a coarse comparator and a linear speed depth),
+  Setup / Calibrate's own screens and the debug screens stay on the raw
+  reading.
+- **Gates from CV inputs** (Quadrants and every applet, via
+  `pitch_values > GATE_THRESHOLD`, about 1.5 V) switch at a true 1.5 V on a
+  calibrated input instead of the shared estimate of it. The comparator has
+  no hysteresis to stay within; the threshold moves by the calibration
+  correction at 1.5 V, a few mV to a few tens of mV on a real unit (the
+  15 % gain acceptance bounds it near 0.2 V), against gate swings of 5-10 V.
 
 ## The frequency counter
 

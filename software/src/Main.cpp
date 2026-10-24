@@ -617,6 +617,8 @@ FLASHMEM void setup() {
 
   // Wait until there's at least some ADC values read
   delay(4);
+  // Raw on purpose, not OC::ADC::calibrated_value(): this is entropy, not a
+  // voltage, and the per-input calibration has no bearing on it.
   uint32_t random_seed =
       OC::ADC::raw_value(ADC_CHANNEL_1) * OC::ADC::raw_value(ADC_CHANNEL_2) +
       OC::ADC::raw_value(ADC_CHANNEL_3) + OC::ADC::raw_value(ADC_CHANNEL_4);
@@ -714,6 +716,12 @@ FLASHMEM void setup() {
 
   // initialize LittleFS for config files
   PhzConfig::Init();
+#if defined(ARDUINO_TEENSY41)
+  // calibration_load() ran before LittleFS was up, so the inputs' curve files
+  // (ICURVE_A/B.BIN) were not readable then: rebuild the apps' per-input
+  // calibration now that they are (InputCal.h).
+  InputCal::Reload();
+#endif
 
   // Display loading splash screen and optional calibration
   bool reset_settings = false;

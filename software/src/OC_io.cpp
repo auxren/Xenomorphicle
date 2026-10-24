@@ -29,6 +29,7 @@
 #include "OC_scales.h"
 #include "OC_cv_utils.h"
 #include "OC_pitch_utils.h"
+#include "InputCal.h"
 
 namespace OC {
 
@@ -60,7 +61,27 @@ void InputDesc::set_printf(const char *fmt, ...)
   }
   {
     DEBUG_PIN_SCOPE(OC_GPIO_DEBUG_PIN1);
+    // Per-input calibration (InputCal.h, design/cal-routine-design.md 6.5).
+    // One load per tick. `channel` is the physical ADC index, which is how
+    // InputCal's tables (and ICA1, and the curve file) are indexed.
+    const uint32_t cal_mask = InputCal::calibrated_mask;
     for (int channel = 0; channel < ADC_CHANNEL_COUNT; ++channel) {
+      if (__builtin_expect(cal_mask & (1u << channel), 0)) {
+        // Calibrated: the table replaces the shared offset and pitch scale;
+        // integers only (one multiply-add and a shift for the value, one
+        // multiply and a shift for the pitch). The same raw reading, filter
+        // choice and input gain as the stock path below.
+        const uint32_t raw12 = io_settings->adc_filter_enabled(channel)
+          ? ADC::smoothed_raw_value(static_cast<ADC_CHANNEL>(channel))
+          : ADC::raw_value(static_cast<ADC_CHANNEL>(channel));
+        const int32_t value = CalRoutineMath::ApplyValueTable(InputCal::value_q8[channel], raw12);
+        auto gain = io_settings->input_gain(channel);
+        ioframe->cv.values[channel] = CVUtils::Attenuate(value, gain);
+        ioframe->cv.pitch_values[channel] = CVUtils::Attenuate(InputCal::Pitch(value), gain);
+        continue;
+      }
+
+      // Uncalibrated: the stock code, unchanged.
       int32_t value = io_settings->adc_filter_enabled(channel)
         ? ADC::value(static_cast<ADC_CHANNEL>(channel))
         : ADC::unsmoothed_value(static_cast<ADC_CHANNEL>(channel));

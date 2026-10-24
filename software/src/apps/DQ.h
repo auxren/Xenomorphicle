@@ -1458,7 +1458,8 @@ void DQ_QuantizerChannel::RenderScreensaver(weegfx::coord_t start_x) const {
     default: {
       graphics.setPixel(start_x + DQ_OFFSET_X - 16, 4);
       // TODO: the graphics thread shouldn't be reading directly from the drivers!
-      int32_t cv = OC::ADC::value(static_cast<ADC_CHANNEL>(source));
+      // Calibrated where the input has a per-input calibration (InputCal.h).
+      int32_t cv = OC::ADC::calibrated_value(static_cast<ADC_CHANNEL>(source));
       cv = (cv * 20 + 2047) >> 11;
       if (cv < 0)
         graphics.drawRect(start_x + DQ_OFFSET_X - 16 + cv, 6, -cv, 2);

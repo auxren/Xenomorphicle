@@ -9,6 +9,7 @@
 #include "src/drivers/ADC/OC_util_ADC.h"
 #include "OC_config.h"
 #include "OC_options.h"
+#include "InputCal.h"
 
 // If enabled, use an interrupt to track DMA completion; otherwise use polling
 //#define OC_ADC_ENABLE_DMA_INTERRUPT
@@ -109,6 +110,31 @@ public:
 
   static int32_t value_to_pitch(int32_t value) {
     return (value * calibration_data_->pitch_cv_scale) >> 12;
+  }
+
+  // ---- the calibrated reading, for apps that read the ADC directly ---------
+  // The one accessor for every direct reader that treats the reading as a
+  // voltage or a pitch (design/cal-routine-design.md 6.6). On an input with a
+  // per-input calibration (InputCal.h) it is the same value IO::Read gives the
+  // app in cv.values, before the input gain: true volts, from the smoothed or
+  // unsmoothed reading per the current app's IO setting, as IO::Read does. On
+  // any other input it is exactly what the reader got before: value(channel),
+  // or uncal_value for a reader that computed its own (Sequins).
+  // channel: the physical index, as for value().
+  static int32_t calibrated_value(ADC_CHANNEL channel) {
+    return calibrated_value(channel, value(channel));
+  }
+
+  static int32_t calibrated_value(ADC_CHANNEL channel, int32_t uncal_value) {
+    if (!::InputCal::Calibrated(channel)) return uncal_value;
+    return ::InputCal::DirectValue(channel);
+  }
+
+  // Pitch units (1536 per octave) for the same reading: the nominal scale on
+  // true volts when calibrated, else value_to_pitch(value(channel)).
+  static int32_t calibrated_pitch(ADC_CHANNEL channel) {
+    if (!::InputCal::Calibrated(channel)) return value_to_pitch(value(channel));
+    return ::InputCal::Pitch(::InputCal::DirectValue(channel));
   }
 
   static void CalibratePitch(int32_t c2, int32_t c4);

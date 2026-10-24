@@ -695,9 +695,10 @@ void AppPassencore::score_by_include() {
 
 
 void AppPassencore::find_new_chord() {
-  function = (int)((OC::ADC::value((ADC_CHANNEL)0) + 128) >> 9);
+  // CV thresholds: calibrated where the input has a per-input calibration (InputCal.h).
+  function = (int)((OC::ADC::calibrated_value((ADC_CHANNEL)0) + 128) >> 9);
   CONSTRAIN(function, 0, PASSENCORE_FUNCTIONS_MEDIANT - 1);
-  color = values_[PASSENCORE_SETTING_BASE_COLOR] + (int)((OC::ADC::value((ADC_CHANNEL)1) + 255) >> 9);
+  color = values_[PASSENCORE_SETTING_BASE_COLOR] + (int)((OC::ADC::calibrated_value((ADC_CHANNEL)1) + 255) >> 9);
   CONSTRAIN(color, 0, PASSENCORE_COLORS_LAST - 1);
 
   reset_possibilities();

@@ -1434,7 +1434,10 @@ public:
               clk_cnt_ = input_map_.Process(ioframe->cv.values[_playmode - PM_SH1]);
            else
               // TODO[PLD] ???
-              clk_cnt_ = input_map_.Process(0xFFF - OC::ADC::smoothed_raw_value(static_cast<ADC_CHANNEL>(_playmode - PM_SH1)));
+              // 0..10 V range: 0xFFF - raw, or the calibrated value (same
+              // units, true volts) where the input has a per-input calibration.
+              clk_cnt_ = input_map_.Process(OC::ADC::calibrated_value(static_cast<ADC_CHANNEL>(_playmode - PM_SH1),
+                  0xFFF - OC::ADC::smoothed_raw_value(static_cast<ADC_CHANNEL>(_playmode - PM_SH1))));
         }
         break;
         case PM_CV1:
@@ -1460,7 +1463,9 @@ public:
               clk_cnt_ = input_map_.Process(ioframe->cv.values[_playmode - PM_CV1]); // = 5V
            else
               // TODO[PLD] ???
-              clk_cnt_ = input_map_.Process(0xFFF - OC::ADC::smoothed_raw_value(static_cast<ADC_CHANNEL>(_playmode - PM_CV1))); // = 10V
+              // = 10V; calibrated as for PM_SH above.
+              clk_cnt_ = input_map_.Process(OC::ADC::calibrated_value(static_cast<ADC_CHANNEL>(_playmode - PM_CV1),
+                  0xFFF - OC::ADC::smoothed_raw_value(static_cast<ADC_CHANNEL>(_playmode - PM_CV1))));
 
            // update output, if slot # changed:
            if (prev_slot_ == clk_cnt_)

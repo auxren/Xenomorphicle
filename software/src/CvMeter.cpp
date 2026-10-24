@@ -16,6 +16,7 @@
 #ifdef CVMETER_ENABLED
 
 #include "CvMeterMath.h"
+#include "InputCal.h"
 #include "OC_ADC.h"
 #include "OC_DAC.h"
 #include "OC_calibration.h"
@@ -81,15 +82,23 @@ FLASHMEM static bool OutputCode(int out_label, int32_t mv, uint16_t *code) {
                              OCTAVES + 1, DAC::kOctaveZero, MvPerStep(), mv, code);
 }
 
+// The same calibration the apps get (InputCal.h): the input's curve or ICA1
+// line where it has one -- interpolated in float on the very table the ISR
+// applies, so the meter keeps its sub-count resolution -- else the shared
+// path. An ICA1 fit that InputCal refused is shown as shared, as the apps see it.
 FLASHMEM static float InputMv(int phys, float raw, bool *per_input) {
-  return InputMillivolts(OC::input_calibration, phys, raw,
-                         OC::calibration_data.adc.offset[phys],
-                         OC::calibration_data.adc.pitch_cv_scale, OctMv(), per_input);
+  if (InputCal::Calibrated(phys)) {
+    if (per_input) *per_input = true;
+    return InputCal::Millivolts(phys, raw);
+  }
+  if (per_input) *per_input = false;
+  return SharedMillivolts(OC::calibration_data.adc.offset[phys], raw,
+                          OC::calibration_data.adc.pitch_cv_scale, OctMv());
 }
 
 // What one input can read, by the calibration that is in effect for it.
 FLASHMEM static void InputRange(int phys, int32_t *lo, int32_t *hi) {
-  if (InputCalValid(OC::input_calibration, phys)) {
+  if (InputCal::Calibrated(phys)) {
     const float a = InputMv(phys, 0.f, nullptr);
     const float b = InputMv(phys, float(kRawMax), nullptr);
     *lo = int32_t(lroundf(a < b ? a : b));
@@ -170,7 +179,7 @@ FLASHMEM static void PrintRanges(const char *tag) {
     int32_t lo, hi;
     InputRange(phys, &lo, &hi);
     Serial.printf("%s,%d,%ld,%ld,%c\r\n", tag, l + 1, (long)lo, (long)hi,
-                  InputCalValid(OC::input_calibration, phys) ? 'C' : 'S');
+                  InputCal::Calibrated(phys) ? 'C' : 'S');
   }
 }
 
@@ -445,6 +454,16 @@ FLASHMEM static void FlowTask(uint32_t now, const uint32_t *q) {
   else FlowFinish();
 }
 
+// What the apps use for this input (InputCal.h): its curve file, this ICA1
+// line, or the shared path. A curve takes precedence over the line.
+FLASHMEM static const char *AppsSource(int phys) {
+  switch (InputCal::SourceOf(phys)) {
+    case InputCal::SOURCE_CURVE: return "curve";
+    case InputCal::SOURCE_LINE: return "line";
+    default: return "shared";
+  }
+}
+
 FLASHMEM static void PrintCalibration() {
   const CvMeterMath::InputCalibration &cal = OC::input_calibration;
   Serial.printf("INCAL#,version=%u,mask=%02X,stored=%s,scale=%u,octave_mv=%ld\r\n", cal.version,
@@ -461,11 +480,12 @@ FLASHMEM static void PrintCalibration() {
       PrintFixed(ScaleRound(cal.offset_mv[phys], 2), 2);
       Serial.print(",verify_mv=");
       PrintFixed(cal.verify_mv10[phys], 1);
-      Serial.printf(",src=%u,range=%ld..%ld\r\n", (unsigned)cal.source_output[phys],
-                    (long)lo, (long)hi);
+      Serial.printf(",src=%u,range=%ld..%ld,apps=%s\r\n", (unsigned)cal.source_output[phys],
+                    (long)lo, (long)hi, AppsSource(phys));
     } else {
-      Serial.printf("INCAL,CH,%d,S,adc_offset=%u,range=%ld..%ld\r\n", l + 1,
-                    (unsigned)OC::calibration_data.adc.offset[phys], (long)lo, (long)hi);
+      Serial.printf("INCAL,CH,%d,S,adc_offset=%u,range=%ld..%ld,apps=%s\r\n", l + 1,
+                    (unsigned)OC::calibration_data.adc.offset[phys], (long)lo, (long)hi,
+                    AppsSource(phys));
     }
   }
 }

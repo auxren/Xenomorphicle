@@ -413,6 +413,11 @@ FLASHMEM void AppSampler::PollSlots() {
   // rule in one place, so a reload armed by the encoder is spread too.
   bool loaded_this_pass = false;
   for (int i = 0; i < kSlotCount; ++i) {
+    // Stock ADC::value() on purpose, not calibrated_value(): the rate CV is
+    // a linear +/-100 % speed depth (SamplerMath kPitchCvDepth, not V/oct)
+    // and the gate a single 1.25 V comparator, so a few mV of input
+    // calibration change nothing audible, and the Sampler keeps reading the
+    // same scale its SamplerMath constants were written for.
     const int32_t raw = OC::ADC::value(SamplerAppNS::AdcChannelForSlot(i));
     const GateEdge edge = UpdateGate(raw, prev_gate_high_[i]);
 

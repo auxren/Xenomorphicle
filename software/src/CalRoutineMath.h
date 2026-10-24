@@ -107,8 +107,11 @@ void LineToValueTable(const CvMeterMath::Fit &line, int32_t value_q8_out[kCurveP
 // No overflow while |q8| <= kMaxValueQ8: |q8| * 256 + 2 |q8| * 255 + 2^15
 // < 2^31. The int16 mV x 2 curve stays below that (|q8| <= ~1.43e6, so
 // ~3.7e8 + ~7.3e8), and InputCal rejects any table outside it.
+// always_inline: an out-of-line copy would land in ITCM (the console build's
+// ITCM sits a few bytes under a 32 KB block boundary, and crossing it costs
+// 32 KB of DTCM) and would cost the ISR a call.
 constexpr int32_t kMaxValueQ8 = 2000000;
-inline int32_t ApplyValueTable(const int32_t q8[kCurvePoints], uint32_t raw12) {
+__attribute__((always_inline)) inline int32_t ApplyValueTable(const int32_t q8[kCurvePoints], uint32_t raw12) {
   if (raw12 > 4095u) raw12 = 4095u;
   const uint32_t seg = raw12 >> kCurveShift;
   const int32_t frac = int32_t(raw12 & 255u);
