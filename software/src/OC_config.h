@@ -98,6 +98,13 @@ static constexpr unsigned long SETTINGS_SAVE_TIMEOUT_MS = 1000;
 #define EEPROM_INPUTCAL_END EEPROM_PRESETBUS_START
 #define EEPROM_APPDATA_END EEPROM_INPUTCAL_START
 #define EEPROM_APPDATA_BINARY_SIZE (EEPROM_APPDATA_END - EEPROM_APPDATA_START - 40)
+// "Input map v1" (AdcSlotMap.h): 'A','M',1,0 once stored per-input data has
+// been moved to the fixed ADC33131D slot map. In the 24 bytes between the
+// app-data page's end (4140) and ICA1 (4164) that no page ever covered;
+// [4140,4144) is the Cal Routine marker's, [4148,4164) still free. OC_storage.h
+// asserts the neighbours.
+#define EEPROM_INPUTMAP_MARKER_START 4144
+#define EEPROM_INPUTMAP_MARKER_END 4148
 #else
 #define EEPROM_APPDATA_END EEPROMStorage::LENGTH
 // This is the available space for all apps' settings (\sa OC_apps.ino)

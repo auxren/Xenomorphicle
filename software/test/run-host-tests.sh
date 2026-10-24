@@ -78,6 +78,8 @@ suite test_cvmeter_math             ../src/CvMeterMath.cpp
 suite test_calroutine_math          ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp
 suite test_usbtmc                   ../src/UsbTmc.cpp
 suite test_input_curve_store        ../src/InputCurveStore.cpp
+suite test_adc_slot_map             ../src/AdcSlotMap.cpp ../src/InputCurveStore.cpp \
+                                    ../src/CvMeterMath.cpp
 suite test_input_cal                ../src/InputCal.cpp ../src/CalRoutineMath.cpp \
                                     ../src/CvMeterMath.cpp ../src/InputCurveStore.cpp
 suite test_calroutine_flow          ../src/CalRoutineFlow.cpp ../src/CalRoutineMath.cpp \

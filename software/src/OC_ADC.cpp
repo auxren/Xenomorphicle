@@ -2,6 +2,7 @@
 #include "OC_gpio.h"
 #include "OC_io.h"
 #include "DMAChannel.h"
+#include "AdcSlotMap.h"
 #include <algorithm>
 
 ADC_CHANNEL ADC_CHANNEL_1=0, ADC_CHANNEL_2=1, ADC_CHANNEL_3=2, ADC_CHANNEL_4=3;
@@ -454,15 +455,37 @@ FLASHMEM static void Init_Teensy41_ADC33131D_chip() {
       for (size_t j=0; j < 8; j++) Serial.printf("%4x  ", sum[j] / count);
       Serial.println();
       #endif
+      // Which slot carries which panel input (AdcSlotMap.h). Slot s is the
+      // s-th reading since the frame boundary, and the mux shifter put
+      // address s on A0-A2 for that conversion: the top row (panels 1-4) on
+      // addresses 4-7, the second row on 0-3. But the reading clocked out in
+      // a trigger period's SPI frame belongs to the address selected one
+      // period earlier -- slot s holds address s-1 -- which is what a SAR ADC
+      // that converts at the end of one frame (CS rising) and returns the
+      // result in the next one does. (The datasheet is not in the tree; the
+      // bench measured exactly one slot, the same on every reboot.)
+      // The old table (sum[0] -> ADC_CHANNEL_5 ... sum[7] -> ADC_CHANNEL_4)
+      // missed that, and every input read one channel over: panel n arrived
+      // at ADC_CHANNEL_(n+1), panel 8 at ADC_CHANNEL_1 (bench, 2026-10-24).
+      //
+      // It is a fixed latency, not a start-up phase. The QTimer trigger
+      // clocks all three FlexIO pieces: the mux shifter shifts on each rising
+      // edge, the SPI read (baud timer, and CS with it) starts on each rising
+      // edge, and the data shifter raises one DMA request per reading. Init
+      // resets FlexIO (SWRST), loads the mux pattern (period 8, reloaded every
+      // 32 shifts, a multiple of 8) and points the DMA at the start of
+      // adc_buffer (128 readings, also a multiple of 8) before FLEXEN, so
+      // reading k always lands in slot k mod 8 and was taken at address
+      // k-1 mod 8, whatever the trigger level when FlexIO starts.
       const int mult = 2;
-      update<ADC_CHANNEL_5>(sum[0] * mult / count);
-      update<ADC_CHANNEL_6>(sum[1] * mult / count);
-      update<ADC_CHANNEL_7>(sum[2] * mult / count);
-      update<ADC_CHANNEL_8>(sum[3] * mult / count);
-      update<ADC_CHANNEL_1>(sum[4] * mult / count);
-      update<ADC_CHANNEL_2>(sum[5] * mult / count);
-      update<ADC_CHANNEL_3>(sum[6] * mult / count);
-      update<ADC_CHANNEL_4>(sum[7] * mult / count);
+      update<ADC_CHANNEL_1>(sum[AdcSlotForPanelInput(0)] * mult / count);
+      update<ADC_CHANNEL_2>(sum[AdcSlotForPanelInput(1)] * mult / count);
+      update<ADC_CHANNEL_3>(sum[AdcSlotForPanelInput(2)] * mult / count);
+      update<ADC_CHANNEL_4>(sum[AdcSlotForPanelInput(3)] * mult / count);
+      update<ADC_CHANNEL_5>(sum[AdcSlotForPanelInput(4)] * mult / count);
+      update<ADC_CHANNEL_6>(sum[AdcSlotForPanelInput(5)] * mult / count);
+      update<ADC_CHANNEL_7>(sum[AdcSlotForPanelInput(6)] * mult / count);
+      update<ADC_CHANNEL_8>(sum[AdcSlotForPanelInput(7)] * mult / count);
       old_poffset = (old_poffset + count * sizeof(adc33131_frame_t)) % sizeof(adc_buffer);
     }
     return;
@@ -495,6 +518,12 @@ FLASHMEM static void Init_Teensy41_ADC33131D_chip() {
 
     old_idx = idx;
   }
+}
+
+/*static*/ FLASHMEM
+void ADC::ChannelTable(int out[8]) {
+  out[0] = ADC_CHANNEL_1; out[1] = ADC_CHANNEL_2; out[2] = ADC_CHANNEL_3; out[3] = ADC_CHANNEL_4;
+  out[4] = ADC_CHANNEL_5; out[5] = ADC_CHANNEL_6; out[6] = ADC_CHANNEL_7; out[7] = ADC_CHANNEL_8;
 }
 
 /*static*/

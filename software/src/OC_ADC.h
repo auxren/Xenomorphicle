@@ -75,6 +75,9 @@ public:
   static void ADC33131D_Vref_calibrate();
   #endif
   static void Init_DMA();
+  // out[n] = ADC_CHANNEL_(n+1) as now in force (after flip mode and the
+  // hardware-ID remaps): the table AdcSlotMap.h's migration takes.
+  static void ChannelTable(int out[8]);
   static void DMA_ISR();
   static void Read(IOFrame *ioframe);
   static void Scan_DMA();

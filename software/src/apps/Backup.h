@@ -36,6 +36,7 @@
 // ever asks or cancels, and the single irreversible commit in this app is a B
 // press on a screen that exists only to state what B will do.
 #include "../InputCurveFiles.h"
+#include "../AdcSlotMap.h"
 
 OC_APP_CLASS(AppBackup, TWOCCS("BU"), "Back It Up!", "Backup / Restore"),
   public SystemExclusiveHandler {
@@ -172,6 +173,17 @@ public:
       uint8_t ix = 0;
       uint8_t p = V[ix++]; // Get packet number
       packet = p;
+      // A calibration-region restore may bring a CAL1 page recorded through
+      // the old input map (a dump from before the fix: its map flag,
+      // reserved0[0], is 0). Clear the input-map marker before the first
+      // byte lands, so that if power goes before ApplyPendingReload has
+      // moved the offsets, the next boot's migration does it instead. The
+      // page's own flag decides either way, so a newer dump is left as is.
+      if (p < (EEPROM_CALIBRATIONDATA_END / 32)) {
+        uint8_t m[4];
+        InputMapMarkerClear(m);
+        EEPROMStorage::update(EEPROM_INPUTMAP_MARKER_START, m, sizeof m);
+      }
       uint16_t address = p * 32;
       for (int b = 0; b < 32; b++) EEPROM.write(address++, V[ix++]);
 
@@ -234,6 +246,12 @@ public:
     // abandoned restore never writes them over the old EEPROM calibration.
     if (curve_pending_) {
       if (what == RELOAD_CALIBRATION) {
+        // A record from a dump made before the input-map fix has no map flag
+        // and rows indexed through the old map: move them first (a newer
+        // dump's record is stamped and left alone). The save stamps it.
+        int chan[8];
+        OC::ADC::ChannelTable(chan);
+        InputCurveNormalize(curve_rx_, chan);
         // seq is reassigned by the store, so the restored curves become the
         // newest copy and the other slot keeps the previous one.
         if (!InputCurveSaveToFlash(curve_rx_)) {
@@ -251,6 +269,10 @@ public:
       // tables are read per sample, so the values apply without a re-init.
       OC::calibration_load();
       OC::SetFlipMode(OC::calibration_data.flipcontrols());
+      // The marker was cleared when the first packet landed: a CAL1 page
+      // without the map flag (a pre-fix dump) has its offsets moved and is
+      // saved, then the marker goes back.
+      OC::input_map_migrate();
     } else {
       OC::ReinitApps(false);
     }

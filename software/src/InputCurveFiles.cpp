@@ -2,6 +2,8 @@
 #include <Arduino.h>
 
 #include "InputCurveFiles.h"
+#include "AdcSlotMap.h"
+#include "OC_ADC.h"
 #include "PhzConfig.h"
 #include "RtStats.h"
 
@@ -29,12 +31,31 @@ class PhzCurveStorage : public CurveStorage {
 
 }  // namespace
 
-bool InputCurveLoadFromFlash(InputCurveRecord *out, int *slot) {
+bool InputCurveLoadFromFlashRaw(InputCurveRecord *out, int *slot) {
   PhzCurveStorage st;
   return InputCurveLoad(st, out, slot);
 }
 
+// Loop context only (not reentrant): the 300-byte scratch records live in
+// DMAMEM, off the loop stack and out of DTCM, like InputCal::Reload's.
+bool InputCurveLoadFromFlash(InputCurveRecord *out, int *slot, bool *legacy) {
+  DMAMEM static InputCurveRecord scratch;
+  InputCurveRecord *rec = out ? out : &scratch;
+  const bool ok = InputCurveLoadFromFlashRaw(rec, slot);
+  bool rotated = false;
+  if (ok) {
+    int chan[8];
+    OC::ADC::ChannelTable(chan);
+    rotated = InputCurveNormalize(*rec, chan);
+  }
+  if (legacy) *legacy = rotated;
+  return ok;
+}
+
 bool InputCurveSaveToFlash(const InputCurveRecord &rec) {
   PhzCurveStorage st;
-  return InputCurveSave(st, rec);
+  DMAMEM static InputCurveRecord stamped;
+  stamped = rec;
+  CurveMapFlag(stamped) = kInputMapV1;  // the store re-encodes (seq, CRC)
+  return InputCurveSave(st, stamped);
 }

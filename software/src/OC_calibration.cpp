@@ -16,6 +16,8 @@
 #include "OC_calibration.h"
 #include "CvMeterMath.h"
 #include "InputCal.h"
+#include "AdcSlotMap.h"
+#include "InputCurveFiles.h"
 #include "OC_digital_inputs.h"
 #include "OC_menus.h"
 #include "OC_strings.h"
@@ -72,7 +74,9 @@ const CalibrationData kCalibrationDefaults = {
   SH1106_128x64_Driver::kDefaultOffset,
   OC_CALIBRATION_DEFAULT_FLAGS,
   SCREENSAVER_TIMEOUT_S,
-  { 0, 0, 0 }, // reserved0
+  // reserved0[0]: the stored offsets follow the fixed input map (AdcSlotMap.h).
+  // Defaults are the same on every input, so they are mapped by definition.
+  { kInputMapV1, 0, 0 }, // reserved0
   0 // reserved1
 };
 
@@ -113,7 +117,9 @@ const CalibrationData kNLMCalibrationDefaults = {
   SH1106_128x64_Driver::kDefaultOffset,
   OC_CALIBRATION_DEFAULT_FLAGS,
   SCREENSAVER_TIMEOUT_S,
-  { 0, 0, 0 }, // reserved0
+  // reserved0[0]: the stored offsets follow the fixed input map (AdcSlotMap.h).
+  // Defaults are the same on every input, so they are mapped by definition.
+  { kInputMapV1, 0, 0 }, // reserved0
   0 // reserved1
 };
 
@@ -219,9 +225,50 @@ FLASHMEM void calibration_load() {
 #ifdef ARDUINO_TEENSY41
 FLASHMEM void input_calibration_save() {
   OC::input_calibration.version = CvMeterMath::InputCalibration::kVersion;
+  // Everything this firmware fits is indexed by the fixed input map.
+  IcaMapFlag(OC::input_calibration) = kInputMapV1;
   input_calibration_storage.Save(OC::input_calibration);
   input_calibration_loaded = true;
   InputCal::Reload();  // the apps follow the new page at once
+}
+
+// The one-time move of per-input data to the fixed ADC33131D slot map
+// (AdcSlotMap.h). Needs the final ADC_CHANNEL table (after ADC::Init's flip)
+// and LittleFS (the curve files), so setup() calls it after PhzConfig::Init;
+// a calibration-region restore (apps/Backup.h) calls it again.
+//
+// Order: CAL1, ICA1, the curves, then the marker -- and the marker only when
+// every save succeeded. Each page carries its own map flag, written in the
+// same save as its rotated data, so power lost anywhere leaves every page
+// either untouched (flag absent: rotated on the rerun) or done (flag set:
+// left alone on the rerun). A rerun can never rotate a page twice.
+FLASHMEM void input_map_migrate() {
+  uint8_t marker[4];
+  EEPROMStorage::read(EEPROM_INPUTMAP_MARKER_START, marker, sizeof marker);
+  if (InputMapMarkerPresent(marker)) return;
+
+  int chan[8];
+  OC::ADC::ChannelTable(chan);
+  DMAMEM static InputCurveRecord rec;  // 300 bytes, off the loop stack and out of DTCM
+  InputMapPages pages;
+  pages.marker = marker;
+  pages.cal_loaded = calibration_data_loaded;
+  pages.cal_offset = OC::calibration_data.adc.offset;
+  pages.cal_flag = &OC::calibration_data.reserved0[0];
+  pages.ica_loaded = input_calibration_loaded;
+  pages.ica = &OC::input_calibration;
+  pages.curves_loaded = InputCurveLoadFromFlashRaw(&rec, nullptr);
+  pages.curves = &rec;
+  const InputMapPlan plan = InputMapPrepare(pages, chan);
+
+  bool ok = true;
+  if (plan.save_cal) OC::calibration_storage.Save(OC::calibration_data);
+  if (plan.save_ica) input_calibration_save();
+  if (plan.save_curves) ok = InputCurveSaveToFlash(rec);
+  if (ok) EEPROMStorage::update(EEPROM_INPUTMAP_MARKER_START, kInputMapMarker, sizeof kInputMapMarker);
+  Serial.printf("Input map v1: cal=%d ica=%d curves=%d ok=%d\r\n", plan.save_cal,
+                plan.save_ica, plan.save_curves, ok);
+  InputCal::Reload();
 }
 #endif
 

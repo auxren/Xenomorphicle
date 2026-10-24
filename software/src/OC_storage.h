@@ -73,6 +73,8 @@ static_assert(EEPROM_APPDATA_START + AppDataStorage::PAGESIZE <= EEPROM_INPUTCAL
 static_assert(InputCalibrationStorage::PAGES == 1, "input calibration page does not fit its region");
 static_assert(EEPROM_INPUTCAL_END <= EEPROM_PRESETBUS_START, "input calibration overlaps the preset-bus record");
 static_assert(sizeof(CalibrationData) + 12 <= EEPROM_CALIBRATIONDATA_END - EEPROM_CALIBRATIONDATA_START, "DAC/ADC calibration page outgrew its region");
+static_assert(EEPROM_APPDATA_START + AppDataStorage::PAGESIZE + 4 <= EEPROM_INPUTMAP_MARKER_START, "the input-map marker overlaps the app-data page or the Cal Routine marker");
+static_assert(EEPROM_INPUTMAP_MARKER_END <= EEPROM_INPUTCAL_START, "the input-map marker overlaps the input calibration");
 #endif
 
 // Helpers for getting total app storage sizes

@@ -64,7 +64,7 @@ CV,123456,7,2,4095.00,3685.50,...,0.0,1000.2,...,CCSSSSSS,H..L...H
 | `ms` | module uptime, milliseconds |
 | `seq` | line counter since the stream started, including dropped lines |
 | `dropped` | lines dropped so far because the host was not reading |
-| `raw1..8` | ADC counts (0-4095, two decimals): the mean of every reading in the 20 ms window, inputs in panel order |
+| `raw1..8` | ADC counts (0-4095, two decimals): the mean of every reading in the 20 ms window, inputs in panel order (column n is panel input n; before the input-map fix of 2026-10-24 every column was one input over, see [Input map fix](Input-Map-Fix)) |
 | `mv1..8` | millivolts, one decimal |
 | `cal` | 8 characters: `C` = this input has its own calibration (its curve file or its `Q` line, the same one the apps use), `S` = shared scale + offset |
 | `clip` | 8 characters: `L` a reading reached raw 0-1, `H` reached 4094-4095, `.` neither. Raw goes **down** as volts go up on this hardware, so `L` is the top of the voltage range and `H` the bottom |
@@ -174,6 +174,14 @@ EEPROM). A page from a newer layout, or a stored gain that fails the sanity
 window, is ignored rather than trusted. The explicit EEPROM erase in the
 factory reset leaves it alone, as it leaves the DAC/ADC page alone.
 
+Every page holding per-input data -- the DAC/ADC page's 0 V offsets, this
+page and the curve files -- carries an input-map flag in a reserved byte.
+Firmware from before the [input-map fix](Input-Map-Fix) stored each input's
+data one place over; the first boot of fixed firmware moves it to the right
+input once, page by page, and records that in a 4-byte marker at EEPROM
+`[4144,4148)`. A Backup restore of a calibration dump made before the fix is
+moved the same way.
+
 ## What apps see
 
 The per-input calibration, in every app, from the moment it is stored.
@@ -240,13 +248,15 @@ Two ADC paths exist. On every Xenomorpher it is the external 8-channel
 ADC33131D, chosen at boot from the hardware ID (`OC_gpio.cpp:176`).
 
 **ADC33131D path (Xenomorpher).** Each sample is a signed 16-bit reading
-(`OC_ADC.cpp:36`); negative sums are clamped to 0 (`OC_ADC.cpp:448`), doubled
-(`:457`) and cut to 12 bits before smoothing (`OC_ADC.h:128`). So every input
+(`OC_ADC.cpp:37`); negative sums are clamped to 0 (`OC_ADC.cpp:449`), doubled
+(`:480`) and cut to 12 bits before smoothing (`OC_ADC.h:157`). Which reading
+in a frame belongs to which panel input is `AdcSlotForPanelInput`
+(`AdcSlotMap.h`). So every input
 is a 0-4095 window and **no reading can go past either end**. On Northern
 Light hardware 0 V is set at the top of that window, raw 4095
 (`OC_calibration.h:19`, used at `OC_calibration.cpp:106`): volts rise as
 raw falls. The default scale is 409.6 counts per pitch octave
-(`OC_ADC.h:42` with `value_to_pitch`, `OC_ADC.h:110`), and on this hardware
+(`OC_ADC.h:43` with `value_to_pitch`, `OC_ADC.h:114`), and on this hardware
 an octave is 1.2 V (the calibration screens, `apps/SETTINGS.h:375` and
 `:409`; `gfxPrintVoltage`, `HSUtils.cpp:806`). That makes the firmware's
 model of an uncalibrated unit **0 V to 12.0 V at 2.93 mV per count**, and a
@@ -268,7 +278,7 @@ check before relying on the top of the range:** hold an output at 10 V
 raw 0 and the `clip` flag stays `.`.
 
 **Internal ADC path (other hardware IDs only).** The Teensy's ADC2 in 12-bit
-mode with 4-sample hardware averaging (`OC_ADC.cpp:213`, `:223`), 0 V at
+mode with 4-sample hardware averaging (`OC_ADC.cpp:214`, `:224`), 0 V at
 2/3 of the window (`OC_calibration.h:20`). With 1 V octaves that is about
 -3.3 V to +6.7 V: a 10 V CV clips at about 6.7 V. Not used on a Xenomorpher.
 
