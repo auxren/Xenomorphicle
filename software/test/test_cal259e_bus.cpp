@@ -246,8 +246,94 @@ static void send_error_is_bus_error() {
   h.Run();
   h.sim.nak = 4;
   h.bus.Commit(RecCrc(rec), 0);
-  CHECK(h.Run() == E_BUS_ERROR);
+  // A Wire error on the COMMIT is not "nothing went out" (S4): it is polled for
+  // its status, and nothing says it landed here.
+  CHECK(h.Run() == E_COMMIT_UNKNOWN);
   CHECK(h.sim.count[CalRec::kCmdCommit] == 0);  // and not resent
+}
+
+// S2: bits 2/3 of the status describe the last commit since power-up. A COMMIT
+// frame lost after an earlier OK commit must not be reported OK from the stale bit.
+static void stale_ok_bit_is_not_a_verdict() {
+  Rig g;
+  uint8_t rec[30];
+  MakeRecord(rec, 7);
+  g.bus.PutRecord(rec); g.Run();
+  g.bus.Commit(RecCrc(rec), 0);
+  CHECK(g.Run() == 1);                       // the earlier commit: ok, seq 7
+  CHECK(g.sim.ok_bit && g.sim.seq == 7);
+  uint8_t rec2[30];
+  MakeRecord(rec2, 8);
+  g.bus.PutRecord(rec2); g.Run();
+  g.sim.drop_commits = 1;                    // the next COMMIT frame never reaches the module
+  g.bus.Commit(RecCrc(rec2), 0);
+  CHECK(g.Run() == E_COMMIT_UNKNOWN);        // not 1 from the stale bit2
+  CHECK(g.sim.commits_received == 1);        // only the earlier one landed
+  CHECK(g.sim.count[CalRec::kCmdCommit] == 2);  // one earlier + exactly one, not resent
+  CHECK(g.bus.status().seq == 7);
+  CHECK(g.clk.t >= 1000 + Cal259eBus::kCommitWaitMs + Cal259eBus::kCommitVerdictMs);
+}
+
+// S2: the same rig with the frame delivered reports OK at the new seq.
+static void second_commit_ok_needs_the_new_seq() {
+  Rig g;
+  uint8_t rec[30], rec2[30];
+  MakeRecord(rec, 7);
+  MakeRecord(rec2, 8);
+  g.bus.PutRecord(rec); g.Run();
+  g.bus.Commit(RecCrc(rec), 0); g.Run();
+  g.bus.PutRecord(rec2); g.Run();
+  g.bus.Commit(RecCrc(rec2), 0);
+  CHECK(g.Run() == 1);
+  CHECK(g.bus.status().seq == 8);
+}
+
+// S4: a Wire error on the COMMIT. The module may have latched the frame (a NAK on
+// the last byte): poll, and exactly one COMMIT goes out whatever the outcome.
+static void commit_wire_error_latched_is_polled() {
+  for (int rc : {2, 3, 4, 5}) {
+    Rig g;
+    uint8_t rec[30];
+    MakeRecord(rec, 5);
+    g.bus.PutRecord(rec); g.Run();
+    g.sim.commit_send_rc = rc;
+    g.sim.commit_latches = true;
+    CHECK(g.bus.Commit(RecCrc(rec), 0));
+    CHECK(g.Run() == 1);                       // the status shows the record at seq 5
+    CHECK(g.sim.count[CalRec::kCmdCommit] == 1);
+    CHECK(g.sim.commits_received == 1);
+    CHECK(g.bus.sends() >= 1);  // the COMMIT counts as sent, plus the status reads
+    CHECK(g.bus.last_send_error() == rc);
+    CHECK(g.clk.t - 1000 >= Cal259eBus::kCommitWaitMs);  // it waited out the flash rewrite first
+  }
+}
+
+static void commit_wire_error_not_latched_is_unknown() {
+  for (int rc : {2, 3, 4, 5}) {
+    Rig g;
+    uint8_t rec[30];
+    MakeRecord(rec, 5);
+    g.bus.PutRecord(rec); g.Run();
+    g.sim.commit_send_rc = rc;
+    g.sim.commit_latches = false;
+    g.bus.Commit(RecCrc(rec), 0);
+    CHECK(g.Run() == E_COMMIT_UNKNOWN);
+    CHECK(g.sim.count[CalRec::kCmdCommit] == 1);   // never resent
+    CHECK(g.sim.commits_received == 0);
+    CHECK(g.bus.sends() >= 1);  // the COMMIT counts as sent, plus the status reads
+  }
+}
+
+// The one send error that IS safe to retry: -1, the tx gate closed.
+static void commit_gate_closed_still_retries() {
+  Rig g;
+  uint8_t rec[30];
+  MakeRecord(rec, 5);
+  g.bus.PutRecord(rec); g.Run();
+  g.sim.busy_sends = 3;
+  g.bus.Commit(RecCrc(rec), 0);
+  CHECK(g.Run() == 1);
+  CHECK(g.sim.count[CalRec::kCmdCommit] == 1);
 }
 
 static void read_timeout_retries_then_fails() {
@@ -436,6 +522,11 @@ int main() {
   stale_adc_counter_rejected();
   busy_bus_retries_then_fails();
   send_error_is_bus_error();
+  stale_ok_bit_is_not_a_verdict();
+  second_commit_ok_needs_the_new_seq();
+  commit_wire_error_latched_is_polled();
+  commit_wire_error_not_latched_is_unknown();
+  commit_gate_closed_still_retries();
   read_timeout_retries_then_fails();
   bad_reply_length();
   record_read_uses_args_the_module_answers();

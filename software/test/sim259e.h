@@ -16,7 +16,9 @@
 //     bit4 no free slot
 // Test knobs: drop_replies, busy_sends (Send returns -1 that many times; -1
 // forever when negative), other_addr (another 259e at that address answers
-// every READ too, with different data), bad_reply_len, nak.
+// every READ too, with different data), bad_reply_len, nak, drop_commits (a COMMIT
+// frame ACKed on the wire but lost), commit_send_rc (+ commit_latches: a Wire error
+// returned for the COMMIT frame, the module having received it or not).
 // ADC model (off unless input_mv is set; then the module samples its two
 // inputs every sample_ms on the clock, bumping adc_n once per sample):
 //   raw = (input_mv(ch) + adc_err_mv[ch]) * adc_k[ch] + noise, clamped to 16 bits,
@@ -56,6 +58,9 @@ struct Sim259e : BusPort {
   uint8_t other_addr = 0;
   int bad_reply_len = -1;   // >= 0: reply data truncated/padded to this length
   int nak = 0;              // Send returns this (not 0) when non-zero
+  int drop_commits = 0;     // the next this-many COMMIT frames are ACKed on the wire and lost
+  int commit_send_rc = 0;   // non-zero: a COMMIT frame's Send returns this (a Wire error)...
+  bool commit_latches = true;  // ...and the module still received the frame (NAK on its last byte)
 
   // ADC model
   static constexpr double kNominalK = (4096.0 / 1200.0) / (0x9041 / 65536.0);
@@ -72,6 +77,7 @@ struct Sim259e : BusPort {
   int count[256] = {};      // frames received per cmd
   int bad_frames = 0;       // frames that failed CalRec::FrameAllowed
   int lost = 0;             // frames lost to the flash rewrite
+  int commits_received = 0; // COMMIT frames the module actually processed
   std::vector<std::vector<uint8_t>> log;
   std::deque<std::vector<uint8_t>> replies;
 
@@ -110,6 +116,10 @@ struct Sim259e : BusPort {
     if (!CalRec::FrameAllowed(f, n)) ++bad_frames;
     log.emplace_back(f, f + n);
     if (n >= 5) ++count[f[3]];
+    if (n >= 5 && f[3] == CalRec::kCmdCommit && commit_send_rc) {
+      if (commit_latches) Receive(f, n);
+      return commit_send_rc;
+    }
     if (busy_active && clock->Ms() - busy_until >= 0x80000000u) { ++lost; return 0; }  // before busy_until
     busy_active = false;
     Receive(f, n);
@@ -135,13 +145,17 @@ struct Sim259e : BusPort {
         if (off + len <= 40) memcpy(staged + off, f + 7, len);
         return;
       }
-      case CalRec::kCmdCommit: Commit(f, n); return;
+      case CalRec::kCmdCommit:
+        if (drop_commits > 0) { --drop_commits; return; }  // never reached the module
+        Commit(f, n);
+        return;
       case CalRec::kCmdRead: Read(f[6], f[7]); return;
       default: return;
     }
   }
 
   void Commit(const uint8_t *f, uint8_t n) {
+    ++commits_received;
     const uint8_t len = f[6];
     const uint16_t crc = (uint16_t)((f[7] << 8) | f[8]);
     const uint8_t flags = n >= 10 ? f[9] : 0;

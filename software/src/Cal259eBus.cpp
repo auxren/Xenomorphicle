@@ -9,7 +9,8 @@ constexpr uint32_t Cal259eBus::kBusyRetryMs, Cal259eBus::kBusyGiveUpMs,
     Cal259eBus::kReplyTimeoutMs, Cal259eBus::kCommitWaitMs, Cal259eBus::kCommitVerdictMs,
     Cal259eBus::kPollGapMs;
 constexpr int Cal259eBus::kReadRetries;
-constexpr uint8_t Cal259eBus::kStatusOk, Cal259eBus::kStatusRefused, Cal259eBus::kStatusNoSlot;
+constexpr uint8_t Cal259eBus::kStatusValid, Cal259eBus::kStatusOk, Cal259eBus::kStatusRefused,
+    Cal259eBus::kStatusNoSlot;
 
 // READs of the record: the last starts at 22, not 24. The module sends no data
 // for arg > 22 (CONTRACT, 259e behaviour), so bytes 22..29 are fetched as the
@@ -34,6 +35,7 @@ bool Cal259eBus::Start(Op op) {
   retries_ = 0;
   sends_ = 0;
   chunk_ = 0;
+  last_send_rc_ = 0;
   return true;
 }
 
@@ -70,6 +72,11 @@ bool Cal259eBus::ReadRecord() {
 bool Cal259eBus::PutRecord(const uint8_t rec[30]) {
   if (!Start(OP_PUT)) return false;
   memcpy(put_rec_, rec, 30);
+  // The seq of what is being staged: the COMMIT's OK is only believed when the
+  // module's status names this seq (see TickCommit).
+  CalRec::Record r;
+  put_seq_valid_ = CalRec::Decode259e(rec, CalRec::kRecLen259e, &r);
+  put_seq_ = put_seq_valid_ ? r.seq : 0;
   frame_n_ = 0;  // built per chunk in TickPut
   return true;
 }
@@ -111,6 +118,7 @@ int Cal259eBus::SendCurrent() {
     return 1;
   }
   busy_open_ = false;
+  last_send_rc_ = rc;
   return E_BUS_ERROR;
 }
 
@@ -220,6 +228,17 @@ int Cal259eBus::TickCommit() {
   if (cstage_ == C_SEND) {
     const int rc = SendCurrent();  // -1 here means nothing went out, so a retry is safe
     if (rc == 1) return 0;
+    if (rc == E_BUS_ERROR && last_send_rc_ != -1) {
+      // The Wire layer reported an error (NAK, arbitration lost, timeout) for
+      // the COMMIT. A NAK on the last byte can come after the module latched the
+      // frame, so "nothing went out" is NOT known. Count it as sent (the flow
+      // waits for a verdict if cancelled) and ask the module for its status:
+      // the one COMMIT is never resent.
+      ++sends_;
+      op_t0_ = now;
+      cstage_ = C_WAIT;
+      return 0;
+    }
     if (rc < 0) { Finish(rc); return rc; }
     op_t0_ = now;
     cstage_ = C_WAIT;
@@ -253,7 +272,12 @@ int Cal259eBus::TickCommit() {
   const uint8_t fl = status_.flags;
   int res = 0;
   if (fl & kStatusRefused) res = (fl & kStatusNoSlot) ? E_NO_SLOT : E_COMMIT_REFUSED;
-  else if (fl & kStatusOk) res = 1;
+  else if ((fl & kStatusOk) && (fl & kStatusValid) && put_seq_valid_ && status_.seq == put_seq_)
+    res = 1;
+  // Bits 2 and 3 describe the last commit SINCE POWER-UP, not this one: a COMMIT
+  // frame lost after an earlier OK commit leaves bit2 set. So "ok" counts only
+  // when the module also holds a valid record (bit0) whose seq is the one we
+  // put. Anything else keeps polling and ends E_COMMIT_UNKNOWN.
   if (res) { Finish(res); return res; }
   t0_ = now;
   cstage_ = C_GAP;
