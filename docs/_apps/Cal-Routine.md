@@ -68,14 +68,19 @@ The outputs are **actively driven** and load-independent: what they put out does
 
 Output A is the voltage source and the meter reads it; the 259e is the unit being calibrated, so it has to be on firmware 31.2C4 and the **outputs must have been calibrated by Cal Routine first** (otherwise the row says so and stops). Let the Xenomorpher and the 259e run for 30 minutes before you start.
 
-1. Choose **259e pitch inputs**, read the meter notice and press the right encoder. The app finds the 259e (bus address 28 to 2B).
-2. Confirm the warm-up with the right encoder.
-3. When asked, patch **output A into the 259e's principal pitch input**, with the meter's + on that same jack and its COM on the 259e's ground. Press the right encoder. The app raises output A and checks that exactly one 259e responds, then measures 8 fit points and 4 check points.
-4. The same for the **mod pitch input**.
-5. **Results** shows, per input, the worst error in cents over the check points, the worst error over the fit points, and the fitted gain against stock. Both inputs must be within 3 cents and 10 % of stock gain, otherwise the run stops and nothing is written.
-6. Press the right encoder for the write screen. **B** on that screen (a press of its own, not a chord) backs up the 259e's presets, writes the record, and reads it back. If all 8 record slots are used, a second screen asks before the slots are reset: that reset briefly stops the 259e's audio, and a power loss during it re-initialises the 259e's presets.
+**Only output A is ever driven.** There is no output B in this routine: you move the one cable from the principal pitch input to the mod pitch input when the screen asks.
 
-The left encoder backs out at every step and never writes anything by itself; the record is written only by the B press. The run's `CALR,259...` lines on the USB console include `CALR,259REC`, a copy of the record written. While a run is open the console `=` command (read-only 259e access) refuses.
+1. Choose **259e pitch inputs**, read the meter notice and press the right encoder. The app finds the 259e (bus address 28 to 2B). If a cancelled run's write is still being confirmed ("259e: please wait"), it waits: try again in a few seconds.
+2. Confirm the warm-up with the right encoder.
+3. When asked, patch **output A into the 259e's principal pitch input**, with the meter's + on that same jack and its COM on the 259e's ground. Press the right encoder. The app raises output A and checks that exactly one 259e responds, then measures 8 fit points and 5 check points (600, 3000, 5400, 7800 and 9000 mV). The 600 mV point lies below the lowest fit point (1200 mV), so it checks the line's extrapolation toward 0 V. The 9000 mV point checks the top of the range: the 259e clamps its corrected code at 0x7FFF, one count under the 9600 mV fit point's target, so that fit point cannot show a positive error.
+4. The same for the **mod pitch input**: move the same cable when asked.
+5. **Results** shows, per input, the worst error in cents over the check points, the worst error over the fit points (nonlinearity, "nl"), and the fitted gain against stock, and how many minutes ago it was measured. Each input must have a worst check error within **3 cents**, a nonlinearity within **5 cents** (a provisional limit, to be confirmed from real bench data) and a gain within **10 %** of stock, otherwise the run stops and nothing is written. **Results older than 10 minutes expire** and must be measured again.
+6. Press the right encoder for the write screen. **B** on that screen (a press of its own, not a chord) backs up the 259e's presets, writes the record, and reads it back. The backup must be exactly 990 bytes and is stored in `CAL259BK.BIN`, then read back; any other size, or a file that does not read back, stops the run before anything is written. The backup is **refused while the firmware card is being served** (a Xenomorpher that booted with the card armed keeps serving it until a reboot, even after `M` disarmed it): reboot the Xenomorpher with the card disarmed first.
+7. **If all 8 record slots are used the run stops** ("all 8 calibration slots are used; compaction is disabled"): nothing is written. Resetting the slots (compaction) is switched off in the firmware until a tested way to restore `CAL259BK.BIN` exists.
+
+The left encoder backs out at every step and never writes anything by itself; the record is written only by the B press. The run's `CALR,259...` lines on the USB console include `CALR,259BK` (the backup: bytes transferred, CRC, result) and `CALR,259REC`, a copy of the record written. COMMIT is sent once and never retried: if the module's answer is lost the run ends **COMMIT unknown** or "Written: UNKNOWN", and you read `=28s` and `=28r` by hand. A `module refused` result means the 259e refused the record **after** programming it (firmware 31.2C4 checks the read-back last), so a slot may have been used: read `=28s` and `=28r` too.
+
+While a run is open, and until a cancelled run's write has been confirmed, nothing else may write to a 259e or restore presets: the console `=` (read-only anyway), the raw-frame sender `W` (only CAL frames, never PUT 12 or COMMIT 0B), `m` and `x`, the broadcast save and recall keys, the USB SysEx bridge's GET_DUMP and PUT_DUMP, and the 200e app's reads and writes all refuse. If you cancel (or switch app) after the write started, the Xenomorpher still reads the module's answer in the background and logs `CALR,259END,CANCELLED_<result>`; the Cal Routine menu then shows "259e cancel: WRITTEN / REFUSED / UNKNOWN" until the next 259e run begins.
 
 ### What the results mean
 
@@ -110,4 +115,4 @@ Modelled at 0.53 s per meter reading, to be updated after bench timing:
 * **Outputs:** about **22 minutes** (19 to 27 minutes depending on the meter's speed). The meter reads at 10 power-line cycles with autozero on, which is slow but gives real, quiet readings. Retrying an output adds about 3 minutes.
 * **Inputs:** about **half a minute** of measuring, plus the time to patch eight cables. No meter.
 * **Self:** about **22 minutes**: the outputs, then the patching and half a minute of inputs.
-* **259e pitch inputs:** a few minutes: 12 meter points per input, each a few readings.
+* **259e pitch inputs:** a few minutes: 13 meter points per input, each a few readings.

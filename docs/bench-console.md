@@ -56,12 +56,21 @@ stray typing is harmless but will spew capture bytes.
 | `c` | hex-dump the last capture held in the resident card image |
 | `w` | patch one byte of the resident card image — 4 hex digits offset, then 2 hex digits value. No bus traffic |
 | `x` | master **RESTORE** the resident card image to a module — 2 hex digits for the address, then press `x` and the **same two digits again within 3 s** to actually push it |
+| `W` | send a **raw frame** on the general call — hex bytes, then Enter or a space (`045C221AFF` is a read-only QUERY of the 251e). **Anything goes: it can send a 259e PUT (`12`) and COMMIT (`0B`).** While a Cal Routine run is open (or a cancelled 259e run's COMMIT answer is still being read) it passes CAL frames only and refuses every PUT and COMMIT whatever the address: `rawframe: refused, a Cal Routine run is open (CALR,BUSY_CAL)` |
 | `y` | USB bridge status; toggles the fallback `usbMIDI` poll (leave OFF under any app that reads USB MIDI itself) |
 
 `w` and `x` together are a whole-bank write with none of the 200e app's guards
 in front of them. `x` rewrites all 30 slots of the target module. A second `x`
 with a **different** address inside the window is a fresh arm, not a
 confirmation — it used to fire at the new address unconfirmed.
+
+`m`, `x`, the broadcast save and recall keys (`S`, `R`, `<`, `>`, `,`, `.`), and
+`W` frames that are not CAL frames refuse while a Cal Routine run is open or a
+cancelled 259e run's COMMIT answer is still pending (`... refused, a Cal Routine
+run is open (CALR,BUSY_CAL)`). Outside a run they are unguarded, so a 259e
+calibration write session must not use them (see the 259e section of
+[bench-cal-routine-checklist](bench-cal-routine-checklist)). `m` also refuses
+while the firmware card is being served.
 
 Every multi-character prompt (`x`, `q`, `w`, `A`, `N`, `V`, `j`, `d`, `Q`) eats
 the next keystrokes as digits, and a scripted console helper that probes with a key
@@ -87,7 +96,7 @@ all of it from a host and logs CSV.
 | `n` | toggle the **frequency counter** on TR1: `FREQ,<ms>,<hz>,<periods>,<note>,<cents>` every 250 ms (or `FREQ,<ms>,NOSIG`). Refuses while an app owns the counter; TR1 is not a trigger input while it runs |
 
 ### 259e calibration module, read-only (`=`)
-Every letter of the console is taken, so this is `=`. It reads a 259e running the calibration firmware (31.2C4) over the 200e bus; it never writes: **there is no PUT and no COMMIT on the console**. The bus address is two hex digits (259e `28`-`2B`, the 251e `5C` answers status and record only), then one command; no Enter.
+Every letter of the console is taken, so this is `=`. It reads a 259e running the calibration firmware (31.2C4) over the 200e bus; it never writes: **there is no PUT and no COMMIT in `=`** (the raw-frame sender `W` above can send both; only the Cal Routine app is meant to). The bus address is two hex digits (259e `28`-`2B`, the 251e `5C` answers status and record only), then one command; no Enter.
 
 | keys | action |
 |---|---|

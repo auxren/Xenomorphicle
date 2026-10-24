@@ -468,3 +468,4 @@ for foreign-module mastering; 10–16 are new here.
 | 14 | FW_CRC | `FwCardCommit` -4 |
 | 15 | FW_WRITE | `FwCardCommit` -5 (write or read-back) |
 | 16 | FW_SEQUENCE | FW_DATA / FW_END out of order, or without FW_BEGIN |
+| 17 | CAL_RUN | GET_DUMP / PUT_DUMP (and the restore at DUMP_END) refused: a Cal Routine run is open, or a cancelled 259e run's COMMIT answer is pending. Retry later |

@@ -97,3 +97,47 @@ Steps: start a run, unplug the meter during an output. Pass: the screen says the
 ### G. Release notes
 
 - [ ] The folder layout reseeds when the app is appended to the app list. Check on a unit with a custom arrangement: after the update, the arrangement and the new app's place are as described, and say so in the release notes.
+
+## 259e target (experimental)
+
+The "259e pitch inputs" row of the app (`Cal259eFlow`, host-tested) and the console `=` command (`=28s`, `=28r`, `=28a0`, `=28a1`, read-only). Design: Buchla_FW `docs/superpowers/specs/2026-10-24-cv-calibration-xeno-coordinator.md`; frames and record: Buchla_FW `docs/cv-calibration/CONTRACT.md`. The gates X2, X3 and X4 are the CV-calibration plan's. Nothing in this section has been run on the bench yet.
+
+**Only output A is ever driven.** There is no output B in this flow. The operator moves the one cable between the 259e's principal pitch input and its mod pitch input when the screen prompts (principal first). The meter's + stays on the jack the cable is in; its COM goes on the 259e's ground near that jack.
+
+### X2. Read-only (no PUT, no COMMIT)
+
+Rig: the T41_console build (check its RAM2 "free for malloc" against an armed FWCARD first: the Xeno mallocs the whole card at boot, and too little heap boot-loops), the 259e on 31.2C4, output A patched to the principal pitch input; the meter is not needed. Steps: `=28s` (flags, fmt=1, seq come back); `=28a0` while stepping `d` on output A (1200, 4800, 9600 mV): the raw word rises and `n` advances; the same with `a1` on the mod pitch input; `=28r` once.
+
+- [ ] `=28s` answers.
+- [ ] `=28a0` rises with output A, `n` advances (principal pitch).
+- [ ] `=28a1` rises with output A, `n` advances (mod pitch).
+- [ ] `=28r` shows the record state (record or `REC,NONE`).
+
+### Before the first write: the octave-ratio proof (gate X3)
+
+The record's scale (4096 counts per octave at the corrected code) is inferred, not yet proven on a unit. Gate X3 proves it with the frequency counter: the 259e's oscillator output into a Xeno input (`n`, the console frequency counter) at held 1200, 2400 and 4800 mV on the principal pitch input; both ratios must be 2.000 within 0.003. **Run it BEFORE the first write if the setup allows it**: the unit's stock correction (no record yet) is close enough to show a scale that is wrong by a factor, though not to prove 0.003; if it cannot be run first, it is a pre-write requirement that Oren knowingly accepts the first write as the proof, and the run after it is the check.
+
+- [ ] Octave ratios 1200 to 2400 and 2400 to 4800 mV, before the first write (or: waived by Oren for the first write, noted here).
+- [ ] The same after the first write: both ratios 2.000 +- 0.003.
+
+### Write session (a CAL-WRITE grant, and Oren present)
+
+All of these, before B is pressed on the write screen:
+
+- [ ] The `T41_console` build is on the Xenomorpher (it has `=` and the `CALR` lines), flashed with `Qp` and the image hash recorded before and after.
+- [ ] The Xenomorpher was **rebooted with the firmware card DISARMED and not serving** (`M` toggles the arming for the *next* boot; the Xeno keeps serving until a reboot; the app refuses the backup while it serves: "Firmware card served"). The 259e's own firmware (31.2C4) is already loaded.
+- [ ] No console `W`, `m`, `x` or `=` used during the session (the app and the console gate each other while a run is open, but a typed `x` before the run is not undone).
+- [ ] Bus Buccaneer is closed, and the 200e app is not in use on the Xenomorpher (it shares the master state machine and the card image).
+- [ ] The 259e was **power-cycled just before the run** (its status bits 2 and 3 describe the last commit since power-up; a fresh start makes them mean something) and has run for 30 minutes.
+- [ ] A fresh dated backup of the Xenomorpher's calibration exists in `~/Documents/Xenomorpher-calibration-backups/` (`backing-up-xenomorpher-calibration`), and the 259e's presets are what the run backs up to `CAL259BK.BIN` itself.
+- [ ] The Siglent alone on the host jack, set up by the app (NPLC 10, autozero on).
+
+### X3/X4 and the first calibration
+
+- [ ] Cal Routine, 259e: warm-up confirmed, principal pitch then mod pitch patched when prompted; Results show each input: worst check error <= 3 cents, nonlinearity <= 5 cents (**the 5 cent limit `kMaxNonlinearityCents` is provisional: confirm it from the real figures**), gain within 10 % of stock; the age on the Results is under 10 minutes.
+- [ ] B on the write screen (not a chord). Expect `CALR,259BK,<addr>,990,<crc>,OK`, then `CALR,259REC,...`, then `CALR,259END,OK`; the Done screen. Keep the `CALR,259REC` line.
+- [ ] If the run ends "COMMIT unknown", "Written: UNKNOWN" or "module refused": do nothing else; read `=28s` and `=28r` by hand. Never retry the write blindly (COMMIT is not idempotent).
+- [ ] Afterwards: the 259e power-cycled, `=28s` bit0 (record valid) set, seq one more than before; a re-run gives seq + 1; a reload of the 31.2C4 card keeps the record.
+- [ ] 8 slots full: the run ends "all 8 calibration slots are used; compaction is disabled" and writes nothing (compaction is switched off).
+- [ ] X4: a full-case soak with the calibration READs on the bus, banks byte-identical before and after.
+- [ ] Cancel after the COMMIT went out (left encoder, or switch app): the Xenomorpher still logs `CALR,259END,CANCELLED_<result>` and the Cal Routine menu shows "259e cancel: ...".
