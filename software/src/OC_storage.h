@@ -28,6 +28,7 @@
 #include <stdint.h>
 #include "OC_config.h"
 #include "OC_calibration.h"
+#include "CvMeterMath.h"
 #include "OC_global_settings.h"
 #include "OC_io_settings.h"
 #include "util/util_misc.h"
@@ -59,6 +60,20 @@ using CalibrationStorage = PageStorage<EEPROMStorage, EEPROM_CALIBRATIONDATA_STA
 using GlobalSettingsStorage = PageStorage<EEPROMStorage, EEPROM_GLOBALSETTINGS_START, EEPROM_GLOBALSETTINGS_END, GlobalSettings>;
 #endif
 using AppDataStorage = PageStorage<EEPROMStorage, EEPROM_APPDATA_START, EEPROM_APPDATA_END, AppData>;
+
+#ifdef ARDUINO_TEENSY41
+using InputCalibrationStorage = PageStorage<EEPROMStorage, EEPROM_INPUTCAL_START, EEPROM_INPUTCAL_END, CvMeterMath::InputCalibration>;
+
+// The layout every unit in the field already has. If one of these fires,
+// a firmware update would invalidate stored data -- fix the layout, do not
+// edit the numbers.
+static_assert(EEPROM_APPDATA_BINARY_SIZE == 3900, "app-data blob size changed: stored app data would no longer validate");
+static_assert(AppDataStorage::PAGES == 1, "app-data page count changed: the page would move");
+static_assert(EEPROM_APPDATA_START + AppDataStorage::PAGESIZE <= EEPROM_INPUTCAL_START, "app-data page overlaps the input calibration");
+static_assert(InputCalibrationStorage::PAGES == 1, "input calibration page does not fit its region");
+static_assert(EEPROM_INPUTCAL_END <= EEPROM_PRESETBUS_START, "input calibration overlaps the preset-bus record");
+static_assert(sizeof(CalibrationData) + 12 <= EEPROM_CALIBRATIONDATA_END - EEPROM_CALIBRATIONDATA_START, "DAC/ADC calibration page outgrew its region");
+#endif
 
 // Helpers for getting total app storage sizes
 

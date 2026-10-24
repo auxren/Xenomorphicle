@@ -179,6 +179,25 @@ public:
     return values_[index];
   }
 
+  // Console hold (CvMeter.cpp 'd', and the input calibration): pin one
+  // output to a fixed code, overriding whatever the running app writes,
+  // until released. Applied in Update(), so the app keeps running and simply
+  // loses that output; release hands it straight back. RAM only -- a reboot
+  // releases everything. Loop context only.
+  FLASHMEM static void Hold(DAC_CHANNEL channel, uint16_t code) {
+    held_values_[channel] = code;
+    held_mask_ |= (1u << channel);
+  }
+  FLASHMEM static void Release(DAC_CHANNEL channel) {
+    held_mask_ &= ~(1u << channel);
+  }
+  FLASHMEM static void ReleaseAll() {
+    held_mask_ = 0;
+  }
+  static uint32_t held_mask() {
+    return held_mask_;
+  }
+
   // Calculate DAC value from pitch value with 12 * 128 bit per octave for a
   // specific channel.
   // 0 = C1 = 0V, C2 = 24 << 7 = 1V etc.
@@ -281,6 +300,12 @@ public:
   }
 
   static void Update() {
+    // One load and a not-taken branch when nothing is held.
+    if (held_mask_) {
+      const uint32_t mask = held_mask_;
+      for (int i = 0; i < DAC_CHANNEL_COUNT; ++i)
+        if (mask & (1u << i)) values_[i] = held_values_[i];
+    }
     #if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
       if (DAC8568_Uses_SPI) {
         if (DAC_is_inverted) {
@@ -337,6 +362,8 @@ private:
   static const AutotuneCalibrationData *autotune_calibration_data_;
 
   static uint32_t values_[DAC_CHANNEL_COUNT];
+  static volatile uint32_t held_mask_;
+  static uint16_t held_values_[DAC_CHANNEL_COUNT];
   static uint16_t history_[DAC_CHANNEL_COUNT][kHistoryDepth];
   static volatile size_t history_tail_;
 };

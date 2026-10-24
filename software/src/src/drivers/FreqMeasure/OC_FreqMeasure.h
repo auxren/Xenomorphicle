@@ -19,6 +19,13 @@ public:
 	uint32_t read(void);
 	float countToFrequency(uint32_t count) { return (float)F_BUS_ACTUAL / (float)count; }
 	void end(void);
+	// Ownership checks for a caller that shares the instance (the console
+	// frequency counter, CvMeter.cpp): running() says somebody has it, and
+	// generation() changes on every begin()/end(), so a caller that noted it
+	// at its own begin() can tell an app switch took the counter away even
+	// when the next app began it again before the caller looked.
+	bool running_now() const { return running; }
+	uint32_t generation() const { return gen; }
 	~FreqMeasureClass() { if (running) end(); }
 private:
 	static FreqMeasureClass *pin_inst[4];
@@ -42,6 +49,7 @@ private:
 	volatile uint8_t buffer_tail;
 	uint16_t capture_msw;
 	uint32_t capture_previous;
+	uint32_t gen = 0;
 };
 
 #endif

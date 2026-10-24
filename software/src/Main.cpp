@@ -52,6 +52,7 @@
 #include "PresetBusUI.h"
 #include "Bus200eBridgeUsb.h"
 #include "HSUtils.h"
+#include "CvMeter.h"
 
 void CaptainDumpProfiles();  // CaptainMIDI.h (global scope)
 void CaptainMidiHealth();    // CaptainMIDI.h (global scope)
@@ -1091,6 +1092,9 @@ FLASHMEM __attribute__((noinline)) void loop() {
     OC::PresetBusUI::Task();
     OC::Bus200eBridgeUsb::Task();
     HS::ClockRoutingPump();
+#ifdef CVMETER_ENABLED
+    OC::CvMeter::Task();   // console CV stream / input calibration / counter
+#endif
 
     // UI events
     if (UI_MODE_APP_SETTINGS == ui_mode) {
@@ -1563,6 +1567,11 @@ FLASHMEM __attribute__((noinline)) void loop() {
           }
           continue;
         }
+#ifdef CVMETER_ENABLED
+        // 'd' and 'Q' arguments, and the input-calibration dialog, which
+        // owns every byte while it is open (CvMeter.h).
+        if (OC::CvMeter::Consume(cmd)) continue;
+#endif
         switch (cmd) {
 #ifdef PRINT_DEBUG
           case 'z':
@@ -1595,6 +1604,9 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.println("q QUERY module identity <2 hex digit addr>");
             Serial.printf("y USB bridge status + fallback usbMIDI poll [%s]\n",
                           OC::Bus200eBridgeUsb::Polling() ? "on" : "off");
+#endif
+#ifdef CVMETER_ENABLED
+            OC::CvMeter::PrintHelp();
 #endif
             Serial.println("-- files --");
             Serial.println("l list LittleFS   s list SD   h LittleFS health (open() cost)");
@@ -1875,6 +1887,16 @@ FLASHMEM __attribute__((noinline)) void loop() {
               Serial.println("'C' RESETS the config - press 'C' again within 3s");
             }
             break;
+#ifdef CVMETER_ENABLED
+          // bench CV meter: stream, DAC hold, input calibration, frequency
+          // counter. Arguments and the calibration dialog: CvMeter::Consume.
+          case 'v':
+          case 'd':
+          case 'Q':
+          case 'n':
+            OC::CvMeter::Command((char)cmd);
+            break;
+#endif
           case 't': SelfTest(); break;  // one-shot system health report
           case 'T': {  // real-time budget report; 'T' again within 3s resets
             static uint32_t last_T_ms = 0;

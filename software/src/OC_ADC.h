@@ -99,6 +99,14 @@ public:
     return smoothed_[channel] >> kAdcValueShift;
   }
 
+  // The same smoothed reading with its kAdcSmoothBits fractional bits kept
+  // (12.8 fixed point). For loop-context averaging -- the console CV meter
+  // (CvMeter.cpp) -- where a mean over many readings resolves below one count.
+  static uint32_t smoothed_raw_q8(ADC_CHANNEL channel) {
+    static_assert(kAdcSmoothBits == 8, "smoothed_raw_q8 assumes 8 fractional bits");
+    return smoothed_[channel];
+  }
+
   static int32_t value_to_pitch(int32_t value) {
     return (value * calibration_data_->pitch_cv_scale) >> 12;
   }

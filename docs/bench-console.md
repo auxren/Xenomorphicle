@@ -62,8 +62,8 @@ in front of them. `x` rewrites all 30 slots of the target module. A second `x`
 with a **different** address inside the window is a fresh arm, not a
 confirmation — it used to fire at the new address unconfirmed.
 
-Every multi-character prompt (`x`, `q`, `w`, `A`, `N`, `V`, `j`) eats the next
-keystrokes as digits, and a scripted console helper that probes with a key
+Every multi-character prompt (`x`, `q`, `w`, `A`, `N`, `V`, `j`, `d`, `Q`) eats
+the next keystrokes as digits, and a scripted console helper that probes with a key
 before each command will feed that probe into an open prompt. Send the digits
 in the same write as the key, and never leave a prompt armed between calls.
 
@@ -72,6 +72,18 @@ command draws no reply will, on an already-unlocked console, type `p` (the
 overlay opens), `e`, `w` (the patch prompt arms) and `!`. Two things make a
 reply go missing on an unlocked console: a second process holding the port,
 and a command that legitimately prints nothing. One `p` closes the overlay.
+
+### CV meter, DAC hold, input calibration, frequency counter
+Bench-instrument use of the module: the procedure, every line format and the
+accuracy limits are in [CV-Meter](CV-Meter); `tools/hwqa/cvmeter.py` drives
+all of it from a host and logs CSV.
+
+| key | action |
+|---|---|
+| `v` | toggle the 50 Hz CV stream: `CV,<ms>,<seq>,<dropped>,<raw1..8>,<mv1..8>,<cal>,<clip>` (inputs in panel order; `cal` per input `C` = own calibration, `S` = shared scale + offset; `clip` `L`/`H` = a rail was hit). Starts with a `CV#` header and one `CVRANGE,<in>,<lo_mv>,<hi_mv>,<C/S>` per input. Never blocks: when the host is not reading, lines are dropped and counted |
+| `d` | **hold an output** at a calibrated voltage until released, overriding the app on that output only: `d<o><mV>` then Enter (`o` = `1`-`8` or `a`-`h`, mV signed, e.g. `d3-1500⏎`) answers `DAC,<o>,HOLD,<mV>,<code>`; `d<o>x` releases one, `dx` all (`DAC,...,RELEASED`). RAM only |
+| `Q` | **per-input calibration** against a DAC output: `Q<i><o>` one input, `Qa<o>` inputs 1-8 in turn; the module prompts for the patch, sets three voltages itself, fits, verifies, and stores only on `y` with the residual under 10 mV. `Qp` prints it, `Qc` twice within 3 s clears it. While the dialog is open **every byte belongs to it**; any key but `y` aborts |
+| `n` | toggle the **frequency counter** on TR1: `FREQ,<ms>,<hz>,<periods>,<note>,<cents>` every 250 ms (or `FREQ,<ms>,NOSIG`). Refuses while an app owns the counter; TR1 is not a trigger input while it runs |
 
 ### Files
 | key | action |

@@ -4,6 +4,7 @@
 #include "OC_config.h"
 #include "OC_ADC.h"
 #include "OC_DAC.h"
+#include "CvMeterMath.h"
 #include "util/util_pagestorage.h"
 
 //#define VERBOSE_LUT
@@ -196,6 +197,18 @@ extern bool calibration_data_loaded;
 void calibration_load();
 void calibration_save();
 void calibration_reset();
+
+#ifdef ARDUINO_TEENSY41
+// Per-input CV calibration (console 'Q', CvMeter.cpp). Loaded by
+// calibration_load() from its own page (OC_config.h, EEPROM_INPUTCAL_*);
+// valid_mask == 0 on every unit that has not run it. Only the console CV
+// meter reads it -- apps stay on calibration_data.adc.
+extern CvMeterMath::InputCalibration input_calibration;
+extern bool input_calibration_loaded;
+// Writes the page (EEPROM, only the bytes that changed). No screen, unlike
+// calibration_save(). Loop context.
+void input_calibration_save();
+#endif
 
 }; // namespace OC
 

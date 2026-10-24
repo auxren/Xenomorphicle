@@ -1,0 +1,9 @@
+# Golden console lines for the bench CV meter (docs/CV-Meter.md).
+# test_cvmeter_math.cpp checks the firmware formatter produces each of these
+# byte for byte; tools/hwqa/test_cvmeter.py checks the host tool parses them.
+# Change one side and the other fails.
+CV,123456,7,2,4095.00,3685.50,2047.75,0.00,409.60,100.01,1.00,4094.00,0.0,1000.2,-3333.3,9997.6,0.5,-0.5,12345.6,-0.1,CCSSSSSS,H..L...H
+FREQ,99,440.0000,110,A4,+0.00
+FREQ,250,445.0000,111,A4,+19.56
+FREQ,500,437.0000,109,A4,-11.84
+FREQ,750,27.5000,7,A0,+0.00

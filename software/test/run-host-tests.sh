@@ -74,6 +74,7 @@ suite test_scope_math               ../src/ScopeMath.cpp
 suite test_sampler_math             ../src/SamplerMath.cpp
 suite test_sample_convert
 suite test_preset_op_queue
+suite test_cvmeter_math             ../src/CvMeterMath.cpp
 
 # Counted, not typed: the literal that used to live here said 25 while 26
 # suites ran, which is the same hand-maintained-list drift this file exists

@@ -141,6 +141,12 @@ const DAC::AutotuneCalibrationData *DAC::autotune_calibration_data_ = nullptr;
 uint32_t DAC::values_[DAC_CHANNEL_COUNT];
 
 /*static*/
+volatile uint32_t DAC::held_mask_ = 0;
+
+/*static*/
+uint16_t DAC::held_values_[DAC_CHANNEL_COUNT];
+
+/*static*/
 uint16_t DAC::history_[DAC_CHANNEL_COUNT][DAC::kHistoryDepth];
 
 /*static*/ 

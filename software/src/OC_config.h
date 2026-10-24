@@ -84,8 +84,20 @@ static constexpr unsigned long SETTINGS_SAVE_TIMEOUT_MS = 1000;
 // app; the reserve shrank in step, 156 -> 152.)
 #define EEPROM_PRESETBUS_SIZE 8
 #define EEPROM_PRESETBUS_START (EEPROMStorage::LENGTH - EEPROM_PRESETBUS_SIZE)
-#define EEPROM_APPDATA_END EEPROM_PRESETBUS_START
-#define EEPROM_APPDATA_BINARY_SIZE (EEPROM_APPDATA_END - EEPROM_APPDATA_START - 152)
+// Per-input CV calibration (CvMeterMath.h, InputCalibration): its own page
+// store just below the preset-bus record, carved off the same reserve. It is
+// NOT part of the CALIBRATIONDATA page at address 0 because that page fills
+// its region exactly; growing it would have moved the app-data page and
+// thrown away every unit's stored DAC/ADC calibration and settings, which
+// is the one thing a firmware update must never do. Firmware that predates
+// this block never wrote these bytes (the app-data page ends at 4140), so
+// they hold no valid page and load as "no input calibration". The reserve
+// went 152 -> 40 so BINARY_SIZE stays 3900 (OC_storage.h asserts it).
+#define EEPROM_INPUTCAL_SIZE 112
+#define EEPROM_INPUTCAL_START (EEPROM_PRESETBUS_START - EEPROM_INPUTCAL_SIZE)
+#define EEPROM_INPUTCAL_END EEPROM_PRESETBUS_START
+#define EEPROM_APPDATA_END EEPROM_INPUTCAL_START
+#define EEPROM_APPDATA_BINARY_SIZE (EEPROM_APPDATA_END - EEPROM_APPDATA_START - 40)
 #else
 #define EEPROM_APPDATA_END EEPROMStorage::LENGTH
 // This is the available space for all apps' settings (\sa OC_apps.ino)

@@ -14,6 +14,7 @@
 #include "OC_ADC.h"
 #include "OC_storage.h"
 #include "OC_calibration.h"
+#include "CvMeterMath.h"
 #include "OC_digital_inputs.h"
 #include "OC_menus.h"
 #include "OC_strings.h"
@@ -33,6 +34,12 @@ DMAMEM CalibrationStorage calibration_storage;
 CalibrationData calibration_data;
 
 bool calibration_data_loaded = false;
+
+#ifdef ARDUINO_TEENSY41
+DMAMEM InputCalibrationStorage input_calibration_storage;
+DMAMEM CvMeterMath::InputCalibration input_calibration;  // set by calibration_load()
+bool input_calibration_loaded = false;
+#endif
 
 PROGMEM
 const CalibrationData kCalibrationDefaults = {
@@ -187,7 +194,30 @@ FLASHMEM void calibration_load() {
 
   if (!OC::calibration_data.screensaver_timeout)
     OC::calibration_data.screensaver_timeout = SCREENSAVER_TIMEOUT_S;
+
+#ifdef ARDUINO_TEENSY41
+  // Separate page, separate fate: a missing or rejected input calibration
+  // never touches the DAC/ADC data above, and vice versa.
+  CvMeterMath::InputCalReset(OC::input_calibration);
+  input_calibration_loaded = input_calibration_storage.Load(OC::input_calibration);
+  if (input_calibration_loaded) {
+    const int dropped = CvMeterMath::InputCalSanitize(OC::input_calibration);
+    (void)dropped;  // SERIAL_PRINTLN compiles away without PRINT_DEBUG
+    SERIAL_PRINTLN("Input calibration loaded, mask %02X (%d dropped)",
+                   OC::input_calibration.valid_mask, dropped);
+  } else {
+    CvMeterMath::InputCalReset(OC::input_calibration);
+  }
+#endif
 }
+
+#ifdef ARDUINO_TEENSY41
+FLASHMEM void input_calibration_save() {
+  OC::input_calibration.version = CvMeterMath::InputCalibration::kVersion;
+  input_calibration_storage.Save(OC::input_calibration);
+  input_calibration_loaded = true;
+}
+#endif
 
 FLASHMEM void calibration_save() {
   SERIAL_PRINTLN("Saving calibration data");

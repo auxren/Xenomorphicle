@@ -793,10 +793,15 @@ bool AppSwitcher::Init(bool reset_settings) {
       // long enough that the module looks dead while it runs -- and on T4.1
       // eraseFiles() is fs.format(), so it destroys every preset too.
       APPS_SERIAL_PRINTLN("Erase EEPROM ...");
-      EEPtr d = EEPROM_GLOBALSETTINGS_START;
-      size_t len = EEPROMStorage::LENGTH - EEPROM_GLOBALSETTINGS_START;
-      while (len--)
-        *d++ = 0;
+      // The per-input CV calibration is calibration, like the DAC/ADC page
+      // below GLOBALSETTINGS_START that this never touched: it survives.
+      for (size_t a = EEPROM_GLOBALSETTINGS_START; a < EEPROMStorage::LENGTH; ++a) {
+#ifdef EEPROM_INPUTCAL_START
+        if (a >= EEPROM_INPUTCAL_START && a < EEPROM_INPUTCAL_END) continue;
+#endif
+        EEPtr d = (int)a;
+        *d = 0;
+      }
       APPS_SERIAL_PRINTLN("...done");
 #ifdef __IMXRT1062__
       PhzConfig::eraseFiles();

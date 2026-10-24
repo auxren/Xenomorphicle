@@ -139,6 +139,7 @@ void FreqMeasureClass::begin(uint8_t pin /*= 0 TR1*/)
 		NVIC_ENABLE_IRQ(irq);
 	}
 	running = true;
+	++gen;
 }
 
 uint8_t FreqMeasureClass::available(void)
@@ -182,6 +183,7 @@ void FreqMeasureClass::end(void)
 	NVIC_DISABLE_IRQ(irq);
 	*muxreg = 5 | 0x10;
 	running = false;
+	++gen;
 }
 
 void FreqMeasureClass::isr(void)
