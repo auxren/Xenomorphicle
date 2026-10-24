@@ -702,16 +702,26 @@ FLASHMEM bool Consume(int cmd) {
   return false;
 }
 
+FLASHMEM void CalRoutineTakeover() {
+  if (flow.state != FLOW_IDLE) FlowAbort("Cal Routine started");  // releases its holds
+  d_state = D_IDLE;  // a half-typed 'd' or 'Q' argument is dropped too
+  q_state = Q_IDLE;
+}
+
 FLASHMEM void Command(char key) {
   switch (key) {
     case 'v':
       if (stream_on) StreamStop();
       else StreamStart();
       break;
+    // The Cal Routine owns the outputs while it runs: a console hold or Q
+    // would drive a jack under its measurement. 'v' only reads, so it stays.
     case 'd':
+      if (CalRoutinePorts::MeterOwned()) { Serial.println("DAC,ERR,BUSY_CAL"); break; }
       d_state = D_WAIT_CH;
       break;
     case 'Q':
+      if (CalRoutinePorts::MeterOwned()) { Serial.println("INCAL,ERR,BUSY_CAL"); break; }
       q_state = Q_WAIT_SUB;
       break;
     case 'n':

@@ -22,6 +22,7 @@
 #include "../OC_global_settings.h"
 #include "../OC_gpio.h"
 #include "../src/drivers/EEPROMStorage.h"
+#include "../CvMeter.h"
 #if defined(ARDUINO_TEENSY41) && !defined(XENO_SIM)
 #include "../src/drivers/USBTMCDevice.h"
 #define CALR_HAVE_METER 1
@@ -464,6 +465,9 @@ FLASHMEM CalRoutine::SavePort &Save() { return save; }
 
 FLASHMEM void Open() {
   owned = true;
+#ifdef CVMETER_ENABLED
+  OC::CvMeter::CalRoutineTakeover();  // a console Q in progress lets go of its output
+#endif
   meter.Forget();  // name whatever is plugged in now
 }
 

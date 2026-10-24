@@ -45,7 +45,8 @@ CalRoutine::Clock &Clock();
 CalRoutine::SavePort &Save();
 
 // The app owns the meter between Open() and Close(): the console's 'e'
-// refuses (METER,ERR,BUSY_CAL), the identity is asked for, and Service()
+// refuses (METER,ERR,BUSY_CAL) and so do 'd' and 'Q' (a Q in progress is
+// aborted at Open), the identity is asked for, and Service()
 // samples the open input window. Close() also releases every hold this
 // port took.
 void Open();
@@ -59,7 +60,8 @@ MeterStatus Status();
 // The model field of the *IDN? reply ("SDM3065X"), "" until it is read.
 const char *MeterModel();
 
-// The step SavePort last failed at ("" if none): "DAC", "CURVES", "LINES".
+// The step SavePort last failed at: "CURVES" (the curve file write), or ""
+// (nothing failed; the DAC and ICA1 steps cannot report a failure).
 const char *SaveFailedAt();
 
 // The marker at EEPROM [4140,4144) (CalRoutineMarker.h).

@@ -36,6 +36,7 @@
 // ever asks or cancels, and the single irreversible commit in this app is a B
 // press on a screen that exists only to state what B will do.
 #include "../InputCurveFiles.h"
+#include "CalRoutinePorts.h"
 
 OC_APP_CLASS(AppBackup, TWOCCS("BU"), "Back It Up!", "Backup / Restore"),
   public SystemExclusiveHandler {
@@ -256,6 +257,10 @@ public:
       // tables are read per sample, so the values apply without a re-init.
       OC::calibration_load();
       OC::SetFlipMode(OC::calibration_data.flipcontrols());
+      // The tables now in use came from the dump, not from this unit's Cal
+      // Routine: the marker (which never travels) must stop saying so, or
+      // Setup would tell the owner the restored tables are the Cal Routine's.
+      if (CalRoutinePorts::MarkerSet()) CalRoutinePorts::MarkerWrite(0);
     } else {
       OC::ReinitApps(false);
     }

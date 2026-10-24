@@ -27,8 +27,14 @@ void Task();
 // pending argument or to the calibration dialog and must not be dispatched.
 bool Consume(int cmd);
 
-// The command switch's 'v', 'd', 'Q' and 'n'.
+// The command switch's 'v', 'd', 'Q' and 'n'. 'd' and 'Q' refuse
+// (DAC,ERR,BUSY_CAL / INCAL,ERR,BUSY_CAL) while the Cal Routine owns the
+// outputs (CalRoutinePorts::MeterOwned()).
 void Command(char key);
+
+// The Cal Routine is starting a run: aborts a Q in progress (releasing its
+// holds) and drops a half-typed 'd' or 'Q' argument.
+void CalRoutineTakeover();
 
 // Lines for the console's 'z' help.
 void PrintHelp();

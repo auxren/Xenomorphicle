@@ -26,7 +26,9 @@
 // and controls, CalRoutinePorts.cpp its hardware.
 //
 // Controls, on every screen: encL press = back / cancel (never destructive:
-// a cancel releases every output and writes nothing), encR press = go on.
+// a cancel releases every output and writes nothing; on Results, where it
+// would throw away a finished run, it asks first and a second encL within
+// 3 s discards), encR press = go on.
 // A = skip an input at its prompt, or retry the output under the Results
 // cursor. The one write -- Save -- is a B press on a confirm screen of its
 // own (Backup.h's two-step confirm: kConfirmDeadMs, B down solo, nothing
@@ -59,6 +61,7 @@ private:
 
   // Same value and reasoning as Backup.h / the 200e write confirm.
   static constexpr uint32_t kConfirmDeadMs = 350;
+  static constexpr uint32_t kDiscardWindowMs = 3000;
   static constexpr int kRows = 16;     // Results: outputs A-H, then inputs 1-8
   static constexpr int kListRows = 4;  // of them on screen at once
 
@@ -70,6 +73,10 @@ private:
   bool save_pending_ = false; // B committed; Loop() saves
   bool save_ok_ = false;
   uint32_t armed_ms_ = 0;     // millis() the confirm screen appeared
+  // Results: encL armed the discard at this millis() (0 = not armed). A
+  // second encL within kDiscardWindowMs (and past kConfirmDeadMs, so a
+  // bounce or a double-tap is not a yes) discards the finished run.
+  uint32_t discard_armed_ms_ = 0;
   bool b_down_solo_ = false;  // B went down alone, after that screen appeared
 
   void StartRun();
@@ -79,6 +86,7 @@ private:
   void HandlePress(const UI::Event &event);
   void MoveCursor(int delta);
   bool CursorOnFailedOutput() const;
+  bool DiscardArmed() const;
 
   void Title(const char *text) const;
   void Row(int row, const char *text) const;
@@ -154,6 +162,7 @@ FLASHMEM void AppCalRoutine::Volts(char *buf, size_t n, int32_t mv) {
 
 FLASHMEM void AppCalRoutine::StartRun() {
   skipped_ = 0;
+  discard_armed_ms_ = 0;
   cursor_ = 0;
   top_ = 0;
   save_pending_ = false;
@@ -168,6 +177,7 @@ FLASHMEM void AppCalRoutine::StartRun() {
 
 // The flow is Idle (cancelled, discarded or saved) when this is called.
 FLASHMEM void AppCalRoutine::EndRun(Screen next) {
+  discard_armed_ms_ = 0;
   CalRoutinePorts::Close();
   OC::ui.preempt_screensaver(false);
   save_pending_ = false;
@@ -179,6 +189,10 @@ FLASHMEM void AppCalRoutine::ArmSave() {
   armed_ms_ = millis();
   // Only a B press that BEGINS on this screen can commit.
   b_down_solo_ = false;
+}
+
+FLASHMEM bool AppCalRoutine::DiscardArmed() const {
+  return discard_armed_ms_ && millis() - discard_armed_ms_ < kDiscardWindowMs;
 }
 
 FLASHMEM bool AppCalRoutine::CursorOnFailedOutput() const {
@@ -207,6 +221,7 @@ FLASHMEM void AppCalRoutine::Loop() {
     const Stage s = CalRoutinePorts::Flow().stage();
     if (s != last_stage_) {
       last_stage_ = s;
+      discard_armed_ms_ = 0;
       OC::ui.Poke();  // a new prompt is activity: keep the panel lit for it
     }
   }
@@ -279,11 +294,23 @@ FLASHMEM void AppCalRoutine::HandlePress(const UI::Event &event) {
     case SCR_RUN: {
       const Stage s = CalRoutinePorts::Flow().stage();
       if (l) {
-        if (s == Stage::Results || s == Stage::Failed) CalRoutinePorts::Flow().Discard();
-        else CalRoutinePorts::Flow().Cancel();
+        if (s == Stage::Results) {
+          // A finished run is minutes of measuring: the first encL only asks.
+          if (!DiscardArmed()) {
+            discard_armed_ms_ = millis() | 1;
+            break;
+          }
+          if (millis() - discard_armed_ms_ < kConfirmDeadMs) break;
+          CalRoutinePorts::Flow().Discard();
+        } else if (s == Stage::Failed) {
+          CalRoutinePorts::Flow().Discard();  // nothing measured is left to lose
+        } else {
+          CalRoutinePorts::Flow().Cancel();
+        }
         EndRun(SCR_MENU);
         break;
       }
+      discard_armed_ms_ = 0;  // any other press is a no
       if (s == Stage::PromptOutput || s == Stage::PromptInput) {
         if (r) CalRoutinePorts::Flow().Continue();
         else if (a && s == Stage::PromptInput) {
@@ -519,12 +546,24 @@ FLASHMEM void AppCalRoutine::ResultDetail(int r, char *buf, size_t n) const {
       snprintf(buf, n, "bad table: A:retry");
       return;
     }
-    int len = snprintf(buf, n, "%sc@%sV", c, v);
-    // Entries the DAC cannot reach: kept at the rail, named by voltage.
-    for (int k = 0; k < CalRoutineMath::kNodes && len > 0 && size_t(len) < n; ++k) {
-      if (!res.at_rail[r][k]) continue;
-      Volts(v, sizeof(v), k * CalRoutineMath::kNodeMv);
-      len += snprintf(buf + len, n - size_t(len), " rail %sV", v);
+    // Entries the DAC cannot reach: kept at the rail, named by voltage. With
+    // rails the line gives up the worst point's voltage to fit 21 columns:
+    // "0.19c rail 10.8,12.0V" is the longest (the worst figure is <= 4 chars).
+    int rails[CalRoutineMath::kNodes];
+    int nr = 0;
+    for (int k = 0; k < CalRoutineMath::kNodes; ++k)
+      if (res.at_rail[r][k]) rails[nr++] = k;
+    if (nr == 0) {
+      snprintf(buf, n, "%sc@%sV", c, v);
+    } else if (nr == 1) {
+      Volts(lo, sizeof(lo), rails[0] * CalRoutineMath::kNodeMv);
+      snprintf(buf, n, "%sc rail %sV", c, lo);
+    } else if (nr == 2) {
+      Volts(lo, sizeof(lo), rails[0] * CalRoutineMath::kNodeMv);
+      Volts(hi, sizeof(hi), rails[1] * CalRoutineMath::kNodeMv);
+      snprintf(buf, n, "%sc rail %s,%sV", c, lo, hi);
+    } else {
+      snprintf(buf, n, "%sc %d rail entries", c, nr);
     }
     return;
   }
@@ -562,8 +601,13 @@ FLASHMEM void AppCalRoutine::DrawResults() const {
     snprintf(line, sizeof(line), "%c%s", r == cursor_ ? '>' : ' ', b);
     Row(k, line);
   }
-  ResultDetail(cursor_, b, sizeof(b));
-  Row(4, b);
+  if (DiscardArmed()) {
+    Row(4, "Press again: discard");
+    graphics.invertRect(0, 46, 128, 9);  // the banner the next encL acts on
+  } else {
+    ResultDetail(cursor_, b, sizeof(b));
+    Row(4, b);
+  }
   graphics.drawLine(0, 46, 127, 46);
   if (CursorOnFailedOutput()) Footer("L:discard    A:retry");
   else if (CalRoutinePorts::Flow().CanSave()) Footer("L:discard   R:save...");
@@ -585,7 +629,9 @@ FLASHMEM void AppCalRoutine::DrawConfirm() const {
   Row(0, "Outputs A-H: new.");
   snprintf(b, sizeof(b), "Inputs: %d new curves", ok);
   Row(1, b);
-  if (uncal) {
+  if (uncal == 0xFF) {
+    Row(2, "Uncal: all");  // 8 numbers with spaces would be 22 columns
+  } else if (uncal) {
     int len = snprintf(b, sizeof(b), "Uncal:");
     for (int i = 0; i < 8 && len > 0 && size_t(len) < sizeof(b); ++i)
       if (uncal & (1u << i)) len += snprintf(b + len, sizeof(b) - size_t(len), " %d", i + 1);

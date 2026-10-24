@@ -374,7 +374,7 @@ public:
     static constexpr weegfx::coord_t kValueX = menu::kDisplayWidth - 30;
 
     // On a unit the Cal Routine calibrated, the DAC and ADC steps carry one
-    // more line. The ADC screens have no row to spare at the stock 12 px
+    // more line (what this step does to that calibration). The ADC screens have no row to spare at the stock 12 px
     // pitch, so with the line they step 9 px (the chord card's pitch).
     const bool adc_step = step->calibration_type == CALIBRATE_ADC_OFFSET ||
                           step->calibration_type == CALIBRATE_ADC_1V ||
@@ -466,7 +466,10 @@ public:
     if (calr_line) {
       y += line_h;
       gfxPos(menu::kIndentDx, y + 2);
-      graphics.print("Replaces Cal Routine");  // 20 of the 21 columns
+      // Saving the DAC steps replaces the Cal Routine's tables. The ADC steps
+      // set only the shared offset and scale, which inputs with a Cal
+      // Routine curve or ICA1 line ignore (InputCal::Calibrated).
+      graphics.print(adc_step ? "Cal Routine ins: kept" : "Replaces Cal Routine");
     }
 
     // NJM: display encoder direction config on first and last screens
