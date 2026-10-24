@@ -85,6 +85,9 @@ FW_SRCS = \
   CalRoutineMath.cpp \
   CalRoutineFlow.cpp \
   CalRoutineMeasure.cpp \
+  CalRec.cpp \
+  Cal259eBus.cpp \
+  Cal259eFlow.cpp \
   apps/CalRoutinePorts.cpp \
   UsbTmc.cpp \
   InputCal.cpp \

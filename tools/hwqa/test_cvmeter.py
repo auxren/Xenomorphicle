@@ -299,6 +299,58 @@ class ParseCalr(unittest.TestCase):
         self.assertIsNone(cvmeter.parse_calr("CALR,OUT,x"))
 
 
+CAL259E_FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "..", "software", "test", "fixtures", "cal259e_lines.txt")
+
+
+def cal259e_fixture():
+    with open(CAL259E_FIXTURE) as f:
+        lines = [l.rstrip("\n") for l in f if l.startswith("CALR")]
+    return ([l for l in lines if l.startswith("CALR#")],
+            [l for l in lines if not l.startswith("CALR#")])
+
+
+class ParseCal259e(unittest.TestCase):
+    def test_headers_match_field_table(self):
+        heads, _ = cal259e_fixture()
+        table = {}
+        for h in heads:
+            f = h.split(",")
+            if f[1].startswith("version"):
+                self.assertEqual(f[1], "version=2")
+                continue
+            table[f[1]] = f[2:]
+        want = {k: list(v) for k, v in cvmeter.CAL259E_FIELDS.items()}
+        want["RETRY"] = list(cvmeter.CALR_FIELDS["RETRY"])
+        want["REREAD"] = list(cvmeter.CALR_FIELDS["REREAD"])
+        self.assertEqual(table, want)
+
+    def test_every_golden_line_parses_to_its_field_count(self):
+        _, lines = cal259e_fixture()
+        self.assertEqual(len(lines), 7)
+        for l in lines:
+            d = cvmeter.parse_calr(l)
+            self.assertIsNotNone(d, l)
+
+    def test_values(self):
+        _, lines = cal259e_fixture()
+        by = {d["sub"]: d for d in (cvmeter.parse_calr(l) for l in lines)}
+        self.assertEqual(by["259START"]["addr"], 0x29)
+        self.assertEqual(by["259PT"], {"sub": "259PT", "ch": 0, "mv": 4800, "meter_mv": 4800.123,
+                                       "raw_median": 29076, "n": 8})
+        self.assertEqual(by["259FIT"]["gain_hex"], 0x8F2C)
+        self.assertEqual(by["259FIT"]["offset"], -120)
+        self.assertEqual(by["259FIT"]["worst_cents"], -1.23)
+        self.assertEqual(by["259FIT"]["nonlin_cents"], 0.45)
+        self.assertEqual(by["259REC"]["addr"], 0x28)
+        self.assertEqual(len(by["259REC"]["rec60hex"]), 60)
+        self.assertEqual(by["259END"]["result"], "COMMIT_UNKNOWN")
+
+    def test_rejects_wrong_count(self):
+        self.assertIsNone(cvmeter.parse_calr("CALR,259PT,0,4800,4800.123,29076"))
+        self.assertIsNone(cvmeter.parse_calr("CALR,259START,ZZ"))
+
+
 class ParseMeter(unittest.TestCase):
     def test_lines(self):
         self.assertEqual(cvmeter.parse_meter("METER,DONE,+1.20000E+00"), ("DONE", "+1.20000E+00"))

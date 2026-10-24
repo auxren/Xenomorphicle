@@ -1,0 +1,30 @@
+# Golden console lines for the Cal Routine's 259e run (src/Cal259eFlow.h,
+# Cal259eLines). test_cal259e_flow.cpp checks the firmware formatter produces
+# each of these byte for byte, that the flow logs exactly these CALR# header
+# lines at the start of a run, and that every CALR line of a simulated run has
+# its header's field count. tools/hwqa/cvmeter.py parses the same SUBs.
+# Change one side and the other fails.
+#
+# Shape: CALR v2 (as fixtures/calr_lines.txt): CALR,<SUB>,<field>,... with no
+# spaces, fixed decimals. ch is the 259e channel, 0 = principal pitch, 1 =
+# modulation pitch. addr and gain_hex are upper-case hex (addr 2 digits, gain
+# 4); rec60hex is the 30-byte record as 60 upper-case hex digits; n is the
+# number of fresh ADC samples in raw_median. result is OK, a fail name, or
+# CANCELLED_<commit result> when a cancel came after the COMMIT went out.
+# The RETRY and REREAD lines are the meter rule's (MeterMeasure), as in a Self
+# run; their headers are calr_lines.txt's.
+CALR#,version=2
+CALR#,259START,addr
+CALR#,259PT,ch,mv,meter_mv,raw_median,n
+CALR#,259FIT,ch,gain_hex,offset,worst_cents,nonlin_cents
+CALR#,259REC,addr,rec60hex
+CALR#,259END,result
+CALR#,RETRY,scpi,attempt
+CALR#,REREAD,out,target_mv,code,spread_mv
+CALR,259START,29
+CALR,259PT,0,4800,4800.123,29076,8
+CALR,259FIT,1,8F2C,-120,-1.23,0.45
+CALR,259REC,28,434C015902000102030405060708000268FAC1808F2CFF889041000FB49E
+CALR,259END,COMMIT_UNKNOWN
+CALR,RETRY,READ?,2
+CALR,REREAD,1,3600,19661,0.734

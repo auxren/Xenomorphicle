@@ -17,11 +17,17 @@
 // Test knobs: drop_replies, busy_sends (Send returns -1 that many times; -1
 // forever when negative), other_addr (another 259e at that address answers
 // every READ too, with different data), bad_reply_len, nak.
+// ADC model (off unless input_mv is set; then the module samples its two
+// inputs every sample_ms on the clock, bumping adc_n once per sample):
+//   raw = (input_mv(ch) + adc_err_mv[ch]) * adc_k[ch] + noise, clamped to 16 bits,
+// noise uniform +-adc_noise counts. kNominalK is the stock correction's inverse:
+// a raw word the stock gain 0x9041 maps onto mv * 4096 / 1200.
 #pragma once
 #include <stdint.h>
 #include <string.h>
 
 #include <deque>
+#include <functional>
 #include <vector>
 
 #include "../src/Cal259eBus.h"
@@ -51,6 +57,17 @@ struct Sim259e : BusPort {
   int bad_reply_len = -1;   // >= 0: reply data truncated/padded to this length
   int nak = 0;              // Send returns this (not 0) when non-zero
 
+  // ADC model
+  static constexpr double kNominalK = (4096.0 / 1200.0) / (0x9041 / 65536.0);
+  std::function<double(int ch)> input_mv;
+  double adc_k[2] = {kNominalK, kNominalK};
+  double adc_err_mv[2] = {0.0, 0.0};
+  double adc_noise = 0.0;
+  uint32_t sample_ms = 2;
+  bool sampled = false;
+  uint32_t last_sample = 0;
+  uint32_t noise_lcg = 7;
+
   // observation
   int count[256] = {};      // frames received per cmd
   int bad_frames = 0;       // frames that failed CalRec::FrameAllowed
@@ -61,6 +78,23 @@ struct Sim259e : BusPort {
   Sim259e() { memset(staged, 0xFF, sizeof staged); memset(active, 0xFF, sizeof active); }
 
   void SampleTick() { ++adc_n; }
+
+  // With the model on: a new sample once sample_ms has passed since the last.
+  void ModelSample() {
+    if (!input_mv || !clock) return;
+    const uint32_t now = clock->Ms();
+    if (sampled && now - last_sample < sample_ms) return;
+    sampled = true;
+    last_sample = now;
+    ++adc_n;
+    for (int ch = 0; ch < 2; ++ch) {
+      noise_lcg = noise_lcg * 1103515245u + 12345u;
+      const double u = double((noise_lcg >> 8) & 0xFFFF) / 65535.0 * 2.0 - 1.0;
+      double raw = (input_mv(ch) + adc_err_mv[ch]) * adc_k[ch] + u * adc_noise;
+      raw = raw < 0.0 ? 0.0 : raw > 65535.0 ? 65535.0 : raw;
+      adc_word[ch] = (uint16_t)(raw + 0.5);
+    }
+  }
 
   // Test helper: put a record straight into the active slot.
   void Install(const uint8_t rec[30]) {
@@ -165,6 +199,7 @@ struct Sim259e : BusPort {
         return;
       case 1:
         if (arg > 1) { Reply(addr, 1, arg, d, 0); return; }
+        ModelSample();
         d[0] = (uint8_t)(adc_word[arg] >> 8); d[1] = (uint8_t)adc_word[arg]; d[2] = adc_n;
         Reply(addr, 1, arg, d, 3);
         return;

@@ -151,6 +151,17 @@ CALR_FIELDS = {
     "PATCH": ("out", "moved", "own_delta_raw"),
     "PRES": ("result", "crossed", "missing"),
 }
+# The Cal Routine's 259e run adds these SUBs (software/src/Cal259eFlow.cpp;
+# golden file software/test/fixtures/cal259e_lines.txt, checked by
+# test_cvmeter.py). Its RETRY and REREAD lines are the Self run's above.
+CAL259E_FIELDS = {
+    "259START": ("addr",),
+    "259PT": ("ch", "mv", "meter_mv", "raw_median", "n"),
+    "259FIT": ("ch", "gain_hex", "offset", "worst_cents", "nonlin_cents"),
+    "259REC": ("addr", "rec60hex"),
+    "259END": ("result",),
+}
+_ALL_FIELDS = dict(CALR_FIELDS, **CAL259E_FIELDS)
 _CALR_KIND = {"ms": "i", "out": "i", "in": "i", "k": "i", "target_mv": "i", "code": "i",
               "measured_mv": "f", "iters": "i", "rail": "i", "spread_mv": "f",
               "resid_mv": "f", "counted": "i", "worst_mv": "f", "worst_at_mv": "i",
@@ -158,7 +169,9 @@ _CALR_KIND = {"ms": "i", "out": "i", "in": "i", "k": "i", "target_mv": "i", "cod
               "mean_raw": "f", "pp_raw": "f", "samples": "i", "used": "i",
               "gain_uv": "f", "offset_mv": "f", "holdout_mv": "f", "line_dev_mv": "f",
               "points": "i", "attempt": "i", "can_save": "i", "out_pass": "h", "in_pass": "h",
-              "moved": "h", "own_delta_raw": "f", "crossed": "h", "missing": "h"}
+              "moved": "h", "own_delta_raw": "f", "crossed": "h", "missing": "h",
+              "addr": "h", "ch": "i", "meter_mv": "f", "raw_median": "i", "n": "i",
+              "gain_hex": "h", "offset": "i", "worst_cents": "f", "nonlin_cents": "f"}
 
 
 def parse_calr(line):
@@ -166,12 +179,13 @@ def parse_calr(line):
 
     None for a '#' header, another tag, an unknown SUB, a wrong field count
     or a field that does not parse. Masks (rail_mask, out_pass, in_pass,
-    moved, crossed, missing) are hex in the line and ints here.
+    moved, crossed, missing) and the 259e run's addr and gain_hex are hex
+    in the line and ints here; rec60hex stays a string.
     """
     f = line.strip().split(",")
-    if len(f) < 2 or f[0] != "CALR" or f[1] not in CALR_FIELDS:
+    if len(f) < 2 or f[0] != "CALR" or f[1] not in _ALL_FIELDS:
         return None
-    names = CALR_FIELDS[f[1]]
+    names = _ALL_FIELDS[f[1]]
     vals = f[2:]
     if f[1] == "METER":
         vals = [",".join(vals)] if vals else []   # an identity may hold commas
