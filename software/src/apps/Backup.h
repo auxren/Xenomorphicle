@@ -153,7 +153,10 @@ public:
         packet = p;
 
         // Wrap into 32-byte packets
-        for (int b = 0; b < 32; b++) V[ix++] = EEPROM.read(address++);
+        // The input-map marker describes THIS unit's pages and never travels:
+        // a dump sends it as 0 (what older firmware reads as "absent").
+        for (int b = 0; b < 32; b++, address++)
+          V[ix++] = InMapMarker(address) ? 0 : EEPROM.read(address);
 
         UnpackedData unpacked;
         unpacked.set_data(ix, V);
@@ -185,7 +188,9 @@ public:
         EEPROMStorage::update(EEPROM_INPUTMAP_MARKER_START, m, sizeof m);
       }
       uint16_t address = p * 32;
-      for (int b = 0; b < 32; b++) EEPROM.write(address++, V[ix++]);
+      // ...and a restore never writes it, from any dump (see OnSendSysEx).
+      for (int b = 0; b < 32; b++, address++, ix++)
+        if (!InMapMarker(address)) EEPROM.write(address, V[ix]);
 
       // Last packet: the EEPROM now holds the backup, and the live copies
       // must be reloaded from it. Not here -- this runs in the app ISR
@@ -279,6 +284,10 @@ public:
   }
 
 private:
+  static bool InMapMarker(uint16_t a) {
+    return a >= EEPROM_INPUTMAP_MARKER_START && a < EEPROM_INPUTMAP_MARKER_END;
+  }
+
   bool calibration = 0;
   bool receiving = 0;
   uint8_t packet = 0;

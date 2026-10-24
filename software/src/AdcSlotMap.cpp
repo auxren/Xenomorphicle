@@ -87,8 +87,11 @@ ADC_SLOT_MAP_CODE bool InputCurveNormalize(InputCurveRecord &rec, const int *cha
 
 ADC_SLOT_MAP_CODE InputMapPlan InputMapPrepare(InputMapPages &p, const int *chan) {
   InputMapPlan plan = {false, false, false, false};
-  if (InputMapMarkerPresent(p.marker)) return plan;
-  plan.run = true;
+  // The marker only says the curve file was done. CAL1 and ICA1 are in RAM
+  // at every boot, so their own flags are always checked: a marker that came
+  // from somewhere else must never hide a legacy page.
+  const bool marker = InputMapMarkerPresent(p.marker);
+  plan.run = !marker;
 
   // CAL1. Defaults (no page) are the same on every input: stamp RAM only.
   if (p.cal_loaded && *p.cal_flag != kInputMapV1) {
@@ -106,6 +109,6 @@ ADC_SLOT_MAP_CODE InputMapPlan InputMapPrepare(InputMapPages &p, const int *chan
   IcaMapFlag(*p.ica) = kInputMapV1;
 
   // The curve record (A/B store).
-  if (p.curves_loaded && InputCurveNormalize(*p.curves, chan)) plan.save_curves = true;
+  if (!marker && p.curves_loaded && InputCurveNormalize(*p.curves, chan)) plan.save_curves = true;
   return plan;
 }

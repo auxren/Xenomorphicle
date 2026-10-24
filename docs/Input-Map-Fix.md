@@ -35,6 +35,9 @@ Xenomorpher. Hardware that uses the Teensy's own ADC is unchanged.
   finishes on the next boot and never moves anything twice.
 - In flip mode the move follows the flipped input order, so a flipped module
   ends up right too.
+- If you go back to older firmware, recalibrate there (Setup's ADC steps or
+  `Q`), and then update again, re-run that calibration after the update: the
+  fixed firmware cannot tell that it was recorded the old way.
 
 ## Backups
 

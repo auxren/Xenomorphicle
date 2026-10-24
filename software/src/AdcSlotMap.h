@@ -100,11 +100,14 @@ struct InputMapPlan {
   bool save_curves;
 };
 
-// Marker present: nothing. Otherwise every loaded page whose flag is absent
-// is rotated and stamped in RAM and marked for saving; pages already stamped
-// (a rerun after power loss) are left alone, so a rerun is harmless. RAM that
-// came from defaults is stamped without a save: the defaults are the same on
-// every input.
+// Every boot. CAL1 and ICA1 (both already in RAM) are checked on their own
+// flags whatever the marker says: a loaded page without the flag is rotated
+// and stamped in RAM and marked for saving. The curve record is handled only
+// while the marker is absent (the caller skips the file read otherwise; the
+// load-time InputCurveNormalize covers it at run time). Pages already
+// stamped (a rerun after power loss) are left alone, so a rerun is harmless.
+// RAM that came from defaults is stamped without a save: the defaults are
+// the same on every input.
 InputMapPlan InputMapPrepare(InputMapPages &p, const int *chan);
 
 #endif

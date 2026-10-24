@@ -233,7 +233,7 @@ FLASHMEM void input_calibration_save() {
 }
 
 // The one-time move of per-input data to the fixed ADC33131D slot map
-// (AdcSlotMap.h). Needs the final ADC_CHANNEL table (after ADC::Init's flip)
+// (AdcSlotMap.h), checked on every boot (it costs nothing once done). Needs the final ADC_CHANNEL table (after ADC::Init's flip)
 // and LittleFS (the curve files), so setup() calls it after PhzConfig::Init;
 // a calibration-region restore (apps/Backup.h) calls it again.
 //
@@ -245,7 +245,7 @@ FLASHMEM void input_calibration_save() {
 FLASHMEM void input_map_migrate() {
   uint8_t marker[4];
   EEPROMStorage::read(EEPROM_INPUTMAP_MARKER_START, marker, sizeof marker);
-  if (InputMapMarkerPresent(marker)) return;
+  const bool marker_present = InputMapMarkerPresent(marker);
 
   int chan[8];
   OC::ADC::ChannelTable(chan);
@@ -257,15 +257,22 @@ FLASHMEM void input_map_migrate() {
   pages.cal_flag = &OC::calibration_data.reserved0[0];
   pages.ica_loaded = input_calibration_loaded;
   pages.ica = &OC::input_calibration;
-  pages.curves_loaded = InputCurveLoadFromFlashRaw(&rec, nullptr);
+  // The marker only spares this flash read on every later boot; CAL1 and
+  // ICA1 are checked on their own flags each time (InputMapPrepare).
+  pages.curves_loaded = !marker_present && InputCurveLoadFromFlashRaw(&rec, nullptr);
   pages.curves = &rec;
   const InputMapPlan plan = InputMapPrepare(pages, chan);
+  if (!plan.run && !plan.save_cal && !plan.save_ica) return;  // the usual boot
 
+  // Only the curve save's result gates the marker: the two EEPROM page saves
+  // report nothing back, and a page that did not land keeps flag 0 and is
+  // simply moved again on the next boot.
   bool ok = true;
   if (plan.save_cal) OC::calibration_storage.Save(OC::calibration_data);
   if (plan.save_ica) input_calibration_save();
   if (plan.save_curves) ok = InputCurveSaveToFlash(rec);
-  if (ok) EEPROMStorage::update(EEPROM_INPUTMAP_MARKER_START, kInputMapMarker, sizeof kInputMapMarker);
+  if (plan.run && ok)
+    EEPROMStorage::update(EEPROM_INPUTMAP_MARKER_START, kInputMapMarker, sizeof kInputMapMarker);
   Serial.printf("Input map v1: cal=%d ica=%d curves=%d ok=%d\r\n", plan.save_cal,
                 plan.save_ica, plan.save_curves, ok);
   InputCal::Reload();

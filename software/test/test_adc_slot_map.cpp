@@ -198,9 +198,13 @@ static void migration_rotates_every_page_and_saves_in_order() {
 }
 
 static void rotate_idempotent_guarded() {
-  // Marker present: nothing runs, nothing moves, nothing is saved.
+  // Marker present and every page flagged: nothing moves, nothing is saved,
+  // and the marker is not rewritten.
   Unit u = legacy_unit();
   memcpy(u.marker, kInputMapMarker, 4);
+  u.cal_flag = kInputMapV1;
+  IcaMapFlag(u.ica) = kInputMapV1;
+  u.curves_loaded = false;          // the caller skips the curve read
   const Unit before = u;
   InputMapPages p = u.pages();
   const InputMapPlan plan = InputMapPrepare(p, kIdentity);
@@ -237,6 +241,40 @@ static void rotate_idempotent_guarded() {
   CHECK(!partial.save_cal && partial.save_ica && partial.save_curves);
   CHECK(w.off[0] == 4001);         // once, not twice
   CHECK(w.ica.valid_mask == 0x01 && w.rec.valid_mask == 0x02);
+}
+
+// A marker that arrived some other way (e.g. a data dump restored on a pre-fix
+// unit) must not hide a legacy page: CAL1 and ICA1 are in RAM at every boot,
+// so their own flags are always checked. Only the curve read is skipped.
+static void marker_present_still_checks_eeprom_pages() {
+  Unit u = legacy_unit();           // CAL1 flag 0
+  memcpy(u.marker, kInputMapMarker, 4);
+  IcaMapFlag(u.ica) = kInputMapV1;
+  u.curves_loaded = false;
+  InputMapPages p = u.pages();
+  InputMapPlan plan = InputMapPrepare(p, kIdentity);
+  CHECK(!plan.run && plan.save_cal && !plan.save_ica && !plan.save_curves);
+  CHECK(u.off[0] == 4001 && u.off[7] == 4000 && u.cal_flag == kInputMapV1);
+
+  Unit v = legacy_unit();           // ICA1 flag 0 with a fitted channel
+  memcpy(v.marker, kInputMapMarker, 4);
+  v.cal_flag = kInputMapV1;
+  v.curves_loaded = false;
+  InputMapPages q = v.pages();
+  plan = InputMapPrepare(q, kIdentity);
+  CHECK(!plan.run && !plan.save_cal && plan.save_ica);
+  CHECK(v.ica.valid_mask == 0x01 && IcaMapFlag(v.ica) == kInputMapV1);
+  CHECK(v.off[0] == 4000);
+
+  // Even if the caller did read the curves, a present marker leaves them to
+  // the load-time normalization.
+  Unit w = legacy_unit();
+  memcpy(w.marker, kInputMapMarker, 4);
+  w.cal_flag = kInputMapV1;
+  IcaMapFlag(w.ica) = kInputMapV1;
+  InputMapPages r = w.pages();
+  plan = InputMapPrepare(r, kIdentity);
+  CHECK(!plan.save_curves && w.rec.valid_mask == 0x04);
 }
 
 static void fresh_unit_no_rotation_needed() {
@@ -311,6 +349,7 @@ int main() {
   legacy_curve_record_normalizes_once();
   migration_rotates_every_page_and_saves_in_order();
   rotate_idempotent_guarded();
+  marker_present_still_checks_eeprom_pages();
   fresh_unit_no_rotation_needed();
   prefix_backup_restore_rotated();
   if (g_fail) {
