@@ -75,6 +75,7 @@ suite test_sampler_math             ../src/SamplerMath.cpp
 suite test_sample_convert
 suite test_preset_op_queue
 suite test_cvmeter_math             ../src/CvMeterMath.cpp
+suite test_calroutine_math          ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp
 suite test_usbtmc                   ../src/UsbTmc.cpp
 
 # Counted, not typed: the literal that used to live here said 25 while 26
