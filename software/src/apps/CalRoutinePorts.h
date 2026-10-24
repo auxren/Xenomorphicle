@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 
+#include "../Cal259eBus.h"
 #include "../CalRoutineFlow.h"
 
 // ---------------------------------------------------------------------------
@@ -80,6 +81,22 @@ void ConsoleLog(const char *line);
 // True on hardware the routine's model fits: 1.2 V per octave, table entry k
 // at k x 1.2 V from 0 V (Northern Light / the Xenomorpher).
 bool HardwareSupported();
+
+// The 200e bus for the 259e calibration client (Cal259eBus.h): Send is
+// OC::PresetBus::SendRawFrame, PopReply is PresetBus::PopCalReply. Where the
+// build has no preset bus, Send answers -2 and PopReply false.
+BusPort &Bus();
+
+// Console 259e read-only access, key '=' (every letter is taken in Main.cpp's
+// switch): "=<aa>s" status, "=<aa>r" record, "=<aa>a<0|1>" 8 ADC words,
+// aa = the module's bus address in two hex digits. Logs CALR,259E,... lines.
+// No PUT and no COMMIT. Refused with CALR,259E,ERR,BUSY_CAL while the Cal
+// Routine owns the meter. Consume is called with every console byte before the
+// command switch and returns true for a byte that belonged to a pending
+// argument; Command is the switch's '='; Task runs once per loop pass.
+bool Cal259Consume(int cmd);
+void Cal259Command();
+void Cal259Task();
 
 }  // namespace CalRoutinePorts
 

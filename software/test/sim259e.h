@@ -1,0 +1,180 @@
+// A C++ model of the 259e calibration firmware 31.2C4, for host tests. The
+// rules are Buchla_FW docs/cv-calibration/CONTRACT.md, "259e behaviour where
+// the contract above was open (31.2C4)", plus its frames table and status bits:
+//   - acts only if dest 0x00, src 0x22, target and magic 0xCA match
+//   - no reply to 0x10 / 0x11 / 0x12 / 0x0B; replies only to READ (0x18)
+//   - READ what 0: 8 bytes of the active record from arg; NO data bytes if
+//     there is no record or arg > 22; what 1: hi, lo, n (no data if arg > 1);
+//     what 2: flags, fmt(=1), seq_hi, seq_lo; an unknown what: no reply
+//   - COMMIT: staged bytes 0..len-1 must decode (CalRec::Decode259e) with
+//     trailing CRC == crc, else refused (bit3). Byte-equal to the active
+//     record: ok (bit2), no write. 8 append-only slots; all full: refused
+//     with bits 3+4 unless flags bit0 (compaction: the new record alone in
+//     slot 0). COMMIT flushes the receive queue: frames arriving while it
+//     rewrites flash (kCommitBusyMs) are lost.
+//   - status flags: bit0 record valid, bit2 last commit ok, bit3 refused,
+//     bit4 no free slot
+// Test knobs: drop_replies, busy_sends (Send returns -1 that many times; -1
+// forever when negative), other_addr (another 259e at that address answers
+// every READ too, with different data), bad_reply_len, nak.
+#pragma once
+#include <stdint.h>
+#include <string.h>
+
+#include <deque>
+#include <vector>
+
+#include "../src/Cal259eBus.h"
+#include "../src/CalRec.h"
+
+struct Sim259e : BusPort {
+  static constexpr uint32_t kCommitBusyMs = 1000;
+
+  uint8_t addr = 0x28;
+  CalRoutine::Clock *clock = nullptr;
+
+  uint8_t staged[40];
+  uint8_t active[30];
+  bool has_active = false;
+  uint8_t slots_used = 0;
+  uint16_t seq = 0;
+  bool ok_bit = false, refused_bit = false, noslot_bit = false;
+  uint16_t adc_word[2] = {0x1234, 0x2345};
+  uint8_t adc_n = 0;
+  uint32_t busy_until = 0;
+  bool busy_active = false;
+
+  // knobs
+  bool drop_replies = false;
+  int busy_sends = 0;
+  uint8_t other_addr = 0;
+  int bad_reply_len = -1;   // >= 0: reply data truncated/padded to this length
+  int nak = 0;              // Send returns this (not 0) when non-zero
+
+  // observation
+  int count[256] = {};      // frames received per cmd
+  int bad_frames = 0;       // frames that failed CalRec::FrameAllowed
+  int lost = 0;             // frames lost to the flash rewrite
+  std::vector<std::vector<uint8_t>> log;
+  std::deque<std::vector<uint8_t>> replies;
+
+  Sim259e() { memset(staged, 0xFF, sizeof staged); memset(active, 0xFF, sizeof active); }
+
+  void SampleTick() { ++adc_n; }
+
+  // Test helper: put a record straight into the active slot.
+  void Install(const uint8_t rec[30]) {
+    memcpy(active, rec, 30); has_active = true; if (slots_used < 8) ++slots_used;
+    ok_bit = true; refused_bit = noslot_bit = false;
+    CalRec::Record r;
+    if (CalRec::Decode259e(rec, 30, &r)) seq = r.seq;
+  }
+
+  int Send(const uint8_t *f, uint8_t n) override {
+    if (busy_sends != 0) { if (busy_sends > 0) --busy_sends; return -1; }
+    if (nak) return nak;
+    if (!CalRec::FrameAllowed(f, n)) ++bad_frames;
+    log.emplace_back(f, f + n);
+    if (n >= 5) ++count[f[3]];
+    if (busy_active && clock->Ms() - busy_until >= 0x80000000u) { ++lost; return 0; }  // before busy_until
+    busy_active = false;
+    Receive(f, n);
+    return 0;
+  }
+
+  bool PopReply(uint8_t *f, uint8_t *n) override {
+    if (replies.empty()) return false;
+    *n = (uint8_t)replies.front().size();
+    memcpy(f, replies.front().data(), *n);
+    replies.pop_front();
+    return true;
+  }
+
+  void Receive(const uint8_t *f, uint8_t n) {
+    if (n < 6 || f[1] != 0x00 || f[2] != CalRec::kMaster || f[4] != addr || f[5] != CalRec::kMagic)
+      return;
+    switch (f[3]) {
+      case CalRec::kCmdOverride:
+      case CalRec::kCmdRelease: return;
+      case CalRec::kCmdPut: {
+        const uint8_t off = f[6], len = (uint8_t)(n - 7);
+        if (off + len <= 40) memcpy(staged + off, f + 7, len);
+        return;
+      }
+      case CalRec::kCmdCommit: Commit(f, n); return;
+      case CalRec::kCmdRead: Read(f[6], f[7]); return;
+      default: return;
+    }
+  }
+
+  void Commit(const uint8_t *f, uint8_t n) {
+    const uint8_t len = f[6];
+    const uint16_t crc = (uint16_t)((f[7] << 8) | f[8]);
+    const uint8_t flags = n >= 10 ? f[9] : 0;
+    busy_active = true;
+    busy_until = clock->Ms() + kCommitBusyMs;  // the queue behind it is lost
+    ok_bit = refused_bit = noslot_bit = false;
+    CalRec::Record r;
+    if (len != 30 || !CalRec::Decode259e(staged, len, &r) ||
+        crc != (uint16_t)((staged[28] << 8) | staged[29])) {
+      refused_bit = true;
+      return;
+    }
+    if (has_active && memcmp(active, staged, 30) == 0) { ok_bit = true; return; }
+    if (slots_used >= 8) {
+      if (!(flags & 1)) { refused_bit = noslot_bit = true; return; }
+      slots_used = 0;  // compaction: the new record alone in slot 0
+    }
+    memcpy(active, staged, 30);
+    has_active = true;
+    ++slots_used;
+    seq = r.seq;
+    ok_bit = true;
+  }
+
+  void Reply(uint8_t src, uint8_t what, uint8_t arg, const uint8_t *d, uint8_t dn) {
+    if (drop_replies) return;
+    std::vector<uint8_t> fr;
+    fr.push_back(0);
+    fr.push_back(CalRec::kMaster);
+    fr.push_back(src);
+    fr.push_back(CalRec::kCmdReply);
+    fr.push_back(what);
+    fr.push_back(arg);
+    if (src == addr && bad_reply_len >= 0) {
+      for (int i = 0; i < bad_reply_len; ++i) fr.push_back(i < dn ? d[i] : 0);
+    } else {
+      fr.insert(fr.end(), d, d + dn);
+    }
+    fr[0] = (uint8_t)(fr.size() - 1);
+    replies.push_back(fr);
+  }
+
+  void Read(uint8_t what, uint8_t arg) {
+    if (other_addr) {  // a second 259e answers first, with other data
+      const uint8_t d[8] = {0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE};
+      Reply(other_addr, what, arg, d, what == 0 ? 8 : what == 1 ? 3 : 4);
+      Reply(addr, (uint8_t)(what ^ 1), arg, d, 3);  // right module, wrong request
+    }
+    uint8_t d[8];
+    switch (what) {
+      case 0:
+        if (!has_active || arg > 22) { Reply(addr, 0, arg, d, 0); return; }
+        { uint8_t pad[32]; memset(pad, 0xFF, sizeof pad); memcpy(pad, active, 30);
+          Reply(addr, 0, arg, pad + arg, 8); }
+        return;
+      case 1:
+        if (arg > 1) { Reply(addr, 1, arg, d, 0); return; }
+        d[0] = (uint8_t)(adc_word[arg] >> 8); d[1] = (uint8_t)adc_word[arg]; d[2] = adc_n;
+        Reply(addr, 1, arg, d, 3);
+        return;
+      case 2:
+        d[0] = (uint8_t)((has_active ? 1 : 0) | (ok_bit ? 4 : 0) | (refused_bit ? 8 : 0) |
+                         (noslot_bit ? 16 : 0));
+        d[1] = 1; d[2] = (uint8_t)(seq >> 8); d[3] = (uint8_t)seq;
+        Reply(addr, 2, arg, d, 4);
+        return;
+      default: return;  // unknown what: no reply
+    }
+  }
+};

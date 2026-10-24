@@ -743,6 +743,7 @@ FLASHMEM void PrintHelp() {
                 (unsigned long)DAC::held_mask());
   Serial.printf("Q<i><o> calibrate input i from output o   Qa<o> all inputs   Qp print   QcQc clear [mask %02X]\r\n",
                 OC::input_calibration.valid_mask);
+  Serial.println("=<aa>s status  =<aa>r record  =<aa>a0 / =<aa>a1 ADC words of a 259e at bus address aa (hex), read-only");
 }
 
 }  // namespace CvMeter

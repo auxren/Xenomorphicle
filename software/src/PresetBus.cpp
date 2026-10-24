@@ -1846,14 +1846,14 @@ FLASHMEM void DebugDump() {
   static const char *const opnames[] = {
     "none", "RECALL", "SAVE", "REMOTE_EN", "REMOTE_DIS", "POLL_DONE",
     "QUERY", "BACKUP", "RESTORE", "MIDI", "CLOCK", "UNKNOWN", "DROPPED",
-    "QRY_REPLY", "XFER_DONE", "LOAD_ACK",
+    "QRY_REPLY", "XFER_DONE", "LOAD_ACK", "CAL_REPLY",
   };
   const uint32_t total = Bus200eLogTotal();
   Serial.printf("decoded commands (%lu total, newest first):\n", total);
   Bus200eCmd c;
   for (uint32_t i = 0; i < 10 && Bus200eLogRead(i, &c); ++i) {
     Serial.printf("  %-10s arg=%u mod=%02X card=%02X off=%04X\n",
-                  c.op <= BUS200E_OP_XFER_DONE ? opnames[c.op] : "?",
+                  c.op <= BUS200E_OP_CAL_REPLY ? opnames[c.op] : "?",
                   c.arg, c.mod_addr,
                   c.card_lo, c.mem_off);
   }

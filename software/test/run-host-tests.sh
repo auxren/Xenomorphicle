@@ -83,6 +83,7 @@ suite test_adc_slot_map             ../src/CvMeterMath.cpp ../src/InputCurveStor
 suite test_input_cal                ../src/InputCal.cpp ../src/CalRoutineMath.cpp \
                                     ../src/CvMeterMath.cpp ../src/InputCurveStore.cpp
 suite test_calrec                   ../src/CalRec.cpp
+suite test_cal259e_bus              ../src/Cal259eBus.cpp ../src/CalRec.cpp
 suite test_calroutine_flow          ../src/CalRoutineFlow.cpp ../src/CalRoutineMath.cpp \
                                     ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
 

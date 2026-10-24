@@ -86,6 +86,17 @@ all of it from a host and logs CSV.
 | `Q` | **per-input calibration** against a DAC output: `Q<i><o>` one input, `Qa<o>` inputs 1-8 in turn; the module prompts for the patch, sets three voltages itself, fits, verifies, and stores only on `y` with the residual under 10 mV. `Qp` prints it, `Qc` twice within 3 s clears it. While the dialog is open **every byte belongs to it**; any key but `y` aborts |
 | `n` | toggle the **frequency counter** on TR1: `FREQ,<ms>,<hz>,<periods>,<note>,<cents>` every 250 ms (or `FREQ,<ms>,NOSIG`). Refuses while an app owns the counter; TR1 is not a trigger input while it runs |
 
+### 259e calibration module, read-only (`=`)
+Every letter of the console is taken, so this is `=`. It reads a 259e running the calibration firmware (31.2C4) over the 200e bus; it never writes: **there is no PUT and no COMMIT on the console**. The bus address is two hex digits (259e `28`-`2B`, the 251e `5C` answers status and record only), then one command; no Enter.
+
+| keys | action |
+|---|---|
+| `=28s` | status: `CALR,259E,28,STATUS,<flags hex>,<fmt>,<seq>` (flags: bit0 record valid, bit2 last commit ok, bit3 refused, bit4 no free slot) |
+| `=28r` | the stored record: `CALR,259E,28,REC,<60 hex digits>` (30 bytes), or `REC,NONE` when the module has none |
+| `=28a0` / `=28a1` | eight ADC words of channel 0 / 1: `CALR,259E,28,ADC,<ch>,<i>,<word>,<n>,FRESH\|SAME` (`n` is the module's sample counter; `SAME` means no new sample since the previous word) |
+
+A failed request logs `CALR,259E,<aa>,ERR,<why>`: `BUS_BUSY` (the bus stayed busy for 1 s), `NO_REPLY` (a READ unanswered after 3 retries of 60 ms), `BAD_REPLY`, `BUS_ERROR` (the module did not ACK), `ADDRESS` (not a calibratable address), `START`. While the Cal Routine owns the meter, or a request is already running, it refuses with `CALR,259E,ERR,BUSY_CAL` or `CALR,259E,ERR,BUSY`. Any other byte after `=` cancels with `CALR,259E,ERR,cancelled`.
+
 ### USB bench DMM (USBTMC)
 A USBTMC meter on the USB host port (or the host hub) is claimed by class
 (interface `FE/03`), not by VID/PID; verified with a Siglent SDM3065X

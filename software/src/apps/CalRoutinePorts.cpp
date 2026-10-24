@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "../AdcSlotMap.h"
+#include "../CalRec.h"
 #include "../CalRoutineMarker.h"
 #include "../CvMeterMath.h"
 #include "../InputCal.h"
@@ -23,6 +24,7 @@
 #include "../OC_gpio.h"
 #include "../src/drivers/EEPROMStorage.h"
 #include "../CvMeter.h"
+#include "../PresetBus.h"
 #if defined(ARDUINO_TEENSY41) && !defined(XENO_SIM)
 #include "../src/drivers/USBTMCDevice.h"
 #define CALR_HAVE_METER 1
@@ -496,5 +498,188 @@ FLASHMEM void Service() {
   meter.Service();
   inputs.Sample();
 }
+
+// ---- the 200e bus for the 259e client, and its read-only console ---------------
+
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS) && !defined(XENO_SIM)
+struct Bus_ : BusPort {
+  int Send(const uint8_t *f, uint8_t n) override { return OC::PresetBus::SendRawFrame(f, n); }
+  bool PopReply(uint8_t *f, uint8_t *n) override { return OC::PresetBus::PopCalReply(f, n); }
+};
+#else
+struct Bus_ : BusPort {
+  int Send(const uint8_t *, uint8_t) override { return -2; }
+  bool PopReply(uint8_t *, uint8_t *) override { return false; }
+};
+#endif
+static Bus_ bus_port;
+FLASHMEM BusPort &Bus() { return bus_port; }
+
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS) && defined(PRINT_DEBUG) && !defined(XENO_SIM)
+
+namespace {
+
+enum CState : uint8_t { CS_IDLE, CS_ADDR_HI, CS_ADDR_LO, CS_CMD, CS_CH };
+enum CJob : uint8_t { J_NONE, J_STATUS, J_RECORD, J_ADC };
+constexpr int kAdcWords = 8;
+
+CState cstate = CS_IDLE;
+CJob cjob = J_NONE;
+uint8_t caddr = 0;
+uint8_t cch = 0;
+int cword = 0;
+int cprev_n = -1;
+Cal259eBus cbus;
+
+// One owner, one place: the console refuses while the Cal Routine holds the
+// meter (and so a run is active).
+bool CalBusy() { return MeterOwned(); }
+
+int HexVal(int c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+const char *ErrName(int e) {
+  switch (e) {
+    case E_BUS_BUSY: return "BUS_BUSY";
+    case E_NO_REPLY: return "NO_REPLY";
+    case E_BAD_REPLY: return "BAD_REPLY";
+    case E_COMMIT_REFUSED: return "COMMIT_REFUSED";
+    case E_NO_SLOT: return "NO_SLOT";
+    case E_COMMIT_UNKNOWN: return "COMMIT_UNKNOWN";
+    case E_BUS_ERROR: return "BUS_ERROR";
+    default: return "ERROR";
+  }
+}
+
+bool AddrOk(uint8_t a) { return (a >= 0x28 && a <= 0x2B) || a == 0x5C; }
+
+void StartJob() {
+  cbus.Begin(Bus(), Clock(), caddr);
+  bool ok = false;
+  switch (cjob) {
+    case J_STATUS: ok = cbus.ReadStatus(); break;
+    case J_RECORD: ok = cbus.ReadRecord(); break;
+    case J_ADC: cword = 0; cprev_n = -1; ok = cbus.ReadAdc(cch); break;
+    default: break;
+  }
+  if (!ok) {
+    Serial.printf("CALR,259E,%02X,ERR,START\r\n", caddr);
+    cjob = J_NONE;
+  }
+}
+
+}  // namespace
+
+FLASHMEM bool Cal259Consume(int cmd) {
+  if (cstate == CS_IDLE) return false;
+  const int v = HexVal(cmd);
+  switch (cstate) {
+    case CS_ADDR_HI:
+      if (v < 0) break;
+      caddr = uint8_t(v << 4);
+      cstate = CS_ADDR_LO;
+      return true;
+    case CS_ADDR_LO:
+      if (v < 0) break;
+      caddr = uint8_t(caddr | v);
+      if (!AddrOk(caddr)) {
+        Serial.printf("CALR,259E,%02X,ERR,ADDRESS (259e 28-2B, 251e 5C)\r\n", caddr);
+        cstate = CS_IDLE;
+        return true;
+      }
+      cstate = CS_CMD;
+      return true;
+    case CS_CMD:
+      cstate = CS_IDLE;
+      if (cmd == 's' || cmd == 'r') {
+        cjob = cmd == 's' ? J_STATUS : J_RECORD;
+        StartJob();
+        return true;
+      }
+      if (cmd == 'a') { cstate = CS_CH; return true; }
+      break;
+    case CS_CH:
+      cstate = CS_IDLE;
+      if (cmd == '0' || cmd == '1') {
+        cch = uint8_t(cmd - '0');
+        cjob = J_ADC;
+        StartJob();
+        return true;
+      }
+      break;
+    default:
+      break;
+  }
+  cstate = CS_IDLE;
+  Serial.println("CALR,259E,ERR,cancelled (=<aa>s  =<aa>r  =<aa>a0  =<aa>a1; aa = bus address in hex)");
+  return true;
+}
+
+FLASHMEM void Cal259Command() {
+  if (CalBusy()) { Serial.println("CALR,259E,ERR,BUSY_CAL"); return; }
+  if (cjob != J_NONE) { Serial.println("CALR,259E,ERR,BUSY"); return; }
+  cstate = CS_ADDR_HI;
+}
+
+FLASHMEM void Cal259Task() {
+  if (cjob == J_NONE) return;
+  if (CalBusy()) {  // the Cal Routine started under us: let go
+    Serial.printf("CALR,259E,%02X,ERR,BUSY_CAL\r\n", caddr);
+    cjob = J_NONE;
+    cstate = CS_IDLE;
+    return;
+  }
+  const int r = cbus.Tick();
+  if (r == 0) return;
+  if (r < 0) {
+    Serial.printf("CALR,259E,%02X,ERR,%s\r\n", caddr, ErrName(r));
+    cjob = J_NONE;
+    return;
+  }
+  switch (cjob) {
+    case J_STATUS: {
+      const ::Status s = cbus.status();
+      Serial.printf("CALR,259E,%02X,STATUS,%02X,%u,%u\r\n", caddr, s.flags, s.fmt, s.seq);
+      cjob = J_NONE;
+      break;
+    }
+    case J_RECORD:
+      if (!cbus.has_record()) {
+        Serial.printf("CALR,259E,%02X,REC,NONE\r\n", caddr);
+      } else {
+        char hex[2 * CalRec::kRecLen259e + 1];
+        for (int i = 0; i < CalRec::kRecLen259e; ++i)
+          snprintf(hex + 2 * i, 3, "%02X", cbus.record()[i]);
+        Serial.printf("CALR,259E,%02X,REC,%s\r\n", caddr, hex);
+      }
+      cjob = J_NONE;
+      break;
+    case J_ADC: {
+      // fresh: the module's sample counter moved since the previous word
+      const int n = cbus.adc_n();
+      Serial.printf("CALR,259E,%02X,ADC,%u,%d,%u,%d,%s\r\n", caddr, cch, cword, cbus.adc(), n,
+                    n != cprev_n ? "FRESH" : "SAME");
+      cprev_n = n;
+      if (++cword >= kAdcWords) { cjob = J_NONE; break; }
+      if (!cbus.ReadAdc(cch)) cjob = J_NONE;
+      break;
+    }
+    default:
+      cjob = J_NONE;
+      break;
+  }
+}
+
+#else
+
+FLASHMEM bool Cal259Consume(int) { return false; }
+FLASHMEM void Cal259Command() {}
+FLASHMEM void Cal259Task() {}
+
+#endif
 
 }  // namespace CalRoutinePorts

@@ -1188,6 +1188,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
 #endif
 #if defined(ARDUINO_TEENSY41) && defined(PRINT_DEBUG)
     MeterConsoleTask();    // console 'e': print the meter's answer when it lands
+    CalRoutinePorts::Cal259Task();  // console '=': 259e read-only requests
 #endif
 
     // UI events
@@ -1711,6 +1712,10 @@ FLASHMEM __attribute__((noinline)) void loop() {
           continue;
         }
 #endif
+#if defined(ARDUINO_TEENSY41) && defined(PRINT_DEBUG)
+        // '=' (259e read-only access) arguments: CalRoutinePorts.h.
+        if (CalRoutinePorts::Cal259Consume(cmd)) continue;
+#endif
 #ifdef CVMETER_ENABLED
         // 'd' and 'Q' arguments, and the input-calibration dialog, which
         // owns every byte while it is open (CvMeter.h).
@@ -2054,6 +2059,12 @@ FLASHMEM __attribute__((noinline)) void loop() {
             break;
 #endif
           case 't': SelfTest(); break;  // one-shot system health report
+#if defined(ARDUINO_TEENSY41)
+          // 259e calibration module, read-only: =<aa>s status, =<aa>r record,
+          // =<aa>a0/a1 ADC words. Every letter is taken, so '='. The arguments
+          // are consumed before this switch (Cal259Consume).
+          case '=': CalRoutinePorts::Cal259Command(); break;
+#endif
 #if defined(ARDUINO_TEENSY41)
           case 'X': {
             // Force 16 ADC33131D capture restarts, each at a different point
