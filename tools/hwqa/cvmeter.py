@@ -13,6 +13,11 @@ docs/CV-Meter.md; the key map is in docs/bench-console.md.
     cvmeter.py PORT set --output M --mv X               hold an output
     cvmeter.py PORT release [--output M]                release one / every output
 
+Also parsed here: the Cal Routine app's CALR,... log lines (parse_calr,
+summarize_calr; fields from software/test/fixtures/calr_lines.txt) and the
+console 'e' meter answers (parse_meter). "sim" has a simulated USBTMC meter
+behind 'e' and start_cal_routine(), a whole all-pass run's CALR lines.
+
 PORT is a serial device (/dev/ttyACM0, /dev/cu.usbmodem...), or "sim" for a
 simulated module that needs no hardware and no pyserial -- what the tests and
 a dry run use.
@@ -113,6 +118,109 @@ def parse_tagged(line, tag):
         else:
             pos.append(x)
     return f[1], pos, kv
+
+
+# CALR lines: the Cal Routine app's run log (software/src/CalRoutineFlow.cpp).
+# The field names and order are the CALR# headers of the golden file
+# software/test/fixtures/calr_lines.txt; test_cvmeter.py checks this table
+# against that file. kind: i int, f float, h hex int, s string.
+CALR_FIELDS = {
+    "METER": ("identity",),
+    "STATE": ("ms", "stage", "out", "in"),
+    "OUT": ("out",),
+    "NODE": ("out", "k", "target_mv", "code", "measured_mv", "iters", "rail"),
+    "REREAD": ("out", "target_mv", "code", "spread_mv"),
+    "SWEEP": ("out", "target_mv", "code", "measured_mv", "resid_mv", "counted"),
+    "ORES": ("out", "result", "reason", "worst_mv", "worst_at_mv", "rail_mask"),
+    "IN": ("in", "src_out", "lo_mv", "hi_mv"),
+    "IPT": ("in", "mv", "code", "mean_raw", "pp_raw", "samples", "used"),
+    "IRES": ("in", "result", "verdict", "gain_uv", "offset_mv", "holdout_mv",
+             "line_dev_mv", "points"),
+    "RETRY": ("scpi", "attempt"),
+    "LOST": ("out",),
+    "BACK": ("out",),
+    "REDO": ("out",),
+    "RESULT": ("can_save", "out_pass", "in_pass"),
+    "SAVE": ("result",),
+    "DISCARD": (),
+    "CANCEL": ("stage",),
+    "FAIL": ("reason",),
+}
+_CALR_KIND = {"ms": "i", "out": "i", "in": "i", "k": "i", "target_mv": "i", "code": "i",
+              "measured_mv": "f", "iters": "i", "rail": "i", "spread_mv": "f",
+              "resid_mv": "f", "counted": "i", "worst_mv": "f", "worst_at_mv": "i",
+              "rail_mask": "h", "src_out": "i", "lo_mv": "i", "hi_mv": "i", "mv": "i",
+              "mean_raw": "f", "pp_raw": "f", "samples": "i", "used": "i",
+              "gain_uv": "f", "offset_mv": "f", "holdout_mv": "f", "line_dev_mv": "f",
+              "points": "i", "attempt": "i", "can_save": "i", "out_pass": "h", "in_pass": "h"}
+
+
+def parse_calr(line):
+    """CALR,<SUB>,... -> {"sub": SUB, field: value, ...} or None.
+
+    None for a '#' header, another tag, an unknown SUB, a wrong field count
+    or a field that does not parse. Masks (rail_mask, out_pass, in_pass) are
+    hex in the line and ints here.
+    """
+    f = line.strip().split(",")
+    if len(f) < 2 or f[0] != "CALR" or f[1] not in CALR_FIELDS:
+        return None
+    names = CALR_FIELDS[f[1]]
+    vals = f[2:]
+    if f[1] == "METER":
+        vals = [",".join(vals)] if vals else []   # an identity may hold commas
+    if len(vals) != len(names):
+        return None
+    d = {"sub": f[1]}
+    try:
+        for n, v in zip(names, vals):
+            k = _CALR_KIND.get(n, "s")
+            d[n] = int(v) if k == "i" else float(v) if k == "f" else int(v, 16) if k == "h" else v
+    except ValueError:
+        return None
+    return d
+
+
+def summarize_calr(parsed):
+    """Fold parsed CALR dicts into the figures an operator reads: per output
+    and input results, the RESULT masks, and whether the run saved."""
+    res = {"outputs": {}, "inputs": {}, "saved": False, "failed": None, "cancelled": None,
+           "out_pass": None, "in_pass": None, "can_save": None, "identity": None}
+    for d in parsed:
+        s = d["sub"]
+        if s == "ORES":
+            res["outputs"][d["out"]] = d      # the last result of an output wins (retry)
+        elif s == "IRES":
+            res["inputs"][d["in"]] = d
+        elif s == "RESULT":
+            res["can_save"], res["out_pass"], res["in_pass"] = d["can_save"], d["out_pass"], d["in_pass"]
+        elif s == "SAVE":
+            res["saved"] = d["result"] == "OK"
+        elif s == "FAIL":
+            res["failed"] = d["reason"]
+        elif s == "CANCEL":
+            res["cancelled"] = d["stage"]
+        elif s == "METER":
+            res["identity"] = d["identity"]
+    return res
+
+
+def parse_meter(line):
+    """METER,DONE,<reply> | REFUSED | TIMEOUT | ERR,<why> -> (kind, value) or None.
+
+    Console 'e' answers. The reply of DONE may hold commas; value is None for
+    REFUSED and TIMEOUT, the reason for ERR (NOT_CONNECTED, BUSY, BUSY_CAL, ...).
+    """
+    f = line.strip().split(",", 2)
+    if len(f) < 2 or f[0] != "METER":
+        return None
+    if f[1] == "DONE":
+        return "DONE", (f[2] if len(f) > 2 else "")
+    if f[1] in ("REFUSED", "TIMEOUT") and len(f) == 2:
+        return f[1], None
+    if f[1] == "ERR" and len(f) == 3:
+        return "ERR", f[2]
+    return None
 
 
 def cv_csv_header():
@@ -225,6 +333,13 @@ class SimModule:
         self.pending = ""
         self.flow = None
         self.seq = 0
+        # simulated USBTMC meter behind console 'e'
+        self.meter = "ok"              # None = not connected
+        self.meter_output = 0          # the output the meter lead is on (0-based)
+        self.meter_timeouts = 0        # next n queries time out
+        self.meter_line = ""           # None when not collecting an 'e' line
+        self.meter_collect = False
+        self.calr = []                 # queued CALR lines of a running Cal Routine
 
     # -- the device side -------------------------------------------------
     def _raw(self, i):
@@ -332,8 +447,17 @@ class SimModule:
                     self._say(f"INCAL,DISCARDED,in={i + 1}")
                 self._next_input()
             return
+        if self.meter_collect:
+            if c in "\r\n":
+                self.meter_collect = False
+                self._meter_query(self.meter_line)
+            else:
+                self.meter_line += c
+            return
         p = self.pending + c
-        if p == "v":
+        if p == "e":
+            self.meter_collect, self.meter_line, self.pending = True, "", ""
+        elif p == "v":
             self.stream = not self.stream
             if self.stream:
                 self._say("CV#,ms,seq,dropped," + ",".join(cv_csv_header()[4:]))
@@ -389,6 +513,83 @@ class SimModule:
         else:
             self.pending = ""   # unknown: a screen capture on the real thing
 
+    # -- the simulated meter (console 'e') -------------------------------
+    METER_ID = "Siglent Technologies,SDM3065X,SDM36GBX000000,1.01.01.25"
+    METER_ALLOW = ("*IDN?", "*RST", "*CLS", "SYST:ERR?", "READ?", "CONF:VOLT:DC",
+                   "VOLT:DC:", "SENS:", "TRIG:", "INIT", "FETC?", "MEAS:VOLT:DC?")
+
+    def _meter_query(self, line):
+        if self.cal_busy:
+            return self._say("METER,ERR,BUSY_CAL")
+        m = re.fullmatch(r"@(\d+) (.*)", line)
+        if line.startswith("@"):
+            if not m or not 1 <= int(m.group(1)) <= 60000:
+                return self._say("METER,ERR,cancelled (expected @<1-60000 ms> then a space)")
+            line = m.group(2)
+        if not line.upper().startswith(self.METER_ALLOW):
+            return self._say("METER,REFUSED")
+        if self.meter is None:
+            return self._say("METER,ERR,NOT_CONNECTED")
+        if self.meter_timeouts > 0:
+            self.meter_timeouts -= 1
+            return self._say("METER,TIMEOUT")
+        u = line.upper()
+        if u == "*IDN?":
+            reply = self.METER_ID
+        elif u == "SYST:ERR?":
+            reply = '+0,"No error"'
+        elif u.endswith("?"):
+            volts = self.held.get(self.meter_output, 0.0) / 1000.0
+            volts += self.rng.gauss(0.0, 2e-5)
+            reply = f"{volts:+.5E}"
+        else:
+            reply = ""
+        self._say(f"METER,DONE,{reply}")
+
+    # -- a simulated Cal Routine run (the app's CALR log) -----------------
+    cal_busy = False
+
+    def start_cal_routine(self):
+        """Queue the CALR lines of a whole, all-pass Self run (8 outputs
+        against the meter, then output A into each input) and own the meter
+        until they have been read."""
+        r = self.rng
+        L = ["CALR#,version=1"]
+        L += ["CALR#," + sub + ("," + ",".join(f) if f else "") for sub, f in CALR_FIELDS.items()]
+        L.append("CALR,METER," + self.METER_ID.replace(",", ";"))
+        ms = 1000
+
+        def line(sub, *vals):
+            L.append("CALR," + sub + "".join("," + str(v) for v in vals))
+
+        for o in range(1, 9):
+            ms += 20000
+            line("STATE", ms, "CAL_OUT", o, 0)
+            line("OUT", o)
+            for k in range(11):
+                t = k * 1200
+                code = round(t * 5.4613)
+                line("NODE", o, k, t, code, f"{t + r.gauss(0, 0.1):.3f}", 3, 0)
+            line("REREAD", o, 3600, 19661, f"{abs(r.gauss(0, 0.4)):.3f}")
+            for t in range(600, 12000, 1200):
+                line("SWEEP", o, t, round(t * 5.4613), f"{t + r.gauss(0, 0.2):.3f}",
+                     f"{r.gauss(0, 0.2):.3f}", 1)
+            line("ORES", o, "PASS", "OK", f"{abs(r.gauss(0, 0.2)):.3f}", 10560, 0)
+        for i in range(1, 9):
+            ms += 15000
+            line("STATE", ms, "CAL_IN", 1, i)
+            line("IN", i, 1, 600, 10800)
+            for mv in range(600, 10801, 1200):
+                raw = 4095.0 - mv / 2.93
+                line("IPT", i, mv, round(mv * 5.4613), f"{raw:.2f}", "2.25", 3333, 1)
+            line("IRES", i, "PASS", "OK", f"{-2930.0 + r.gauss(0, 2):.1f}",
+                 f"{12000 + r.gauss(0, 0.5):.2f}", f"{abs(r.gauss(0, 0.5)):.2f}",
+                 f"{abs(r.gauss(0, 0.8)):.2f}", 19)
+        line("RESULT", 1, "FF", "FF")
+        line("SAVE", "OK")
+        self.calr = L
+        self.cal_busy = True
+
     # -- the Console interface -------------------------------------------
     def write(self, data):
         for c in data.decode("ascii"):
@@ -397,6 +598,11 @@ class SimModule:
     def readline(self, timeout=1.0):
         if self.out:
             return self.out.pop(0)
+        if self.calr:
+            l = self.calr.pop(0)
+            if not self.calr:
+                self.cal_busy = False
+            return l
         if self.stream or self.freq:
             self.t_ms += 20
             if self.freq and self.t_ms % 260 == 0:
