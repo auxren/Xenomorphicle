@@ -100,6 +100,7 @@ FLASHMEM bool USBTMCDevice::claim(Device_t *dev, int type, const uint8_t *descri
   tx_busy_ = false;
   ctl_busy_ = false;
   ctl_done_ = false;
+  ctl_abandoned_ = false;
   halt_in_ = false;
   halt_out_ = false;
   recover_req_ = false;
@@ -123,6 +124,7 @@ void USBTMCDevice::disconnect() {
   tx_busy_ = false;
   ctl_busy_ = false;
   ctl_done_ = false;
+  ctl_abandoned_ = false;  // the host layer frees the queued control transfer
   halt_in_ = false;
   halt_out_ = false;
   recover_req_ = false;
@@ -177,6 +179,13 @@ void USBTMCDevice::XferError(bool in) {
 // deadline covers that.
 void USBTMCDevice::control(const Transfer_t *) {
   ctl_busy_ = false;
+  // A late completion of a request RecoverFinish gave up on: its qTDs are
+  // back in the pool, so a new resync may start (RecoverStep). Its data is
+  // stale and the step it belonged to is over, so it does not count as done.
+  if (ctl_abandoned_) {
+    ctl_abandoned_ = false;
+    return;
+  }
   ctl_done_ = true;
 }
 
@@ -258,7 +267,14 @@ FLASHMEM bool USBTMCDevice::StartControl(const UsbTmc::Setup &s) {
 
 FLASHMEM void USBTMCDevice::RecoverFinish(bool ok) {
   rec_ = rNone;
-  ctl_busy_ = false;  // a request we gave up on may still be in flight; forget it
+  // A request we gave up on (its step deadline, or the whole resync's, passed)
+  // may still be queued in the controller, holding its qTDs from the pool the
+  // host shares with MIDI. Do not queue another behind it: ctl_busy_ stays
+  // set, and no new resync starts (RecoverStep) until it completes (control()),
+  // the device goes (disconnect()), or the controller drops it on an error
+  // (RecoverStep sees the control pipe inactive). A meter that never answers
+  // then holds one control transfer's qTDs, not one set per resync.
+  if (ctl_busy_) ctl_abandoned_ = true;
   if (state_ == QueryState::Recovering) {
     if (ok) {
       state_ = QueryState::Idle;
@@ -283,6 +299,18 @@ FLASHMEM void USBTMCDevice::RecoverStep() {
   const uint32_t now = millis();
   if (rec_ == rNone) {
     if (!recover_req_) return;
+    // A control request from the last resync is still queued: wait for it
+    // (recover_req_ stays set, so queries report Recovering meanwhile).
+    if (ctl_abandoned_) {
+      // ...unless the controller is no longer working on it. A request the
+      // device STALLs is freed by the host layer's error follow-up and never
+      // reaches control() (see there), which leaves the control pipe's
+      // overlay inactive; a request still NAKed keeps it Active.
+      Device_t *dev = device;
+      if (dev && dev->control_pipe && (dev->control_pipe->qh.token & 0x80u)) return;
+      ctl_abandoned_ = false;
+      ctl_busy_ = false;
+    }
     recover_req_ = false;
     rec_ = rNext;
     rec_start_ms_ = now;

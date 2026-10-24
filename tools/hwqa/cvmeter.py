@@ -137,6 +137,7 @@ CALR_FIELDS = {
     "IRES": ("in", "result", "verdict", "gain_uv", "offset_mv", "holdout_mv",
              "line_dev_mv", "points"),
     "RETRY": ("scpi", "attempt"),
+    "MERR": ("step", "reply"),
     "LOST": ("out",),
     "BACK": ("out",),
     "REDO": ("out",),

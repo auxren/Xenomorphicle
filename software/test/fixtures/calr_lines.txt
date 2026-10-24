@@ -21,6 +21,7 @@ CALR#,IN,in,src_out,lo_mv,hi_mv
 CALR#,IPT,in,mv,code,mean_raw,pp_raw,samples,used
 CALR#,IRES,in,result,verdict,gain_uv,offset_mv,holdout_mv,line_dev_mv,points
 CALR#,RETRY,scpi,attempt
+CALR#,MERR,step,reply
 CALR#,LOST,out
 CALR#,BACK,out
 CALR#,REDO,out
@@ -40,6 +41,7 @@ CALR,IN,1,1,600,10800
 CALR,IPT,7,600,3277,3889.37,2.25,3333,1
 CALR,IRES,4,PASS,OK,-2930.5,12000.41,1.23,4.57,19
 CALR,RETRY,READ?,2
+CALR,MERR,SETUP,-113;"Undefined header"
 CALR,LOST,4
 CALR,BACK,4
 CALR,REDO,3

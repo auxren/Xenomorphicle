@@ -153,10 +153,11 @@ public:
         packet = p;
 
         // Wrap into 32-byte packets
-        // The Cal Routine marker describes THIS unit's calibration and never
-        // travels: a dump sends it as 0 (what every reader takes as "absent").
+        // The Cal Routine marker and the per-input calibration (ICA1) describe
+        // THIS unit's calibration and never travel in a data dump: they are
+        // sent as 0 (what every reader takes as "absent"). See NeverTravels().
         for (int b = 0; b < 32; b++, address++)
-          V[ix++] = InCalRoutineMarker(address) ? 0 : EEPROM.read(address);
+          V[ix++] = NeverTravels(address) ? 0 : EEPROM.read(address);
 
         UnpackedData unpacked;
         unpacked.set_data(ix, V);
@@ -177,9 +178,9 @@ public:
       uint8_t p = V[ix++]; // Get packet number
       packet = p;
       uint16_t address = p * 32;
-      // ...and a restore never writes it, from any dump (see OnSendSysEx).
+      // ...and a restore never writes them, from any dump (see OnSendSysEx).
       for (int b = 0; b < 32; b++, address++, ix++)
-        if (!InCalRoutineMarker(address)) EEPROM.write(address, V[ix]);
+        if (!NeverTravels(address)) EEPROM.write(address, V[ix]);
 
       // Last packet: the EEPROM now holds the backup, and the live copies
       // must be reloaded from it. Not here -- this runs in the app ISR
@@ -267,12 +268,29 @@ public:
   }
 
 private:
-  static bool InCalRoutineMarker(uint16_t a) {
+  // EEPROM bytes a dump never carries and a restore never writes, whichever
+  // region it is:
+  // - The Cal Routine marker [4140,4144): it says where THIS unit's tables
+  //   came from.
+  // - The per-input calibration page ICA1 [EEPROM_INPUTCAL_START,
+  //   EEPROM_INPUTCAL_END) = [4164,4276). It is calibration, like the DAC/ADC
+  //   page (a factory erase keeps it too: OC_apps.cpp), but it sits at the
+  //   top of the EEPROM, inside the span the Data region's packets cover
+  //   (224 .. 133 * 32 = 4256). Restoring a data dump over it wrote 92 of its
+  //   112 bytes and left the rest, so its checksum failed at the next boot and
+  //   the apps lost their per-input line fits (the Cal Routine's fallback
+  //   behind its curves, and the only per-input calibration of a console-Q
+  //   unit). The packet framing is unchanged: these bytes go out as 0 and
+  //   come in ignored, so dumps stay interchangeable with older firmware.
+  static bool NeverTravels(uint16_t a) {
 #ifdef EEPROM_CALROUTINE_MARKER_START
-    return a >= EEPROM_CALROUTINE_MARKER_START && a < EEPROM_CALROUTINE_MARKER_END;
-#else
-    return false;
+    if (a >= EEPROM_CALROUTINE_MARKER_START && a < EEPROM_CALROUTINE_MARKER_END) return true;
 #endif
+#ifdef EEPROM_INPUTCAL_START
+    if (a >= EEPROM_INPUTCAL_START && a < EEPROM_INPUTCAL_END) return true;
+#endif
+    (void)a;
+    return false;
   }
 
   bool calibration = 0;

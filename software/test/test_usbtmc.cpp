@@ -208,7 +208,32 @@ static void test_stale_msg_in() {
   CHECK(!UsbTmc::IsStaleMsgIn(nullptr, 16, 6));
 }
 
+// SYST:ERR? after the meter setup: only an empty error queue passes.
+static void test_no_scpi_error() {
+  CHECK(UsbTmc::NoScpiError("0,\"No error\"\n"));   // the SDM3065X, bench 2026-10-24
+  CHECK(UsbTmc::NoScpiError("+0,\"No error\"\n"));
+  CHECK(UsbTmc::NoScpiError("+0,\"No error\"\r\n"));
+  CHECK(UsbTmc::NoScpiError("  0,\"No error\""));
+  CHECK(UsbTmc::NoScpiError("0"));
+  CHECK(UsbTmc::NoScpiError("0\n"));
+  CHECK(UsbTmc::NoScpiError("+00,\"No error\""));
+  CHECK(!UsbTmc::NoScpiError("-113,\"Undefined header\"\n"));
+  CHECK(!UsbTmc::NoScpiError("-222,\"Data out of range\""));
+  CHECK(!UsbTmc::NoScpiError("+1,\"Something\""));
+  CHECK(!UsbTmc::NoScpiError("10,\"x\""));      // starts with 1, not 0
+  CHECK(!UsbTmc::NoScpiError("01,\"x\""));      // 1 written with a leading zero
+  CHECK(!UsbTmc::NoScpiError("0.5"));
+  CHECK(!UsbTmc::NoScpiError("-0,\"x\""));      // not a form any meter sends
+  CHECK(!UsbTmc::NoScpiError("+,\"x\""));
+  CHECK(!UsbTmc::NoScpiError(",\"No error\""));
+  CHECK(!UsbTmc::NoScpiError("No error"));
+  CHECK(!UsbTmc::NoScpiError(""));
+  CHECK(!UsbTmc::NoScpiError("\n"));
+  CHECK(!UsbTmc::NoScpiError(nullptr));
+}
+
 int main() {
+  test_no_scpi_error();
   test_control_setup();
   test_control_replies();
   test_stale_msg_in();

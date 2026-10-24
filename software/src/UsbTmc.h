@@ -47,6 +47,12 @@ bool ScpiAllowed(const char *line);
 // meter's 9.9E37 overload marker (|v| >= 9.9E37).
 bool ParseReading(const char *reply, double *volts);
 
+// A SYST:ERR? reply that says the error queue is empty: the error number is 0
+// (SCPI "0,\"No error\"", also "+0,..."; the SDM3065X answers
+// 0,"No error"), after optional leading blanks. Anything else -- another
+// number, no number, an empty or missing reply -- is not "no error".
+bool NoScpiError(const char *reply);
+
 // ---------------------------------------------------------------------------
 // Control requests: the USBTMC 1.0 class requests (section 4.2.1) and the
 // standard CLEAR_FEATURE(ENDPOINT_HALT), as setup-packet fields, plus the

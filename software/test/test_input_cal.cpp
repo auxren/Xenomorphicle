@@ -17,6 +17,7 @@
 #include "../src/CalRoutineMath.h"
 #include "../src/InputCal.h"
 #include "../src/InputCurveStore.h"
+#include "../src/AdcSlotMap.h"
 
 // ---- the real EEPROM layout macros and page store, over a fake EEPROM ------
 // (as test_cvmeter_math.cpp does)
@@ -69,9 +70,13 @@ static void read_channel(int phys, uint32_t raw, int32_t offset, uint16_t scale,
   *pitch = InputCal::Calibrated(phys) ? InputCal::Pitch(*value) : stock_pitch(*value, scale);
 }
 
+// Every input stamped as measured with the input-map fix (AdcSlotMap.h), as
+// anything the current firmware writes is: the fits these tests set are
+// applied. test_predating_line_ignored covers the unstamped ones.
 static CM::InputCalibration empty_ica() {
   CM::InputCalibration c;
   CM::InputCalReset(c);
+  MarkMeasuredWithFix(c, 0xFF);
   return c;
 }
 
@@ -252,6 +257,47 @@ static void test_untrusted_data_ignored() {
   CHECK(InputCal::calibrated_mask == 0);
 }
 
+// An ICA1 fit measured before the input-map fix may be the neighbouring
+// jack's (AdcSlotMap.h): the apps do not use it, the input stays on the
+// shared scale until it is measured again. Its curve, when it has a valid
+// one of its own, still applies.
+static void test_predating_line_ignored() {
+  CM::InputCalibration ica = empty_ica();
+  ica.valid_mask = 0xFF;
+  for (int ch = 0; ch < 8; ++ch) { ica.gain[ch] = -2.93f; ica.offset_mv[ch] = 12000.f + ch; }
+  // No stamp at all (firmware before the fix): every fit predates it.
+  ica.reserved0[0] = 0;
+  ica.reserved0[1] = 0;
+  InputCal::ReloadFrom(ica, nullptr, kOct);
+  CHECK(InputCal::calibrated_mask == 0);
+  // The interim images' stamp (1) counts as before the fix too.
+  ica.reserved0[0] = 1;
+  ica.reserved0[1] = 0xFF;
+  InputCal::ReloadFrom(ica, nullptr, kOct);
+  CHECK(InputCal::calibrated_mask == 0);
+  // Stamped: only the inputs measured with the fix are applied.
+  ica.reserved0[0] = kInputMapV2;
+  ica.reserved0[1] = 0x24;
+  InputCal::ReloadFrom(ica, nullptr, kOct);
+  CHECK(InputCal::calibrated_mask == 0x24);
+  CHECK(InputCal::SourceOf(2) == InputCal::SOURCE_LINE);
+  CHECK(InputCal::SourceOf(5) == InputCal::SOURCE_LINE);
+  CHECK(InputCal::SourceOf(0) == InputCal::SOURCE_NONE);
+  // An input with a curve keeps it whatever its line's stamp says.
+  InputCurveRecord r = curve_record(0x01);
+  InputCal::ReloadFrom(ica, &r, kOct);
+  CHECK(InputCal::calibrated_mask == 0x25);
+  CHECK(InputCal::SourceOf(0) == InputCal::SOURCE_CURVE);
+  // Uncalibrated inputs read exactly the stock path.
+  int bad = 0;
+  for (uint32_t raw = 0; raw <= 4095; raw += 7) {
+    int32_t v, p;
+    read_channel(1, raw, 4095, 15360, &v, &p);
+    if (v != stock_value(4095, raw) || p != stock_pitch(v, 15360)) ++bad;
+  }
+  CHECK(bad == 0);
+}
+
 using InputCalStore = PageStorage<EEPROMStorage, EEPROM_INPUTCAL_START, EEPROM_INPUTCAL_END,
                                   CM::InputCalibration>;
 
@@ -314,6 +360,7 @@ int main() {
   test_line_fallback();
   test_mixed_channels();
   test_untrusted_data_ignored();
+  test_predating_line_ignored();
   test_old_unit_eeprom_image();
   test_publish_order();
   printf("test_input_cal: %d checks, %d failures\n", checks, fails);

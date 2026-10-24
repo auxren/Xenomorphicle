@@ -88,6 +88,7 @@ static const char *const kHeaders[] = {
   "CALR#,IPT,in,mv,code,mean_raw,pp_raw,samples,used",
   "CALR#,IRES,in,result,verdict,gain_uv,offset_mv,holdout_mv,line_dev_mv,points",
   "CALR#,RETRY,scpi,attempt",
+  "CALR#,MERR,step,reply",
   "CALR#,LOST,out",
   "CALR#,BACK,out",
   "CALR#,REDO,out",
@@ -104,14 +105,12 @@ CALR_CODE const char *Header(int i) { return i >= 0 && i < HeaderCount() ? kHead
 // Panel label 0..7 -> 1..8; anything else (none) -> 0.
 CALR_CODE long Label(int x) { return x >= 0 && x < 8 ? long(x + 1) : 0L; }
 
-CALR_CODE int Meter(char *buf, size_t n, const char *identity) {
-  Builder l;
-  l.Init(buf, n);
-  l.Str("CALR,METER,");
-  // One field: commas become ';', control bytes go, trailing blanks too.
+// Meter text as one field: commas become ';', control bytes go, trailing
+// blanks too; "-" when nothing is left.
+CALR_CODE static void MeterText(Builder &l, const char *text) {
   char id[81];
   size_t k = 0;
-  for (const char *p = identity ? identity : ""; *p && k < sizeof(id) - 1; ++p) {
+  for (const char *p = text ? text : ""; *p && k < sizeof(id) - 1; ++p) {
     const unsigned char c = (unsigned char)*p;
     if (c < 0x20 || c >= 0x7F) continue;
     id[k++] = c == ',' ? ';' : char(c);
@@ -119,6 +118,13 @@ CALR_CODE int Meter(char *buf, size_t n, const char *identity) {
   while (k && id[k - 1] == ' ') --k;
   id[k] = 0;
   l.Str(k ? id : "-");
+}
+
+CALR_CODE int Meter(char *buf, size_t n, const char *identity) {
+  Builder l;
+  l.Init(buf, n);
+  l.Str("CALR,METER,");
+  MeterText(l, identity);
   return l.Done();
 }
 
@@ -247,6 +253,16 @@ CALR_CODE int Retry(char *buf, size_t n, const char *scpi, int attempt) {
   return l.Done();
 }
 
+CALR_CODE int MeterError(char *buf, size_t n, const char *step, const char *reply) {
+  Builder l;
+  l.Init(buf, n);
+  l.Str("CALR,MERR");
+  l.Field(step);
+  l.Str(",");
+  MeterText(l, reply);
+  return l.Done();
+}
+
 CALR_CODE int Lost(char *buf, size_t n, int out) {
   Builder l;
   l.Init(buf, n);
@@ -366,10 +382,11 @@ namespace L = CalRoutineLines;
 
 namespace CalRoutine {
 
-const char *const kMeterSetup[5] = {
-  "*CLS", "CONF:VOLT:DC 20", "VOLT:DC:NPLC 1", "VOLT:DC:AZ ONCE", "TRIG:SOUR IMM",
+const char *const kMeterSetup[6] = {
+  "*CLS", "CONF:VOLT:DC 20", "VOLT:DC:NPLC 1", "VOLT:DC:AZ ONCE", "TRIG:SOUR IMM", "SYST:ERR?",
 };
 const char *const kOutputZero = "VOLT:DC:AZ ONCE";
+const char *const kErrorQuery = "SYST:ERR?";
 
 CALR_CODE void InputPoint::Start(OutputPort &out, InputPort &in, Clock &clock, int out_label,
                                  uint16_t code, int in_label) {
@@ -485,7 +502,7 @@ CALR_CODE void CalRoutineFlow::Begin(MeterPort &meter, OutputPort &out, InputPor
   lost_ = false;
   resume_out_ = -1;
   retry_out_ = -1;
-  zeroing_ = false;
+  zeroing_ = Z_NONE;
   fail_reason_ = "";
   cur_out_ = -1;
   cur_in_ = -1;
@@ -562,7 +579,7 @@ CALR_CODE void CalRoutineFlow::Cancel() {
   q_phase_ = Q_NONE;
   m_phase_ = M_NONE;
   lost_ = false;
-  zeroing_ = false;
+  zeroing_ = Z_NONE;
   retry_out_ = -1;
   for (int o = 0; o < 8; ++o) results_.out_pass[o] = results_.in_pass[o] = false;
   CALR_LOG(Cancel, StageName(stage_));
@@ -592,7 +609,7 @@ CALR_CODE void CalRoutineFlow::Fail(const char *reason) {
   q_phase_ = Q_NONE;
   m_phase_ = M_NONE;
   lost_ = false;
-  zeroing_ = false;
+  zeroing_ = Z_NONE;
   retry_out_ = -1;
   fail_reason_ = reason;
   for (int o = 0; o < 8; ++o) results_.out_pass[o] = results_.in_pass[o] = false;
@@ -607,7 +624,7 @@ CALR_CODE void CalRoutineFlow::Lost() {
   out_->ReleaseAll();
   q_phase_ = Q_NONE;
   m_phase_ = M_NONE;
-  zeroing_ = false;
+  zeroing_ = Z_NONE;
   resume_out_ = cur_out_;
   lost_ = true;
   lost_ms_ = now_;
@@ -629,6 +646,7 @@ CALR_CODE void CalRoutineFlow::TickConfig() {
   if (r == QR_BUSY) return;
   if (r == QR_LOST) { Lost(); return; }
   if (r == QR_FAIL) { Fail("METER_CONFIG"); return; }
+  if (MeterErrorReply("SETUP")) { Fail("METER_CONFIG"); return; }
   if (++cfg_i_ < int(sizeof(kMeterSetup) / sizeof(kMeterSetup[0]))) {
     QStart(kMeterSetup[cfg_i_], kConfigTimeoutMs);
     return;
@@ -651,6 +669,15 @@ CALR_CODE void CalRoutineFlow::QStart(const char *scpi, uint32_t timeout_ms) {
   q_fails_ = 0;
   q_phase_ = Q_BEGIN;
   q_begin_ms_ = now_;
+}
+
+// The query that just finished was kErrorQuery and its reply is not the
+// empty queue's: logged (CALR,MERR), true. Any other query: false.
+CALR_CODE bool CalRoutineFlow::MeterErrorReply(const char *step) {
+  if (!q_scpi_ || strcmp(q_scpi_, kErrorQuery) != 0) return false;
+  if (UsbTmc::NoScpiError(q_reply_)) return false;
+  CALR_LOG(MeterError, step, q_reply_);
+  return true;
 }
 
 CALR_CODE CalRoutineFlow::QResult CalRoutineFlow::QFailure() {
@@ -784,7 +811,7 @@ CALR_CODE void CalRoutineFlow::StartOutput(int o) {
   // A fresh autozero first, with nothing held: every reading of this output
   // then shares a zero taken seconds ago (kMeterSetup turns autozero off
   // between readings).
-  zeroing_ = true;
+  zeroing_ = Z_ZERO;
   QStart(kOutputZero, kConfigTimeoutMs);
 }
 
@@ -804,12 +831,19 @@ CALR_CODE void CalRoutineFlow::StartNode() {
 // overshoots past a rail is corrected on the next pass; only a measured
 // shortfall at the rail flags the entry at_rail.
 CALR_CODE void CalRoutineFlow::TickNode() {
-  if (zeroing_) {
+  if (zeroing_ != Z_NONE) {
     const QResult q = QStep();
     if (q == QR_BUSY) return;
-    zeroing_ = false;
+    const bool was_zero = zeroing_ == Z_ZERO;
+    zeroing_ = Z_NONE;
     if (q == QR_LOST) { Lost(); return; }
     if (q == QR_FAIL) { Fail("METER_CONFIG"); return; }
+    if (was_zero) {  // then whether the meter took it
+      zeroing_ = Z_ERR;
+      QStart(kErrorQuery, kConfigTimeoutMs);
+      return;
+    }
+    if (MeterErrorReply("ZERO")) { Fail("METER_CONFIG"); return; }
     StartNode();
     return;
   }
@@ -901,7 +935,7 @@ CALR_CODE void CalRoutineFlow::TickSweep() {
 
 CALR_CODE void CalRoutineFlow::FinishOutput(OutReason reason) {
   out_->ReleaseAll();
-  zeroing_ = false;
+  zeroing_ = Z_NONE;
   m_phase_ = M_NONE;
   q_phase_ = Q_NONE;
   const int o = cur_out_;

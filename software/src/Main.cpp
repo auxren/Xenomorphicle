@@ -718,13 +718,14 @@ FLASHMEM void setup() {
   // initialize LittleFS for config files
   PhzConfig::Init();
 #if defined(ARDUINO_TEENSY41)
-  // Says which stored per-input calibration predates the deterministic
-  // ADC33131D start (AdcSlotMap.h); needs LittleFS for the curve files.
-  OC::input_map_check();
   // calibration_load() ran before LittleFS was up, so the inputs' curve files
   // (ICURVE_A/B.BIN) were not readable then: rebuild the apps' per-input
   // calibration now that they are (InputCal.h).
   InputCal::Reload();
+  // Says which stored per-input calibration predates the deterministic
+  // ADC33131D start (AdcSlotMap.h); needs LittleFS for the curve files, and
+  // the reload above for which inputs still use Setup's shared offsets.
+  OC::input_map_check();
 #endif
 
   // Display loading splash screen and optional calibration

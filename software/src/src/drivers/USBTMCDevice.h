@@ -140,6 +140,7 @@ private:
   volatile bool tx_busy_ = false;       // an OUT transfer is in the controller
   volatile bool ctl_busy_ = false;      // our control request is in flight
   volatile bool ctl_done_ = false;      // ... and has completed (control())
+  volatile bool ctl_abandoned_ = false; // ... was given up on while still queued
   volatile bool halt_in_ = false;       // Bulk-IN errored: clear its halt
   volatile bool halt_out_ = false;      // Bulk-OUT errored: clear its halt
   volatile bool recover_req_ = false;   // run the resync before the next query

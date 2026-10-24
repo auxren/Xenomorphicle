@@ -113,17 +113,27 @@ constexpr int kSweepPoints = 40;
 
 // The meter setup, in order (all on UsbTmc::ScpiAllowed's list): DC volts on
 // the fixed 20 V range, NPLC 1, one autozero now and none between readings,
-// immediate trigger. Sent at Begin and again after every reconnect.
+// immediate trigger, and last kErrorQuery. Sent at Begin and again after
+// every reconnect.
+//
+// None of the setup lines has a reply, so a meter that rejected one would
+// say so only in its error queue: the last line reads it (*CLS emptied it
+// first), and the run fails METER_CONFIG (CALR,MERR names the reply) unless
+// it is empty (UsbTmc::NoScpiError).
 //
 // Run time (Task 7): NPLC 10 with autozero ON measured ~20 min a run on the
 // bench; NPLC 1 with the autozero refreshed once per output (kOutputZero)
 // cuts the meter's share by about 7x. The 5 readings per point (median and
 // spread) and the 150 ms settle stay: the median absorbs the extra noise of
 // the shorter integration, and the spread check still catches a loose lead.
-extern const char *const kMeterSetup[5];
+// The error queue checks add one short query at Begin and one per output
+// (modelled at 20 ms each, ~0.2 s a run).
+extern const char *const kMeterSetup[6];
 // Sent at the start of every output, before its first reading: one fresh
 // autozero, so the zero the output's readings share is never minutes old.
+// kErrorQuery follows it, checked the same way.
 extern const char *const kOutputZero;
+extern const char *const kErrorQuery;  // "SYST:ERR?"
 
 // Settles one CV output at a code, then averages one input: the measuring
 // step of both the routine's input part and the console's Q.
@@ -276,6 +286,7 @@ class CalRoutineFlow {
   void QStart(const char *scpi, uint32_t timeout_ms);
   QResult QStep();
   QResult QFailure();
+  bool MeterErrorReply(const char *step);
   void MStart(uint16_t code, int32_t target_mv);
   MResult MStep();
 
@@ -318,7 +329,10 @@ class CalRoutineFlow {
   const char *fail_reason_ = "";
 
   // output in progress
-  bool zeroing_ = false;     // kOutputZero is in flight, before node 0
+  // Before node 0: Z_ZERO while kOutputZero is in flight, then Z_ERR while
+  // kErrorQuery is.
+  enum ZPhase : uint8_t { Z_NONE, Z_ZERO, Z_ERR };
+  uint8_t zeroing_ = Z_NONE;
   int node_k_ = 0;
   uint16_t code_ = 0;
   int iters_ = 0;
@@ -429,6 +443,8 @@ int InPoint(char *buf, size_t n, int in, int32_t mv, uint16_t code,
 int InResult(char *buf, size_t n, int in, const char *outcome, CvMeterMath::Verdict v,
              const CvMeterMath::Fit &line, float holdout_mv, float line_dev_mv, int points);
 int Retry(char *buf, size_t n, const char *scpi, int attempt);
+// step: "SETUP" (after kMeterSetup) or "ZERO" (after an output's kOutputZero).
+int MeterError(char *buf, size_t n, const char *step, const char *reply);
 int Lost(char *buf, size_t n, int out);
 int Back(char *buf, size_t n, int out);
 int Redo(char *buf, size_t n, int out);

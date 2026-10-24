@@ -8,6 +8,7 @@
 #include <atomic>
 
 #include "InputCal.h"
+#include "AdcSlotMap.h"
 #include "InputCurveStore.h"
 
 #include <cmath>
@@ -109,6 +110,11 @@ INPUTCAL_CODE void ReloadFrom(const CM::InputCalibration &ica, const InputCurveR
   // ICA1 is version-checked and sanitized by its loader; nothing here relies
   // on that. Only bits 0-7 of either mask are channels (kInputs == 8).
   const bool ica_ok = ica.version == CM::InputCalibration::kVersion;
+  // A fit measured before the input-map fix (AdcSlotMap.h) may be the
+  // neighbouring jack's: not applied, so that input stays on the shared scale
+  // until it is measured again. OC::input_map_check() names these at boot.
+  // Only bench units can have one (no release image wrote ICA1 before it).
+  const uint8_t ica_stale = IcaPredatesFix(ica);
   for (int ch = 0; ch < kInputs; ++ch) {
     int32_t q8[CR::kCurvePoints] = {};
     Source src = SOURCE_NONE;
@@ -117,7 +123,7 @@ INPUTCAL_CODE void ReloadFrom(const CM::InputCalibration &ica, const InputCurveR
         CR::CurveToValueTable(curves->mv_x2[ch], q8);
         if (Rescale(q8, octave_mv) && TableUsable(q8)) src = SOURCE_CURVE;
       }
-      if (src == SOURCE_NONE && ica_ok && LineTable(ica, ch, q8) &&
+      if (src == SOURCE_NONE && ica_ok && !(ica_stale & (1u << ch)) && LineTable(ica, ch, q8) &&
           Rescale(q8, octave_mv) && TableUsable(q8))
         src = SOURCE_LINE;
     }

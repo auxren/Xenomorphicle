@@ -234,17 +234,21 @@ FLASHMEM void input_calibration_save() {
 // deterministic ADC33131D start (AdcSlotMap.h). It moves nothing: an older
 // image read each input from a slot that depended on its own init timing,
 // so its data may be right or one input over, and only a new calibration
-// settles it. Loop context, LittleFS up.
+// settles it. The apps already ignore a predating ICA1 fit (InputCal.cpp).
+// Loop context, LittleFS up, after InputCal::Reload() has read the curves.
 FLASHMEM void input_map_check() {
   DMAMEM static InputCurveRecord rec;  // 300 bytes, off the loop stack and out of DTCM
-  const bool offsets = calibration_data_loaded &&
-                       CalOffsetsPredateFix(OC::calibration_data.reserved0[0]);
+  // Setup's offsets matter only to the inputs that still use them: an input
+  // calibrated by a curve or a line ignores them (InputCal::Calibrated).
+  const uint8_t shared = uint8_t(~InputCal::calibrated_mask);
+  const uint8_t offsets = (calibration_data_loaded &&
+                           CalOffsetsPredateFix(OC::calibration_data.reserved0[0])) ? shared : 0;
   const uint8_t q = input_calibration_loaded ? IcaPredatesFix(OC::input_calibration) : 0;
   const uint8_t curves = InputCurveLoadFromFlash(&rec, nullptr) ? CurvesPredateFix(rec) : 0;
   // Masks by physical input (bit n = ADC_CHANNEL value n).
   if (offsets || q || curves)
-    Serial.printf("Input map: measured before the input fix, re-run: offsets=%d q=%02X curves=%02X\r\n",
-                  offsets, q, curves);
+    Serial.printf("Input map: measured before the input fix, re-run: offsets=%02X q=%02X "
+                  "curves=%02X (q fits not used)\r\n", offsets, q, curves);
 }
 #endif
 

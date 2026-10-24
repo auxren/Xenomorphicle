@@ -216,6 +216,17 @@ USBTMC_CODE bool ParseReading(const char *reply, double *volts) {
   return true;
 }
 
+USBTMC_CODE bool NoScpiError(const char *reply) {
+  if (!reply) return false;
+  const char *p = reply;
+  while (*p == ' ') p++;
+  if (*p == '+') p++;
+  if (*p != '0') return false;
+  while (*p == '0') p++;
+  // The number ends here: a ',' before the message, or the end of the line.
+  return *p == ',' || *p == 0 || *p == '\r' || *p == '\n' || *p == ' ';
+}
+
 namespace {
 
 USBTMC_CODE Setup Make(uint8_t type, uint8_t req, uint16_t value, uint16_t index,

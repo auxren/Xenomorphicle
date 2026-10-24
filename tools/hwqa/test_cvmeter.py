@@ -246,7 +246,7 @@ class ParseCalr(unittest.TestCase):
 
     def test_every_golden_line_parses_to_its_field_count(self):
         _, lines = calr_fixture()
-        self.assertEqual(len(lines), 19)
+        self.assertEqual(len(lines), 20)
         for l in lines:
             d = cvmeter.parse_calr(l)
             self.assertIsNotNone(d, l)
@@ -260,6 +260,8 @@ class ParseCalr(unittest.TestCase):
             d = cvmeter.parse_calr(l)
             by[d["sub"]] = d
         self.assertEqual(by["NODE"]["measured_mv"], 8400.094)
+        self.assertEqual(by["MERR"]["step"], "SETUP")
+        self.assertEqual(by["MERR"]["reply"], '-113;"Undefined header"')
         self.assertEqual(by["NODE"]["code"], 45873)
         self.assertEqual(by["ORES"]["rail_mask"], 0x400)
         self.assertEqual(by["ORES"]["result"], "PASS")

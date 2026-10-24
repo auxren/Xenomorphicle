@@ -44,7 +44,8 @@ enum Source : uint8_t { SOURCE_NONE = 0, SOURCE_CURVE = 1, SOURCE_LINE = 2 };
 // Rebuilds every input's table. Per input: the curve when curves is non-null,
 // its bit is set and the table it gives is usable; else the ICA1 line when
 // that channel's fit is valid and usable; else uncalibrated. Nothing is
-// trusted: only bits 0-7 are channels, a non-finite or implausible line, an
+// trusted: only bits 0-7 are channels, a line whose fit predates the input-map
+// fix (AdcSlotMap.h, IcaPredatesFix), a non-finite or implausible line, an
 // offset whose table would overflow, and any table that is not strictly
 // falling (volts rise as raw falls) or exceeds CalRoutineMath::kMaxValueQ8
 // are all treated as "no calibration" for that input. source_output[] is not

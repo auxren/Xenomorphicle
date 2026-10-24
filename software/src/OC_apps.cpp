@@ -128,6 +128,16 @@ enum GlobalSettingsDataKeys : uint16_t {
 // bits per app, mirroring HS::hidden_applets[2]. See OC_app_folders.h.
 static OC::AppFolders::State app_folders;
 
+// The running roster's app ids, in container order (at most kMaxApps:
+// apps/_config.h asserts the roster fits).
+FLASHMEM
+static size_t RosterIds(uint16_t ids[OC::AppFolders::kMaxApps]) {
+  size_t n = app_container.num_apps();
+  if (n > OC::AppFolders::kMaxApps) n = OC::AppFolders::kMaxApps;
+  for (size_t i = 0; i < n; ++i) ids[i] = app_container[i].id();
+  return n;
+}
+
 // Put every app in the folder OC_app_folders.h's table names for it. Keyed by
 // app ID, so this is correct for whatever roster the running build has.
 //
@@ -137,14 +147,15 @@ static OC::AppFolders::State app_folders;
 // police.
 FLASHMEM
 static void SeedAppFolderDefaults() {
-  const size_t n = app_container.num_apps();
-  for (size_t i = 0; i < n && i < OC::AppFolders::kMaxApps; ++i)
-    app_folders.Set(i, OC::AppFolders::DefaultFor(app_container[i].id()));
+  uint16_t ids[OC::AppFolders::kMaxApps];
+  const size_t n = RosterIds(ids);
+  OC::AppFolders::SeedDefaults(app_folders, ids, n);
 }
 
 // Identifies the app roster a stored, POSITION-indexed folder arrangement was
-// written against: the app count, plus an FNV-1a hash of every app id in
-// container order. Any insertion, removal or reordering changes it.
+// written against (OC::AppFolders::RosterStamp: the app count, plus an FNV-1a
+// hash of every app id in container order). Any insertion, removal or
+// reordering changes it.
 //
 // Without this the arrangement is silently reinterpreted after the single most
 // common real-world transition. Flashing T41 (10 apps) and then T41_audio (15)
@@ -154,18 +165,19 @@ static void SeedAppFolderDefaults() {
 // clamps and the switcher's turn skips empty folders -- but the taxonomy is
 // gone, which is the entire point of the feature.
 //
+// One change is accepted rather than refused: exactly one app appended at the
+// end (OC::AppFolders::MatchStamp, STAMP_ONE_APPENDED), which moves no other
+// app's position. That is how new apps join the roster (Cal Routine did), and
+// refusing it reset every owner's layout on the update that added one.
+//
 // apps/Bus200eApp.h stamps its scan bitmap with the module-table size for
 // exactly this reason: refuse a set built against a different table rather than
 // read old bits as new meanings.
 FLASHMEM
 static uint64_t AppFolderRosterStamp() {
-  const size_t n = app_container.num_apps();
-  uint64_t h = 1469598103934665603ull;   // FNV-1a offset basis
-  for (size_t i = 0; i < n; ++i) {
-    h ^= app_container[i].id();
-    h *= 1099511628211ull;
-  }
-  return (h & ~0xffffull) | (uint64_t)(n & 0xffff);
+  uint16_t ids[OC::AppFolders::kMaxApps];
+  const size_t n = RosterIds(ids);
+  return OC::AppFolders::RosterStamp(ids, n);
 }
 
 #ifdef __IMXRT1062__
@@ -524,16 +536,17 @@ void RestoreGlobalSettingsFromConfig(uint8_t scala_loaded_mask) {
     const bool have_w1 = PhzConfig::getValue(APPFOLDER_KEY | 1, w1);
     const bool have_stamp = PhzConfig::getValue(APPFOLDER_KEY | 2, stamp);
     if (have_w0 || have_w1) {
-      if (have_stamp && stamp == AppFolderRosterStamp()) {
-        app_folders.bits[0] = w0;
-        app_folders.bits[1] = w1;
-      } else {
-        // Written against a different app roster (or by a build that predates
-        // the stamp), so the nibbles no longer name the apps they did. Refuse
-        // the set and fall back to the ID-keyed defaults, which are correct for
-        // whatever roster is running now.
-        SeedAppFolderDefaults();
-      }
+      // Same roster: the words as stored. The same roster plus one app
+      // appended at the end: the words for every old position, the new app
+      // in its default folder. Anything else (a different roster, or a build
+      // that predates the stamp): the nibbles no longer name the apps they
+      // did, so the set is refused and every app gets its ID-keyed default.
+      // The new stamp is written with the words at the next settings save
+      // (BuildGlobalSettingsValues); until then the stored stamp still
+      // matches as STAMP_ONE_APPENDED, so every boot gives the same result.
+      uint16_t ids[OC::AppFolders::kMaxApps];
+      const size_t n = RosterIds(ids);
+      OC::AppFolders::ApplyStored(app_folders, w0, w1, have_stamp, stamp, ids, n);
     }
   }
 

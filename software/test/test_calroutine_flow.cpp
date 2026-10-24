@@ -120,6 +120,9 @@ struct FakeMeter : MeterPort {
   double offset_mv = 0.0;   // reading offset (a replug moves it)
   double noise_mv = 0.02;   // uniform +/-
   std::function<double(int read_index)> extra;  // added to READ? #n (0-based)
+  // SYST:ERR? #n (0-based) answers this instead of the empty queue's reply.
+  std::function<const char *(int err_index)> err_reply;
+  int err_queries = 0;
   std::vector<std::string> sent;
   std::vector<std::pair<int, uint16_t>> read_at;  // (held output, code) at each READ?
   int reads = 0;
@@ -155,6 +158,10 @@ struct FakeMeter : MeterPort {
       ++reads;
       read_at.push_back({outs->held, outs->held_code});
       snprintf(reply, sizeof(reply), "%+.9E\n", mv / 1000.0);
+    } else if (cur == "SYST:ERR?") {
+      const char *e = err_reply ? err_reply(err_queries) : nullptr;
+      ++err_queries;
+      snprintf(reply, sizeof(reply), "%s\n", e ? e : "0,\"No error\"");  // as the SDM3065X
     }
     *r = reply;
     return 1;
@@ -295,14 +302,26 @@ static void test_happy_path_all_pass() {
     CHECK(res.in_points[i] >= 18);
   }
   CHECK(r.flow.CanSave());
-  // The meter setup, in order, before anything else.
-  CHECK(r.meter.sent.size() > 5);
-  for (int i = 0; i < 5 && r.meter.sent.size() > 5; ++i) CHECK(r.meter.sent[i] == kMeterSetup[i]);
-  // Then one fresh autozero per output, before its first reading.
-  CHECK(r.meter.sent.size() > 6 && r.meter.sent[5] == std::string(kOutputZero));
-  int zeros = 0;
-  for (const auto &l : r.meter.sent) zeros += l == kOutputZero;
+  // The meter setup, in order, before anything else, ending with the error
+  // queue check.
+  const size_t ns = sizeof(kMeterSetup) / sizeof(kMeterSetup[0]);
+  CHECK(r.meter.sent.size() > ns);
+  for (size_t i = 0; i < ns && r.meter.sent.size() > ns; ++i) CHECK(r.meter.sent[i] == kMeterSetup[i]);
+  CHECK(r.meter.sent.size() > ns && r.meter.sent[ns - 1] == "SYST:ERR?");
+  // Then one fresh autozero per output, before its first reading, and the
+  // error queue checked after it.
+  CHECK(r.meter.sent.size() > ns + 2 && r.meter.sent[ns] == std::string(kOutputZero));
+  CHECK(r.meter.sent.size() > ns + 2 && r.meter.sent[ns + 1] == "SYST:ERR?");
+  int zeros = 0, errs = 0;
+  for (size_t i = 0; i < r.meter.sent.size(); ++i) {
+    if (r.meter.sent[i] != kOutputZero) continue;
+    ++zeros;
+    // Every autozero is followed by SYST:ERR? (the setup's by its own lines first).
+    if (i >= ns) errs += i + 1 < r.meter.sent.size() && r.meter.sent[i + 1] == "SYST:ERR?";
+  }
   CHECK(zeros == 1 + 8);  // kMeterSetup's own, then one per output
+  CHECK(errs == 8);
+  CHECK(r.meter.err_queries == 1 + 8);
   for (int i = 0; i < 8; ++i) {
     CHECK(res.in_lo_mv[i] == kInStepMv);
     CHECK(res.in_hi_mv[i] > res.in_lo_mv[i] + 9000);
@@ -541,8 +560,9 @@ static void test_reconnect_restarts_current_output() {
   CHECK(count_prefix("CALR,OUT,4") == 2);
   CHECK(count_prefix("CALR,NODE,4,0,") == 2);
   // The meter was set up again, first thing after the replug.
-  CHECK(r.meter.sent.size() > sent_before + 5);
-  for (int i = 0; i < 5 && r.meter.sent.size() > sent_before + 5; ++i)
+  const size_t ns = sizeof(kMeterSetup) / sizeof(kMeterSetup[0]);
+  CHECK(r.meter.sent.size() > sent_before + ns);
+  for (size_t i = 0; i < ns && r.meter.sent.size() > sent_before + ns; ++i)
     CHECK(r.meter.sent[sent_before + i] == kMeterSetup[i]);
   // Output D's table is entirely from after the replug.
   uint16_t t[CR::kNodes];
@@ -649,6 +669,46 @@ static void test_meter_lines_allowed() {
   }
   CHECK(nplc1 && az_once && !az_on);
   CHECK(std::string(kOutputZero) == "VOLT:DC:AZ ONCE");
+}
+
+// A meter that rejected a setup line (or the per-output autozero) says so
+// only in its error queue: the flow asks SYST:ERR? and stops on anything but
+// an empty queue, with nothing held.
+static void test_meter_config_error_fails() {
+  {
+    Rig r;
+    r.meter.err_reply = [](int) { return "-113,\"Undefined header\""; };
+    r.Begin();
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Failed);
+    CHECK(std::string(r.flow.fail_reason()) == "METER_CONFIG");
+    CHECK(count_prefix("CALR,FAIL,METER_CONFIG") == 1);
+    CHECK(count_prefix("CALR,MERR,SETUP,-113;\"Undefined header\"") == 1);
+    CHECK(r.meter.reads == 0);  // nothing measured on a meter in an unknown state
+    CHECK(r.outs.held == -1);
+  }
+  {
+    // "+0,..." is the empty queue too.
+    Rig r;
+    r.meter.err_reply = [](int) { return "+0,\"No error\""; };
+    r.Begin();
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Results && r.flow.CanSave());
+    CHECK(count_prefix("CALR,MERR,") == 0);
+  }
+  {
+    // The setup is fine; output C's autozero is refused.
+    Rig r;
+    r.meter.err_reply = [](int n) { return n == 3 ? "-221,\"Settings conflict\"" : nullptr; };
+    r.Begin();
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Failed);
+    CHECK(std::string(r.flow.fail_reason()) == "METER_CONFIG");
+    CHECK(count_prefix("CALR,MERR,ZERO,-221;\"Settings conflict\"") == 1);
+    CHECK(count_prefix("CALR,ORES,1,") == 1 && count_prefix("CALR,ORES,2,") == 1);
+    CHECK(count_prefix("CALR,NODE,3,") == 0);  // C never measured
+    CHECK(r.outs.held == -1 && !r.hold_rule_broken);
+  }
 }
 
 // The modelled run time: what one Self run costs at a few READ? latencies.
@@ -823,7 +883,8 @@ static void test_retry_output() {
   CHECK(count_prefix("CALR,REDO,3") == 1);
   CHECK(r.Run([&] { return r.flow.stage() == Stage::PromptOutput; }));
   CHECK(r.flow.current_output() == 2);
-  for (int i = 0; i < 5 && r.meter.sent.size() > sent0 + 5; ++i)
+  const size_t ns = sizeof(kMeterSetup) / sizeof(kMeterSetup[0]);
+  for (size_t i = 0; i < ns && r.meter.sent.size() > sent0 + ns; ++i)
     CHECK(r.meter.sent[sent0 + i] == kMeterSetup[i]);
   CHECK(r.Run());
   CHECK(r.flow.stage() == Stage::Results);
@@ -1043,6 +1104,7 @@ static void test_calr_lines_golden() {
   const CM::Fit f = {-2.93049f, 12000.41f};
   InResult(b, sizeof(b), 3, "PASS", CM::VERDICT_OK, f, 1.234f, 4.567f, 19); is("IRES");
   Retry(b, sizeof(b), "READ?", 2); is("RETRY");
+  MeterError(b, sizeof(b), "SETUP", "-113,\"Undefined header\"\n"); is("MERR");
   Lost(b, sizeof(b), 3); is("LOST");
   Back(b, sizeof(b), 3); is("BACK");
   Redo(b, sizeof(b), 2); is("REDO");
@@ -1114,6 +1176,7 @@ int main() {
   test_input_span_capped_below_source_rail();
   test_rebegin_releases();
   test_meter_lines_allowed();
+  test_meter_config_error_fails();
   test_run_time_model();
   test_retry_output();
   test_marker();

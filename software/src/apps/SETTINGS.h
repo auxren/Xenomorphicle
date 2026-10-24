@@ -27,6 +27,7 @@
 #include "../PhzConfig.h"
 #include "../AdcSlotMap.h"
 #include "CalRoutinePorts.h"
+#include "../InputCal.h"
 
 extern "C" void _reboot_Teensyduino_();
 using namespace OC;
@@ -373,14 +374,17 @@ public:
 
     static constexpr weegfx::coord_t kValueX = menu::kDisplayWidth - 30;
 
-    // On a unit the Cal Routine calibrated, the DAC and ADC steps carry one
-    // more line (what this step does to that calibration). The ADC screens have no row to spare at the stock 12 px
-    // pitch, so with the line they step 9 px (the chord card's pitch).
+    // The DAC steps carry one more line on a unit the Cal Routine calibrated
+    // (they replace its tables), and the ADC steps on a unit with any input
+    // calibrated per input, by a Cal Routine curve or a console Q line (those
+    // inputs ignore what the ADC steps set). The ADC screens have no row to
+    // spare at the stock 12 px pitch, so with the line they step 9 px (the
+    // chord card's pitch).
     const bool adc_step = step->calibration_type == CALIBRATE_ADC_OFFSET ||
                           step->calibration_type == CALIBRATE_ADC_1V ||
                           step->calibration_type == CALIBRATE_ADC_3V;
-    const bool calr_line = calr_marker_ &&
-                           (adc_step || step->calibration_type == CALIBRATE_OCTAVE);
+    const bool calr_line = adc_step ? InputCal::calibrated_mask != 0
+                                    : (calr_marker_ && step->calibration_type == CALIBRATE_OCTAVE);
     const weegfx::coord_t line_h = (calr_line && adc_step) ? 9 : menu::kMenuLineH;
 
     gfxPos(menu::kIndentDx, y + 2);
@@ -467,9 +471,9 @@ public:
       y += line_h;
       gfxPos(menu::kIndentDx, y + 2);
       // Saving the DAC steps replaces the Cal Routine's tables. The ADC steps
-      // set only the shared offset and scale, which inputs with a Cal
-      // Routine curve or ICA1 line ignore (InputCal::Calibrated).
-      graphics.print(adc_step ? "Cal Routine ins: kept" : "Replaces Cal Routine");
+      // set only the shared offset and scale, which inputs with a curve or an
+      // ICA1 line ignore (InputCal::Calibrated): their calibration is kept.
+      graphics.print(adc_step ? "Per-input cal: kept" : "Replaces Cal Routine");
     }
 
     // NJM: display encoder direction config on first and last screens
