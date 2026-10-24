@@ -68,7 +68,7 @@ Steps: start a run, unplug the meter during an output. Pass: the screen says the
 
 ### B. Autozero
 
-- [ ] Does the meter accept `VOLT:DC:AZ ONCE`? Steps: run the app through the first output, then `eSYST:ERR?`. Pass: `METER,DONE,+0,"No error"`. If it reports an error, note it and the flow's fallback.
+- [ ] Does the meter accept `VOLT:DC:AZ ONCE`? Steps: run the app through the first output, then `eSYST:ERR?`. Pass: `METER,DONE,+0,"No error"`. If it reports an error, note it and the flow's fallback. (The flow now asks `SYST:ERR?` itself after the setup and after every output's autozero, and stops with `CALR,MERR,...` then `CALR,FAIL,METER_CONFIG` on anything but an empty queue.)
 
 ### C. Real run time
 

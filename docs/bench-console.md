@@ -161,6 +161,7 @@ While the Cal Routine app runs it logs one line per step on the console. The for
 - `IPT` one input measurement point
 - `IRES` an input's result: verdict, gain, offset, hold-out and line deviation
 - `RETRY` a meter query was repeated
+- `MERR` the meter's error queue was not empty after its setup (`SETUP`) or an output's autozero (`ZERO`): the reply; the run then fails `METER_CONFIG`
 - `LOST` / `BACK` / `REDO` the meter was lost, came back, the output restarts
 - `RESULT` can-save flag and the output and input pass masks
 - `SAVE` the save result; `DISCARD`; `CANCEL` (stage); `FAIL` (reason)
