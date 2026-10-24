@@ -8,6 +8,7 @@
 #include "Buchla259eSlotCodec.h"
 #include "PresetBus.h"     // real declarations; the definitions below are ours
 #include "PresetEngine.h"  // where a bus-wide SAVE/RECALL lands here
+#include "apps/CalRunActive.h"  // the real PresetBus refuses MasterBackup / MasterRestore during a run
 #include "sim_host.h"      // SimNowMs, SimLog
 #include "sim_capture.h"
 
@@ -466,6 +467,7 @@ void MasterQuerySetQuiet(bool on) { g_quiet = on; }
 bool MasterQueryQuiet() { return g_quiet; }
 
 int MasterBackup(uint8_t mod_addr) {
+  if (CalRoutinePorts::CalRunActive()) return -BUS200E_MASTER_ERR_BUSY;
   if (!g_bus_enabled) return -BUS200E_MASTER_ERR_BAD_ARGS;
   const uint8_t candidates[] = {0, 1};
   uint8_t card_lo = 0;
@@ -476,6 +478,7 @@ int MasterBackup(uint8_t mod_addr) {
 }
 
 int MasterRestore(uint8_t mod_addr) {
+  if (CalRoutinePorts::CalRunActive()) return -BUS200E_MASTER_ERR_BUSY;
   if (!g_bus_enabled) return -BUS200E_MASTER_ERR_BAD_ARGS;
   // Mirrors the real one: the caller must already be serving a populated card.
   if (!g_serving) return -BUS200E_MASTER_ERR_NO_FREE_CARD;

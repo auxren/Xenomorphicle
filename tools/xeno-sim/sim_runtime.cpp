@@ -24,6 +24,7 @@
 #include "PhzConfig.h"
 #include "PresetBus.h"
 #include "PresetBusUI.h"
+#include "apps/CalRoutinePorts.h"
 #include "PresetEngine.h"
 #include "src/drivers/display.h"
 
@@ -108,6 +109,7 @@ void LoopPass() {
   OC::PresetEngine::Process();
   OC::PresetBus::Task();
   OC::PresetBusUI::Task();
+  CalRoutinePorts::CalTask();  // a cancelled 259e run's COMMIT verdict (Main.cpp does the same)
 
   // UI events
   if (UI_MODE_APP_SETTINGS == g_ui_mode) {

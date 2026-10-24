@@ -25,10 +25,12 @@ Plant plant;
 
 // One line at exit for the self-check: what the plant ended up holding.
 static void Report() {
-  fprintf(stderr, "SIM259E,commits=%d,puts=%d,reads=%d,bad_frames=%d,out_mv=%.1f,seq=%u,slots=%u\n",
+  fprintf(stderr, "SIM259E,commits=%d,puts=%d,reads=%d,bad_frames=%d,out_mv=%.1f,seq=%u,slots=%u,"
+                  "run_active=%d,verdict=%d\n",
           plant.module.count[CalRec::kCmdCommit], plant.module.count[CalRec::kCmdPut],
           plant.module.count[CalRec::kCmdRead], plant.module.bad_frames, plant.mv,
-          unsigned(plant.module.seq), unsigned(plant.module.slots_used));
+          unsigned(plant.module.seq), unsigned(plant.module.slots_used),
+          int(CalRoutinePorts::CalRunActive()), CalRoutinePorts::Cancelled259Verdict());
 }
 
 // Called after the firmware has booted. The 259e target needs Output A

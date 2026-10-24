@@ -1821,5 +1821,20 @@ c259 "$R259,$LP,step500,$LP,step300" | has 'Cal Routine' \
   && grep -q 'commits=0' "$TMP/c259.err" \
   && ok "the second encL on results discards" || bad "results discard did not return to the menu"
 
+has 'min old' < "$TMP/c259r" \
+  && ok "the results screen shows how old the measurement is (it expires after 10 minutes)" \
+  || bad "the 259e results do not show their age: $(head -5 "$TMP/c259r")"
+# A SUSPEND (the app switcher) after the COMMIT was ACKed: the Xeno still reads the
+# module's verdict with the app gone (CalRoutinePorts::CalTask), sends no second
+# COMMIT, and the menu shows the cancelled verdict. Before the CalTask fix a T41 /
+# T41_audio build never collected it and CalRunActive() stayed true for good.
+c259 "$R259,$PR,step600,$BP,step1000,$MENU,encr+,step100,r,step8000" > "$TMP/c259s"
+grep -q 'commits=1,' "$TMP/c259.err" && grep -q 'run_active=0,verdict=1' "$TMP/c259.err" \
+  && ok "SUSPEND after the COMMIT ACK: one COMMIT, the verdict collected, no run left open" \
+  || bad "suspend in Write: $(cat "$TMP/c259.err")"
+has '259e cancel: WRITTEN' < "$TMP/c259s" \
+  && ok "... and the Cal Routine menu shows the cancelled run's verdict" \
+  || bad "no cancelled-verdict banner on the menu: $(head -8 "$TMP/c259s")"
+
 [ $fail -eq 0 ] && echo "all checks passed" || echo "SOME CHECKS FAILED"
 exit $fail
