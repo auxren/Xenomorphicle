@@ -1,65 +1,80 @@
 #pragma once
 // ---------------------------------------------------------------------------
-// Scope -- a simple oscilloscope for the O.R.N.8 hardware's 20 monitorable
-// signals: CV IN 1-8, CV OUT 1-8, and (on an audio build) AUDIO IN L/R,
-// AUDIO OUT L/R. One channel at a time, a scrolling 128px-wide waveform
-// trace, a discrete vertical gain control, freeze, and a numeric readout of
-// the latest sample.
+// Scope: a triggered, auto-ranging oscilloscope and spectrum view for the
+// Xenomorpher's jacks. Design: docs/superpowers/specs/2026-10-24-scope-app-design.md.
 //
-// CHANNEL MODEL: a flat 0..19 index (see ScopeMath.h for the exact layout
-// and why it is a fixed table rather than something computed). encL cycles
-// it; on a build without the codec the cursor is kept off the 4 audio
-// entries entirely (they would have nothing behind them). That condition is
-// XENO_CODEC_AUDIO (see platformio.ini) -- not AUDIO_INTERFACE, which is a USB
-// descriptor number and says nothing about whether the codec is running.
+// SOURCES (ScopeSources.h): audio in/out L/R (codec builds only), CV in 1-8,
+// CV out 1-8, TR 1-4. A view is a set of up to 8 of them, picked from a
+// quick list on the channel field or, on its last entry, a Custom picker.
 //
-// SAMPLING: CV channels are sampled once per redraw, in Render() below --
-// non-ISR, no timer needed, since a screen redraw is already the natural
-// "how often does a human need a new sample" rate. Audio channels are
-// sampled at audio-block rate by AudioScopeCapture (Audio/AudioScopeCapture.h),
-// wired permanently at Init() the same way TweightyApp::WireAudio() taps
-// OC::AudioIO's streams -- being an extra downstream reader of those
-// existing streams needs no special handling (ordinary Teensy Audio Library
-// fan-out), unlike output_route's own summing-destination story.
+// CAPTURE (ScopeCapture.h) runs in the hot paths at each source's own rate
+// into decimating min/max rings: one bucket per screen column at the chosen
+// timebase. Everything else happens here, at redraw rate, in loop context:
+// converting to millivolts, finding the trigger (ScopeTrigger.h), damped
+// auto-ranging (ScopeRange.h), the FFT (ScopeFft.h) and drawing.
 //
-// MEMORY: only the CURRENTLY SELECTED channel keeps a live ring buffer --
-// switching channels (encL) resets whichever ring is now selected, rather
-// than reasoning about 20 buffers' worth of state. CV channels share one
-// int16_t ring[ScopeMath::kRingSize] owned here; audio channels read
-// straight out of AudioScopeCapture's own 4 ring buffers (it only bothers
-// writing the one currently selected -- see that class's header comment).
+// SCREEN: one 21-column line at the top, `channel time volts trigger`, the
+// focused field inverted (the only use of inversion besides the jack-number
+// chips in a stacked view); an auto time or volts field ends in "A". Below
+// it is plot: one trace, overlaid traces on a shared scale, stacked lanes
+// each on its own scale, or the spectrum.
 //
-// CONTROLS: A = freeze/pause (stop appending new samples; press again to
-// resume). B = reset gain to 1.0x. encL = channel select (wraps). encR =
-// gain, 0.25x..4x in discrete steps. encL PUSH (CONTROL_BUTTON_L) toggles
-// whether DrawScreensaver() shows a live, still-updating trace instead of
-// the framework's default blank screensaver -- the one button/encoder-push
-// this app doesn't otherwise use, and a single press (not a hold) since
-// nothing else is competing for it. Z/CONTROL_BUTTON_M is not wired on this
-// hardware (see Bus200eApp.h's header comment) so it was never an option.
+// CONTROLS (encL = where you are, encR = what it is):
+//   encL turn  focus along the top line      encR turn  change the field
+//   encR push  focused field back to auto    encL push  back (closes Custom)
+//   A freeze/run   B everything auto   X scope/FFT   Y overlaid/stacked
+// The trigger field cycles auto (per shown trace), level, and external TR1-4.
+// In level mode encR turns the level and encR push returns to auto.
+//
+// VOLTS: audio in is AC-coupled and full scale is about +-9.3 V at the jack
+// (hardware/xenomorpher/README.md); CV in uses the calibrated reading,
+// 1200 mV per 409.6 counts; CV out uses the DAC's own zero and octave
+// calibration points, 1.2 V per octave.
 // ---------------------------------------------------------------------------
 
-#include <new>   // std::nothrow
 #include "../HSUtils.h"
 #include "../OC_ADC.h"
 #include "../OC_DAC.h"
-#include "../ScopeMath.h"
+#include "../ScopeCapture.h"
+#include "../ScopeFft.h"
+#include "../ScopeRange.h"
+#include "../ScopeSettings.h"
+#include "../ScopeSources.h"
+#include "../ScopeTrigger.h"
 #ifdef XENO_CODEC_AUDIO
+#include <new>  // std::nothrow
 #include "../Audio/AudioScopeCapture.h"
 #include "../AudioIO.h"
 #endif
 
 namespace ScopeAppNS {
 
+using namespace ScopeSources;
+
 #ifdef XENO_CODEC_AUDIO
-static constexpr int kUsableChannels = ScopeMath::kChannelCount;       // 20
+static constexpr bool kCodec = true;
 #else
-static constexpr int kUsableChannels = ScopeMath::kCvChannelCount;     // 16
+static constexpr bool kCodec = false;
 #endif
 
-// OC::ADC::value()'s ADC_CHANNEL_n globals are not guaranteed to be plain
-// 0..7 -- OC_ADC.cpp can remap them (flip180) -- so this always reads the
-// live global for the requested sub-index rather than caching one.
+constexpr int kTop = 11;                 // first plot row
+constexpr int kPlotH = 64 - kTop;        // 53 rows
+constexpr int kCols = 128;
+constexpr int kMaxWindow = kCols;        // buckets on screen at most
+constexpr int kAnalyse = 4 * kMaxWindow; // buckets the trigger looks at
+constexpr float kAudioFsMv = 9300.f;
+constexpr float kCvInMvPerCount = 1200.f / 409.6f;
+constexpr float kCvFsMv = 12000.f;       // FFT normalisation for CV sources
+
+inline int Wrap(int i, int n) {
+  if (n <= 0) return 0;
+  const int r = i % n;
+  return r < 0 ? r + n : r;
+}
+
+enum Field { F_CH, F_TIME, F_VOLT, F_TRIG, F_COUNT };
+enum TrigMode { TM_AUTO = 0, TM_LEVEL = 1, TM_EXT = 2 };  // TM_EXT + n = TRn+1
+
 inline ADC_CHANNEL AdcChannelForSub(int sub) {
   switch (sub) {
     default:
@@ -76,309 +91,676 @@ inline ADC_CHANNEL AdcChannelForSub(int sub) {
   }
 }
 
+// One ring sample (bucket value) in millivolts for its source.
+inline float ToMv(Source s, int16_t v) {
+  switch (KindOf(s)) {
+    case KIND_AUDIO_IN:
+    case KIND_AUDIO_OUT: return v * (kAudioFsMv / 32768.f);
+    case KIND_CV_IN: {
+      const ADC_CHANNEL ch = AdcChannelForSub(SubIndex(s));
+      return OC::ADC::calibrated_from_raw12(ch, (uint32_t)(v < 0 ? 0 : v)) * kCvInMvPerCount;
+    }
+    case KIND_CV_OUT: {
+      const DAC_CHANNEL ch = (DAC_CHANNEL)SubIndex(s);
+      const int32_t zero = (int32_t)OC::DAC::get_zero_offset(ch);
+      const int32_t oct = (int32_t)OC::DAC::get_octave_offset(ch, 1) - zero;
+      const int32_t code = (int32_t)v + 32768;
+      return oct ? (code - zero) * 1200.f / oct : 0.f;
+    }
+    default: return v ? 1.f : 0.f;  // TR: 0/1
+  }
+}
+
+// Capture latency, in CPU cycles, between a ring's commit_cyc and the real
+// time of its newest sample (ScopeCapture.h).
+inline uint32_t LatencyCyc(Source s) {
+  switch (KindOf(s)) {
+    case KIND_AUDIO_IN:
+      return (uint32_t)((uint64_t)F_CPU_ACTUAL * ScopeCapture::kAudioInLatencySamples / 48000);
+    case KIND_CV_IN:
+      return (uint32_t)((uint64_t)F_CPU_ACTUAL * ScopeCapture::kCvInLatencyFrames / 37500);
+    default: return 0;
+  }
+}
+
+// Working buffers: loop context only.
+static DMAMEM float g_mv[kAnalyse];
+static DMAMEM float g_fft_in[ScopeFft::kN];
+static DMAMEM float g_fft_db[ScopeFft::kN / 2 + 1];
+
 }  // namespace ScopeAppNS
 
 OC_APP_CLASS(AppScope, TWOCCS("SP"), "Scope", "Scope") {
 public:
-  // channel_ u8 + gain_index_ u8 + screensaver_trace_ u8 = 3 bytes.
-  OC_APP_INTERFACE_DECLARE(AppScope, 3);
+  OC_APP_INTERFACE_DECLARE(AppScope, kScopeSettingsBytes);
 
 private:
-  // --- persisted (3 bytes) -------------------------------------------------
-  uint8_t channel_ = 0;                    // 0..19, see ScopeMath.h
-  uint8_t gain_index_ = ScopeMath::kDefaultGainIndex;
-  bool screensaver_trace_ = false;         // encL-push toggle
+  ScopeSettings set_;
 
-  // --- live UI state ---------------------------------------------------
+  // --- live UI state ------------------------------------------------------
+  uint8_t focus_ = ScopeAppNS::F_CH;
   bool frozen_ = false;
+  bool picker_ = false;
+  uint8_t picker_cursor_ = 0;
+  bool level_follow_ = true;  // level tracks the signal until turned
+  mutable int16_t live_level_mv_ = 0;  // the followed level while level_follow_
 
-  // --- CV ring (audio channels use AudioScopeCapture's own instead) -------
-  // mutable: appended to from Render(), which DrawMenu()/DrawScreensaver()
-  // (both const, per OC_APP_INTERFACE_DECLARE) call -- sampling on redraw
-  // is this app's design (see the class comment), not a side channel that
-  // would be surprising to find behind a const method.
-  mutable int16_t cv_ring_[ScopeMath::kRingSize] = {};
-  mutable uint8_t cv_head_ = 0;
-  mutable int32_t last_raw_ = 0;
+  // --- the armed view ---------------------------------------------------
+  ScopeSources::Source list_[ScopeSources::kMaxTraces];
+  int n_ = 0;
+  int armed_time_idx_ = -1;
+
+  // --- analysis state (mutated while drawing; see Render()) ---------------
+  mutable ScopeRange::AutoTime atime_;
+  mutable ScopeRange::AutoVolt avolt_[ScopeSources::kMaxTraces];
+  mutable ScopeTrigger::AutoTrigger atrig_;
+  mutable bool locked_ = false;
+  mutable float peak_hz_ = 0.f;
+  mutable float last_mv_[ScopeSources::kMaxTraces] = {};
+  mutable int pending_time_idx_ = -1;  // auto timebase moved: re-arm in Loop()
 
 #ifdef XENO_CODEC_AUDIO
   AudioScopeCapture scope_capture_;
-  AudioConnection *conn_in_l_ = nullptr;
-  AudioConnection *conn_in_r_ = nullptr;
-  AudioConnection *conn_out_l_ = nullptr;
-  AudioConnection *conn_out_r_ = nullptr;
+  AudioConnection *conn_[4] = {nullptr, nullptr, nullptr, nullptr};
 #endif
   bool audio_wired_ = false;
 
+  ScopeSources::Mask ViewMask() const;
+  int TimeIdx() const;
+  int VoltIdx(int trace) const;
+  int TrigSlot() const;
+  int16_t LevelMv() const { return level_follow_ ? live_level_mv_ : set_.trig_level_mv; }
+  bool TrigIsTr() const;
+  void Rearm();
   void WireAudio();
-  void SetChannel(int new_channel);
-  void SetFrozen(bool frozen);
+  void SetFrozen(bool f);
+  void AllAuto();
+  void TurnField(int v);
+  void PushField();
   void Render() const;
+  void RenderPicker() const;
+  void RenderSpectrum() const;
+  void DrawHeader(const char *trig_text, const char *time_text, const char *volt_text) const;
+  int StartFor(int slot, uint32_t src_newest_cyc, float back_s) const;
 };
 
 // ---------------------------------------------------------------------------
-// Out-of-class and FLASHMEM: this app has no audio-ISR-hot or unconditional
-// per-tick surface of its own (unlike TweightyApp's Controller()/
-// BackgroundPump()) -- CV sampling happens at redraw rate inside Render(),
-// which is plenty cold for flash. AudioScopeCapture::update() is the one
-// piece of real ISR-hot code this feature adds, and it lives in its own
-// header (Audio/AudioScopeCapture.h), never FLASHMEM, same discipline as
-// AudioAnalyzeStrobe::update() and AudioTweightyF32::update().
+// Everything below runs in loop context except Process() (core ISR), which
+// only forwards to ScopeCapture::OnCoreTick(). FLASHMEM throughout the rest:
+// none of it is on an audio or ISR path.
 // ---------------------------------------------------------------------------
 
-// std::nothrow on every connection allocated here, deliberately.
-//
-// -fcheck-new is not in this build (verified in the compile line), and the
-// standard only requires the compiler to test operator new's result when it
-// cannot throw. With -fno-exceptions and a plain `new`, a failed allocation
-// runs the AudioConnection constructor with `this` == nullptr and faults
-// inside it -- before any null check at a later use site can help.
-// std::nothrow makes the compiler emit the test and skip the constructor, so
-// the pointer simply stays null and the existing guards do their job.
+FLASHMEM ScopeSources::Mask AppScope::ViewMask() const {
+  using namespace ScopeSources;
+  const Mask m = QuickIsCustom(set_.quick_idx) ? set_.custom_mask : QuickMask(set_.quick_idx);
+  return m & AvailableMask(ScopeAppNS::kCodec);
+}
+
+FLASHMEM int AppScope::TimeIdx() const {
+  return set_.time_auto ? atime_.Idx() : ScopeRange::ClampTime(set_.time_idx);
+}
+
+FLASHMEM int AppScope::VoltIdx(int trace) const {
+  return set_.volt_auto ? avolt_[trace].Idx() : ScopeRange::ClampVolt(set_.volt_idx);
+}
+
+FLASHMEM int AppScope::TrigSlot() const {
+  if (n_ <= 0) return -1;
+  if (set_.trig_mode >= ScopeAppNS::TM_EXT) {
+    for (int i = 0; i < n_; ++i)  // align ext sync to the first non-TR trace
+      if (ScopeSources::KindOf(list_[i]) != ScopeSources::KIND_TR) return i;
+    return 0;
+  }
+  return set_.trig_src < n_ ? set_.trig_src : 0;
+}
+
+FLASHMEM bool AppScope::TrigIsTr() const {
+  const int s = TrigSlot();
+  return s >= 0 && ScopeSources::KindOf(list_[s]) == ScopeSources::KIND_TR;
+}
+
+FLASHMEM void AppScope::Rearm() {
+  using namespace ScopeSources;
+  n_ = MaskToList(ViewMask(), list_);
+  if (set_.trig_src >= n_) set_.trig_src = 0;
+  const int ts = TrigSlot();
+  const bool fft = set_.view == 1 && ts >= 0 && !TrigIsTr();
+  const int ext = set_.trig_mode >= ScopeAppNS::TM_EXT ? set_.trig_mode - ScopeAppNS::TM_EXT : -1;
+  armed_time_idx_ = TimeIdx();
+  if (frozen_) {
+    ScopeCapture::Disarm();
+  } else {
+    ScopeCapture::Arm(list_, n_, armed_time_idx_, fft ? ts : -1, ext);
+  }
+  atrig_.Reset();
+  locked_ = false;
+}
+
+// std::nothrow on every connection allocated here, deliberately: with
+// -fno-exceptions and no -fcheck-new, a failed plain `new` would run the
+// AudioConnection constructor on nullptr. std::nothrow makes the compiler
+// test the result, so the pointer simply stays null.
 FLASHMEM void AppScope::WireAudio() {
   if (audio_wired_) return;
 #ifdef XENO_CODEC_AUDIO
-  // Wired permanently at Init(), per the class comment -- unlike
-  // TunerApp/TweightyApp's own taps, there is no connect()/disconnect()
-  // dance here: AudioScopeCapture's active_channel_ (default -1, "nothing
-  // selected") is the actual cost gate, so an unselected or backgrounded
-  // Scope costs a bare release() per block on all 4 taps, not a torn-down
-  // graph to rebuild on every RESUME.
-  conn_in_l_ = new (std::nothrow) AudioConnection(OC::AudioIO::InputStream(0), 0,
-                                    scope_capture_, AudioScopeCapture::TAP_IN_L);
-  conn_in_r_ = new (std::nothrow) AudioConnection(OC::AudioIO::InputStream(0), 1,
-                                    scope_capture_, AudioScopeCapture::TAP_IN_R);
-  conn_out_l_ = new (std::nothrow) AudioConnection(OC::AudioIO::OutputStream(), 0,
-                                     scope_capture_, AudioScopeCapture::TAP_OUT_L);
-  conn_out_r_ = new (std::nothrow) AudioConnection(OC::AudioIO::OutputStream(), 1,
-                                     scope_capture_, AudioScopeCapture::TAP_OUT_R);
+  // Wired permanently: an unshown tap costs a release() per block, so there
+  // is no graph to rebuild on every resume.
+  conn_[0] = new (std::nothrow) AudioConnection(OC::AudioIO::InputStream(0), 0, scope_capture_,
+                                                AudioScopeCapture::TAP_IN_L);
+  conn_[1] = new (std::nothrow) AudioConnection(OC::AudioIO::InputStream(0), 1, scope_capture_,
+                                                AudioScopeCapture::TAP_IN_R);
+  conn_[2] = new (std::nothrow) AudioConnection(OC::AudioIO::OutputStream(), 0, scope_capture_,
+                                                AudioScopeCapture::TAP_OUT_L);
+  conn_[3] = new (std::nothrow) AudioConnection(OC::AudioIO::OutputStream(), 1, scope_capture_,
+                                                AudioScopeCapture::TAP_OUT_R);
 #endif
   audio_wired_ = true;
 }
 
-// Resets whichever ring the new channel needs (its own CV ring, or the
-// matching AudioScopeCapture tap) and arms/disarms the audio tap's active
-// channel to match -- see AudioScopeCapture's header comment for why only
-// the selected tap ever gets scanned.
-FLASHMEM void AppScope::SetChannel(int new_channel) {
-  channel_ = (uint8_t)ScopeMath::WrapIndex(new_channel, ScopeAppNS::kUsableChannels);
-  cv_head_ = 0;
-  last_raw_ = 0;
-  for (auto &v : cv_ring_) v = 0;
-#ifdef XENO_CODEC_AUDIO
-  if (ScopeMath::ChannelKindOf(channel_) == ScopeMath::KIND_AUDIO) {
-    const int sub = ScopeMath::ChannelSubIndex(channel_);
-    scope_capture_.ResetRing(sub);
-    scope_capture_.SetActiveChannel(frozen_ ? -1 : sub);
-  } else {
-    scope_capture_.SetActiveChannel(-1);
-  }
-#endif
+FLASHMEM void AppScope::SetFrozen(bool f) {
+  frozen_ = f;
+  Rearm();  // frozen: capture disarmed, the rings keep their last frame
 }
 
-FLASHMEM void AppScope::SetFrozen(bool frozen) {
-  frozen_ = frozen;
-#ifdef XENO_CODEC_AUDIO
-  if (ScopeMath::ChannelKindOf(channel_) == ScopeMath::KIND_AUDIO) {
-    const int sub = ScopeMath::ChannelSubIndex(channel_);
-    scope_capture_.SetActiveChannel(frozen_ ? -1 : sub);
-  }
-#endif
+FLASHMEM void AppScope::AllAuto() {
+  set_.time_auto = 1;
+  set_.volt_auto = 1;
+  set_.trig_mode = ScopeAppNS::TM_AUTO;
+  level_follow_ = true;
+  Rearm();
 }
 
 FLASHMEM void AppScope::Init() {
-  channel_ = 0;
-  gain_index_ = ScopeMath::kDefaultGainIndex;
-  screensaver_trace_ = false;
+  ScopeSettingsDefaults(&set_);
+  atime_.Reset(ScopeRange::kDefaultTimeIdx);
+  for (auto &v : avolt_) v.Reset(ScopeRange::kDefaultVoltIdx);
+  focus_ = ScopeAppNS::F_CH;
   frozen_ = false;
+  picker_ = false;
   audio_wired_ = false;
   WireAudio();
-  SetChannel(0);
+  n_ = ScopeSources::MaskToList(ViewMask(), list_);  // not armed until resumed
 }
 
 FLASHMEM size_t AppScope::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
-  stream_buffer.Write<uint8_t>(channel_);
-  stream_buffer.Write<uint8_t>(gain_index_);
-  stream_buffer.Write<uint8_t>(screensaver_trace_ ? 1 : 0);
+  uint8_t buf[kScopeSettingsBytes];
+  ScopeSettingsPack(set_, buf);
+  for (uint8_t b : buf) stream_buffer.Write<uint8_t>(b);
   return stream_buffer.overflow() ? 0 : stream_buffer.written();
 }
 
 FLASHMEM size_t AppScope::RestoreAppData(util::StreamBufferReader &stream_buffer) {
-  const uint8_t ch = stream_buffer.Read<uint8_t>();
-  const uint8_t gain = stream_buffer.Read<uint8_t>();
-  const uint8_t scr = stream_buffer.Read<uint8_t>();
-  gain_index_ = (uint8_t)ScopeMath::ClampGainIndex((int)gain);
-  screensaver_trace_ = scr != 0;
-  SetChannel((int)ch);   // wraps/validates internally
+  uint8_t buf[kScopeSettingsBytes];
+  size_t n = 0;
+  while (n < sizeof(buf) && stream_buffer.available()) buf[n++] = stream_buffer.Read<uint8_t>();
+  ScopeSettingsUnpack(buf, n, &set_);  // defaults on anything it can't read
+  atime_.Reset(set_.time_idx);
+  for (auto &v : avolt_) v.Reset(set_.volt_idx);
+  n_ = ScopeSources::MaskToList(ViewMask(), list_);
   return stream_buffer.underflow() ? 0 : stream_buffer.read();
 }
 
 FLASHMEM void AppScope::HandleAppEvent(OC::AppEvent event) {
   switch (event) {
-    case OC::APP_EVENT_RESUME:
-#ifdef XENO_CODEC_AUDIO
-      if (!frozen_ && ScopeMath::ChannelKindOf(channel_) == ScopeMath::KIND_AUDIO)
-        scope_capture_.SetActiveChannel(ScopeMath::ChannelSubIndex(channel_));
-#endif
+    case OC::APP_EVENT_RESUME: Rearm(); break;
+    case OC::APP_EVENT_SUSPEND: ScopeCapture::Disarm(); break;
+    default: break;
+  }
+}
+
+// Core ISR: the CV-out and TR lanes are sampled here (ScopeCapture.cpp).
+void AppScope::Process(OC::IOFrame *) { ScopeCapture::OnCoreTick(); }
+
+FLASHMEM void AppScope::Loop() {
+  // Auto timebase moved while drawing: re-arm here, out of the const draw.
+  if (pending_time_idx_ >= 0) {
+    pending_time_idx_ = -1;
+    if (!frozen_) Rearm();
+  }
+}
+
+FLASHMEM void AppScope::TurnField(int v) {
+  using namespace ScopeAppNS;
+  switch (focus_) {
+    case F_CH:
+      set_.quick_idx = (uint8_t)ScopeAppNS::Wrap(set_.quick_idx + v, ScopeSources::QuickCount());
+      set_.trig_src = 0;
+      Rearm();
       break;
-    case OC::APP_EVENT_SUSPEND:
-      // Switching to a different app entirely: neither DrawMenu() nor
-      // DrawScreensaver() will run again until RESUME, so there is nothing
-      // left to animate -- stop the audio tap from doing pointless work
-      // meanwhile (mirrors TunerApp::SetActive(false)'s reasoning, just
-      // gating one flag here instead of a connect/disconnect pair).
-#ifdef XENO_CODEC_AUDIO
-      scope_capture_.SetActiveChannel(-1);
-#endif
+    case F_TIME:
+      set_.time_idx = (uint8_t)ScopeRange::ClampTime(TimeIdx() + v);
+      set_.time_auto = 0;
+      Rearm();
       break;
-    case OC::APP_EVENT_SCREENSAVER_ON:
-    case OC::APP_EVENT_SCREENSAVER_OFF:
-      // Deliberately no-op: Render() (called from both DrawMenu() and
-      // DrawScreensaver()) already decides whether to sample/draw, so
-      // there is nothing extra to arm or disarm on either edge.
+    case F_VOLT:
+      set_.volt_idx = (uint8_t)ScopeRange::ClampVolt(VoltIdx(0) + v);
+      set_.volt_auto = 0;
+      break;
+    case F_TRIG:
+      if (set_.trig_mode == TM_LEVEL) {  // turn the level
+        const int step = ScopeRange::kVoltDivMv[VoltIdx(set_.trig_src < n_ ? set_.trig_src : 0)] / 4;
+        set_.trig_level_mv = (int16_t)constrain(LevelMv() + v * (step ? step : 1), -15000, 15000);
+        level_follow_ = false;
+      } else {
+        // auto on each shown non-TR trace, then level on trace 0, then TR1-4
+        int pos = set_.trig_mode >= TM_EXT ? n_ + 1 + (set_.trig_mode - TM_EXT) : set_.trig_src;
+        pos = ScopeAppNS::Wrap(pos + v, n_ + 1 + 4);
+        if (pos < n_) {
+          set_.trig_mode = TM_AUTO;
+          set_.trig_src = (uint8_t)pos;
+        } else if (pos == n_) {
+          set_.trig_mode = TM_LEVEL;
+          level_follow_ = true;
+        } else {
+          set_.trig_mode = (uint8_t)(TM_EXT + (pos - n_ - 1));
+        }
+        Rearm();
+      }
       break;
     default: break;
   }
 }
 
-void AppScope::Process(OC::IOFrame *) {}
-FLASHMEM void AppScope::Loop() {}
-
-// Shared by DrawMenu() and DrawScreensaver() so the screensaver's live
-// trace is the SAME per-frame cost as the normal view, not extra work on
-// top of it -- see the class comment's SAMPLING paragraph.
-FLASHMEM void AppScope::Render() const {
-  using namespace ScopeMath;
-
-  const ChannelKind kind = ChannelKindOf(channel_);
-  const int sub = ChannelSubIndex(channel_);
-  const float gain = kGainSteps[gain_index_];
-  const int32_t full_scale = ChannelFullScale(channel_);
-
-  // --- sample (skipped entirely while frozen) -----------------------------
-  if (!frozen_) {
-    switch (kind) {
-      case KIND_CV_IN:
-        // Calibrated where the input has a per-input calibration
-        // (InputCal.h): the trace and the value counts it prints are the
-        // calibrated counts (true volts, 409.6 counts per octave).
-        last_raw_ = OC::ADC::calibrated_value(ScopeAppNS::AdcChannelForSub(sub));
-        cv_ring_[cv_head_] = (int16_t)last_raw_;
-        cv_head_ = (uint8_t)((cv_head_ + 1) % kRingSize);
-        break;
-      case KIND_CV_OUT:
-        last_raw_ = (int32_t)OC::DAC::value((size_t)sub) - kCvOutCenter;
-        cv_ring_[cv_head_] = (int16_t)last_raw_;
-        cv_head_ = (uint8_t)((cv_head_ + 1) % kRingSize);
-        break;
-      case KIND_AUDIO:
-#ifdef XENO_CODEC_AUDIO
-        {
-          const uint8_t h = scope_capture_.Head(sub);
-          last_raw_ = scope_capture_.RingValue(sub, (h + kRingSize - 1) % kRingSize);
-        }
-#endif
-        break;
-    }
+FLASHMEM void AppScope::PushField() {
+  using namespace ScopeAppNS;
+  switch (focus_) {
+    case F_CH:
+      if (ScopeSources::QuickIsCustom(set_.quick_idx)) {
+        picker_ = true;
+        picker_cursor_ = 0;
+      }
+      break;
+    case F_TIME: set_.time_auto = 1; atime_.Reset(set_.time_idx); Rearm(); break;
+    case F_VOLT: set_.volt_auto = 1; break;
+    case F_TRIG: set_.trig_mode = TM_AUTO; level_follow_ = true; Rearm(); break;
+    default: break;
   }
-
-  // --- header: title, gain, freeze flag -----------------------------------
-  graphics.setPrintPos(1, 1);
-  graphics.print("SCOPE");
-  if (frozen_) {
-    graphics.setPrintPos(40, 1);
-    graphics.print("FRZ");
-  }
-  char gbuf[8];
-  snprintf(gbuf, sizeof(gbuf), "x%.2f", gain);
-  graphics.setPrintPos(127, 1);
-  graphics.print_right(gbuf);
-  graphics.drawHLine(0, 10, 128);
-
-  // --- channel label + numeric readout ------------------------------------
-  char label[16];
-  ChannelLabel(channel_, label, sizeof(label));
-  graphics.setPrintPos(1, 13);
-  graphics.print(label);
-  char vbuf[12];
-  snprintf(vbuf, sizeof(vbuf), "%ld", (long)last_raw_);
-  graphics.setPrintPos(127, 13);
-  graphics.print_right(vbuf);
-
-  // --- trace -----------------------------------------------------------
-  static constexpr int kPlotTop = 23;
-  static constexpr int kPlotH = 29;   // rows 23..51
-  graphics.drawHLinePattern(0, kPlotTop + kPlotH / 2, 128, 3);  // zero line
-
-  int prev_y = kPlotTop;
-  for (int x = 0; x < kRingSize; ++x) {
-    int32_t raw;
-    if (kind == KIND_AUDIO) {
-#ifdef XENO_CODEC_AUDIO
-      const int idx = RingReadIndex(scope_capture_.Head(sub), x);
-      raw = scope_capture_.RingValue(sub, idx);
-#else
-      raw = 0;
-#endif
-    } else {
-      const int idx = RingReadIndex(cv_head_, x);
-      raw = cv_ring_[idx];
-    }
-    const int y = kPlotTop + ValueToRow(raw, gain, full_scale, kPlotH);
-    if (x == 0) graphics.drawLine(x, y, x, y);
-    else graphics.drawLine(x - 1, prev_y, x, y);
-    prev_y = y;
-  }
-
-  gfxFooter("A:frz B:gain L:scrsvr");
-}
-
-FLASHMEM void AppScope::DrawMenu() const { Render(); }
-
-// Off by default (screensaver_trace_ == false): falls back to a blank
-// screen like a simple app normally would (e.g. AppScaleEditor::
-// DrawScreensaver()). Toggled on (encL push), it reuses Render() verbatim
-// -- same sampling, same draw -- so the "scope stays watching" idle screen
-// costs exactly what the on-screen view already costs, no more.
-FLASHMEM void AppScope::DrawScreensaver() const {
-  if (!screensaver_trace_) return;
-  Render();
 }
 
 FLASHMEM void AppScope::HandleButtonEvent(const UI::Event &event) {
+  using namespace ScopeSources;
   if (event.type != UI::EVENT_BUTTON_PRESS) return;
+  if (picker_) {
+    switch (event.control) {
+      case OC::CONTROL_BUTTON_R: {
+        const Mask bit = (Mask)1u << picker_cursor_;
+        if (set_.custom_mask & bit) {
+          set_.custom_mask &= ~bit;
+        } else {
+          Source tmp[kMaxTraces];
+          if (MaskToList(set_.custom_mask, tmp) < kMaxTraces) set_.custom_mask |= bit;
+        }
+        break;
+      }
+      case OC::CONTROL_BUTTON_L: picker_ = false; Rearm(); break;
+      default: break;
+    }
+    return;
+  }
   switch (event.control) {
-    case OC::CONTROL_BUTTON_UP:      // A: freeze/pause toggle
-      SetFrozen(!frozen_);
+    case OC::CONTROL_BUTTON_A: SetFrozen(!frozen_); break;
+    case OC::CONTROL_BUTTON_B: AllAuto(); break;
+    case OC::CONTROL_BUTTON_X:
+      if (!TrigIsTr()) { set_.view = set_.view ? 0 : 1; Rearm(); }
       break;
-    case OC::CONTROL_BUTTON_DOWN:    // B: reset gain to 1.0x
-      gain_index_ = (uint8_t)ScopeMath::kDefaultGainIndex;
+    case OC::CONTROL_BUTTON_Y:
+      if (n_ > 1) set_.stacked = set_.stacked ? 0 : 1;
       break;
-    case OC::CONTROL_BUTTON_L:       // encL push: live trace as screensaver, on/off
-      screensaver_trace_ = !screensaver_trace_;
-      break;
-    default: break;   // R/X/Y unbound in v1
+    case OC::CONTROL_BUTTON_R: PushField(); break;
+    case OC::CONTROL_BUTTON_L: break;  // back: nothing open to close
+    default: break;
   }
 }
 
 FLASHMEM void AppScope::HandleEncoderEvent(const UI::Event &event) {
+  using namespace ScopeSources;
+  if (picker_) {
+    if (event.control == OC::CONTROL_ENCODER_R || event.control == OC::CONTROL_ENCODER_L) {
+      const Mask avail = AvailableMask(ScopeAppNS::kCodec);
+      int c = picker_cursor_;
+      const int dir = event.value > 0 ? 1 : -1;
+      for (int steps = event.value > 0 ? event.value : -event.value; steps > 0; --steps) {
+        do { c = ScopeAppNS::Wrap(c + dir, SRC_COUNT); } while (!(avail & ((Mask)1u << c)));
+      }
+      picker_cursor_ = (uint8_t)c;
+    }
+    return;
+  }
   if (event.control == OC::CONTROL_ENCODER_L) {
-    SetChannel((int)channel_ + event.value);
+    focus_ = (uint8_t)ScopeAppNS::Wrap(focus_ + event.value, ScopeAppNS::F_COUNT);
   } else if (event.control == OC::CONTROL_ENCODER_R) {
-    gain_index_ = (uint8_t)ScopeMath::ClampGainIndex((int)gain_index_ + event.value);
+    TurnField(event.value);
   }
 }
 
 FLASHMEM void AppScope::GetIOConfig(OC::IOConfig &) const {
-  // Scope only ever reads OC::ADC::calibrated_value()/OC::DAC::value() directly; it
-  // does not route or drive anything through the panel I/O config.
+  // Reads the jacks directly through ScopeCapture; routes nothing.
 }
 
 FLASHMEM void AppScope::DrawDebugInfo() const {
   graphics.setPrintPos(2, 12);
-  graphics.print("ch ");
-  graphics.print((int)channel_);
+  graphics.printf("n %d time %d", n_, TimeIdx());
   graphics.setPrintPos(2, 22);
-  graphics.print("raw ");
-  graphics.print((int)last_raw_);
+  graphics.printf("lock %d per %d", locked_ ? 1 : 0, (int)atrig_.Period());
+}
+
+// ---------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------
+
+// The top line. Fields sit left to right one space apart; the channel label
+// gives way first if the line would pass 21 columns.
+FLASHMEM void AppScope::DrawHeader(const char *trig_text, const char *time_text,
+                                   const char *volt_text) const {
+  using namespace ScopeAppNS;
+  char ch[8];
+  snprintf(ch, sizeof(ch), "%s", ScopeSources::QuickLabel(set_.quick_idx));
+  const char *texts[F_COUNT] = {ch, time_text, volt_text, trig_text};
+  int len[F_COUNT], total = F_COUNT - 1;
+  for (int i = 0; i < F_COUNT; ++i) total += (len[i] = (int)strlen(texts[i]));
+  if (total > 21) {
+    const int cut = len[F_CH] - (total - 21);
+    len[F_CH] = cut < 3 ? 3 : cut;
+    ch[len[F_CH]] = 0;
+  }
+  int x = 1;
+  for (int i = 0; i < F_COUNT; ++i) {
+    graphics.setPrintPos(x, 1);
+    graphics.print(texts[i]);
+    if (focus_ == i && !picker_) graphics.invertRect(x - 1, 0, len[i] * 6 + 1, 9);
+    x += (len[i] + 1) * 6;
+  }
+  if (frozen_) {  // a freeze is stated, not hinted
+    graphics.setPrintPos(128 - 6 * 3, kTop + 1);
+    graphics.print("FRZ");
+  }
+}
+
+// Bucket number on `slot`'s ring that lines up with the first column, given
+// how far (back_s) that column sits behind the trigger source's newest
+// sample. Only the newest-sample timestamps of the two rings are compared,
+// and those are always moments apart, so the 7 s wrap of the cycle counter
+// never matters even at 2 s/div.
+FLASHMEM int AppScope::StartFor(int slot, uint32_t src_newest_cyc, float back_s) const {
+  using namespace ScopeAppNS;
+  const ScopeRing &r = ScopeCapture::g_rings[slot];
+  const uint32_t c = r.Committed();
+  if (!c) return -1;
+  const Source s = list_[slot];
+  const float bucket_s = r.Decim() / RateHz(s);
+  const uint32_t newest_cyc = r.commit_cyc - LatencyCyc(s);
+  const float ahead_s = (float)(int32_t)(src_newest_cyc - newest_cyc) / (float)F_CPU_ACTUAL;
+  const float behind_s = back_s - ahead_s;  // first column, behind this ring's newest
+  return (int)c - 1 - (int)lroundf(behind_s / bucket_s);
+}
+
+FLASHMEM void AppScope::RenderPicker() const {
+  using namespace ScopeSources;
+  Source tmp[kMaxTraces];
+  graphics.setPrintPos(1, 1);
+  graphics.printf("Custom %d/%d", MaskToList(set_.custom_mask, tmp), kMaxTraces);
+  graphics.setPrintPos(127, 1);
+  graphics.print_right("L:done");
+  const Mask avail = AvailableMask(ScopeAppNS::kCodec);
+  for (int s = 0; s < SRC_COUNT; ++s) {
+    const int col = s % 4, row = s / 4;
+    const int x = 1 + col * 32, y = 11 + row * 9;
+    char lab[8];
+    Label((Source)s, lab, sizeof(lab));
+    graphics.setPrintPos(x, y);
+    if (!(avail & ((Mask)1u << s))) { graphics.print(" -"); continue; }
+    graphics.print((set_.custom_mask & ((Mask)1u << s)) ? "*" : " ");
+    graphics.print(lab);
+    if (s == picker_cursor_) graphics.invertRect(x - 1, y - 1, 31, 9);
+  }
+}
+
+FLASHMEM void AppScope::RenderSpectrum() const {
+  using namespace ScopeAppNS;
+  const int ts = TrigSlot();
+  char pk[12] = "pk --";
+  const char *none = "";
+  if (ts >= 0) {
+    const ScopeRing &r = ScopeCapture::g_rings[ts];
+    const uint32_t c = r.Committed();
+    const Source s = list_[ts];
+    const float fs = (KindOf(s) == KIND_CV_IN || KindOf(s) == KIND_CV_OUT) ? kCvFsMv : kAudioFsMv;
+    const float rate = RateHz(s);
+    if (c >= (uint32_t)ScopeFft::kN && r.Decim() == 1) {
+      for (int i = 0; i < ScopeFft::kN; ++i)
+        g_fft_in[i] = ToMv(s, r.At(c - ScopeFft::kN + i).lo) / fs;
+      if (KindOf(s) == KIND_CV_IN || KindOf(s) == KIND_CV_OUT) {  // DC would swamp bin 0..1
+        float m = 0;
+        for (int i = 0; i < ScopeFft::kN; ++i) m += g_fft_in[i];
+        m /= ScopeFft::kN;
+        for (int i = 0; i < ScopeFft::kN; ++i) g_fft_in[i] -= m;
+      }
+      ScopeFft::MagnitudeDb(g_fft_in, g_fft_db);
+      peak_hz_ = ScopeFft::PeakHz(g_fft_db, rate);
+      uint8_t rows[kCols];
+      ScopeFft::Columns(g_fft_db, rate, kPlotH, rows);
+      for (int x = 0; x < kCols; ++x)
+        if (rows[x]) graphics.drawVLine(x, 64 - rows[x], rows[x]);
+      const float grid[3] = {100.f, 1000.f, 10000.f};
+      for (float g : grid) {
+        if (g >= rate / 2) continue;
+        graphics.drawVLinePattern(ScopeFft::ColumnForHz(g, rate), kTop, kPlotH, 0x55);
+      }
+      if (peak_hz_ >= 1000.f) snprintf(pk, sizeof(pk), "pk %.1fk", peak_hz_ / 1000.f);
+      else snprintf(pk, sizeof(pk), "pk %dHz", (int)lroundf(peak_hz_));
+    }
+  }
+  // spectrum top line: channel, peak, and the analysed source
+  DrawHeader(none, pk, "FFT");
+}
+
+FLASHMEM void AppScope::Render() const {
+  using namespace ScopeAppNS;
+  if (picker_) { RenderPicker(); return; }
+  if (n_ == 0) {
+    DrawHeader("", "", "");
+    graphics.setPrintPos(1, 30);
+    graphics.print("no sources: encR push");
+    return;
+  }
+  if (set_.view == 1 && !TrigIsTr()) { RenderSpectrum(); return; }
+
+  const int time_idx = armed_time_idx_ >= 0 ? armed_time_idx_ : TimeIdx();
+  const uint32_t now_ms = millis();
+
+  // --- the trigger source's recent buckets, in mV ---------------------------
+  const int ts = TrigSlot();
+  const Source tsrc = list_[ts];
+  const float rate = RateHz(tsrc);
+  const float cpb = ScopeRange::ColsPerBucket(time_idx, rate);
+  const int window = (int)ceilf(kCols / cpb);
+  const ScopeRing &tr = ScopeCapture::g_rings[ts];
+  const uint32_t committed = tr.Committed();
+  const int m = (int)(committed < (uint32_t)kAnalyse ? committed : (uint32_t)kAnalyse);
+  const float bucket_s = tr.Decim() / rate;
+  const uint32_t bucket_cyc = (uint32_t)(bucket_s * F_CPU_ACTUAL);
+  int start = -1;  // bucket number of the first column
+  float lo = 0, hi = 0;
+  if (m >= window) {
+    const uint32_t base = committed - (uint32_t)m;
+    for (int i = 0; i < m; ++i) {
+      const ScopeBucket b = tr.At(base + i);
+      g_mv[i] = 0.5f * (ToMv(tsrc, b.lo) + ToMv(tsrc, b.hi));
+    }
+    lo = hi = g_mv[0];
+    for (int i = 0; i < m; ++i) { lo = fminf(lo, g_mv[i]); hi = fmaxf(hi, g_mv[i]); }
+    int idx = -1;
+    if (set_.trig_mode == TM_AUTO) {
+      idx = atrig_.Find(g_mv, m, window, 5.f);  // 5 mV p-p: below that is flat
+      locked_ = atrig_.Locked();
+    } else if (set_.trig_mode == TM_LEVEL) {
+      if (level_follow_) live_level_mv_ = (int16_t)(0.5f * (lo + hi));
+      idx = ScopeTrigger::LevelTrigger(g_mv, m, window, LevelMv(), 0.02f * (hi - lo), true);
+      locked_ = idx >= 0;
+    } else {  // external: the newest TR edge that leaves a full window
+      const ScopeEdgeRing &e = ScopeCapture::g_edges[set_.trig_mode - TM_EXT];
+      const uint32_t newest_cyc = tr.commit_cyc - LatencyCyc(tsrc);
+      locked_ = false;
+      for (uint32_t k = e.Count(), seen = 0; k > 0 && seen < (uint32_t)ScopeEdgeRing::kLen; --k, ++seen) {
+        const uint32_t edge = e.At(k - 1);
+        const int32_t behind = (int32_t)(newest_cyc - edge);
+        if (behind < 0) continue;
+        const int32_t back = (int32_t)lroundf((float)behind / (float)bucket_cyc);
+        const int i = m - 1 - back;
+        if (i < 0) break;
+        if (i + window <= m) { idx = i; locked_ = true; break; }
+      }
+    }
+    if (idx < 0) idx = m - window;  // free-running
+    start = (int)(base + idx);
+    // auto timebase from the period, when there is one
+    if (set_.time_auto && !frozen_) {
+      const float per_s = (set_.trig_mode == TM_AUTO && locked_) ? atrig_.Period() * bucket_s : 0.f;
+      if (atime_.Update(per_s, now_ms) != time_idx) pending_time_idx_ = atime_.Idx();
+    }
+  }
+  const uint32_t src_newest_cyc = tr.commit_cyc - LatencyCyc(tsrc);
+  const float back_s = start >= 0 ? (float)(committed - 1 - (uint32_t)start) * bucket_s : 0.f;
+
+  // --- header -----------------------------------------------------------
+  char ttext[8], vtext[8], gtext[8];
+  ScopeRange::FormatTime(time_idx, ttext, sizeof(ttext));
+  if (set_.time_auto) strncat(ttext, "A", sizeof(ttext) - strlen(ttext) - 1);
+  const bool stacked = set_.stacked && n_ > 1;
+  if (stacked) snprintf(vtext, sizeof(vtext), "%s", set_.volt_auto ? "lanesA" : "lanes");
+  else {
+    ScopeRange::FormatVolt(VoltIdx(0), vtext, sizeof(vtext));
+    if (set_.volt_auto) strncat(vtext, "A", sizeof(vtext) - strlen(vtext) - 1);
+  }
+  if (set_.trig_mode == TM_AUTO) {
+    if (n_ == 1) snprintf(gtext, sizeof(gtext), "%s", locked_ ? "AUTO" : "FREE");
+    else snprintf(gtext, sizeof(gtext), "%c%d", locked_ ? 'A' : 'F', ts + 1);
+  } else if (set_.trig_mode == TM_LEVEL) {
+    snprintf(gtext, sizeof(gtext), "%+.1fV", LevelMv() / 1000.f);
+  } else {
+    snprintf(gtext, sizeof(gtext), "TR%d", set_.trig_mode - TM_EXT + 1);
+  }
+  DrawHeader(gtext, ttext, vtext);
+  if (start < 0) {
+    graphics.setPrintPos(1, 30);
+    graphics.print("waiting for signal");
+    return;
+  }
+
+  // --- traces -----------------------------------------------------------
+  // Overlaid traces share trace 0's AutoVolt, fed with the union of their
+  // ranges; a stacked lane uses its own.
+  const int lanes = stacked ? n_ : 1;
+  const int lane_h = kPlotH / lanes;
+  const bool chips = stacked && lane_h >= 9;
+  const int x0 = chips ? 8 : 0, x1 = chips ? 100 : kCols;
+  float u_lo = 1e9f, u_hi = -1e9f;
+  for (int t = 0; t < n_; ++t) {
+    const Source s = list_[t];
+    const bool is_tr = KindOf(s) == KIND_TR;
+    const ScopeRing &r = ScopeCapture::g_rings[t];
+    const int st = (t == ts) ? start : StartFor(t, src_newest_cyc, back_s);
+    const float tcpb = ScopeRange::ColsPerBucket(time_idx, RateHz(s));
+    const int tw = (int)ceilf((x1 - x0) / tcpb);
+    const uint32_t c = r.Committed();
+    // range over this trace's window
+    float tlo = 1e9f, thi = -1e9f;
+    for (int i = 0; i < tw; ++i) {
+      const int64_t bn = (int64_t)st + i;
+      if (bn < 0 || bn >= (int64_t)c || bn < (int64_t)c - ScopeRing::kLen) continue;
+      const ScopeBucket b = r.At((uint32_t)bn);
+      tlo = fminf(tlo, ToMv(s, b.lo));
+      thi = fmaxf(thi, ToMv(s, b.hi));
+    }
+    if (c) last_mv_[t] = ToMv(s, r.At(c - 1).hi);
+    if (!is_tr && thi >= tlo) {
+      if (stacked) { if (!frozen_) avolt_[t].Update((int32_t)tlo, (int32_t)thi, now_ms); }
+      else { u_lo = fminf(u_lo, tlo); u_hi = fmaxf(u_hi, thi); }
+    }
+  }
+  if (!stacked && u_hi >= u_lo && !frozen_) avolt_[0].Update((int32_t)u_lo, (int32_t)u_hi, now_ms);
+
+  // grid: centre line and divisions (one-trace and overlaid views)
+  if (!stacked) {
+    graphics.drawHLinePattern(0, kTop + kPlotH / 2, kCols, 3);
+    for (int x = ScopeRange::kColsPerDiv; x < kCols; x += ScopeRange::kColsPerDiv)
+      graphics.drawVLinePattern(x, kTop, kPlotH, 0x11);
+  }
+
+  static const uint8_t kStyle[4] = {0xFF, 0x55, 0xCF, 0x11};  // solid, dotted, dashed, sparse
+  for (int t = 0; t < n_; ++t) {
+    const Source s = list_[t];
+    const bool is_tr = KindOf(s) == KIND_TR;
+    const ScopeRing &r = ScopeCapture::g_rings[t];
+    const uint32_t c = r.Committed();
+    const int st = (t == ts) ? start : StartFor(t, src_newest_cyc, back_s);
+    const float tcpb = ScopeRange::ColsPerBucket(time_idx, RateHz(s));
+    const int lane = stacked ? t : 0;
+    const int ytop = kTop + lane * lane_h, yh = stacked ? lane_h - 1 : kPlotH;
+    const int vi = stacked ? VoltIdx(t) : VoltIdx(0);
+    const float vdiv = ScopeRange::kVoltDivMv[vi];
+    const float center = stacked ? avolt_[t].CenterMv() : avolt_[0].CenterMv();
+    const float vscale = yh / (ScopeRange::kDivsY * vdiv);
+    const uint8_t style = stacked ? 0xFF : kStyle[t & 3];
+    auto row = [&](float mv) {
+      int y;
+      if (is_tr) {  // a 1-bit lane: low at the bottom, high a few rows up
+        const int top = stacked ? ytop + 1 : 64 - 6;
+        y = mv > 0.5f ? top : (stacked ? ytop + yh - 1 : 63);
+      } else {
+        y = ytop + yh / 2 - (int)lroundf((mv - center) * vscale);
+      }
+      return y < ytop ? ytop : y > ytop + yh - 1 ? ytop + yh - 1 : y;
+    };
+    int prev_y = -1, prev_x = -1;
+    for (float fx = 0; x0 + fx < x1; fx += tcpb) {
+      const int64_t bn = (int64_t)st + (int64_t)(fx / tcpb);
+      if (bn < 0 || bn >= (int64_t)c || bn < (int64_t)c - ScopeRing::kLen) { prev_y = -1; continue; }
+      const int x = x0 + (int)fx;
+      const ScopeBucket b = r.At((uint32_t)bn);
+      const int ylo = row(ToMv(s, b.lo)), yhi = row(ToMv(s, b.hi));
+      if (!(style & (1u << (x & 7)))) { prev_y = -1; continue; }
+      if (ylo != yhi) graphics.drawVLine(x, yhi, ylo - yhi + 1);
+      if (prev_y >= 0) graphics.drawLine(prev_x, prev_y, x, (ylo + yhi) / 2);
+      else graphics.setPixel(x, (ylo + yhi) / 2);
+      prev_x = x;
+      prev_y = (ylo + yhi) / 2;
+    }
+    char lab[8];
+    if (stacked) {
+      if (t < n_ - 1) graphics.drawHLinePattern(0, ytop + lane_h - 1, kCols, 2);
+      if (chips) {
+        graphics.setPrintPos(1, ytop + (lane_h - 8) / 2);
+        graphics.print((char)('1' + t));
+        graphics.invertRect(0, ytop + (lane_h - 8) / 2 - 1, 7, 9);
+        if (is_tr) snprintf(lab, sizeof(lab), "%s", last_mv_[t] > 0.5f ? "HI" : "LO");
+        else snprintf(lab, sizeof(lab), "%.1fV", last_mv_[t] / 1000.f);
+        graphics.setPrintPos(127, ytop + (lane_h - 8) / 2);
+        graphics.print_right(lab);
+      }
+    } else if (n_ > 1 && prev_y >= 0) {  // overlaid: the trace number at its right end
+      int y = prev_y - 4;
+      y = y < kTop ? kTop : y > 56 ? 56 : y;
+      graphics.setPrintPos(122, y);
+      graphics.print((char)('1' + t));
+    }
+  }
+  // trigger level tick at the left edge
+  if (!stacked && (set_.trig_mode == TM_LEVEL || (set_.trig_mode == TM_AUTO && locked_))) {
+    const float lvl = set_.trig_mode == TM_LEVEL ? LevelMv() : 0.5f * (lo + hi);
+    const float vdiv = ScopeRange::kVoltDivMv[VoltIdx(0)];
+    int y = kTop + kPlotH / 2 - (int)lroundf((lvl - avolt_[0].CenterMv()) * kPlotH / (ScopeRange::kDivsY * vdiv));
+    y = y < kTop ? kTop : y > 63 ? 63 : y;
+    graphics.drawHLine(0, y, 3);
+  }
+  if (ScopeSources::IsAc(tsrc) && !stacked) {
+    graphics.setPrintPos(1, 56);
+    graphics.print("AC");
+  }
+}
+
+FLASHMEM void AppScope::DrawMenu() const { Render(); }
+
+FLASHMEM void AppScope::DrawScreensaver() const {
+  if (set_.screensaver_trace) Render();
 }

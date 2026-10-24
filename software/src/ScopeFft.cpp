@@ -2,8 +2,10 @@
 #if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define SCOPE_CODE FLASHMEM
+#define SCOPE_BSS DMAMEM  // loop-context work buffers: RAM2, not RAM1
 #else
 #define SCOPE_CODE
+#define SCOPE_BSS
 #endif
 
 #include "ScopeFft.h"
@@ -17,8 +19,11 @@ namespace {
 constexpr int kLog2N = 10;
 constexpr double kPi = 3.14159265358979323846;
 
-float re_[kN], im_[kN];
-float cos_[kN / 2], sin_[kN / 2], win_[kN];
+SCOPE_BSS float re_[kN];
+SCOPE_BSS float im_[kN];
+SCOPE_BSS float cos_[kN / 2];
+SCOPE_BSS float sin_[kN / 2];
+SCOPE_BSS float win_[kN];
 bool tables_ = false;
 
 void Tables() {

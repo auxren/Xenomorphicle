@@ -70,7 +70,6 @@ suite test_buchla251e_editgenrec    -I host_stubs ../src/Buchla251eSlotCodec.cpp
                                     ../src/src/extern/bjorklund.cpp
 suite test_tweighty_transport       ../src/TweightyTransport.cpp
 suite test_tweighty_tap_phase       ../src/TweightyTapPhase.cpp
-suite test_scope_math               ../src/ScopeMath.cpp
 suite test_scope_sources            ../src/ScopeSources.cpp ../src/ScopeSettings.cpp ../src/ScopeRange.cpp
 suite test_scope_ring
 suite test_scope_range              ../src/ScopeRange.cpp

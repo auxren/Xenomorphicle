@@ -25,7 +25,7 @@
 
 namespace ScopeTrigger {
 
-constexpr int kMaxWindow = 1024;
+constexpr int kMaxWindow = 512;  // the app shows at most 128 buckets; tests use 384
 
 // Period in samples (sub-sample, parabolic), or 0 when there is none: a flat
 // input, peak-to-peak below min_pp, or no lag correlating at 0.5 or better.

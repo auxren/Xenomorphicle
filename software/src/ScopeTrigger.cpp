@@ -2,8 +2,10 @@
 #if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define SCOPE_CODE FLASHMEM
+#define SCOPE_BSS DMAMEM  // loop-context work buffer: RAM2, not RAM1
 #else
 #define SCOPE_CODE
+#define SCOPE_BSS
 #endif
 
 #include "ScopeTrigger.h"
@@ -92,7 +94,7 @@ SCOPE_CODE float EstimatePeriod(const float *x, int n, int min_lag, int max_lag,
   }
 
   // r(L) for L in [min_lag - 1, max_lag + 1]: one extra each side for peaks.
-  static float r[4096 / 2 + 4];
+  static SCOPE_BSS float r[4096 / 2 + 4];
   const int first = min_lag - 1, last = max_lag + 1;
   if (last - first + 1 > (int)(sizeof(r) / sizeof(r[0]))) return 0.f;
   for (int L = first; L <= last; ++L) {

@@ -10,7 +10,7 @@
 // acceptance checks, calibrated-millivolts -> DAC code, the frequency
 // counter's note/cents arithmetic, and the exact text of every streamed line.
 // No Arduino dependency -- host-tested by test/test_cvmeter_math.cpp, same
-// split as ScopeMath.h/.cpp.
+// split as ScopeSources.h/.cpp.
 //
 // Raw counts here are the ADC's own 12-bit reading (OC::ADC::raw_value()),
 // either as a float or as the 12.8 fixed-point smoothed value the ADC keeps
