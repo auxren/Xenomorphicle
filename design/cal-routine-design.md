@@ -275,7 +275,7 @@ Meter setup: `CONF:VOLT:DC 20`, `VOLT:DC:NPLC 10`, `VOLT:DC:AZ ON`, `TRIG:SOUR I
 After every DAC code change: settle 150 ms, **one throwaway `READ?`**, then **3** readings → median +
 spread (trusted ≤ 0.5 mV; one re-read set, then NOISY). Each output node's **final** value (the one
 reported and stored as measured) is the median of **10** readings. Sweep points use the 3-reading rule.
-Expected Outputs run ≈ 25 min (to be measured).
+Modelled Outputs + Inputs run ≈ 30 min at 0.53 s per `READ?` (Outputs ≈ 28; to be measured).
 
 ### 9.2 Separate routines
 The Cal Routine list becomes **Outputs**, **Inputs**, **Self (both)** (later rows, e.g. bus modules,

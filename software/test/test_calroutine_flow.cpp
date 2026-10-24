@@ -7,6 +7,7 @@
 //   g++ -std=c++17 -Wall -Wsign-compare -Werror -O2 -o build/test_calroutine_flow
 //     test_calroutine_flow.cpp ../src/CalRoutineFlow.cpp ../src/CalRoutineMath.cpp
 //     ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +51,7 @@ static int count_prefix(const char *p) {
 struct FakeClock : Clock {
   uint32_t t = 0xFFFF0000u;  // wraps during every run
   uint32_t Ms() const override { return t; }
+  uint32_t Abs() const { return t - 0xFFFF0000u; }  // ms since the start, no wrap
 };
 
 // Output o: mV = nominal * (1 + gain) + offset + bow * sin(pi x), clipped at clip.
@@ -75,6 +77,25 @@ struct FakeOutputs : OutputPort {
   uint16_t held_code = 0;
   int holds = 0, releases = 0;
   bool two_held = false;  // a second output was held while one already was
+  // What the output was holding since the start, for a meter whose reading
+  // spans a code change.
+  const FakeClock *clk = nullptr;
+  struct Seg { int64_t t; int out; uint16_t code; };
+  std::vector<Seg> hist{{0, -1, 0}};
+  // Mean mV over [a, b) ms; *changed when the output changed inside it.
+  double AvgMv(int64_t a, int64_t b, bool *changed) const {
+    double sum = 0.0;
+    int n_seg = 0;
+    for (size_t i = 0; i < hist.size(); ++i) {
+      const int64_t s0 = hist[i].t, s1 = i + 1 < hist.size() ? hist[i + 1].t : INT64_MAX;
+      const int64_t lo = std::max(a, s0), hi = std::min(b, s1);
+      if (hi <= lo) continue;
+      ++n_seg;
+      sum += (hist[i].out >= 0 ? dac->Mv(hist[i].out, hist[i].code) : 0.0) * double(hi - lo);
+    }
+    if (changed) *changed = n_seg > 1;
+    return sum / double(b - a);
+  }
   explicit FakeOutputs(const SimDac *d) : dac(d) {
     for (int o = 0; o < 8; ++o)
       for (int k = 0; k < CR::kNodes; ++k)
@@ -85,8 +106,13 @@ struct FakeOutputs : OutputPort {
     held = out;
     held_code = code;
     ++holds;
+    if (clk) hist.push_back({int64_t(clk->Abs()), out, code});
   }
-  void ReleaseAll() override { held = -1; ++releases; }
+  void ReleaseAll() override {
+    held = -1;
+    ++releases;
+    if (clk) hist.push_back({int64_t(clk->Abs()), -1, 0});
+  }
   uint16_t TableCode(int out, int k) const override { return stored[out][k]; }
   uint16_t CodeForMv(int, const uint16_t t[CR::kNodes], int32_t mv) const override {
     if (mv <= 0) return t[0];
@@ -110,10 +136,16 @@ struct FakeMeter : MeterPort {
   FakeClock *clk;
   bool connected = true;
   bool never_answer = false;
-  // One READ? at NPLC 1, autozero off (kMeterSetup): 20 ms of integration at
-  // 50 Hz plus the meter's trigger and USB turnaround. NPLC 10 with autozero
-  // on was 400 ms here and ~20 min a run on the bench.
-  uint32_t read_ms = 60;
+  // The SDM3065X at NPLC 10, autozero ON (kMeterSetup), as measured on the
+  // bench 2026-10-24: each READ? takes ~530 ms and is a real conversion. The
+  // meter converts continuously, so the reading a READ? returns was already
+  // in progress when it was asked (it began conv_lead_ms earlier) and spans
+  // any code change in that window: its value is the mean over the window,
+  // about the midpoint of a step. Below NPLC 10 the meter returns a smoothed,
+  // stale stream; that is not modelled because the flow never uses it.
+  uint32_t read_ms = 530;
+  int conv_lead_ms = -1;     // < 0: half a conversion
+  int64_t begin_abs = 0;
   uint32_t cmd_ms = 20;
   int fail_next = 0;        // next N completions report an error
   int refuse_begin = 0;     // next N Begin() calls are refused (driver recovering)
@@ -125,6 +157,9 @@ struct FakeMeter : MeterPort {
   int err_queries = 0;
   std::vector<std::string> sent;
   std::vector<std::pair<int, uint16_t>> read_at;  // (held output, code) at each READ?
+  std::vector<int> read_hold;       // outs.holds at each READ? (one measurement = one hold)
+  std::vector<double> read_mv;      // the value each READ? returned
+  std::vector<bool> read_straddled; // its window spanned a code change
   int reads = 0;
   bool busy = false;
   uint32_t ready_at = 0;
@@ -140,6 +175,7 @@ struct FakeMeter : MeterPort {
     cur = scpi;
     busy = true;
     ready_at = clk->t + (cur == "READ?" ? read_ms : cmd_ms);
+    begin_abs = clk->Abs();
     return true;
   }
   int Poll(const char **r) override {
@@ -153,10 +189,16 @@ struct FakeMeter : MeterPort {
     if (cur == "READ?") {
       lcg = lcg * 1103515245u + 12345u;
       const double u = double((lcg >> 8) & 0xFFFF) / 65535.0 * 2.0 - 1.0;
-      double mv = (outs->held >= 0 ? outs->OutMv(outs->held) : 0.0) + offset_mv + u * noise_mv;
+      const int64_t lead = conv_lead_ms < 0 ? int64_t(read_ms / 2) : int64_t(conv_lead_ms);
+      bool straddled = false;
+      double mv = outs->AvgMv(begin_abs - lead, begin_abs - lead + read_ms, &straddled) + offset_mv +
+                  u * noise_mv;
       if (extra) mv += extra(reads);
       ++reads;
       read_at.push_back({outs->held, outs->held_code});
+      read_hold.push_back(outs->holds);
+      read_mv.push_back(mv);
+      read_straddled.push_back(straddled);
       snprintf(reply, sizeof(reply), "%+.9E\n", mv / 1000.0);
     } else if (cur == "SYST:ERR?") {
       const char *e = err_reply ? err_reply(err_queries) : nullptr;
@@ -218,6 +260,7 @@ struct Rig {
   bool hold_rule_broken = false;  // a Hold on anything but the output under test
   Rig() {
     g_log.clear();
+    outs.clk = &clk;
     flow.SetLog(capture);
     ins.flow = &flow;
   }
@@ -308,20 +351,17 @@ static void test_happy_path_all_pass() {
   CHECK(r.meter.sent.size() > ns);
   for (size_t i = 0; i < ns && r.meter.sent.size() > ns; ++i) CHECK(r.meter.sent[i] == kMeterSetup[i]);
   CHECK(r.meter.sent.size() > ns && r.meter.sent[ns - 1] == "SYST:ERR?");
-  // Then one fresh autozero per output, before its first reading, and the
-  // error queue checked after it.
-  CHECK(r.meter.sent.size() > ns + 2 && r.meter.sent[ns] == std::string(kOutputZero));
-  CHECK(r.meter.sent.size() > ns + 2 && r.meter.sent[ns + 1] == "SYST:ERR?");
-  int zeros = 0, errs = 0;
-  for (size_t i = 0; i < r.meter.sent.size(); ++i) {
-    if (r.meter.sent[i] != kOutputZero) continue;
-    ++zeros;
-    // Every autozero is followed by SYST:ERR? (the setup's by its own lines first).
-    if (i >= ns) errs += i + 1 < r.meter.sent.size() && r.meter.sent[i + 1] == "SYST:ERR?";
+  // Autozero is ON for every reading, so no per-output re-zero and no
+  // per-output error query: the setup's SYST:ERR? is the only one, and the
+  // first thing after it is a reading.
+  CHECK(r.meter.sent.size() > ns && r.meter.sent[ns] == "READ?");
+  int errs = 0, az = 0;
+  for (const auto &l : r.meter.sent) {
+    errs += l == "SYST:ERR?";
+    az += l.compare(0, 11, "VOLT:DC:AZ ") == 0;
   }
-  CHECK(zeros == 1 + 8);  // kMeterSetup's own, then one per output
-  CHECK(errs == 8);
-  CHECK(r.meter.err_queries == 1 + 8);
+  CHECK(errs == 1 && r.meter.err_queries == 1);
+  CHECK(az == 1);  // the setup's AZ ON
   for (int i = 0; i < 8; ++i) {
     CHECK(res.in_lo_mv[i] == kInStepMv);
     CHECK(res.in_hi_mv[i] > res.in_lo_mv[i] + 9000);
@@ -423,8 +463,9 @@ static void test_noisy_point_retries_not_stores() {
   {
     Rig r;
     r.meter.noise_mv = 0.0;
-    // Measurement #4 (READ? 15..19) of output A: a loose lead, 1 mV p-p.
-    r.meter.extra = [](int n) { return (n >= 15 && n < 20) ? ((n & 1) ? 0.5 : -0.5) : 0.0; };
+    // READ? 5..7 of output A (the second measurement's readings; 4 is its
+    // throwaway): a loose lead, 1 mV p-p.
+    r.meter.extra = [](int n) { return (n >= 5 && n < 8) ? ((n & 1) ? 0.5 : -0.5) : 0.0; };
     r.Begin();
     CHECK(r.Run([&] { return r.flow.stage() == Stage::PromptOutput && r.flow.current_output() == 1; }));
     CHECK(count_prefix("CALR,REREAD,1,") == 1);
@@ -652,26 +693,27 @@ static void test_rebegin_releases() {
 }
 
 // Every line the flow sends passes the driver's allowlist, and the setup is
-// the fast one (NPLC 1, autozero once).
+// the one the bench showed gives real conversions: NPLC 10, autozero ON.
 static void test_meter_lines_allowed() {
   for (const char *l : kMeterSetup) {
     CHECK(UsbTmc::ScpiAllowed(l));
     if (!UsbTmc::ScpiAllowed(l)) printf("  refused: %s\n", l);
   }
-  CHECK(UsbTmc::ScpiAllowed(kOutputZero));
   CHECK(UsbTmc::ScpiAllowed("READ?"));
   CHECK(UsbTmc::ScpiAllowed("*IDN?"));  // the app's identity query
-  bool nplc1 = false, az_once = false, az_on = false;
+  bool nplc10 = false, az_on = false, other_nplc = false, az_other = false;
   for (const char *l : kMeterSetup) {
-    nplc1 |= std::string(l) == "VOLT:DC:NPLC 1";
-    az_once |= std::string(l) == "VOLT:DC:AZ ONCE";
-    az_on |= std::string(l) == "VOLT:DC:AZ ON";
+    const std::string x = l;
+    nplc10 |= x == "VOLT:DC:NPLC 10";
+    az_on |= x == "VOLT:DC:AZ ON";
+    other_nplc |= x.compare(0, 14, "VOLT:DC:NPLC ") == 0 && x != "VOLT:DC:NPLC 10";
+    az_other |= x.compare(0, 11, "VOLT:DC:AZ ") == 0 && x != "VOLT:DC:AZ ON";
   }
-  CHECK(nplc1 && az_once && !az_on);
-  CHECK(std::string(kOutputZero) == "VOLT:DC:AZ ONCE");
+  CHECK(nplc10 && az_on && !other_nplc && !az_other);
+  CHECK(std::string(kMeterSetup[sizeof(kMeterSetup) / sizeof(kMeterSetup[0]) - 1]) == kErrorQuery);
 }
 
-// A meter that rejected a setup line (or the per-output autozero) says so
+// A meter that rejected a setup line says so
 // only in its error queue: the flow asks SYST:ERR? and stops on anything but
 // an empty queue, with nothing held.
 static void test_meter_config_error_fails() {
@@ -696,24 +738,96 @@ static void test_meter_config_error_fails() {
     CHECK(r.flow.stage() == Stage::Results && r.flow.CanSave());
     CHECK(count_prefix("CALR,MERR,") == 0);
   }
-  {
-    // The setup is fine; output C's autozero is refused.
-    Rig r;
-    r.meter.err_reply = [](int n) { return n == 3 ? "-221,\"Settings conflict\"" : nullptr; };
-    r.Begin();
-    CHECK(r.Run());
-    CHECK(r.flow.stage() == Stage::Failed);
-    CHECK(std::string(r.flow.fail_reason()) == "METER_CONFIG");
-    CHECK(count_prefix("CALR,MERR,ZERO,-221;\"Settings conflict\"") == 1);
-    CHECK(count_prefix("CALR,ORES,1,") == 1 && count_prefix("CALR,ORES,2,") == 1);
-    CHECK(count_prefix("CALR,NODE,3,") == 0);  // C never measured
-    CHECK(r.outs.held == -1 && !r.hold_rule_broken);
+}
+
+// The bench rule at NPLC 10: the reading in progress at a code change spans
+// the step (about the midpoint). Every code change is followed by a settle and
+// one throwaway READ?; only the readings after it reach a median.
+static void test_throwaway_after_code_change() {
+  Rig r;
+  r.meter.noise_mv = 0.0;
+  r.outs.stored[3][7] = uint16_t(r.outs.stored[3][7] + 300);  // big first steps
+  r.Begin();
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Results);
+  // The model engaged: some readings did span a code change ...
+  int straddled = 0, bad = 0;
+  for (size_t i = 0; i < r.meter.read_mv.size(); ++i) {
+    if (!r.meter.read_straddled[i]) continue;
+    ++straddled;
+    // ... and each of them is the first READ? after its code change.
+    if (i > 0 && r.meter.read_hold[i - 1] == r.meter.read_hold[i]) ++bad;
   }
+  CHECK(straddled > 50);
+  CHECK(bad == 0);
+  // Reads per code change: 1 throwaway + 3 (a sweep point), or + 10 (a node's
+  // final). Never a bare 3 or 10, and no reading set is mixed.
+  std::map<int, int> per_hold;
+  for (int h : r.meter.read_hold) ++per_hold[h];
+  for (const auto &kv : per_hold) CHECK(kv.second == 4 || kv.second == 11);
+  // A midpoint never reached a median: every table is the noise-free one.
+  for (int o = 0; o < 8; ++o) {
+    uint16_t t[CR::kNodes];
+    bool rail[CR::kNodes];
+    ref_table(r.dac, o, r.outs.stored[o], 0.0, t, rail);
+    for (int k = 0; k < CR::kNodes; ++k) CHECK(r.flow.results().table[o][k] == t[k]);
+  }
+  // No settle and no throwaway would have: the same sweep step read as the
+  // very first READ? is the midpoint of the step.
+  CHECK(r.meter.read_straddled[0] || r.meter.read_straddled[1]);
+}
+
+// A node's reported and stored measured value is the median of 10 readings
+// taken after the code is final (and a throwaway), not the iteration's 3.
+static void test_node_final_uses_10_readings() {
+  Rig r;
+  r.meter.noise_mv = 0.0;
+  // Alternating +-0.2 mV on every reading so the median is not just the mean.
+  r.meter.extra = [](int n) { return (n % 2) ? 0.2 : -0.2; };
+  r.Begin();
+  CHECK(r.Run([&] { return r.flow.stage() == Stage::PromptOutput && r.flow.current_output() == 1; }));
+  // Output A's reads grouped by code change (hold).
+  std::vector<std::vector<size_t>> groups;
+  int last = -1;
+  for (size_t i = 0; i < r.meter.read_hold.size(); ++i) {
+    if (r.meter.read_at[i].first != 0) break;
+    if (r.meter.read_hold[i] != last) { groups.push_back({}); last = r.meter.read_hold[i]; }
+    groups.back().push_back(i);
+  }
+  int finals = 0, sweeps = 0;
+  std::vector<std::vector<size_t>> fin;
+  for (const auto &g : groups) {
+    if (g.size() == 11) { ++finals; fin.push_back(g); }
+    if (g.size() == 4) ++sweeps;
+  }
+  CHECK(finals == CR::kNodes);
+  CHECK(sweeps >= kSweepPoints);
+  // Node 5's logged measured value is the median of the 10 after the throwaway.
+  const auto &g = fin[5];
+  std::vector<double> v;
+  for (size_t j = 1; j < g.size(); ++j) v.push_back(r.meter.read_mv[g[j]]);
+  std::sort(v.begin(), v.end());
+  const double med = 0.5 * (v[4] + v[5]);
+  char want[64];
+  snprintf(want, sizeof(want), "CALR,NODE,1,5,6000,");
+  bool found = false;
+  for (const auto &l : g_log) {
+    if (l.compare(0, strlen(want), want) != 0) continue;
+    found = true;
+    // CALR,NODE,out,k,target,code,measured,iters,rail
+    int c = 0;
+    size_t pos = 0;
+    while (c < 6) { pos = l.find(',', pos) + 1; ++c; }
+    const double logged = atof(l.c_str() + pos);
+    CHECK(std::fabs(logged - med) < 0.0006);
+    CHECK(kFinalReadings == 10 && kReadings == 3);
+  }
+  CHECK(found);
 }
 
 // The modelled run time: what one Self run costs at a few READ? latencies.
 static void test_run_time_model() {
-  const uint32_t lat[] = {40, 60, 100};
+  const uint32_t lat[] = {450, 530, 650};
   for (uint32_t ms : lat) {
     Rig r;
     r.meter.read_ms = ms;
@@ -731,7 +845,7 @@ static void test_run_time_model() {
     const double outs_min = (t_in - r.t_begin) / 60000.0;
     printf("  model, READ? %3u ms: %.1f min (outputs %.1f, inputs %.1f), %d READ?\n",
            unsigned(ms), r.Minutes(), outs_min, r.Minutes() - outs_min, r.meter.reads);
-    if (ms == 60) CHECK(r.Minutes() < 8.0);
+    if (ms == 530) CHECK(r.Minutes() > 25.0 && r.Minutes() < 33.0);
   }
 }
 
@@ -1129,7 +1243,7 @@ static void test_calr_lines_golden() {
   // A full run, with a retry, a reread, a skipped input and a save: every
   // line is a header line or a CALR line of a known SUB with its field count.
   Rig r;
-  r.meter.extra = [](int n) { return (n >= 15 && n < 20) ? ((n & 1) ? 0.5 : -0.5) : 0.0; };
+  r.meter.extra = [](int n) { return (n >= 5 && n < 8) ? ((n & 1) ? 0.5 : -0.5) : 0.0; };
   r.Begin();
   CHECK(r.Run([&] { return r.meter.reads >= 40; }));
   r.meter.fail_next = 1;
@@ -1177,6 +1291,8 @@ int main() {
   test_rebegin_releases();
   test_meter_lines_allowed();
   test_meter_config_error_fails();
+  test_throwaway_after_code_change();
+  test_node_final_uses_10_readings();
   test_run_time_model();
   test_retry_output();
   test_marker();

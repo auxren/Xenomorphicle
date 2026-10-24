@@ -68,11 +68,11 @@ Steps: start a run, unplug the meter during an output. Pass: the screen says the
 
 ### B. Autozero
 
-- [ ] Does the meter accept `VOLT:DC:AZ ONCE`? Steps: run the app through the first output, then `eSYST:ERR?`. Pass: `METER,DONE,+0,"No error"`. If it reports an error, note it and the flow's fallback. (The flow now asks `SYST:ERR?` itself after the setup and after every output's autozero, and stops with `CALR,MERR,...` then `CALR,FAIL,METER_CONFIG` on anything but an empty queue.)
+- [ ] Does the meter accept the setup (`VOLT:DC:NPLC 10`, `VOLT:DC:AZ ON`)? Steps: start the app, then `eSYST:ERR?`. Pass: `METER,DONE,+0,"No error"` (bench 2026-10-24: `0,"No error"`). (The flow asks `SYST:ERR?` itself after the setup only, and stops with `CALR,MERR,...` then `CALR,FAIL,METER_CONFIG` on anything but an empty queue. There is no per-output re-zero: autozero is on for every reading.)
 
 ### C. Real run time
 
-- [ ] Time a whole run from start to Results (the `ms` field of `CALR,STATE` lines gives it). Model: about 6 to 7 minutes (5.5 / 6.3 / 8.0 min at 40 / 60 / 100 ms per `READ?`). Pass: within 8 minutes; record the figure and update `docs/_apps/Cal-Routine.md`.
+- [ ] Time a whole run from start to Results (the `ms` field of `CALR,STATE` lines gives it). Model: about 30 minutes for Outputs plus Inputs (26 / 30 / 36 min at 450 / 530 / 650 ms per `READ?`; each measurement is a settle, one throwaway and 3 readings, a node's final value 10). Pass: within 33 minutes; record the figure and update `docs/_apps/Cal-Routine.md`.
 
 ### D. Screens on hardware
 

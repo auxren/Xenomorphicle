@@ -52,4 +52,4 @@ Outputs use the measured table instead of the nominal one, and each calibrated i
 
 ### How long it takes
 
-Roughly **6 to 7 minutes** for the whole run (modelled; to be updated after bench timing). Retrying an output adds about a minute.
+Roughly **30 minutes** for Outputs plus Inputs (modelled: about 28 minutes for the 8 outputs and 2 for the inputs, at 0.53 s per meter reading; to be updated after bench timing). The meter reads at 10 power-line cycles with autozero on, which is slow but gives real, quiet readings. Retrying an output adds about 3 to 4 minutes.

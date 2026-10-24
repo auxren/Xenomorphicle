@@ -91,10 +91,16 @@ typedef void (*LogFn)(const char *line);  // one line, no line ending
 // ---- timings and limits ------------------------------------------------------
 
 constexpr uint32_t kOutSettleMs = 150;     // after every DAC code change
-constexpr int kReadings = 5;               // READ? per measurement -> Summarize
-// One READ?: NPLC 1 with autozero off takes ~20 ms of integration plus the
-// meter's trigger and USB turnaround (modelled at 60 ms); 3 s is only the
-// give-up point.
+// The measurement rule (design 9.1), one place for every target that measures
+// a held output with the meter (MStart/MStep): settle kOutSettleMs after the
+// code change, one throwaway READ? (the conversion in progress at the change
+// spans the step and is never used), then kReadings READ? -> Summarize
+// (median, spread, trusted <= 0.5 mV; one re-read set, then NOISY). A node's
+// final value takes kFinalReadings instead.
+constexpr int kReadings = 3;               // READ? per measurement -> Summarize
+constexpr int kFinalReadings = 10;         // a node's final value, after the iteration settles
+// One READ? at NPLC 10 with autozero ON is a real conversion and takes ~0.53 s
+// on the SDM3065X; 3 s is only the give-up point.
 constexpr uint32_t kReadTimeoutMs = 3000;
 constexpr uint32_t kConfigTimeoutMs = 1000;
 constexpr uint32_t kWatchdogMs = 500;      // past the timeout a busy Poll counts as failed
@@ -112,27 +118,21 @@ constexpr int kSourceOutput = 0;           // output A is every input's source
 constexpr int kSweepPoints = 40;
 
 // The meter setup, in order (all on UsbTmc::ScpiAllowed's list): DC volts on
-// the fixed 20 V range, NPLC 1, one autozero now and none between readings,
-// immediate trigger, and last kErrorQuery. Sent at Begin and again after
-// every reconnect.
+// the fixed 20 V range, NPLC 10 with autozero ON (below NPLC 10 the SDM3065X
+// returns a smoothed, stale stream; bench 2026-10-24), immediate trigger, and
+// last kErrorQuery. Sent at Begin and again after every reconnect.
 //
 // None of the setup lines has a reply, so a meter that rejected one would
 // say so only in its error queue: the last line reads it (*CLS emptied it
 // first), and the run fails METER_CONFIG (CALR,MERR names the reply) unless
-// it is empty (UsbTmc::NoScpiError).
+// it is empty (UsbTmc::NoScpiError). With autozero on, every reading zeroes
+// itself: there is no per-output re-zero and no per-output error query.
 //
-// Run time (Task 7): NPLC 10 with autozero ON measured ~20 min a run on the
-// bench; NPLC 1 with the autozero refreshed once per output (kOutputZero)
-// cuts the meter's share by about 7x. The 5 readings per point (median and
-// spread) and the 150 ms settle stay: the median absorbs the extra noise of
-// the shorter integration, and the spread check still catches a loose lead.
-// The error queue checks add one short query at Begin and one per output
-// (modelled at 20 ms each, ~0.2 s a run).
+// Run time: each READ? is ~0.53 s, so the readings dominate. Per output:
+// 11 nodes x (iteration measurements x 4 READ? + 11 READ? final) plus 40
+// sweep points x 4 READ?; the test_run_time_model test prints the modelled
+// figure for Outputs + Inputs (the inputs use no meter).
 extern const char *const kMeterSetup[6];
-// Sent at the start of every output, before its first reading: one fresh
-// autozero, so the zero the output's readings share is never minutes old.
-// kErrorQuery follows it, checked the same way.
-extern const char *const kOutputZero;
 extern const char *const kErrorQuery;  // "SYST:ERR?"
 
 // Settles one CV output at a code, then averages one input: the measuring
@@ -259,7 +259,7 @@ class CalRoutineFlow {
 
  private:
   enum QPhase : uint8_t { Q_NONE, Q_BEGIN, Q_BEGIN_WAIT, Q_WAIT, Q_BUSY };
-  enum MPhase : uint8_t { M_NONE, M_SETTLE, M_READ };
+  enum MPhase : uint8_t { M_NONE, M_SETTLE, M_READ };  // M_READ: the throwaway, then the readings
 
   void Log(const char *line);
   void SetStage(Stage s);
@@ -273,6 +273,7 @@ class CalRoutineFlow {
   void TickInput();
   void StartOutput(int o);
   void StartNode();
+  void StartFinal();
   void AcceptNode();
   void StartSweep();
   void FinishOutput(OutReason r);
@@ -287,7 +288,7 @@ class CalRoutineFlow {
   QResult QStep();
   QResult QFailure();
   bool MeterErrorReply(const char *step);
-  void MStart(uint16_t code, int32_t target_mv);
+  void MStart(uint16_t code, int32_t target_mv, int readings = CalRoutine::kReadings);
   MResult MStep();
 
   MeterPort *meter_ = nullptr;
@@ -310,14 +311,17 @@ class CalRoutineFlow {
   QPhase q_phase_ = Q_NONE;
   const char *q_reply_ = nullptr;
 
-  // one measurement: settle, kReadings READ?
+  // one measurement: settle, throwaway READ?, m_want_ READ?
   MPhase m_phase_ = M_NONE;
   uint32_t m_t0_ = 0;
   int m_n_ = 0;
+  int m_want_ = CalRoutine::kReadings;
+  bool m_throw_ = false;      // the throwaway READ? is in flight
+  bool node_final_ = false;   // the node's final measurement (kFinalReadings) is running
   bool m_reread_ = false;
   uint16_t m_code_ = 0;
   int32_t m_target_ = 0;
-  double m_mv_[CalRoutine::kReadings];
+  double m_mv_[CalRoutine::kFinalReadings];
   CalRoutineMath::Reading m_reading_ = {0.0, 0.0, 0};
 
   // meter setup / loss
@@ -329,10 +333,6 @@ class CalRoutineFlow {
   const char *fail_reason_ = "";
 
   // output in progress
-  // Before node 0: Z_ZERO while kOutputZero is in flight, then Z_ERR while
-  // kErrorQuery is.
-  enum ZPhase : uint8_t { Z_NONE, Z_ZERO, Z_ERR };
-  uint8_t zeroing_ = Z_NONE;
   int node_k_ = 0;
   uint16_t code_ = 0;
   int iters_ = 0;
@@ -443,7 +443,7 @@ int InPoint(char *buf, size_t n, int in, int32_t mv, uint16_t code,
 int InResult(char *buf, size_t n, int in, const char *outcome, CvMeterMath::Verdict v,
              const CvMeterMath::Fit &line, float holdout_mv, float line_dev_mv, int points);
 int Retry(char *buf, size_t n, const char *scpi, int attempt);
-// step: "SETUP" (after kMeterSetup) or "ZERO" (after an output's kOutputZero).
+// step: "SETUP" (after kMeterSetup).
 int MeterError(char *buf, size_t n, const char *step, const char *reply);
 int Lost(char *buf, size_t n, int out);
 int Back(char *buf, size_t n, int out);
