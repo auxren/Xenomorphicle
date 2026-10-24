@@ -99,11 +99,20 @@ void LineToValueTable(const CvMeterMath::Fit &line, int32_t value_q8_out[kCurveP
 
 // Calibrated value counts for a raw reading: integer only, for the ISR.
 // raw12 is clamped to 4095, so the highest index read is 16.
+//
+// One rounding, to nearest (half up, also for negative values: >> is an
+// arithmetic shift on every target here): the interpolation is carried in
+// 16 fractional bits, q8 * 256 + diff * frac, and rounded once at the end.
+// Flooring twice instead biased every calibrated input by -0.5..-1 count.
+// No overflow while |q8| <= kMaxValueQ8: |q8| * 256 + 2 |q8| * 255 + 2^15
+// < 2^31. The int16 mV x 2 curve stays below that (|q8| <= ~1.43e6, so
+// ~3.7e8 + ~7.3e8), and InputCal rejects any table outside it.
+constexpr int32_t kMaxValueQ8 = 2000000;
 inline int32_t ApplyValueTable(const int32_t q8[kCurvePoints], uint32_t raw12) {
   if (raw12 > 4095u) raw12 = 4095u;
   const uint32_t seg = raw12 >> kCurveShift;
   const int32_t frac = int32_t(raw12 & 255u);
-  return (q8[seg] + (((q8[seg + 1] - q8[seg]) * frac) >> 8)) >> 8;
+  return (q8[seg] * 256 + (q8[seg + 1] - q8[seg]) * frac + 32768) >> 16;
 }
 
 }  // namespace CalRoutineMath

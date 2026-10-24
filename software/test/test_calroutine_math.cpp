@@ -264,7 +264,7 @@ static void test_apply_value_table() {
   for (uint32_t raw = 0; raw <= 4095; ++raw) {
     const int32_t today = 4095 - int32_t(raw);
     const int32_t got = ApplyValueTable(q8, raw);
-    CHECK(std::abs(got - today) <= 1);
+    NEAR(got, today, 0.5);  // rounded, not floored: no -0.5..-1 count bias
   }
   // Last raw reads segment 15 only: q8[16] is the highest index touched.
   int32_t guarded[kCurvePoints + 1];
@@ -277,7 +277,44 @@ static void test_apply_value_table() {
     c[i] = int16_t(std::lround(2.0 * CM::FitMillivolts(line, 256.f * i)));
   int32_t q8c[kCurvePoints];
   CurveToValueTable(c, q8c);
-  for (int i = 0; i < kCurvePoints; ++i) CHECK(std::abs(q8c[i] - q8[i]) <= 256);
+  for (int i = 0; i < kCurvePoints; ++i) CHECK(std::abs(q8c[i] - q8[i]) <= 128);  // 0.5 count
+}
+
+// The exact interpolation of a q8 table, in value counts.
+static double exact_apply(const int32_t q8[kCurvePoints], uint32_t raw) {
+  if (raw > 4095u) raw = 4095u;
+  const uint32_t seg = raw >> kCurveShift;
+  const double f = double(raw & 255u) / 256.0;
+  return (double(q8[seg]) + f * (double(q8[seg + 1]) - double(q8[seg]))) / 256.0;
+}
+
+static void test_apply_value_table_rounds() {
+  // Bent tables crossing zero (negative values round correctly too), and the
+  // worst case the int16 mV x 2 curve can produce: +/-32767 mV x 2 at
+  // alternate breakpoints (|q8| ~1.43e6, |diff| ~2.86e6, x 255 ~7.3e8 < 2^31),
+  // which UBSan would flag if anything overflowed.
+  uint32_t lcg = 12345;
+  for (int t = 0; t < 40; ++t) {
+    int32_t q8[kCurvePoints];
+    if (t == 0) {
+      int16_t c[kCurvePoints];
+      for (int i = 0; i < kCurvePoints; ++i) c[i] = (i & 1) ? int16_t(-32767) : int16_t(32767);
+      CurveToValueTable(c, q8);
+    } else {
+      int32_t v = int32_t(lcg % 2000000u) - 600000;
+      for (int i = 0; i < kCurvePoints; ++i) {
+        lcg = lcg * 1103515245u + 12345u;
+        q8[i] = v;
+        v -= int32_t(40000 + (lcg >> 8) % 60000);  // falling, crosses zero
+      }
+    }
+    double worst = 0;
+    for (uint32_t raw = 0; raw <= 4096; ++raw) {
+      const double err = std::fabs(double(ApplyValueTable(q8, raw)) - exact_apply(q8, raw));
+      if (err > worst) worst = err;
+    }
+    CHECK(worst <= 0.5);
+  }
 }
 
 int main() {
@@ -291,6 +328,7 @@ int main() {
   test_input_curve_bent();
   test_input_curve_verdicts();
   test_apply_value_table();
+  test_apply_value_table_rounds();
   printf("test_calroutine_math: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
 }
