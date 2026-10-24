@@ -59,12 +59,33 @@ JP2 = analog JP3 (CV in, bias rails), JP3/JP4 = JP4/JP5 (panel controls, OLED).
   is whatever the 200e bus pulls to, and the Teensy pins only ever see 3.3 V.
 - **MIDI**: H11L1 opto in → pin 34, 74LV1T125 buffer out from pin 35, TRS (PJ-392A) jacks.
 
-## Open discrepancy (verify on the bench)
+## Reference chain
 
-`docs/CV-Meter.md` ("Input range") says 0 V sits at the ADC rail (raw 4095), with no
-room below it. The schematic shows the CV-in offset network (−5 V × 44k9/49k9 ≈ 4.50 V
-against a 5.0 V reference) putting 0 V at about 90 % of full scale, raw ≈ 3685. That
-would leave about 1 V of headroom below 0 V, whatever the gain trimmer is set to (the
-trimmer only scales the jack signal). One of two things is true: either the doc's model
-is too conservative, or the 0 V offset stored on this unit by calibration sets the limit.
-A stored offset read from a real unit settles it.
+Every precision voltage comes from the DAC8568's internal 2.5 V reference (enabled by
+`0x08000001` in `OC_DAC.cpp`, net `2.5VREF`). Digital-board U4 (OPA2277) makes
+`5.0REF` = 2 × 2.5VREF and passes it through R3 / L4 / C45 to the MCP33131D VREF
+(`5.0REFUH`). It also makes −5.0 V = −2 × 2.5VREF, the CV-input offset rail. Outputs,
+ADC full scale and the input offset are therefore ratiometric: reference drift cancels
+in an output→input loopback, but not against an external meter. The CV-out 0 V offset
+is one shared trimmer for all 8 outputs (TR1, net `BIAS1`); gain is trimmed per channel.
+
+Each CV output also drives a blue LED: 100k → LED → `LED-BRANCH` → D3–D5 to DGND,
+plus R79 2k to −12 V. That draws a standing ~5 mA returning in digital ground.
+
+## Bench-confirmed (2026-10-24, Cal Routine session)
+
+- 0 V input reads raw ≈ 3635 on every input (schematic predicts ≈ 3685). `CVRANGE`
+  gives −1.35 V … +10.65 V on input 1. So there IS headroom below 0 V, and
+  `docs/CV-Meter.md`'s "0 V is the rail" is wrong. The Cal Routine work is correcting it.
+- Inputs top out near 10.6–10.8 V, about 2.75 mV per count. That is the MCP604's ground
+  rail (Vadc = 4.50 V − 0.449·k·Vin, with the gain trimmer at k ≈ 0.945), not the ADC.
+- Patching an output into a Xeno input lowers it by a constant ~1.2 mV at 1.2 V and at
+  9.6 V. The input load is 1 MΩ (proportional), and the output loop senses after its 220 Ω,
+  so a constant shift points to a ground/return path, not the input load.
+
+## Schematic anomaly (unchecked)
+
+The netlist puts IC14/IC15 (the CV-in TL074 followers) symbol pin V+ (pad 4) on −12VA
+and V− (pad 11) on +12VA. That would reverse-power a real TL074. The inputs work, so
+the PCB presumably differs from the drawing; a DMM on IC14 pin 4 (expect +12 V) would
+settle it.
