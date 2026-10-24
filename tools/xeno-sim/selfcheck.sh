@@ -1748,5 +1748,75 @@ for n in 0 1 2 3 5 8; do
 done
 echo
 
+# ---------------------------------------------------------------------------
+# Cal Routine, the 259e row, end to end against --sim-259e: an ideal output A,
+# a USB meter reading it, a backup that completes and a Sim259e at 0x28 (the
+# model the host tests use). The point is the screens and the controls: each
+# prompt is the one the plan names, the write is a B press on a confirm screen
+# of its own, cancelling writes nothing, and no output is held at the end
+# (the plant's out_mv returns to 0). The step timings are simulated ms.
+echo "Cal Routine, the 259e row"
+PR='r-down,step40,r-up,step60'
+BP='b-down,step40,b-up,step60'
+LP='l-down,step40,l-up,step60'
+C259="step100,encr+,encr+,encr+,step50,$PR,$PR,step3000"   # menu -> 259e row -> notice -> run -> scan done
+c259() {  # keys -> screen text on stdout, the plant's report on $TMP/c259.err
+  $SIM --sim-259e --app "Cal Routine" --keys "$1" --dump-fb 2>"$TMP/c259.err" \
+    | python3 fbtext.py - | grep -v '{{'
+}
+has() { grep -q "$1" ; }
+W259="$C259,$PR"             # warm-up confirmed: the first patch prompt
+P0259="$W259,$PR,step9000"   # principal pitch patched and measured: the second prompt
+R259="$P0259,$PR,step9000"   # mod pitch patched and measured: Results
+c259 "$C259" > "$TMP/c259w"
+has 'Xeno + 259e on' < "$TMP/c259w" && has '30 min?' < "$TMP/c259w" \
+  && ok "the warm-up screen asks if both modules have been on 30 min" \
+  || bad "no 259e warm-up screen"
+c259 "$W259" | has 'Out A>259e PITCH' \
+  && ok "the first patch prompt names the principal pitch input" \
+  || bad "no pitch patch prompt"
+c259 "$P0259" | has 'Out A>259e MOD PITCH' \
+  && ok "the second patch prompt names the mod pitch input" \
+  || bad "no mod pitch patch prompt"
+c259 "$R259" > "$TMP/c259r"
+has '259e results' < "$TMP/c259r" && has 'worst' < "$TMP/c259r" && has 'gain' < "$TMP/c259r" \
+  && ok "the results screen shows worst cents, nonlinearity and gain" \
+  || bad "no 259e results screen: $(head -5 "$TMP/c259r")"
+c259 "$R259,$PR,step600" > "$TMP/c259c"
+has 'WRITE 259e @28?' < "$TMP/c259c" \
+  && ok "the write is asked on a confirm screen of its own" \
+  || bad "no write confirm screen"
+has 'B:WRITE' < "$TMP/c259c" \
+  && ok "the confirm screen names B as the write" || bad "confirm screen without B:WRITE"
+# A B press inside kConfirmDeadMs (350 ms) after the confirm appears is not a yes.
+c259 "$R259,$PR,step100,$BP,step6000" | has 'WRITE 259e @28?' \
+  && ok "an early B press (inside the dead time) does not write" \
+  || bad "a B press 100 ms after the confirm screen wrote"
+grep -q 'commits=0' "$TMP/c259.err" \
+  && ok "... and sent no COMMIT" || bad "early B sent a COMMIT: $(cat "$TMP/c259.err")"
+c259 "$R259,$PR,step600,$BP,step6000" > "$TMP/c259d"
+has '259e calibrated' < "$TMP/c259d" && has 'byte-exact' < "$TMP/c259d" \
+  && ok "B on the confirm screen writes, reads back and shows Done" \
+  || bad "the 259e write did not reach Done: $(head -4 "$TMP/c259d")"
+grep -q 'commits=1,puts=[1-9]' "$TMP/c259.err" && grep -q 'bad_frames=0' "$TMP/c259.err" \
+  && grep -q 'out_mv=0.0' "$TMP/c259.err" \
+  && ok "exactly one COMMIT, only allowlisted frames, output A released" \
+  || bad "plant report after a full run: $(cat "$TMP/c259.err")"
+grep -q 'seq=1,slots=1' "$TMP/c259.err" \
+  && ok "a first record: seq 1 in slot 1" || bad "record state: $(cat "$TMP/c259.err")"
+c259 "$R259,$PR,step600,$LP,step300" | has 'Cal Routine' \
+  && grep -q 'commits=0' "$TMP/c259.err" && grep -q 'out_mv=0.0' "$TMP/c259.err" \
+  && ok "encL on the confirm screen cancels: nothing written, output released" \
+  || bad "cancel at the confirm wrote or held: $(cat "$TMP/c259.err")"
+c259 "$W259,$PR,step700,$LP,step300" | has 'Cal Routine' \
+  && grep -q 'commits=0,puts=0' "$TMP/c259.err" && grep -q 'out_mv=0.0' "$TMP/c259.err" \
+  && ok "encL mid-measurement cancels: no frame written, output released" \
+  || bad "cancel while measuring wrote or held: $(cat "$TMP/c259.err")"
+c259 "$R259,$LP" | has 'Press again: discard' \
+  && ok "the first encL on results only asks" || bad "results discard did not ask first"
+c259 "$R259,$LP,step500,$LP,step300" | has 'Cal Routine' \
+  && grep -q 'commits=0' "$TMP/c259.err" \
+  && ok "the second encL on results discards" || bad "results discard did not return to the menu"
+
 [ $fail -eq 0 ] && echo "all checks passed" || echo "SOME CHECKS FAILED"
 exit $fail

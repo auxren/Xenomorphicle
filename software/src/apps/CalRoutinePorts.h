@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "../Cal259eBus.h"
+#include "../Cal259eFlow.h"
 #include "../CalRoutineFlow.h"
 
 // ---------------------------------------------------------------------------
@@ -87,6 +88,32 @@ bool HardwareSupported();
 // build has no preset bus, Send answers -2 and PopReply false.
 BusPort &Bus();
 
+// The 259e target's flow engine (Cal259eFlow.h), constructed on first use in
+// DMAMEM like Flow(). The app drives it from Loop() between Open() and Close().
+Cal259eFlow &Flow259e();
+
+// The two ports the 259e flow needs besides the meter, output and bus:
+//   Backup   the master BACKUP of one 259e (Bus200eMasterBackup through
+//            OC::PresetBus::MasterBackup, as the console 'm' starts it); on
+//            success the bank is stored with PresetEngine::SnapshotBank
+//            (PBSNAP.BIN, the 200e app's undo copy, which it replaces). The
+//            flow may abandon a job (Cancel, or its give-up): the master FSM
+//            then finishes on its own, nothing is stored, and the next Begin()
+//            retires the leftover DONE/FAILED or is refused while it still runs.
+//   Entropy  the 8 unit-ID bytes and the record date. Not the TRNG: its
+//            registers have never been brought up in this firmware, and the
+//            unit ID needs uniqueness, not secrecy. Fill mixes the chip's
+//            OCOTP serial (CFG0/CFG1), the cycle counter, micros(), the RTC and
+//            a call counter. UnixTime is rtc_get(), or 0 when the RTC was never
+//            set (before 2020).
+BackupPort &Backup();
+EntropyPort &Entropy();
+
+// True from Open() to Close(): a Cal Routine run (any target, the 259e one
+// included) is open. The console '=' refuses while it is, and Task 7's
+// SysEx cal frames must refuse COMMIT.
+bool CalRunActive();
+
 // Console 259e read-only access, key '=' (every letter is taken in Main.cpp's
 // switch): "=<aa>s" status, "=<aa>r" record, "=<aa>a<0|1>" 8 ADC words,
 // aa = the module's bus address in two hex digits. Logs CALR,259E,... lines.
@@ -97,6 +124,18 @@ BusPort &Bus();
 bool Cal259Consume(int cmd);
 void Cal259Command();
 void Cal259Task();
+
+#ifdef XENO_SIM
+// The simulator's plant (tools/xeno-sim/sim_cal259.cpp, flag --sim-259e): an
+// ideal output A (the meter and the 259e inputs see the mV of the code held),
+// a USB meter that answers READ? with it, a 259e on the bus, and a backup that
+// completes. The ports tell the plant what output A holds.
+struct SimPlant {
+  virtual BusPort *Bus259e() = 0;
+  virtual void OutputMv(double mv) = 0;
+};
+void SimSetPlant(SimPlant *plant);
+#endif
 
 }  // namespace CalRoutinePorts
 

@@ -7,7 +7,7 @@ _Cal Routine_ calibrates the module's outputs against a USB bench meter, and its
 
 It is meant for a unit that tracks **1.2 V per octave**, with 0 V at the first entry of the output table. On any other unit the app says so on its first screen and does nothing.
 
-### Three routines
+### The routines
 
 The app opens on a list. Turn either encoder to choose, press the right encoder to open.
 
@@ -16,6 +16,7 @@ The app opens on a list. Turn either encoder to choose, press the right encoder 
 | **Outputs** | Sets all 11 table points of outputs A to H against the meter, then checks 20 points in between | the USB meter | After touching an output trimmer, or when the outputs drift |
 | **Inputs** | Patch A→1 … H→8; the app checks the patch, then measures all 8 inputs at once against the outputs | 8 patch cables, no meter | After touching an input gain trimmer, or after an Outputs run when the inputs were not done |
 | **Self (both)** | Outputs, then Inputs on the new output tables | the meter and 8 cables | A first calibration, or after touching any trimmer when you have the time |
+| **259e pitch inputs** | Calibrates a Buchla 259e's two pitch CV inputs over the 200e bus, using output A and the meter | the meter, one cable, a 259e on firmware 31.2C4 | **Experimental.** After the outputs are calibrated, when the 259e's pitch tracking needs it |
 
 Each routine saves only its own part: **Outputs** replaces the output tables, **Inputs** replaces the input curves, **Self** replaces both.
 
@@ -63,6 +64,19 @@ The outputs are **actively driven** and load-independent: what they put out does
 
 **Below about 0.6 V the input curves are extrapolated.** The outputs cannot go below 0 V, and the sweep starts at 0.6 V, so the stretch from there down to an input's bottom (about −1.35 V) is an extension of the measured curve, not a measurement. At the top, each input's curve ends where that input tops out (about 10.6 V, set by its gain trimmer).
 
+### 259e pitch inputs (experimental)
+
+Output A is the voltage source and the meter reads it; the 259e is the unit being calibrated, so it has to be on firmware 31.2C4 and the **outputs must have been calibrated by Cal Routine first** (otherwise the row says so and stops). Let the Xenomorpher and the 259e run for 30 minutes before you start.
+
+1. Choose **259e pitch inputs**, read the meter notice and press the right encoder. The app finds the 259e (bus address 28 to 2B).
+2. Confirm the warm-up with the right encoder.
+3. When asked, patch **output A into the 259e's principal pitch input**, with the meter's + on that same jack and its COM on the 259e's ground. Press the right encoder. The app raises output A and checks that exactly one 259e responds, then measures 8 fit points and 4 check points.
+4. The same for the **mod pitch input**.
+5. **Results** shows, per input, the worst error in cents over the check points, the worst error over the fit points, and the fitted gain against stock. Both inputs must be within 3 cents and 10 % of stock gain, otherwise the run stops and nothing is written.
+6. Press the right encoder for the write screen. **B** on that screen (a press of its own, not a chord) backs up the 259e's presets, writes the record, and reads it back. If all 8 record slots are used, a second screen asks before the slots are reset: that reset briefly stops the 259e's audio, and a power loss during it re-initialises the 259e's presets.
+
+The left encoder backs out at every step and never writes anything by itself; the record is written only by the B press. The run's `CALR,259...` lines on the USB console include `CALR,259REC`, a copy of the record written. While a run is open the console `=` command (read-only 259e access) refuses.
+
 ### What the results mean
 
 * **1 mV is 1 cent** at 1.2 V per octave, so a figure of 0.4 mV is 0.4 cents.
@@ -96,3 +110,4 @@ Modelled at 0.53 s per meter reading, to be updated after bench timing:
 * **Outputs:** about **22 minutes** (19 to 27 minutes depending on the meter's speed). The meter reads at 10 power-line cycles with autozero on, which is slow but gives real, quiet readings. Retrying an output adds about 3 minutes.
 * **Inputs:** about **half a minute** of measuring, plus the time to patch eight cables. No meter.
 * **Self:** about **22 minutes**: the outputs, then the patching and half a minute of inputs.
+* **259e pitch inputs:** a few minutes: 12 meter points per input, each a few readings.

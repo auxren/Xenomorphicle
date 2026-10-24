@@ -25,6 +25,9 @@
 #include "../src/drivers/EEPROMStorage.h"
 #include "../CvMeter.h"
 #include "../PresetBus.h"
+#include "../PresetEngine.h"
+#include "../Buchla200eWriteGuard.h"
+#include "../Buchla259eSlotCodec.h"
 #if defined(ARDUINO_TEENSY41) && !defined(XENO_SIM)
 #include "../src/drivers/USBTMCDevice.h"
 #define CALR_HAVE_METER 1
@@ -39,6 +42,15 @@ static_assert(EEPROM_CALROUTINE_MARKER_START == CalRoutineMarkerStart &&
 namespace CalRoutinePorts {
 
 using CvMeterMath::PointStats;
+
+#ifdef XENO_SIM
+static SimPlant *sim_plant = nullptr;
+static double sim_out_mv = 0.0;  // what the held output puts out (ideal), mV
+FLASHMEM void SimSetPlant(SimPlant *plant) {
+  sim_plant = plant;
+  sim_out_mv = 0.0;
+}
+#endif
 
 FLASHMEM int PanelInPhys(int label) {
   switch (label) {
@@ -67,6 +79,9 @@ FLASHMEM int PanelOutPhys(int label) {
 }
 
 FLASHMEM bool HardwareSupported() {
+#ifdef XENO_SIM
+  if (sim_plant) return true;  // --sim-259e: an ideal 1.2 V/oct output stage
+#endif
   return NorthernLightModular && OC::DAC::kOctaveZero == 0 && !DAC_20Vpp;
 }
 
@@ -182,7 +197,41 @@ FLASHMEM void Meter_::Service() {
   }
 }
 
-#else  // no USB host meter in this build (the simulator)
+#elif defined(XENO_SIM)
+
+// The simulator has no USB host: with a plant (--sim-259e) the meter is an
+// ideal SDM3065X reading the held output, 60 ms per READ?, else absent.
+static char sim_cur[32];
+static char sim_reply[48];
+static bool sim_busy = false;
+static uint32_t sim_ready = 0;
+
+FLASHMEM bool Meter_::Connected() const { return sim_plant != nullptr; }
+FLASHMEM bool Meter_::Begin(const char *scpi, uint32_t) {
+  if (!sim_plant || sim_busy) return false;
+  strncpy(sim_cur, scpi, sizeof(sim_cur) - 1);
+  sim_cur[sizeof(sim_cur) - 1] = 0;
+  sim_busy = true;
+  sim_ready = millis() + (strcmp(scpi, "READ?") == 0 ? 60 : 5);
+  return true;
+}
+FLASHMEM int Meter_::Poll(const char **reply) {
+  if (!sim_busy) return -1;
+  if (int32_t(millis() - sim_ready) < 0) return 0;
+  sim_busy = false;
+  sim_reply[0] = 0;
+  if (strcmp(sim_cur, "READ?") == 0)
+    snprintf(sim_reply, sizeof(sim_reply), "%+.9E\n", sim_out_mv / 1000.0);
+  else if (strcmp(sim_cur, "SYST:ERR?") == 0)
+    snprintf(sim_reply, sizeof(sim_reply), "0,\"No error\"\n");
+  *reply = sim_reply;
+  return 1;
+}
+FLASHMEM void Meter_::Service() {
+  if (sim_plant && !model[0]) TakeIdentity("Siglent Technologies,SDM3065X,SIM0001,1.01");
+}
+
+#else  // no USB host meter in this build
 
 FLASHMEM bool Meter_::Connected() const { return false; }
 FLASHMEM bool Meter_::Begin(const char *, uint32_t) { return false; }
@@ -197,6 +246,8 @@ FLASHMEM MeterStatus Status() {
 #ifdef CALR_HAVE_METER
   if (!usbMeter.connected()) return METER_ABSENT;
   return meter.idn == Meter_::IDN_OK ? METER_READY : METER_ASKING;
+#elif defined(XENO_SIM)
+  return sim_plant ? METER_READY : METER_ABSENT;
 #else
   return METER_ABSENT;
 #endif
@@ -216,16 +267,41 @@ struct Outputs_ : CalRoutine::OutputPort {
 
 static Outputs_ outputs;
 
+#ifdef XENO_SIM
+// The ideal output stage: the mV whose code through the stored table is `code`
+// (the table is monotone; bisection on CodeForMv).
+static double SimMvOfCode(const Outputs_ &o, int out, uint16_t code) {
+  uint16_t table[CalRoutineMath::kNodes];
+  for (int k = 0; k < CalRoutineMath::kNodes; ++k) table[k] = o.TableCode(out, k);
+  int32_t lo = 0, hi = CalRoutineMath::kNodes * CalRoutineMath::kNodeMv - CalRoutineMath::kNodeMv;
+  while (hi - lo > 1) {
+    const int32_t mid = (lo + hi) / 2;
+    if (o.CodeForMv(out, table, mid) < code) lo = mid; else hi = mid;
+  }
+  return o.CodeForMv(out, table, lo) >= code ? lo : hi;
+}
+#endif
+
 FLASHMEM void Outputs_::Hold(int out, uint16_t code) {
   const int phys = PanelOutPhys(out);
   OC::DAC::Hold(phys, code);
   held = uint8_t(held | (1u << phys));
+#ifdef XENO_SIM
+  if (sim_plant) {
+    sim_out_mv = SimMvOfCode(*this, out, code);
+    sim_plant->OutputMv(sim_out_mv);
+  }
+#endif
 }
 
 FLASHMEM void Outputs_::ReleaseAll() {
   for (int c = 0; c < 8; ++c)
     if (held & (1u << c)) OC::DAC::Release(c);
   held = 0;
+#ifdef XENO_SIM
+  sim_out_mv = 0.0;
+  if (sim_plant) sim_plant->OutputMv(0.0);
+#endif
 }
 
 FLASHMEM uint16_t Outputs_::TableCode(int out, int k) const {
@@ -468,6 +544,19 @@ FLASHMEM CalRoutineFlow &Flow() {
   return *flow;
 }
 
+// Zeroed at startup like flow_store; constructed on first use.
+alignas(Cal259eFlow) DMAMEM static uint8_t flow259_store[sizeof(Cal259eFlow)];
+static Cal259eFlow *flow259 = nullptr;
+
+FLASHMEM Cal259eFlow &Flow259e() {
+  if (!flow259) flow259 = new (flow259_store) Cal259eFlow;
+  return *flow259;
+}
+
+FLASHMEM bool CalRunActive() {
+  return owned;
+}
+
 FLASHMEM CalRoutine::MeterPort &Meter() { return meter; }
 FLASHMEM CalRoutine::OutputPort &Outputs() { return outputs; }
 FLASHMEM CalRoutine::InputPort &Inputs() { return inputs; }
@@ -508,12 +597,119 @@ struct Bus_ : BusPort {
 };
 #else
 struct Bus_ : BusPort {
+#ifdef XENO_SIM
+  int Send(const uint8_t *f, uint8_t n) override {
+    BusPort *b = sim_plant ? sim_plant->Bus259e() : nullptr;
+    return b ? b->Send(f, n) : -2;
+  }
+  bool PopReply(uint8_t *f, uint8_t *n) override {
+    BusPort *b = sim_plant ? sim_plant->Bus259e() : nullptr;
+    return b && b->PopReply(f, n);
+  }
+#else
   int Send(const uint8_t *, uint8_t) override { return -2; }
   bool PopReply(uint8_t *, uint8_t *) override { return false; }
+#endif
 };
 #endif
 static Bus_ bus_port;
 FLASHMEM BusPort &Bus() { return bus_port; }
+
+// ---- the 259e flow's backup and entropy ports -------------------------------------
+
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS) && !defined(XENO_SIM)
+// The master BACKUP of a 259e: the bank lands in MasterCardImage() (console
+// 'm' leaves it there); the 990-byte bank is stored in PBSNAP.BIN.
+struct Backup_ : BackupPort {
+  bool mine = false;
+  uint8_t addr = 0;
+  bool Begin(uint8_t a) override;
+  int Poll() override;
+};
+
+FLASHMEM bool Backup_::Begin(uint8_t a) {
+  mine = false;
+  const Bus200eMasterState st = OC::PresetBus::MasterState();
+  if (st == BUS200E_MASTER_DONE || st == BUS200E_MASTER_FAILED) OC::PresetBus::MasterReset();
+  else if (st != BUS200E_MASTER_IDLE) return false;  // a job (ours, abandoned, or the console's) runs
+  if (OC::PresetBus::MasterBackup(a) != 0) return false;
+  mine = true;
+  addr = a;
+  return true;
+}
+
+FLASHMEM int Backup_::Poll() {
+  if (!mine) return -1;
+  const Bus200eMasterState st = OC::PresetBus::MasterState();
+  if (st == BUS200E_MASTER_FAILED) {
+    mine = false;
+    OC::PresetBus::MasterReset();
+    return -1;
+  }
+  if (st == BUS200E_MASTER_IDLE) { mine = false; return -1; }  // someone reset it under us
+  if (st != BUS200E_MASTER_DONE) return 0;
+  mine = false;
+  constexpr uint32_t kBank = kBuchla259eBankBytes;  // 990, as the 200e app expects
+  const uint8_t *img = OC::PresetBus::MasterCardImage();
+  if (!img || Bus200eMasterBytesTransferred() < kBank) return -1;
+  if (!OC::PresetEngine::SnapshotBank(addr, img, kBank, Buchla200eCrc32(img, kBank))) return -1;
+  return 1;
+}
+#else
+struct Backup_ : BackupPort {
+#ifdef XENO_SIM
+  uint32_t t0 = 0;
+  bool on = false;
+  bool Begin(uint8_t) override { on = true; t0 = millis(); return sim_plant != nullptr; }
+  int Poll() override { return !on ? -1 : millis() - t0 >= 300 ? 1 : 0; }
+#else
+  bool Begin(uint8_t) override { return false; }
+  int Poll() override { return -1; }
+#endif
+};
+#endif
+static Backup_ backup_port;
+FLASHMEM BackupPort &Backup() { return backup_port; }
+
+struct Entropy_ : EntropyPort {
+  uint32_t calls = 0;
+  void Fill(uint8_t *d, int n) override;
+  uint32_t UnixTime() override;
+};
+
+#if defined(__IMXRT1062__) && !defined(XENO_SIM)
+static uint32_t Mix32(uint32_t h, uint32_t v) {  // FNV-1a over the 4 bytes, then a finaliser
+  for (int i = 0; i < 4; ++i) { h ^= (v >> (8 * i)) & 0xFF; h *= 16777619u; }
+  h ^= h >> 15; h *= 0x2c1b3c6dU; h ^= h >> 12;
+  return h;
+}
+FLASHMEM void Entropy_::Fill(uint8_t *d, int n) {
+  uint32_t h = 2166136261u;
+  h = Mix32(h, HW_OCOTP_CFG0);
+  h = Mix32(h, HW_OCOTP_CFG1);
+  h = Mix32(h, ARM_DWT_CYCCNT);
+  h = Mix32(h, micros());
+  h = Mix32(h, uint32_t(rtc_get()));
+  h = Mix32(h, ++calls);
+  for (int i = 0; i < n; ++i) {
+    if ((i & 3) == 0) h = Mix32(h, ARM_DWT_CYCCNT + uint32_t(i));
+    d[i] = uint8_t(h >> (8 * (i & 3)));
+  }
+}
+FLASHMEM uint32_t Entropy_::UnixTime() {
+  const uint32_t t = uint32_t(rtc_get());
+  return t < 1577836800u ? 0u : t;  // before 2020-01-01: the RTC was never set
+}
+#else
+// Host and simulator: deterministic.
+FLASHMEM void Entropy_::Fill(uint8_t *d, int n) {
+  uint32_t h = 0x9E3779B9u + ++calls;
+  for (int i = 0; i < n; ++i) { h = h * 1664525u + 1013904223u; d[i] = uint8_t(h >> 24); }
+}
+FLASHMEM uint32_t Entropy_::UnixTime() { return 0; }
+#endif
+static Entropy_ entropy_port;
+FLASHMEM EntropyPort &Entropy() { return entropy_port; }
 
 #if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS) && defined(PRINT_DEBUG) && !defined(XENO_SIM)
 
@@ -531,9 +727,8 @@ int cword = 0;
 int cprev_n = -1;
 Cal259eBus cbus;
 
-// One owner, one place: the console refuses while the Cal Routine holds the
-// meter (and so a run is active).
-bool CalBusy() { return MeterOwned(); }
+// One owner, one place: the console refuses while a Cal Routine run is open.
+bool CalBusy() { return CalRunActive(); }
 
 int HexVal(int c) {
   if (c >= '0' && c <= '9') return c - '0';

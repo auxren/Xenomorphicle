@@ -24,7 +24,11 @@
 // calibration of the 8 CV outputs against a USB bench DMM on the host jack
 // (Outputs), of the 8 CV inputs against the outputs patched A->1 ... H->8
 // (Inputs, no meter), or both in turn (Self). The menu is the kMenu table
-// below: later rows (bus modules) append there. The step machine is
+// below: later rows (bus modules) append there. The "259e pitch inputs" row
+// runs Cal259eFlow (host-tested): the Xeno's output A and the USB meter
+// calibrate a 259e's two pitch inputs over the 200e bus. Its screens are
+// Draw259 (stage by stage), Draw259Confirm (the write and the slot reset, each
+// a B press on a screen of its own) and Draw259Failed. The step machine is
 // CalRoutineFlow (host-tested); this file is its screens and controls,
 // CalRoutinePorts.cpp its hardware.
 //
@@ -56,7 +60,7 @@
 
 // The Cal Routine menu, one row per routine; a later routine (a bus module)
 // is one more row and one more action.
-enum CalRoutineMenuAction : uint8_t { CALR_MENU_OUTPUTS, CALR_MENU_INPUTS, CALR_MENU_SELF };
+enum CalRoutineMenuAction : uint8_t { CALR_MENU_OUTPUTS, CALR_MENU_INPUTS, CALR_MENU_SELF, CALR_MENU_259E };
 struct CalRoutineMenuEntry {
   const char *name;  // the row, after one leading space (20 columns)
   const char *hint;  // the line under the list for the selected row (21 columns)
@@ -66,6 +70,7 @@ static const CalRoutineMenuEntry kCalRoutineMenu[] = {
   {"Outputs", "A-H with a USB meter", CALR_MENU_OUTPUTS},
   {"Inputs", "A>1 ... H>8, no meter", CALR_MENU_INPUTS},
   {"Self (both)", "outputs, then inputs", CALR_MENU_SELF},
+  {"259e pitch inputs", "A>259e, USB meter", CALR_MENU_259E},
 };
 static constexpr int kCalRoutineMenuRows =
     int(sizeof(kCalRoutineMenu) / sizeof(kCalRoutineMenu[0]));
@@ -93,6 +98,8 @@ private:
   Screen screen_ = SCR_MENU;
   Stage last_stage_ = Stage::Idle;
   Mode mode_ = Mode::Self;    // the routine chosen in the menu
+  bool is259_ = false;        // the 259e row: Flow259e() runs, not Flow()
+  Cal259eFlow::Stage last259_ = Cal259eFlow::Stage::Idle;
   int8_t menu_sel_ = 0;       // kCalRoutineMenu row
   int8_t menu_top_ = 0;       // first menu row on screen
   int8_t cursor_ = 0;         // Results row
@@ -115,6 +122,9 @@ private:
   void ArmSave();
   void HandleConfirm(const UI::Event &event);
   void HandlePress(const UI::Event &event);
+  void HandlePress259(const UI::Event &event);
+  void Abort259();
+  void End259();
   void MoveCursor(int delta);
   bool CursorOnFailedOutput() const;
   bool DiscardArmed() const;
@@ -132,6 +142,10 @@ private:
   void DrawNoMeter() const;
   void DrawResults() const;
   void DrawFailed() const;
+  void Draw259() const;
+  void Draw259Results() const;
+  void Draw259Failed() const;
+  void Draw259Confirm() const;
   void DrawConfirm() const;
   void DrawSaved() const;
   void ResultRow(int r, char *buf, size_t n) const;
@@ -200,6 +214,17 @@ FLASHMEM void AppCalRoutine::StartRun() {
   save_pending_ = false;
   CalRoutinePorts::Open();
   OC::ui.preempt_screensaver(true);
+  if (is259_) {
+    // The run needs Output A calibrated by Cal Routine (the marker), else the
+    // flow stops at NoSelfCal.
+    CalRoutinePorts::Flow259e().Begin(CalRoutinePorts::Meter(), CalRoutinePorts::Outputs(),
+                                      CalRoutinePorts::Clock(), CalRoutinePorts::Bus(),
+                                      CalRoutinePorts::Backup(), CalRoutinePorts::Entropy(),
+                                      CalRoutinePorts::MarkerSet(), CalRoutinePorts::ConsoleLog);
+    last259_ = CalRoutinePorts::Flow259e().stage();
+    screen_ = SCR_RUN;
+    return;
+  }
   CalRoutinePorts::Flow().SetLog(CalRoutinePorts::ConsoleLog);
   // Inputs warns (and lets the owner go on) when the output tables it
   // measures against were not set by Cal Routine.
@@ -211,6 +236,7 @@ FLASHMEM void AppCalRoutine::StartRun() {
 
 FLASHMEM void AppCalRoutine::OpenMenuEntry() {
   const uint8_t action = kCalRoutineMenu[menu_sel_].action;
+  is259_ = action == CALR_MENU_259E;
   mode_ = action == CALR_MENU_OUTPUTS ? Mode::Outputs
         : action == CALR_MENU_INPUTS ? Mode::Inputs : Mode::Self;
   if (!CalRoutinePorts::HardwareSupported()) screen_ = SCR_UNSUPPORTED;
@@ -222,7 +248,7 @@ FLASHMEM int AppCalRoutine::RowFirst() const { return mode_ == Mode::Inputs ? 8 
 FLASHMEM int AppCalRoutine::RowLast() const { return mode_ == Mode::Outputs ? 7 : kRows - 1; }
 
 FLASHMEM const char *AppCalRoutine::ModeName() const {
-  return mode_ == Mode::Outputs ? "Outputs" : mode_ == Mode::Inputs ? "Inputs" : "Self";
+  return is259_ ? "259e" : mode_ == Mode::Outputs ? "Outputs" : mode_ == Mode::Inputs ? "Inputs" : "Self";
 }
 
 // The flow is Idle (cancelled, discarded or saved) when this is called.
@@ -232,6 +258,27 @@ FLASHMEM void AppCalRoutine::EndRun(Screen next) {
   OC::ui.preempt_screensaver(false);
   save_pending_ = false;
   screen_ = next;
+}
+
+// Cancel the 259e run from any screen. Never destructive: before the COMMIT
+// nothing was written. A COMMIT already on the wire is waited for (the flow
+// stays in Write and reports its status; the screen stays), and a cancel after
+// a COMMIT verdict stays on the Failed screen, which says what the module may
+// hold. Otherwise the run is dismissed and the menu returns.
+FLASHMEM void AppCalRoutine::Abort259() {
+  Cal259eFlow &f = CalRoutinePorts::Flow259e();
+  f.Cancel();
+  if (f.cancel_pending()) { screen_ = SCR_RUN; return; }
+  if (f.stage() == Cal259eFlow::Stage::Failed && f.commit_result() != 0) { screen_ = SCR_RUN; return; }
+  End259();
+}
+
+// Dismiss Done / Failed / NoSelfCal (and a cancel that wrote nothing) back to Idle.
+FLASHMEM void AppCalRoutine::End259() {
+  Cal259eFlow &f = CalRoutinePorts::Flow259e();
+  if (f.stage() != Cal259eFlow::Stage::Idle) f.Cancel();
+  if (f.stage() != Cal259eFlow::Stage::Idle) f.Cancel();
+  EndRun(SCR_MENU);
 }
 
 FLASHMEM void AppCalRoutine::ArmSave() {
@@ -265,6 +312,22 @@ FLASHMEM void AppCalRoutine::Init() {
 }
 
 FLASHMEM void AppCalRoutine::Loop() {
+  if (is259_) {
+    if (screen_ == SCR_RUN || screen_ == SCR_CONFIRM) {
+      CalRoutinePorts::Service();
+      CalRoutinePorts::Flow259e().Tick();
+      const Cal259eFlow::Stage s = CalRoutinePorts::Flow259e().stage();
+      if (s != last259_) {
+        last259_ = s;
+        discard_armed_ms_ = 0;
+        OC::ui.Poke();
+        // The two writes each get a confirm screen of their own.
+        if (s == Cal259eFlow::Stage::Confirm || s == Cal259eFlow::Stage::ConfirmCompact) ArmSave();
+        else if (screen_ == SCR_CONFIRM) screen_ = SCR_RUN;
+      }
+    }
+    return;
+  }
   if (screen_ == SCR_RUN || screen_ == SCR_CONFIRM) {
     CalRoutinePorts::Service();
     CalRoutinePorts::Flow().Tick();
@@ -293,7 +356,15 @@ FLASHMEM void AppCalRoutine::HandleAppEvent(OC::AppEvent event) {
     case OC::APP_EVENT_SCREENSAVER_ON:
       // Never leave an output held, a run half done or a save armed behind a
       // screen that is gone.
-      CalRoutinePorts::Flow().Cancel();
+      if (is259_) {
+        // A COMMIT already on the wire cannot be waited for with the app gone:
+        // the module finishes it alone and its record is read by hand (=28s).
+        CalRoutinePorts::Flow259e().Cancel();
+        if (CalRoutinePorts::Flow259e().stage() != Cal259eFlow::Stage::Idle)
+          CalRoutinePorts::Flow259e().Cancel();
+      } else {
+        CalRoutinePorts::Flow().Cancel();
+      }
       EndRun(SCR_MENU);
       break;
     default:
@@ -303,7 +374,8 @@ FLASHMEM void AppCalRoutine::HandleAppEvent(OC::AppEvent event) {
 
 FLASHMEM void AppCalRoutine::HandleConfirm(const UI::Event &event) {
   if (event.control == OC::CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_PRESS) {
-    screen_ = SCR_RUN;  // no: back to Results, nothing written
+    if (is259_) Abort259();  // no: nothing more is written
+    else screen_ = SCR_RUN;  // no: back to Results, nothing written
     return;
   }
   if (event.control != OC::CONTROL_BUTTON_B) return;
@@ -317,6 +389,13 @@ FLASHMEM void AppCalRoutine::HandleConfirm(const UI::Event &event) {
   b_down_solo_ = false;
   if (!solo || event.mask) return;
   if (millis() - armed_ms_ < kConfirmDeadMs) return;
+  if (is259_) {
+    Cal259eFlow &f = CalRoutinePorts::Flow259e();
+    if (f.stage() == Cal259eFlow::Stage::Confirm) f.ConfirmWrite();
+    else if (f.stage() == Cal259eFlow::Stage::ConfirmCompact) f.ConfirmCompact();
+    screen_ = SCR_RUN;
+    return;
+  }
   if (!CalRoutinePorts::Flow().CanSave()) { screen_ = SCR_RUN; return; }
   save_pending_ = true;
 }
@@ -343,6 +422,7 @@ FLASHMEM void AppCalRoutine::HandlePress(const UI::Event &event) {
       screen_ = CalRoutinePorts::Flow().stage() == Stage::Results ? SCR_RUN : SCR_MENU;
       break;
     case SCR_RUN: {
+      if (is259_) { HandlePress259(event); break; }
       const Stage s = CalRoutinePorts::Flow().stage();
       if (l) {
         if (s == Stage::Results) {
@@ -377,6 +457,29 @@ FLASHMEM void AppCalRoutine::HandlePress(const UI::Event &event) {
     default:
       break;
   }
+}
+
+FLASHMEM void AppCalRoutine::HandlePress259(const UI::Event &event) {
+  using S = Cal259eFlow::Stage;
+  Cal259eFlow &f = CalRoutinePorts::Flow259e();
+  const S s = f.stage();
+  if (event.control == OC::CONTROL_BUTTON_L) {
+    if (s == S::Results) {
+      // A finished run is minutes of measuring: the first encL only asks.
+      if (!DiscardArmed()) { discard_armed_ms_ = millis() | 1; return; }
+      if (millis() - discard_armed_ms_ < kConfirmDeadMs) return;
+      Abort259();
+    } else if (s == S::Done || s == S::Failed || s == S::NoSelfCal) {
+      End259();
+    } else {
+      Abort259();
+    }
+    return;
+  }
+  discard_armed_ms_ = 0;  // any other press is a no
+  if (event.control != OC::CONTROL_BUTTON_R) return;
+  if (s == S::Warmup || s == S::PromptPatch || s == S::Results) f.Continue();  // Results -> Confirm
+  else if (s == S::Done) End259();
 }
 
 FLASHMEM void AppCalRoutine::HandleButtonEvent(const UI::Event &event) {
@@ -466,6 +569,7 @@ FLASHMEM void AppCalRoutine::DrawNoMeter() const {
 }
 
 FLASHMEM void AppCalRoutine::DrawRun() const {
+  if (is259_) { Draw259(); return; }
   char b[24], v[12];
   const Stage s = CalRoutinePorts::Flow().stage();
   const int o = CalRoutinePorts::Flow().current_output();
@@ -789,6 +893,7 @@ FLASHMEM void AppCalRoutine::DrawResults() const {
 }
 
 FLASHMEM void AppCalRoutine::DrawConfirm() const {
+  if (is259_) { Draw259Confirm(); return; }
   const CalRoutineFlow::Results &res = CalRoutinePorts::Flow().results();
   char b[24];
   graphics.setPrintPos(0, 2);
@@ -864,6 +969,221 @@ FLASHMEM void AppCalRoutine::DrawSaved() const {
     Row(0, "Nothing was written.");
   }
   Footer("R:back to results");
+}
+
+
+// ---- the 259e target's screens ---------------------------------------------------
+
+FLASHMEM void AppCalRoutine::Draw259() const {
+  using S = Cal259eFlow::Stage;
+  const Cal259eFlow &f = CalRoutinePorts::Flow259e();
+  char b[24], v[12];
+  const int ch = f.channel() == 1 ? 1 : 0;
+  char head[24];
+  snprintf(head, sizeof(head), "259e %s (%d/2)", ch ? "MOD PITCH" : "PITCH", ch + 1);
+  switch (f.stage()) {
+    case S::Idle:
+      Title("259e");
+      return;
+    case S::NoMeter:
+      Title("259e: meter");
+      Row(0, "Plug the USB meter");
+      Row(1, "into the host jack.");
+      if (CalRoutinePorts::Status() == CalRoutinePorts::METER_ASKING) Row(3, "Found: asking *IDN?");
+      Footer("L:cancel");
+      return;
+    case S::NoSelfCal:
+      Title("259e: not ready");
+      Row(0, "Output A is not yet");
+      Row(1, "calibrated by Cal");
+      Row(2, "Routine. Run Outputs");
+      Row(3, "(or Self) first.");
+      Footer("L:back");
+      return;
+    case S::Scan:
+      Title("259e: scan");
+      Row(0, "Setting up the meter,");
+      Row(1, "looking for a 259e");
+      Row(2, "at 28-2B...");
+      Footer("L:cancel");
+      return;
+    case S::Warmup:
+      Title("259e: warm-up");
+      Row(0, "Xeno + 259e on");
+      Row(1, "30 min?");
+      Row(3, "A cold module drifts");
+      Row(4, "after the fit.");
+      Footer("L:cancel      R:yes");
+      return;
+    case S::PromptPatch:
+      Title(head);
+      Row(0, ch ? "Out A>259e MOD PITCH" : "Out A>259e PITCH");
+      Row(1, "Meter + at that jack,");
+      Row(2, "COM on 259e ground.");
+      Row(3, "Nothing else on A.");
+      Footer("L:cancel   R:patched");
+      return;
+    case S::Identify:
+      Title(head);
+      Row(0, "Which 259e is it?");
+      Row(1, "Raising output A...");
+      Row(3, "Leave the cables be.");
+      Footer("L:cancel");
+      return;
+    case S::Measure: {
+      Title(head);
+      Volts(v, sizeof(v), f.point_mv());
+      const int pt = f.point_index();
+      snprintf(b, sizeof(b), "%s %d/%d: %sV", pt < Cal259eFlow::kFitPoints ? "Fit" : "Verify",
+               pt < Cal259eFlow::kFitPoints ? pt + 1 : pt - Cal259eFlow::kFitPoints + 1,
+               pt < Cal259eFlow::kFitPoints ? Cal259eFlow::kFitPoints : Cal259eFlow::kVerifyPoints, v);
+      Row(0, b);
+      Bar(1, pt + 1, Cal259eFlow::kPoints);
+      Row(3, "Leave the cables be.");
+      Footer("L:cancel");
+      return;
+    }
+    case S::Results:
+      Draw259Results();
+      return;
+    case S::Confirm:
+    case S::ConfirmCompact:
+      // SCR_CONFIRM draws these; a frame between the stage change and the
+      // screen change shows the results behind.
+      Draw259Results();
+      return;
+    case S::Backup:
+      Title("259e: backup");
+      snprintf(b, sizeof(b), "Backing up 259e @%02X", f.target());
+      Row(0, b);
+      Row(1, "presets first...");
+      Row(3, "Nothing written yet.");
+      Footer("L:cancel");
+      return;
+    case S::Write:
+      Title("259e: writing");
+      snprintf(b, sizeof(b), "to 259e @%02X...", f.target());
+      Row(0, "Writing the record");
+      Row(1, b);
+      Row(2, "Do not power off.");
+      Footer("L:cancel");
+      return;
+    case S::Verify:
+      Title("259e: verify");
+      Row(0, "Reading the record");
+      Row(1, "back...");
+      Footer("L:cancel");
+      return;
+    case S::Done:
+      Title("259e calibrated");
+      snprintf(b, sizeof(b), "Record written to @%02X", f.target());
+      Row(0, b);
+      Row(1, "and read back");
+      Row(2, "byte-exact.");
+      Row(3, "Log: CALR,259REC");
+      Footer("               R:done");
+      return;
+    case S::Failed:
+      Draw259Failed();
+      return;
+  }
+}
+
+FLASHMEM void AppCalRoutine::Draw259Results() const {
+  const Cal259eFlow &f = CalRoutinePorts::Flow259e();
+  const Cal259eFlow::Result &res = f.result();
+  char b[24], w[12], n[12];
+  Title("259e results");
+  for (int c = 0; c < 2; ++c) {
+    Centi(w, sizeof(w), fabsf(res.worst_verify_cents[c]));
+    snprintf(b, sizeof(b), "%-9s worst %sc", c ? "MOD PITCH" : "PITCH", w);
+    Row(2 * c, b);
+    Centi(n, sizeof(n), res.nonlin_cents[c]);
+    const float pct = (float(res.ch[c].gain) / float(Cal259eFlow::kNominalGain) - 1.f) * 100.f;
+    snprintf(b, sizeof(b), " nl %sc gain %+.1f%%", n, double(pct));
+    Row(2 * c + 1, b);
+  }
+  if (DiscardArmed()) {
+    Row(4, "Press again: discard");
+    graphics.invertRect(0, 46, 128, 9);  // the banner the next encL acts on
+  } else {
+    snprintf(b, sizeof(b), "Target: 259e @%02X", f.target());
+    Row(4, b);
+  }
+  graphics.drawLine(0, 46, 127, 46);
+  Footer("L:discard   R:write...");
+}
+
+FLASHMEM void AppCalRoutine::Draw259Failed() const {
+  using F = Cal259eFlow;
+  const F &f = CalRoutinePorts::Flow259e();
+  const F::FailCode code = f.fail();
+  const char *l1 = "", *l2 = "";
+  switch (code) {
+    case F::F_NO_259E: l1 = "No 259e answered at"; l2 = "28-2B. On 31.2C4?"; break;
+    case F::F_SEVERAL_MOVED: l1 = "More than one 259e"; l2 = "moved: patch one."; break;
+    case F::F_IDENTITY: l1 = "No 259e saw A rise."; l2 = "Wrong jack patched?"; break;
+    case F::F_PATCH: l1 = "Meter and held volts"; l2 = "differ by > 50 mV."; break;
+    case F::F_NOISY: l1 = "Meter reading noisy"; l2 = "(loose lead?)"; break;
+    case F::F_SCALE: l1 = "Gain is > 10% off"; l2 = "stock: not written."; break;
+    case F::F_FIT: l1 = "The fit failed (an"; l2 = "offset out of range)."; break;
+    case F::F_VERIFY: l1 = "Verify residual"; l2 = "is over 3 cents."; break;
+    case F::F_BACKUP: l1 = "Preset backup failed"; l2 = "so nothing written."; break;
+    case F::F_BUS: l1 = "200e bus error or"; l2 = "no reply from 259e."; break;
+    case F::F_COMMIT_REFUSED: l1 = "The 259e refused"; l2 = "the record (=28s)."; break;
+    case F::F_COMMIT_UNKNOWN: l1 = "COMMIT unknown: read"; l2 = "=28s and =28r."; break;
+    case F::F_READBACK: l1 = "Read-back differs:"; l2 = "read =28r by hand."; break;
+    case F::F_CANCELLED: l1 = "Cancelled."; break;
+    case F::F_METER_LOST: l1 = "The meter was lost."; break;
+    case F::F_METER_CONFIG: l1 = "The meter refused a"; l2 = "setup command."; break;
+    case F::F_METER_TIMEOUT: l1 = "The meter stopped"; l2 = "answering."; break;
+    case F::F_NO_METER: l1 = "No meter."; break;
+    case F::F_NO_SELF_CAL: l1 = "Run Outputs first."; break;
+    default: break;
+  }
+  Title(code == F::F_CANCELLED ? "Run cancelled" : "Run stopped");
+  char b[24];
+  snprintf(b, sizeof(b), "%.21s", F::FailName(code));
+  Row(0, b);
+  Row(1, l1);
+  Row(2, l2);
+  if (f.commit_result() == 1) Row(3, "Record committed.");
+  else if (code == F::F_COMMIT_UNKNOWN || f.commit_result() != 0) Row(3, "Written: UNKNOWN.");
+  else Row(3, "Nothing was written.");
+  Row(4, "Output A released.");
+  Footer("L:back");
+}
+
+FLASHMEM void AppCalRoutine::Draw259Confirm() const {
+  const Cal259eFlow &f = CalRoutinePorts::Flow259e();
+  char b[24];
+  graphics.setPrintPos(0, 2);
+  if (f.stage() == Cal259eFlow::Stage::ConfirmCompact) {
+    graphics.print("RESET 259e SLOTS?");
+    graphics.invertRect(0, 0, 128, 11);
+    Row(0, "All 8 slots used.");
+    Row(1, "Reset slots? Audio");
+    Row(2, "drops briefly. Power");
+    Row(3, "loss now = presets");
+    Row(4, "reinit. Backup taken.");
+    graphics.setPrintPos(0, 56);
+    graphics.print("encL:no");
+    graphics.setPrintPos(78, 56);
+    graphics.print("B:RESET");
+    return;
+  }
+  snprintf(b, sizeof(b), "WRITE 259e @%02X?", f.target());
+  graphics.print(b);
+  graphics.invertRect(0, 0, 128, 11);  // inversion is the only emphasis
+  Row(0, "Write calibration to");
+  Row(1, "both pitch inputs.");
+  Row(2, "Presets are backed");
+  Row(3, "up first, then the");
+  Row(4, "record is read back.");
+  graphics.setPrintPos(0, 56);
+  graphics.print("encL:no");
+  graphics.setPrintPos(84, 56);
+  graphics.print("B:WRITE");
 }
 
 FLASHMEM void AppCalRoutine::DrawMenu() const {

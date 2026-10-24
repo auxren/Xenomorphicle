@@ -115,7 +115,7 @@ $(shell mkdir -p $(BUILD) && ./mkshadow.sh $(SRC) $(SHIM) $(SHADOW) && ln -sfn .
 # weegfx.cpp is the real renderer too, but it needs one host adjustment inside
 # its own translation unit -- see the header comment in shim/weegfx_host.cpp.
 SIM_SRCS = main.cpp sim_bus.cpp sim_capture.cpp sim_host.cpp sim_input.cpp \
-           sim_runtime.cpp sim_selftest.cpp sim_session.cpp sim_storage.cpp \
+           sim_cal259.cpp sim_runtime.cpp sim_selftest.cpp sim_session.cpp sim_storage.cpp \
            sim_stubs.cpp sim_term.cpp \
            shim/weegfx_host.cpp
 
