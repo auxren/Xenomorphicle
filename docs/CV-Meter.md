@@ -156,7 +156,9 @@ A fit is stored only if every check passes:
 `Qp` prints what is stored, and in `apps=` what the apps use for each input;
 `Qc` twice clears the `Q` lines. An input that also has a Cal Routine curve
 keeps using its curve: the curve takes precedence over the line, and `Qc`
-does not touch the curve files.
+does not touch the curve files. Storing a new `Q` line (`y` at the commit
+prompt) does: that input's curve is dropped from the curve file, so the new
+line is what the apps use (a `note:` line says so).
 
 ### Where it is stored
 

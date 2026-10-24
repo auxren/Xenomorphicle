@@ -80,6 +80,8 @@ suite test_usbtmc                   ../src/UsbTmc.cpp
 suite test_input_curve_store        ../src/InputCurveStore.cpp
 suite test_input_cal                ../src/InputCal.cpp ../src/CalRoutineMath.cpp \
                                     ../src/CvMeterMath.cpp ../src/InputCurveStore.cpp
+suite test_calroutine_flow          ../src/CalRoutineFlow.cpp ../src/CalRoutineMath.cpp \
+                                    ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
 
 # Counted, not typed: the literal that used to live here said 25 while 26
 # suites ran, which is the same hand-maintained-list drift this file exists

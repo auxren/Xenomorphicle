@@ -1,0 +1,48 @@
+# Golden console lines for the calibration routine (src/CalRoutineFlow.h,
+# CalRoutineLines). test_calroutine_flow.cpp checks the firmware formatter
+# produces each of these byte for byte, that the flow logs exactly these
+# CALR# header lines at the start of a run, and that every CALR line of a
+# simulated run has its header's field count. The host-side parser reads the
+# same file. Change one side and the other fails.
+#
+# Shape: CALR,<SUB>,<field>,... -- comma-separated, no spaces around commas,
+# fixed decimals, outputs and inputs 1-based (0 = none), masks in upper-case
+# hex (bit n = output/input n+1; rail_mask bit k = table entry k). The
+# CALR# lines name each SUB's fields in order.
+CALR#,version=1
+CALR#,METER,identity
+CALR#,STATE,ms,stage,out,in
+CALR#,OUT,out
+CALR#,NODE,out,k,target_mv,code,measured_mv,iters,rail
+CALR#,REREAD,out,target_mv,code,spread_mv
+CALR#,SWEEP,out,target_mv,code,measured_mv,resid_mv,counted
+CALR#,ORES,out,result,reason,worst_mv,worst_at_mv,rail_mask
+CALR#,IN,in,src_out
+CALR#,IPT,in,mv,code,mean_raw,pp_raw,samples,used
+CALR#,IRES,in,result,verdict,gain_uv,offset_mv,holdout_mv,line_dev_mv,points
+CALR#,RETRY,scpi,attempt
+CALR#,LOST,out
+CALR#,BACK,out
+CALR#,RESULT,can_save,out_pass,in_pass
+CALR#,SAVE,result
+CALR#,DISCARD
+CALR#,CANCEL,stage
+CALR#,FAIL,reason
+CALR,METER,Siglent Technologies;SDM3065X;SDM36GBX000000;1.01.01.25
+CALR,STATE,123456,CAL_OUT,4,0
+CALR,OUT,3
+CALR,NODE,3,7,8400,45873,8400.094,3,0
+CALR,REREAD,1,3600,19661,0.734
+CALR,SWEEP,5,7440,40630,7440.472,0.472,1
+CALR,ORES,6,PASS,OK,0.413,10560,400
+CALR,IN,1,1
+CALR,IPT,7,600,3277,3889.37,2.25,3333,1
+CALR,IRES,4,PASS,OK,-2930.5,12000.41,1.23,4.57,19
+CALR,RETRY,READ?,2
+CALR,LOST,4
+CALR,BACK,4
+CALR,RESULT,1,FF,F7
+CALR,SAVE,OK
+CALR,DISCARD
+CALR,CANCEL,SWEEP_OUT
+CALR,FAIL,METER_TIMEOUT
