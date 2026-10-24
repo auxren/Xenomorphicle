@@ -71,6 +71,7 @@ suite test_buchla251e_editgenrec    -I host_stubs ../src/Buchla251eSlotCodec.cpp
 suite test_tweighty_transport       ../src/TweightyTransport.cpp
 suite test_tweighty_tap_phase       ../src/TweightyTapPhase.cpp
 suite test_scope_math               ../src/ScopeMath.cpp
+suite test_scope_sources            ../src/ScopeSources.cpp ../src/ScopeSettings.cpp
 suite test_sampler_math             ../src/SamplerMath.cpp
 suite test_sample_convert
 suite test_preset_op_queue
