@@ -95,8 +95,9 @@ Cal259eFlow &Flow259e();
 // The two ports the 259e flow needs besides the meter, output and bus:
 //   Backup   the master BACKUP of one 259e (Bus200eMasterBackup through
 //            OC::PresetBus::MasterBackup, as the console 'm' starts it); on
-//            success the bank is stored with PresetEngine::SnapshotBank
-//            (PBSNAP.BIN, the 200e app's undo copy, which it replaces). The
+//            success the bank is stored with PresetEngine::SaveCalBackup
+//            (CAL259BK.BIN, its own file: PBSNAP.BIN is the 200e app's undo
+//            copy and is never touched). The
 //            flow may abandon a job (Cancel, or its give-up): the master FSM
 //            then finishes on its own, nothing is stored, and the next Begin()
 //            retires the leftover DONE/FAILED or is refused while it still runs.
@@ -110,7 +111,8 @@ BackupPort &Backup();
 EntropyPort &Entropy();
 
 // True from Open() to Close(): a Cal Routine run (any target, the 259e one
-// included) is open. The console '=' refuses while it is, and Task 7's
+// included) is open, or a cancelled 259e run is still waiting for its COMMIT
+// verdict (Cal259Task finishes it). The console '=' refuses while it is, and Task 7's
 // SysEx cal frames must refuse COMMIT.
 bool CalRunActive();
 

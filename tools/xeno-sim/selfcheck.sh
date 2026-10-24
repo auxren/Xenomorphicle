@@ -1804,9 +1804,12 @@ grep -q 'commits=1,puts=[1-9]' "$TMP/c259.err" && grep -q 'bad_frames=0' "$TMP/c
   || bad "plant report after a full run: $(cat "$TMP/c259.err")"
 grep -q 'seq=1,slots=1' "$TMP/c259.err" \
   && ok "a first record: seq 1 in slot 1" || bad "record state: $(cat "$TMP/c259.err")"
-c259 "$R259,$PR,step600,$LP,step300" | has 'Cal Routine' \
+c259 "$R259,$PR,step600,$LP,step100" | has 'encL again: discard' \
+  && ok "the first encL on the write confirm only asks" \
+  || bad "the write confirm discarded on one encL"
+c259 "$R259,$PR,step600,$LP,step500,$LP,step300" | has 'Cal Routine' \
   && grep -q 'commits=0' "$TMP/c259.err" && grep -q 'out_mv=0.0' "$TMP/c259.err" \
-  && ok "encL on the confirm screen cancels: nothing written, output released" \
+  && ok "the second encL on the confirm screen cancels: nothing written, output released" \
   || bad "cancel at the confirm wrote or held: $(cat "$TMP/c259.err")"
 c259 "$W259,$PR,step700,$LP,step300" | has 'Cal Routine' \
   && grep -q 'commits=0,puts=0' "$TMP/c259.err" && grep -q 'out_mv=0.0' "$TMP/c259.err" \

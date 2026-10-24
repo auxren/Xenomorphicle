@@ -553,8 +553,17 @@ FLASHMEM Cal259eFlow &Flow259e() {
   return *flow259;
 }
 
+// A cancel (or an app switch) after the COMMIT frame went out leaves the flow
+// waiting for the module's verdict with the app gone: that wait still counts
+// as a run, and Task259() below finishes it.
 FLASHMEM bool CalRunActive() {
-  return owned;
+  return owned || (flow259 && flow259->cancel_pending());
+}
+
+// Once per loop pass, whatever app is showing: finish a cancelled run's COMMIT
+// verdict (it logs CALR,259END,CANCELLED_<result>). Bounded work per call.
+FLASHMEM static void Task259() {
+  if (flow259 && !owned && flow259->cancel_pending()) flow259->Tick();
 }
 
 FLASHMEM CalRoutine::MeterPort &Meter() { return meter; }
@@ -619,7 +628,7 @@ FLASHMEM BusPort &Bus() { return bus_port; }
 
 #if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS) && !defined(XENO_SIM)
 // The master BACKUP of a 259e: the bank lands in MasterCardImage() (console
-// 'm' leaves it there); the 990-byte bank is stored in PBSNAP.BIN.
+// 'm' leaves it there); the 990-byte bank is stored in CAL259BK.BIN.
 struct Backup_ : BackupPort {
   bool mine = false;
   uint8_t addr = 0;
@@ -650,9 +659,12 @@ FLASHMEM int Backup_::Poll() {
   if (st != BUS200E_MASTER_DONE) return 0;
   mine = false;
   constexpr uint32_t kBank = kBuchla259eBankBytes;  // 990, as the 200e app expects
+  // The DONE must be this job's: the console 'm' / 'x' or the bridge share the
+  // master FSM and could have retired ours and run their own.
+  if (Bus200eMasterModAddr() != addr || Bus200eMasterIsRestore()) return -1;
   const uint8_t *img = OC::PresetBus::MasterCardImage();
   if (!img || Bus200eMasterBytesTransferred() < kBank) return -1;
-  if (!OC::PresetEngine::SnapshotBank(addr, img, kBank, Buchla200eCrc32(img, kBank))) return -1;
+  if (!OC::PresetEngine::SaveCalBackup(addr, img, kBank, Buchla200eCrc32(img, kBank))) return -1;
   return 1;
 }
 #else
@@ -822,6 +834,7 @@ FLASHMEM void Cal259Command() {
 }
 
 FLASHMEM void Cal259Task() {
+  Task259();
   if (cjob == J_NONE) return;
   if (CalBusy()) {  // the Cal Routine started under us: let go
     Serial.printf("CALR,259E,%02X,ERR,BUSY_CAL\r\n", caddr);
@@ -874,7 +887,7 @@ FLASHMEM void Cal259Task() {
 
 FLASHMEM bool Cal259Consume(int) { return false; }
 FLASHMEM void Cal259Command() {}
-FLASHMEM void Cal259Task() {}
+FLASHMEM void Cal259Task() { Task259(); }
 
 #endif
 

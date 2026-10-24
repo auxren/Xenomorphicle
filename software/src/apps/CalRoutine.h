@@ -374,11 +374,22 @@ FLASHMEM void AppCalRoutine::HandleAppEvent(OC::AppEvent event) {
 
 FLASHMEM void AppCalRoutine::HandleConfirm(const UI::Event &event) {
   if (event.control == OC::CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_PRESS) {
-    if (is259_) Abort259();  // no: nothing more is written
-    else screen_ = SCR_RUN;  // no: back to Results, nothing written
+    if (is259_) {
+      // The measurements are minutes of work and cannot be got back to
+      // Results: the first encL on the write confirm only asks (ConfirmCompact
+      // is past the write: its encL cancels at once).
+      if (CalRoutinePorts::Flow259e().stage() == Cal259eFlow::Stage::Confirm) {
+        if (!DiscardArmed()) { discard_armed_ms_ = millis() | 1; return; }
+        if (millis() - discard_armed_ms_ < kConfirmDeadMs) return;
+      }
+      Abort259();  // no: nothing more is written
+    } else {
+      screen_ = SCR_RUN;  // no: back to Results, nothing written
+    }
     return;
   }
   if (event.control != OC::CONTROL_BUTTON_B) return;
+  discard_armed_ms_ = 0;  // any B press is a no to the discard
   // The chord test belongs on the DOWN edge (Backup.h has the reasoning).
   if (event.type == UI::EVENT_BUTTON_DOWN) {
     b_down_solo_ = (event.mask == OC::CONTROL_BUTTON_B);
@@ -1147,9 +1158,12 @@ FLASHMEM void AppCalRoutine::Draw259Failed() const {
   Row(0, b);
   Row(1, l1);
   Row(2, l2);
-  if (f.commit_result() == 1) Row(3, "Record committed.");
-  else if (code == F::F_COMMIT_UNKNOWN || f.commit_result() != 0) Row(3, "Written: UNKNOWN.");
-  else Row(3, "Nothing was written.");
+  // commit_result(): 1 ok, E_NO_SLOT and E_COMMIT_REFUSED mean the module
+  // did not take the record; any other non-zero code leaves it unknown.
+  const int cr = f.commit_result();
+  if (cr == 1) Row(3, "Record committed.");
+  else if (cr == 0 || cr == E_NO_SLOT || cr == E_COMMIT_REFUSED) Row(3, "Nothing was written.");
+  else Row(3, "Written: UNKNOWN.");
   Row(4, "Output A released.");
   Footer("L:back");
 }
@@ -1179,7 +1193,12 @@ FLASHMEM void AppCalRoutine::Draw259Confirm() const {
   Row(1, "both pitch inputs.");
   Row(2, "Presets are backed");
   Row(3, "up first, then the");
-  Row(4, "record is read back.");
+  if (DiscardArmed()) {
+    Row(4, "encL again: discard");
+    graphics.invertRect(0, 46, 128, 9);
+  } else {
+    Row(4, "record is read back.");
+  }
   graphics.setPrintPos(0, 56);
   graphics.print("encL:no");
   graphics.setPrintPos(84, 56);

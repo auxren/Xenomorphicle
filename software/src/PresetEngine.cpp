@@ -1847,10 +1847,9 @@ struct SnapHeader {
 static_assert(sizeof(SnapHeader) == 16, "SnapHeader must stay 16 bytes");
 static const char *const kSnapFile = "PBSNAP.BIN";
 
-FLASHMEM bool SnapshotBank(uint8_t addr, const uint8_t *bank, uint32_t len,
-                           uint32_t crc) {
+FLASHMEM static bool WriteBankFile(const char *kSnapTmp, const char *kSnapFile, uint8_t addr,
+                          const uint8_t *bank, uint32_t len, uint32_t crc) {
   if (!bank || !len) return false;
-  static const char *const kSnapTmp = "PB_SNP.TMP";
   preset_fs().remove(kSnapTmp);
   File f = preset_fs().open(kSnapTmp, FILE_WRITE_BEGIN);
   if (!f) return false;
@@ -1875,6 +1874,18 @@ FLASHMEM bool SnapshotBank(uint8_t addr, const uint8_t *bank, uint32_t len,
   serial_printf("PresetEngine: snapshot %lu bytes from %02X\n",
                 (unsigned long)len, addr);
   return true;
+}
+
+
+FLASHMEM bool SnapshotBank(uint8_t addr, const uint8_t *bank, uint32_t len,
+                           uint32_t crc) {
+  return WriteBankFile("PB_SNP.TMP", kSnapFile, addr, bank, len, crc);
+}
+
+// The Cal Routine's pre-write backup of a 259e: its own file, so that it can
+// never replace the 200e app's undo snapshot (PBSNAP.BIN). Same format.
+FLASHMEM bool SaveCalBackup(uint8_t addr, const uint8_t *bank, uint32_t len, uint32_t crc) {
+  return WriteBankFile("CAL_BK.TMP", "CAL259BK.BIN", addr, bank, len, crc);
 }
 
 FLASHMEM bool SnapshotInfo(uint8_t *addr_out, uint32_t *len_out) {
