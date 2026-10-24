@@ -567,6 +567,8 @@ CALR_CODE void CalRoutineFlow::Begin(MeterPort &meter, OutputPort &out, InputPor
   out_ = &out;
   in_ = &in;
   clock_ = &clock;
+  query_.Bind(meter, log_);
+  meas_.Bind(meter, out, log_);
   now_ = clock.Ms();
   mode_ = mode;
   memset(&results_, 0, sizeof(results_));
@@ -584,8 +586,8 @@ CALR_CODE void CalRoutineFlow::Begin(MeterPort &meter, OutputPort &out, InputPor
     results_.out_reason[o] = OUT_NOT_RUN;
     results_.in_verdict[o] = CM::VERDICT_NO_SAMPLES;
   }
-  q_phase_ = Q_NONE;
-  m_phase_ = M_NONE;
+  query_.Reset();
+  meas_.Reset();
   iwin_.Stop();
   p_i_ = -1;
   p_crossed_ = p_missing_ = 0;
@@ -616,7 +618,7 @@ CALR_CODE void CalRoutineFlow::Begin(MeterPort &meter, OutputPort &out, InputPor
 CALR_CODE void CalRoutineFlow::StartConfig() {
   CALR_LOG(Meter, meter_->Identity());
   cfg_i_ = 0;
-  QStart(kMeterSetup[0], kConfigTimeoutMs);
+  query_.Start(kMeterSetup[0], kConfigTimeoutMs, now_);
   SetStage(Stage::ConfigMeter);
 }
 
@@ -689,8 +691,8 @@ CALR_CODE void CalRoutineFlow::Cancel() {
   if (clock_) now_ = clock_->Ms();
   if (out_) out_->ReleaseAll();
   iwin_.Stop();
-  q_phase_ = Q_NONE;
-  m_phase_ = M_NONE;
+  query_.Reset();
+  meas_.Reset();
   lost_ = false;
   retry_out_ = -1;
   for (int o = 0; o < 8; ++o) results_.out_pass[o] = results_.in_pass[o] = false;
@@ -718,8 +720,8 @@ CALR_CODE bool CalRoutineFlow::RetryOutput(int o) {
 CALR_CODE void CalRoutineFlow::Fail(const char *reason) {
   out_->ReleaseAll();
   iwin_.Stop();
-  q_phase_ = Q_NONE;
-  m_phase_ = M_NONE;
+  query_.Reset();
+  meas_.Reset();
   lost_ = false;
   retry_out_ = -1;
   fail_reason_ = reason;
@@ -733,8 +735,8 @@ CALR_CODE void CalRoutineFlow::Fail(const char *reason) {
 // again from node 0 once the meter is back and set up again.
 CALR_CODE void CalRoutineFlow::Lost() {
   out_->ReleaseAll();
-  q_phase_ = Q_NONE;
-  m_phase_ = M_NONE;
+  query_.Reset();
+  meas_.Reset();
   resume_out_ = cur_out_;
   lost_ = true;
   lost_ms_ = now_;
@@ -752,13 +754,13 @@ CALR_CODE void CalRoutineFlow::TickNoMeter() {
 }
 
 CALR_CODE void CalRoutineFlow::TickConfig() {
-  const QResult r = QStep();
-  if (r == QR_BUSY) return;
-  if (r == QR_LOST) { Lost(); return; }
-  if (r == QR_FAIL) { Fail("METER_CONFIG"); return; }
+  const QResult r = query_.Step(now_);
+  if (r == CalRoutine::MeterQuery::BUSY) return;
+  if (r == CalRoutine::MeterQuery::LOST) { Lost(); return; }
+  if (r == CalRoutine::MeterQuery::FAIL) { Fail("METER_CONFIG"); return; }
   if (MeterErrorReply("SETUP")) { Fail("METER_CONFIG"); return; }
   if (++cfg_i_ < int(sizeof(kMeterSetup) / sizeof(kMeterSetup[0]))) {
-    QStart(kMeterSetup[cfg_i_], kConfigTimeoutMs);
+    query_.Start(kMeterSetup[cfg_i_], kConfigTimeoutMs, now_);
     return;
   }
   const bool resume = lost_ && resume_out_ >= 0;
@@ -771,140 +773,19 @@ CALR_CODE void CalRoutineFlow::TickConfig() {
   }
 }
 
-// ---- one meter query, retried ------------------------------------------------
-
-CALR_CODE void CalRoutineFlow::QStart(const char *scpi, uint32_t timeout_ms) {
-  q_scpi_ = scpi;
-  q_timeout_ = timeout_ms;
-  q_fails_ = 0;
-  q_phase_ = Q_BEGIN;
-  q_begin_ms_ = now_;
-}
+// ---- the meter rule lives in CalRoutineMeasure.cpp ------------------------------
 
 // The query that just finished was kErrorQuery and its reply is not the
 // empty queue's: logged (CALR,MERR), true. Any other query: false.
 CALR_CODE bool CalRoutineFlow::MeterErrorReply(const char *step) {
-  if (!q_scpi_ || strcmp(q_scpi_, kErrorQuery) != 0) return false;
-  if (UsbTmc::NoScpiError(q_reply_)) return false;
-  CALR_LOG(MeterError, step, q_reply_);
+  if (!query_.scpi() || strcmp(query_.scpi(), kErrorQuery) != 0) return false;
+  if (UsbTmc::NoScpiError(query_.reply())) return false;
+  CALR_LOG(MeterError, step, query_.reply());
   return true;
 }
 
-CALR_CODE CalRoutineFlow::QResult CalRoutineFlow::QFailure() {
-  if (!meter_->Connected()) {
-    q_phase_ = Q_NONE;
-    return QR_LOST;
-  }
-  if (q_fails_ >= kQueryRetries) {
-    q_phase_ = Q_NONE;
-    return QR_FAIL;
-  }
-  ++q_fails_;
-  CALR_LOG(Retry, q_scpi_, q_fails_);
-  q_phase_ = Q_WAIT;
-  q_t0_ = now_;
-  return QR_BUSY;
-}
-
-CALR_CODE CalRoutineFlow::QResult CalRoutineFlow::QStep() {
-  switch (q_phase_) {
-    case Q_NONE:
-      return QR_FAIL;
-    case Q_WAIT:  // after a failed attempt
-      if (now_ - q_t0_ < kRetryWaitMs) return QR_BUSY;
-      q_begin_ms_ = now_;
-      q_phase_ = Q_BEGIN;
-      return QR_BUSY;
-    case Q_BEGIN_WAIT:  // Begin() refused: the driver is busy or resynchronising
-      if (now_ - q_t0_ < kRetryWaitMs) return QR_BUSY;
-      q_phase_ = Q_BEGIN;
-      return QR_BUSY;
-    case Q_BEGIN:
-      if (!meter_->Connected()) {
-        q_phase_ = Q_NONE;
-        return QR_LOST;
-      }
-      if (meter_->Begin(q_scpi_, q_timeout_)) {
-        q_phase_ = Q_BUSY;
-        q_t0_ = now_;
-        return QR_BUSY;
-      }
-      if (now_ - q_begin_ms_ >= kBeginGiveUpMs) return QFailure();
-      q_phase_ = Q_BEGIN_WAIT;
-      q_t0_ = now_;
-      return QR_BUSY;
-    case Q_BUSY: {
-      const char *reply = nullptr;
-      const int r = meter_->Poll(&reply);
-      if (r > 0) {
-        q_phase_ = Q_NONE;
-        q_reply_ = reply ? reply : "";
-        return QR_DONE;
-      }
-      if (r == 0 && now_ - q_t0_ < q_timeout_ + kWatchdogMs) return QR_BUSY;
-      return QFailure();
-    }
-  }
-  return QR_FAIL;
-}
-
-// ---- one measurement: settle, throwaway READ?, readings, median and spread -----
-
 CALR_CODE void CalRoutineFlow::MStart(uint16_t code, int32_t target_mv, int readings) {
-  out_->Hold(cur_out_, code);
-  m_code_ = code;
-  m_target_ = target_mv;
-  m_t0_ = now_;
-  m_phase_ = M_SETTLE;
-  m_n_ = 0;
-  m_want_ = readings;
-  m_throw_ = true;
-  m_reread_ = false;
-}
-
-CALR_CODE CalRoutineFlow::MResult CalRoutineFlow::MStep() {
-  if (m_phase_ == M_SETTLE) {
-    if (now_ - m_t0_ < kOutSettleMs) return MR_BUSY;
-    m_phase_ = M_READ;
-    QStart("READ?", kReadTimeoutMs);
-    return MR_BUSY;
-  }
-  if (m_phase_ != M_READ) return MR_FAIL;
-  QResult r = QStep();
-  if (r == QR_DONE) {
-    double volts = 0.0;
-    if (!UsbTmc::ParseReading(q_reply_, &volts)) {
-      r = QFailure();  // garbled: ask again, within the same retry budget
-    } else {
-      if (m_throw_) {  // the conversion in progress at the code change: never used
-        m_throw_ = false;
-        QStart("READ?", kReadTimeoutMs);
-        return MR_BUSY;
-      }
-      m_mv_[m_n_++] = volts * 1000.0;
-      if (m_n_ < m_want_) {
-        QStart("READ?", kReadTimeoutMs);
-        return MR_BUSY;
-      }
-      m_reading_ = CR::Summarize(m_mv_, m_n_);
-      if (CR::ReadingTrusted(m_reading_)) {
-        m_phase_ = M_NONE;
-        return MR_DONE;
-      }
-      if (!m_reread_) {  // one re-read; the untrusted readings are dropped
-        m_reread_ = true;
-        CALR_LOG(Reread, cur_out_, m_target_, m_code_, m_reading_.spread_mv);
-        m_n_ = 0;
-        QStart("READ?", kReadTimeoutMs);
-        return MR_BUSY;
-      }
-      m_phase_ = M_NONE;
-      return MR_NOISY;
-    }
-  }
-  if (r == QR_BUSY) return MR_BUSY;
-  m_phase_ = M_NONE;
-  return r == QR_LOST ? MR_LOST : MR_FAIL;
+  meas_.Start(cur_out_, code, target_mv, now_, readings);
 }
 
 // ---- outputs -----------------------------------------------------------------
@@ -945,13 +826,13 @@ CALR_CODE void CalRoutineFlow::StartNode() {
 // overshoots past a rail is corrected on the next pass; only a measured
 // shortfall at the rail flags the entry at_rail.
 CALR_CODE void CalRoutineFlow::TickNode() {
-  const MResult r = MStep();
-  if (r == MR_BUSY) return;
-  if (r == MR_LOST) { Lost(); return; }
-  if (r == MR_FAIL) { Fail("METER_TIMEOUT"); return; }
-  if (r == MR_NOISY) { FinishOutput(OUT_NOISY); return; }
+  const MResult r = meas_.Step(now_);
+  if (r == CalRoutine::MeterMeasure::BUSY) return;
+  if (r == CalRoutine::MeterMeasure::LOST) { Lost(); return; }
+  if (r == CalRoutine::MeterMeasure::FAIL) { Fail("METER_TIMEOUT"); return; }
+  if (r == CalRoutine::MeterMeasure::NOISY) { FinishOutput(OUT_NOISY); return; }
   const int32_t target = node_k_ * CR::kNodeMv;
-  const double mv = m_reading_.median_mv;
+  const double mv = meas_.reading().median_mv;
   if (node_final_) {  // the 10-reading median at the chosen code is the node's value
     best_mv_ = mv;
     AcceptNode();
@@ -1019,14 +900,14 @@ CALR_CODE void CalRoutineFlow::StartSweep() {
 // interpolates towards a code that does not give its voltage), and a rail
 // entry does not fail the output (design 6.2).
 CALR_CODE void CalRoutineFlow::TickSweep() {
-  const MResult r = MStep();
-  if (r == MR_BUSY) return;
-  if (r == MR_LOST) { Lost(); return; }
-  if (r == MR_FAIL) { Fail("METER_TIMEOUT"); return; }
-  if (r == MR_NOISY) { FinishOutput(OUT_NOISY); return; }
+  const MResult r = meas_.Step(now_);
+  if (r == CalRoutine::MeterMeasure::BUSY) return;
+  if (r == CalRoutine::MeterMeasure::LOST) { Lost(); return; }
+  if (r == CalRoutine::MeterMeasure::FAIL) { Fail("METER_TIMEOUT"); return; }
+  if (r == CalRoutine::MeterMeasure::NOISY) { FinishOutput(OUT_NOISY); return; }
   const int o = cur_out_;
   const int32_t target = sweep_mv_[sweep_i_];
-  const double mv = m_reading_.median_mv;
+  const double mv = meas_.reading().median_mv;
   int seg = target / CR::kNodeMv;
   if (seg > CR::kNodes - 2) seg = CR::kNodes - 2;
   const bool counted = !results_.at_rail[o][seg] && !results_.at_rail[o][seg + 1];
@@ -1046,8 +927,8 @@ CALR_CODE void CalRoutineFlow::TickSweep() {
 
 CALR_CODE void CalRoutineFlow::FinishOutput(OutReason reason) {
   out_->ReleaseAll();
-  m_phase_ = M_NONE;
-  q_phase_ = Q_NONE;
+  meas_.Reset();
+  query_.Reset();
   const int o = cur_out_;
   if (reason == OUT_NOISY)  // incomplete: nothing measured is kept
     for (int k = 0; k < CR::kNodes; ++k) {

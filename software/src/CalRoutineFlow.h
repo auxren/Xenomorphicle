@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "CalRoutineMath.h"
+#include "CalRoutineMeasure.h"
 #include "CvMeterMath.h"
 
 struct InputCurveRecord;
@@ -98,27 +99,12 @@ struct SavePort {
   virtual void ReloadInputs() = 0;
 };
 
-typedef void (*LogFn)(const char *line);  // one line, no line ending
+// LogFn and the meter rule's timings (kOutSettleMs, kReadings, kFinalReadings,
+// kReadTimeoutMs, the retry limits) live in CalRoutineMeasure.h.
 
 // ---- timings and limits ------------------------------------------------------
 
-constexpr uint32_t kOutSettleMs = 150;     // after every DAC code change
-// The measurement rule (design 9.1), one place for every target that measures
-// a held output with the meter (MStart/MStep): settle kOutSettleMs after the
-// code change, one throwaway READ? (the conversion in progress at the change
-// spans the step and is never used), then kReadings READ? -> Summarize
-// (median, spread, trusted <= 0.5 mV; one re-read set, then NOISY). A node's
-// final value takes kFinalReadings instead.
-constexpr int kReadings = 3;               // READ? per measurement -> Summarize
-constexpr int kFinalReadings = 10;         // a node's final value, after the iteration settles
-// One READ? at NPLC 10 with autozero ON is a real conversion and takes ~0.53 s
-// on the SDM3065X; 3 s is only the give-up point.
-constexpr uint32_t kReadTimeoutMs = 3000;
 constexpr uint32_t kConfigTimeoutMs = 1000;
-constexpr uint32_t kWatchdogMs = 500;      // past the timeout a busy Poll counts as failed
-constexpr int kQueryRetries = 3;           // a failed query is retried this often
-constexpr uint32_t kRetryWaitMs = 200;     // ... after this wait
-constexpr uint32_t kBeginGiveUpMs = 5000;  // Begin() refused for this long: failed
 constexpr uint32_t kReconnectMs = 20000;   // meter gone this long mid-run: Failed
 constexpr uint32_t kInSettleMs = 300;      // the console Q's settle and measure
 constexpr uint32_t kInMeasureMs = 600;
@@ -250,7 +236,7 @@ class CalRoutineFlow {
     bool CanSave() const;
   };
 
-  void SetLog(CalRoutine::LogFn fn) { log_ = fn; }
+  void SetLog(CalRoutine::LogFn fn) { log_ = fn; query_.SetLog(fn); meas_.SetLog(fn); }
 
   // Starts a run. Outputs, Self: NoMeter until the meter is connected, then
   // ConfigMeter. Inputs: PromptPatch, or WarnMarker first when
@@ -327,12 +313,11 @@ class CalRoutineFlow {
   static const char *OutReasonName(uint8_t r);
 
   // ---- internals: results of one meter query / one measurement ----
-  enum QResult : uint8_t { QR_BUSY, QR_DONE, QR_FAIL, QR_LOST };
-  enum MResult : uint8_t { MR_BUSY, MR_DONE, MR_NOISY, MR_FAIL, MR_LOST };
+  // The meter rule's results are CalRoutine::MeterQuery/MeterMeasure's.
+  typedef CalRoutine::MeterQuery::Result QResult;
+  typedef CalRoutine::MeterMeasure::Result MResult;
 
  private:
-  enum QPhase : uint8_t { Q_NONE, Q_BEGIN, Q_BEGIN_WAIT, Q_WAIT, Q_BUSY };
-  enum MPhase : uint8_t { M_NONE, M_SETTLE, M_READ };  // M_READ: the throwaway, then the readings
 
   void Log(const char *line);
   void SetStage(Stage s);
@@ -361,12 +346,8 @@ class CalRoutineFlow {
   void FinishInputs();
   void FinishRun();
 
-  void QStart(const char *scpi, uint32_t timeout_ms);
-  QResult QStep();
-  QResult QFailure();
   bool MeterErrorReply(const char *step);
   void MStart(uint16_t code, int32_t target_mv, int readings = CalRoutine::kReadings);
-  MResult MStep();
 
   MeterPort *meter_ = nullptr;
   OutputPort *out_ = nullptr;
@@ -380,27 +361,10 @@ class CalRoutineFlow {
   int cur_in_ = -1;
   uint32_t now_ = 0;
 
-  // meter query
-  const char *q_scpi_ = nullptr;
-  uint32_t q_timeout_ = 0;
-  uint32_t q_t0_ = 0;        // phase start
-  uint32_t q_begin_ms_ = 0;  // first Begin attempt of this try
-  int q_fails_ = 0;
-  QPhase q_phase_ = Q_NONE;
-  const char *q_reply_ = nullptr;
-
-  // one measurement: settle, throwaway READ?, m_want_ READ?
-  MPhase m_phase_ = M_NONE;
-  uint32_t m_t0_ = 0;
-  int m_n_ = 0;
-  int m_want_ = CalRoutine::kReadings;
-  bool m_throw_ = false;      // the throwaway READ? is in flight
+  // meter setup queries, and one measurement (settle, throwaway READ?, readings)
+  CalRoutine::MeterQuery query_;
+  CalRoutine::MeterMeasure meas_;
   bool node_final_ = false;   // the node's final measurement (kFinalReadings) is running
-  bool m_reread_ = false;
-  uint16_t m_code_ = 0;
-  int32_t m_target_ = 0;
-  double m_mv_[CalRoutine::kFinalReadings];
-  CalRoutineMath::Reading m_reading_ = {0.0, 0.0, 0};
 
   // meter setup / loss
   int cfg_i_ = 0;
