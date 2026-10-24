@@ -22,6 +22,14 @@ constexpr const char *kInputCurveFileB = "ICURVE_B.BIN";
 // Files with this prefix are migrated first, with GLOBALS.* (PhzConfig.cpp).
 constexpr const char *kInputCurvePrefix = "ICURVE_";
 
+// True for files that hold calibration and must survive a layout migration or
+// a factory erase (GLOBALS.* is handled alongside by PhzConfig). Pure.
+inline bool IsCalibrationFile(const char *name) {
+  const char *p = kInputCurvePrefix;
+  while (*p) { if (*name++ != *p++) return false; }
+  return true;
+}
+
 #pragma pack(push, 1)
 struct InputCurveRecord {
   uint32_t magic;          // kInputCurveMagic

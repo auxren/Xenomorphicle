@@ -46,6 +46,9 @@ public:
     receiving = 0;
     packet = 0;
     restore_armed_ = 0;
+    curve_got_ = 0;
+    curve_pending_ = 0;
+    curve_save_failed_ = 0;
   }
 
   void Controller() {
@@ -59,6 +62,9 @@ public:
   void ToggleReceiveMode() {
     receiving = 1 - receiving;
     packet = 0;
+    curve_got_ = 0;
+    curve_pending_ = 0;
+    curve_save_failed_ = 0;
   }
 
   void ToggleCalibration() {
@@ -221,15 +227,22 @@ public:
 
   // Loop context: apply a finished restore.
   void ApplyPendingReload() {
-    if (curve_pending_) {
-      // seq is reassigned by the store, so the restored curves become the
-      // newest copy and the other slot keeps the previous one.
-      InputCurveSaveToFlash(curve_rx_);
-      curve_pending_ = 0;
-    }
     const uint8_t what = reload_pending_;
     if (!what) return;
     reload_pending_ = 0;
+    // The curves commit only now, after the final calibration packet: an
+    // abandoned restore never writes them over the old EEPROM calibration.
+    if (curve_pending_) {
+      if (what == RELOAD_CALIBRATION) {
+        // seq is reassigned by the store, so the restored curves become the
+        // newest copy and the other slot keeps the previous one.
+        if (!InputCurveSaveToFlash(curve_rx_)) {
+          curve_save_failed_ = 1;
+          Serial.println("Backup: restored input curves could NOT be saved");
+        }
+      }
+      curve_pending_ = 0;
+    }
     if (what == RELOAD_CALIBRATION) {
       // Init() never reloaded calibration -- that happens once, in setup() --
       // so a restored calibration took effect only after the next power
@@ -251,6 +264,7 @@ private:
   enum : uint8_t { RELOAD_CALIBRATION = 1, RELOAD_APPDATA = 2 };
   InputCurveRecord curve_rx_;
   uint16_t curve_got_ = 0;
+  bool curve_save_failed_ = 0;
   volatile uint8_t curve_pending_ = 0;   // a complete, CRC-valid record awaits Loop()
   volatile uint8_t reload_pending_ = 0;   // set in the ISR, consumed in Loop()
   uint32_t armed_ms_ = 0;    // millis() the confirm screen appeared
@@ -299,7 +313,8 @@ private:
       return;
     }
 
-    if (packet > 0) graphics.print("Done!");
+    if (curve_save_failed_) graphics.print("Curves NOT saved!");
+    else if (packet > 0) graphics.print("Done!");
     else graphics.print("Restore or Backup?");
 
     graphics.setPrintPos(0, 25);

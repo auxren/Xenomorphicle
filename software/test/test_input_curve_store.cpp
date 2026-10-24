@@ -124,7 +124,17 @@ static void readback_mismatch_fails_save() {
   CHECK(InputCurveSave(t, make(0, 1)));
 }
 
+static void calibration_file_predicate() {
+  CHECK(IsCalibrationFile("ICURVE_A.BIN"));
+  CHECK(IsCalibrationFile("ICURVE_B.BIN"));
+  CHECK(!IsCalibrationFile("GLOBALS.DAT"));
+  CHECK(!IsCalibrationFile("ICURVE"));
+  CHECK(!IsCalibrationFile("XICURVE_A"));
+  CHECK(!IsCalibrationFile(""));
+}
+
 int main() {
+  calibration_file_predicate();
   roundtrip(); crc_rejects_one_bit(); ab_newest_valid_wins(); torn_copy_falls_back();
   seq_wrap(); no_files_uses_line_fit(); readback_mismatch_fails_save();
   if (g_fail) { printf("%d FAILED\n", g_fail); return 1; }

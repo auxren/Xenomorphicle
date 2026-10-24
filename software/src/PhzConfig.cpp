@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <vector>
 #include "PhzConfig.h"
+#include "InputCurveStore.h"
 #include "PresetStage.h"
 #include "HSUtils.h"
 #include "util/util_misc.h"
@@ -186,7 +187,7 @@ FLASHMEM bool XenoFS::migrate_legacy() {
   struct Held { char name[16]; uint8_t *data; uint32_t size; bool kept; };
   static constexpr int kMaxHeld = 96;
   auto first_priority = [](const char *n) {
-    return strncmp(n, "GLOBALS", 7) == 0 || strncmp(n, "ICURVE_", 7) == 0;
+    return strncmp(n, "GLOBALS", 7) == 0 || IsCalibrationFile(n);
   };
   Held held[kMaxHeld];
   int count = 0, over = 0;
@@ -955,7 +956,32 @@ FLASHMEM
 void eraseFiles(FS &fs)
 {
   //myfs.quickFormat();
+  // The input calibration curves are calibration, which an erase keeps (the
+  // EEPROM half is skipped by the caller). Lift them into RAM across the format.
+  static const char *const kKeep[] = { kInputCurveFileA, kInputCurveFileB };
+  uint8_t *kept[2] = { nullptr, nullptr };
+  size_t kept_len[2] = { 0, 0 };
+  for (int i = 0; i < 2; ++i) {
+    File f = fs.open(kKeep[i], FILE_READ);
+    if (!f) continue;
+    const size_t n = (size_t)f.size();
+    uint8_t *buf = n ? (uint8_t *)malloc(n) : nullptr;
+    if (buf && f.read(buf, n) == (int)n) { kept[i] = buf; kept_len[i] = n; }
+    else {
+      free(buf);
+      Serial.printf("eraseFiles: could not hold %s in RAM, it will be lost\n", kKeep[i]);
+    }
+    f.close();
+  }
   fs.format();
+  for (int i = 0; i < 2; ++i) {
+    if (!kept[i]) continue;
+    File f = fs.open(kKeep[i], FILE_WRITE_BEGIN);
+    const bool ok = f && f.write(kept[i], kept_len[i]) == kept_len[i];
+    if (f) f.close();
+    if (!ok) Serial.printf("eraseFiles: could not write %s back, curve copy lost\n", kKeep[i]);
+    free(kept[i]);
+  }
   Serial.println("\nFilesystem formatted - All files erased !");
 }
 
