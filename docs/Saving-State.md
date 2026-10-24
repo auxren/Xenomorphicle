@@ -33,6 +33,17 @@ Newer Teensy's have enough space in flash storage to accomodate a filesystem (ak
 
 The binary file format used by Phazerville Apps (PhzConfig) has a small header with a signature & checksum, followed by a simple KEY-VALUE hashmap using 16-bit KEYs and 64-bit VALUEs. External editors are a possibility.
 
+## Cal Routine calibration
+
+The [Cal Routine](Cal-Routine) stores four things, all kept apart from app settings and presets:
+
+* **Output tables** go into the normal DAC calibration page, as Setup's own calibration does.
+* **Input curves** (a 17-point curve for each calibrated input) go into two files on internal flash, **`ICURVE_A.BIN` and `ICURVE_B.BIN`**, written alternately. Each carries a checksum and a sequence number, so an interrupted save can only ever cost the newest copy and the other file is used. A factory erase and a folder-layout migration keep both files.
+* **Input lines** (a straight-line fit for each calibrated input, also written by the console's input calibration) go into their own EEPROM page at bytes [4164, 4276). The apps use an input's line when it has no usable curve. It is calibration: a factory erase keeps it, and no Backup dump carries or overwrites it.
+* **A marker** in the EEPROM gap at bytes [4140, 4144): `'C'`, `'R'`, version 1, flags. It records that the tables and curves in use came from the Cal Routine, so that Setup can warn before it replaces them. It is not part of a Backup dump, and a factory erase keeps it. Restoring a Calibration dump clears it, since the tables then in use came from the dump.
+
+A unit that has never run the Cal Routine has none of these and behaves exactly as before.
+
 ## Preset-bus slots (Xenomorpher / `PRESET_BUS` builds)
 
 Xenomorpher builds add a second, separate store: **30 whole-instrument preset

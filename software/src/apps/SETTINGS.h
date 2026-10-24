@@ -25,6 +25,9 @@
 #endif
 #include "../PresetBus.h"
 #include "../PhzConfig.h"
+#include "../AdcSlotMap.h"
+#include "CalRoutinePorts.h"
+#include "../InputCal.h"
 
 extern "C" void _reboot_Teensyduino_();
 using namespace OC;
@@ -92,6 +95,12 @@ public:
   bool calibration_mode = false;
   bool calibration_complete = true;
   bool cal_save_q = false;
+  // The stored calibration came from the Cal Routine (its EEPROM marker,
+  // read when the wizard starts): the DAC and ADC steps say so on screen.
+  // calr_dac_sum_ is the DAC table as the wizard found it; a save that
+  // changed it clears the marker, since the tables are then Setup's.
+  bool calr_marker_ = false;
+  uint32_t calr_dac_sum_ = 0;
   int current_octave = 0; // for fine-tuning DAC points
   OC::DigitalInputDisplay digital_input_displays[4];
   OC::TickCount tick_count;
@@ -234,6 +243,7 @@ public:
             for (int i = 0; i < ADC_CHANNEL_COUNT; ++i) {
               OC::calibration_data.adc.offset[i] = OC::ADC::smoothed_raw_value(static_cast<ADC_CHANNEL>(i));
             }
+            OC::calibration_data.reserved0[0] = kInputMapV2;  // AdcSlotMap.h
           }
 
           break;
@@ -364,6 +374,19 @@ public:
 
     static constexpr weegfx::coord_t kValueX = menu::kDisplayWidth - 30;
 
+    // The DAC steps carry one more line on a unit the Cal Routine calibrated
+    // (they replace its tables), and the ADC steps on a unit with any input
+    // calibrated per input, by a Cal Routine curve or a console Q line (those
+    // inputs ignore what the ADC steps set). The ADC screens have no row to
+    // spare at the stock 12 px pitch, so with the line they step 9 px (the
+    // chord card's pitch).
+    const bool adc_step = step->calibration_type == CALIBRATE_ADC_OFFSET ||
+                          step->calibration_type == CALIBRATE_ADC_1V ||
+                          step->calibration_type == CALIBRATE_ADC_3V;
+    const bool calr_line = adc_step ? InputCal::calibrated_mask != 0
+                                    : (calr_marker_ && step->calibration_type == CALIBRATE_OCTAVE);
+    const weegfx::coord_t line_h = (calr_line && adc_step) ? 9 : menu::kMenuLineH;
+
     gfxPos(menu::kIndentDx, y + 2);
     switch (step->calibration_type) {
       case CALIBRATE_OCTAVE:
@@ -389,10 +412,10 @@ public:
 
       case CALIBRATE_ADC_OFFSET:
         for (int i = 0; i < ADC_CHANNEL_COUNT; ++i) {
-          gfxPos(1 + i%4*32, y + 10*(i/4));
+          gfxPos(1 + i%4*32, y + (line_h == 9 ? 9 : 10)*(i/4));
           graphics.printf("%3d", (int)OC::ADC::value(static_cast<ADC_CHANNEL>(i)));
         }
-        y += 10;
+        y += (line_h == 9 ? 9 : 10);
         break;
 
       case CALIBRATE_DISPLAY:
@@ -407,7 +430,7 @@ public:
       case CALIBRATE_ADC_3V:
         gfxPos(menu::kIndentDx, y + 2);
         graphics.printf(step->message, (NorthernLightModular*2*step->index));
-        y += menu::kMenuLineH;
+        y += line_h;
         gfxPos(menu::kIndentDx, y + 2);
         graphics.print((int)OC::ADC::value(ADC_CHANNEL_1), 2);
         if ( (calstate.adc_1v && step->calibration_type == CALIBRATE_ADC_1V) ||
@@ -439,10 +462,19 @@ public:
         break;
     }
 
-    y += menu::kMenuLineH;
+    y += line_h;
     gfxPos(menu::kIndentDx, y + 2);
     if (step->help)
       graphics.print(step->help);
+
+    if (calr_line) {
+      y += line_h;
+      gfxPos(menu::kIndentDx, y + 2);
+      // Saving the DAC steps replaces the Cal Routine's tables. The ADC steps
+      // set only the shared offset and scale, which inputs with a curve or an
+      // ICA1 line ignore (InputCal::Calibrated): their calibration is kept.
+      graphics.print(adc_step ? "Per-input cal: kept" : "Replaces Cal Routine");
+    }
 
     // NJM: display encoder direction config on first and last screens
     if (step->step == HELLO || step->step == CALIBRATION_EXIT) {
@@ -635,6 +667,7 @@ public:
                 for (int i = 0; i < ADC_CHANNEL_COUNT; ++i) {
                   OC::calibration_data.adc.offset[i] = OC::ADC::smoothed_raw_value(static_cast<ADC_CHANNEL>(i));
                 }
+                OC::calibration_data.reserved0[0] = kInputMapV2;  // AdcSlotMap.h
               }
 
               // long-press DOWN to auto-scale DAC values on current channel
@@ -662,6 +695,10 @@ public:
           SERIAL_PRINTLN("Calibration complete");
           OC::calibration_save();
           cal_save_q = false;
+          if (calr_marker_ && DacTableSum() != calr_dac_sum_) {
+            CalRoutinePorts::MarkerWrite(0);  // no longer the Cal Routine's tables
+            calr_marker_ = false;
+          }
         } else {
           SERIAL_PRINTLN("Calibration complete (but don't save)");
         }
@@ -687,9 +724,13 @@ public:
 
         OC::ui.encoder_enable_acceleration(OC::CONTROL_ENCODER_R, true);
 
+        calr_marker_ = CalRoutinePorts::MarkerSet();
+        calr_dac_sum_ = DacTableSum();
+
         calibration_complete = false;
         calibration_mode = true;
     }
+    static uint32_t DacTableSum() { return CalRoutinePorts::DacTableSum(); }
     void Arm(PendingAction what) {
       pending_ = what;
       armed_ms_ = millis();

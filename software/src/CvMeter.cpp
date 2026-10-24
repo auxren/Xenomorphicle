@@ -12,10 +12,15 @@
 #include <Arduino.h>
 #include <math.h>
 #include "CvMeter.h"
+#include "AdcSlotMap.h"
 
 #ifdef CVMETER_ENABLED
 
+#include "CalRoutineFlow.h"
+#include "apps/CalRoutinePorts.h"
 #include "CvMeterMath.h"
+#include "InputCal.h"
+#include "InputCurveFiles.h"
 #include "OC_ADC.h"
 #include "OC_DAC.h"
 #include "OC_calibration.h"
@@ -33,31 +38,9 @@ using namespace CvMeterMath;
 // physical index behind each label (flip mode and some hardware IDs remap
 // them at boot), and every calibration table is indexed physically.
 
-FLASHMEM static int InPhys(int label) {
-  switch (label) {
-    case 0: return ADC_CHANNEL_1;
-    case 1: return ADC_CHANNEL_2;
-    case 2: return ADC_CHANNEL_3;
-    case 3: return ADC_CHANNEL_4;
-    case 4: return ADC_CHANNEL_5;
-    case 5: return ADC_CHANNEL_6;
-    case 6: return ADC_CHANNEL_7;
-    default: return ADC_CHANNEL_8;
-  }
-}
-
-FLASHMEM static int OutPhys(int label) {
-  switch (label) {
-    case 0: return DAC_CHANNEL_A;
-    case 1: return DAC_CHANNEL_B;
-    case 2: return DAC_CHANNEL_C;
-    case 3: return DAC_CHANNEL_D;
-    case 4: return DAC_CHANNEL_E;
-    case 5: return DAC_CHANNEL_F;
-    case 6: return DAC_CHANNEL_G;
-    default: return DAC_CHANNEL_H;
-  }
-}
+// The same mapping the Cal Routine app uses (apps/CalRoutinePorts.h).
+FLASHMEM static int InPhys(int label) { return CalRoutinePorts::PanelInPhys(label); }
+FLASHMEM static int OutPhys(int label) { return CalRoutinePorts::PanelOutPhys(label); }
 
 // '1'..'8' or 'a'..'h' / 'A'..'H' -> 0..7, else -1
 FLASHMEM static int ParseOutput(int c) {
@@ -81,15 +64,23 @@ FLASHMEM static bool OutputCode(int out_label, int32_t mv, uint16_t *code) {
                              OCTAVES + 1, DAC::kOctaveZero, MvPerStep(), mv, code);
 }
 
+// The same calibration the apps get (InputCal.h): the input's curve or ICA1
+// line where it has one -- interpolated in float on the very table the ISR
+// applies, so the meter keeps its sub-count resolution -- else the shared
+// path. An ICA1 fit that InputCal refused is shown as shared, as the apps see it.
 FLASHMEM static float InputMv(int phys, float raw, bool *per_input) {
-  return InputMillivolts(OC::input_calibration, phys, raw,
-                         OC::calibration_data.adc.offset[phys],
-                         OC::calibration_data.adc.pitch_cv_scale, OctMv(), per_input);
+  if (InputCal::Calibrated(phys)) {
+    if (per_input) *per_input = true;
+    return InputCal::Millivolts(phys, raw);
+  }
+  if (per_input) *per_input = false;
+  return SharedMillivolts(OC::calibration_data.adc.offset[phys], raw,
+                          OC::calibration_data.adc.pitch_cv_scale, OctMv());
 }
 
 // What one input can read, by the calibration that is in effect for it.
 FLASHMEM static void InputRange(int phys, int32_t *lo, int32_t *hi) {
-  if (InputCalValid(OC::input_calibration, phys)) {
+  if (InputCal::Calibrated(phys)) {
     const float a = InputMv(phys, 0.f, nullptr);
     const float b = InputMv(phys, float(kRawMax), nullptr);
     *lo = int32_t(lroundf(a < b ? a : b));
@@ -170,7 +161,7 @@ FLASHMEM static void PrintRanges(const char *tag) {
     int32_t lo, hi;
     InputRange(phys, &lo, &hi);
     Serial.printf("%s,%d,%ld,%ld,%c\r\n", tag, l + 1, (long)lo, (long)hi,
-                  InputCalValid(OC::input_calibration, phys) ? 'C' : 'S');
+                  InputCal::Calibrated(phys) ? 'C' : 'S');
   }
 }
 
@@ -255,31 +246,104 @@ static uint32_t q_clear_arm_ms = 0;
 enum FlowState : uint8_t {
   FLOW_IDLE,
   FLOW_WAIT_PATCH,   // operator patches, presses y
-  FLOW_SETTLE,       // DAC set, waiting for it and the input filter
-  FLOW_MEASURE,      // averaging
+  FLOW_MEASURE,      // CalQFlow settling and averaging the three points
   FLOW_WAIT_COMMIT,  // result shown, operator presses y to keep it
 };
-
-static constexpr uint32_t kSettleMs = 300;
-static constexpr uint32_t kMeasureMs = 600;
 
 struct Flow {
   FlowState state;
   bool all;
   int in;      // panel label 0..7
   int out;     // panel label 0..7
-  int point;   // 0, 1: fit; 2: verify
   int32_t mv[3];
   uint16_t code[3];
-  PointStats stats[3];
-  Fit fit;
-  float residual_mv;
-  uint32_t t0;
-  Window win;
 };
 static Flow flow;
 
+// ---- the ports CalQFlow measures through (CalRoutineFlow.h) -------------------
+// The same settle / measure step the Cal Routine's input part uses
+// (CalRoutine::InputPoint), on the live hardware.
+
+struct QOutputs : CalRoutine::OutputPort {
+  uint8_t held;  // physical channels this port holds
+  void Hold(int out, uint16_t code) override;
+  void ReleaseAll() override;  // only what this port holds: a 'd' hold elsewhere stays
+  uint16_t TableCode(int out, int k) const override;
+  uint16_t CodeForMv(int out, const uint16_t table[CalRoutineMath::kNodes], int32_t mv) const override;
+};
+
+FLASHMEM void QOutputs::Hold(int out, uint16_t code) {
+  const int phys = OutPhys(out);
+  DAC::Hold(phys, code);
+  held = uint8_t(held | (1u << phys));
+}
+
+FLASHMEM void QOutputs::ReleaseAll() {
+  for (int c = 0; c < kChannels; ++c)
+    if (held & (1u << c)) DAC::Release(c);
+  held = 0;
+}
+
+// The Q never asks for these two (it brings its own codes); they follow the
+// flow's convention, entry k = k * 1200 mV from 0 V at entry 0, which is the
+// Xenomorpher's table (DAC::kOctaveZero == 0 there).
+FLASHMEM uint16_t QOutputs::TableCode(int out, int k) const {
+  return OC::calibration_data.dac.calibrated_octaves[OutPhys(out)][k];
+}
+
+FLASHMEM uint16_t QOutputs::CodeForMv(int, const uint16_t table[CalRoutineMath::kNodes],
+                                      int32_t mv) const {
+  uint16_t code = 0;
+  MillivoltsToDacCode(table, CalRoutineMath::kNodes, 0, CalRoutineMath::kNodeMv, mv, &code);
+  return code;
+}
+
+// Averages all 8 inputs from the loop's sampling (Task()) while the window is
+// open (the Window already sums every channel); the Q reads its own one.
+struct QInputs : CalRoutine::InputPort {
+  bool open;
+  Window win;
+  void StartWindow() override;
+  bool WindowDone(PointStats s[8]) override;
+};
+
+FLASHMEM void QInputs::StartWindow() {
+  win.Reset();
+  open = true;
+}
+
+FLASHMEM bool QInputs::WindowDone(PointStats s[8]) {
+  open = false;
+  for (int i = 0; i < 8; ++i) {
+    const int phys = InPhys(i);
+    s[i].samples = win.n;
+    s[i].mean_raw = win.n ? float(win.sum[phys]) / (256.f * float(win.n)) : 0.f;
+    s[i].min_raw = win.n ? float(win.lo[phys]) * (1.f / 256.f) : 0.f;
+    s[i].max_raw = win.n ? float(win.hi[phys]) * (1.f / 256.f) : 0.f;
+  }
+  return true;
+}
+
+struct MsClock : CalRoutine::Clock {
+  uint32_t Ms() const override;
+};
+
+FLASHMEM uint32_t MsClock::Ms() const { return millis(); }
+
+static QOutputs q_outs;
+static QInputs q_ins;
+static MsClock q_clock;
+static CalQFlow q_engine;
+
+FLASHMEM static void QLog(const char *line) {
+  Serial.print(line);
+  Serial.print("\r\n");
+}
+
 FLASHMEM static void FlowEnd() {
+  q_engine.Cancel();
+  q_ins.open = false;
+  q_outs.ReleaseAll();
   DAC::Release(OutPhys(flow.out));
   flow.state = FLOW_IDLE;
 }
@@ -311,10 +375,10 @@ FLASHMEM static bool FlowPrepare() {
       return false;
     }
   }
-  flow.point = 0;
   flow.state = FLOW_WAIT_PATCH;
-  Serial.printf("INCAL,PATCH,in=%d,out=%d,points=%ld,%ld,%ld\r\n", flow.in + 1, flow.out + 1,
-                (long)flow.mv[0], (long)flow.mv[1], (long)flow.mv[2]);
+  char line[CalRoutineLines::kMaxLine];
+  CalRoutineLines::IncalPatch(line, sizeof(line), flow.in, flow.out, flow.mv);
+  QLog(line);
   Serial.printf("  Patch OUTPUT %d to INPUT %d (nothing else on either jack). Output %d will be\r\n"
                 "  driven to %ld, %ld and %ld mV. Press y when patched; any other key aborts.\r\n",
                 flow.out + 1, flow.in + 1, flow.out + 1,
@@ -343,31 +407,16 @@ FLASHMEM static void FlowNext() {
   flow.state = FLOW_IDLE;
 }
 
-FLASHMEM static void FlowSetPoint() {
-  DAC::Hold(OutPhys(flow.out), flow.code[flow.point]);
-  flow.t0 = millis();
-  flow.state = FLOW_SETTLE;
+FLASHMEM static void FlowMeasure() {
+  q_engine.SetLog(QLog);
+  q_engine.Begin(q_outs, q_ins, q_clock, flow.in, flow.out, flow.mv, flow.code,
+                 OC::calibration_data.adc.pitch_cv_scale, OctMv());
+  flow.state = FLOW_MEASURE;
 }
 
+// CalQFlow has printed INCAL,RESULT and released the output.
 FLASHMEM static void FlowFinish() {
-  DAC::Release(OutPhys(flow.out));
-  const Verdict v = CheckCalibration(flow.stats, flow.mv,
-                                     OC::calibration_data.adc.pitch_cv_scale, OctMv(),
-                                     &flow.fit, &flow.residual_mv);
-  float noise = 0.f;
-  for (int i = 0; i < 3; ++i) {
-    const float pp = flow.stats[i].max_raw - flow.stats[i].min_raw;
-    if (pp > noise) noise = pp;
-  }
-  Serial.printf("INCAL,RESULT,in=%d,out=%d,gain_uv=", flow.in + 1, flow.out + 1);
-  PrintFixed(ScaleRound(flow.fit.gain * 1000.f, 1), 1);
-  Serial.print(",offset_mv=");
-  PrintFixed(ScaleRound(flow.fit.offset_mv, 2), 2);
-  Serial.print(",resid_mv=");
-  PrintFixed(ScaleRound(flow.residual_mv, 2), 2);
-  Serial.print(",noise_pp=");
-  PrintFixed(ScaleRound(noise, 2), 2);
-  Serial.printf(",verdict=%s\r\n", VerdictName(v));
+  const Verdict v = q_engine.verdict();
   if (v != VERDICT_OK) {
     Serial.printf("  NOT committed (%s). Limits: residual <= %d mV, gain within %d%% of the shared "
                   "scale, noise <= %d counts p-p, no point within %d counts of a rail.\r\n",
@@ -383,15 +432,29 @@ FLASHMEM static void FlowFinish() {
 FLASHMEM static void FlowCommit() {
   const int phys = InPhys(flow.in);
   CvMeterMath::InputCalibration &cal = OC::input_calibration;
-  cal.gain[phys] = flow.fit.gain;
-  cal.offset_mv[phys] = flow.fit.offset_mv;
-  int64_t r = ScaleRound(flow.residual_mv, 1);
+  const Fit &fit = q_engine.fit();
+  cal.gain[phys] = fit.gain;
+  cal.offset_mv[phys] = fit.offset_mv;
+  int64_t r = ScaleRound(q_engine.residual_mv(), 1);
   if (r > 32767) r = 32767;
   if (r < -32768) r = -32768;
   cal.verify_mv10[phys] = int16_t(r);
   cal.source_output[phys] = uint8_t(flow.out + 1);
   cal.valid_mask |= uint8_t(1u << phys);
+  MarkMeasuredWithFix(cal, uint8_t(1u << phys));  // AdcSlotMap.h
   input_calibration_save();
+  // A curve takes precedence over the line, so an input with a curve would
+  // ignore this Q: drop its curve, so the new line is what the apps use.
+  DMAMEM static InputCurveRecord rec;  // 300 bytes, out of DTCM
+  if (InputCurveLoadFromFlash(&rec, nullptr) && CalRoutineDropCurve(rec, phys)) {
+    if (InputCurveSaveToFlash(rec))
+      Serial.printf("  note: input %d's curve was dropped; the apps now use this line\r\n",
+                    flow.in + 1);
+    else
+      Serial.printf("  note: input %d's curve could not be dropped (curve file write failed); "
+                    "the apps keep the curve\r\n", flow.in + 1);
+    InputCal::Reload();
+  }
   Serial.printf("INCAL,SAVED,in=%d\r\n", flow.in + 1);
 }
 
@@ -400,7 +463,7 @@ FLASHMEM static void FlowCommit() {
 FLASHMEM static void FlowKey(int cmd) {
   switch (flow.state) {
     case FLOW_WAIT_PATCH:
-      if (cmd == 'y' || cmd == 'Y') FlowSetPoint();
+      if (cmd == 'y' || cmd == 'Y') FlowMeasure();
       else FlowAbort("cancelled at the patch prompt");
       break;
     case FLOW_WAIT_COMMIT:
@@ -408,7 +471,6 @@ FLASHMEM static void FlowKey(int cmd) {
       else Serial.printf("INCAL,DISCARDED,in=%d\r\n", flow.in + 1);
       FlowNext();
       break;
-    case FLOW_SETTLE:
     case FLOW_MEASURE:
       FlowAbort("key pressed during a measurement");
       break;
@@ -417,32 +479,20 @@ FLASHMEM static void FlowKey(int cmd) {
   }
 }
 
-FLASHMEM static void FlowTask(uint32_t now, const uint32_t *q) {
-  if (flow.state == FLOW_SETTLE) {
-    if (now - flow.t0 >= kSettleMs) {
-      flow.win.Reset();
-      flow.t0 = now;
-      flow.state = FLOW_MEASURE;
-    }
-    return;
-  }
+FLASHMEM static void FlowTask(const uint32_t *q) {
   if (flow.state != FLOW_MEASURE) return;
-  const int phys = InPhys(flow.in);
-  if (q) flow.win.Add(q);
-  if (now - flow.t0 < kMeasureMs) return;
+  if (q && q_ins.open) q_ins.win.Add(q);
+  if (q_engine.Tick() == CalQFlow::State::Done) FlowFinish();
+}
 
-  PointStats &s = flow.stats[flow.point];
-  s.samples = flow.win.n;
-  s.mean_raw = flow.win.n ? float(flow.win.sum[phys]) / (256.f * float(flow.win.n)) : 0.f;
-  s.min_raw = flow.win.n ? float(flow.win.lo[phys]) * (1.f / 256.f) : 0.f;
-  s.max_raw = flow.win.n ? float(flow.win.hi[phys]) * (1.f / 256.f) : 0.f;
-  Serial.printf("INCAL,POINT,in=%d,%d,%ld,", flow.in + 1, flow.point + 1, (long)flow.mv[flow.point]);
-  PrintFixed(ScaleRound(s.mean_raw, 2), 2);
-  Serial.print(",");
-  PrintFixed(ScaleRound(s.max_raw - s.min_raw, 2), 2);
-  Serial.printf(",%lu\r\n", (unsigned long)s.samples);
-  if (++flow.point < 3) FlowSetPoint();
-  else FlowFinish();
+// What the apps use for this input (InputCal.h): its curve file, this ICA1
+// line, or the shared path. A curve takes precedence over the line.
+FLASHMEM static const char *AppsSource(int phys) {
+  switch (InputCal::SourceOf(phys)) {
+    case InputCal::SOURCE_CURVE: return "curve";
+    case InputCal::SOURCE_LINE: return "line";
+    default: return "shared";
+  }
 }
 
 FLASHMEM static void PrintCalibration() {
@@ -461,11 +511,12 @@ FLASHMEM static void PrintCalibration() {
       PrintFixed(ScaleRound(cal.offset_mv[phys], 2), 2);
       Serial.print(",verify_mv=");
       PrintFixed(cal.verify_mv10[phys], 1);
-      Serial.printf(",src=%u,range=%ld..%ld\r\n", (unsigned)cal.source_output[phys],
-                    (long)lo, (long)hi);
+      Serial.printf(",src=%u,range=%ld..%ld,apps=%s\r\n", (unsigned)cal.source_output[phys],
+                    (long)lo, (long)hi, AppsSource(phys));
     } else {
-      Serial.printf("INCAL,CH,%d,S,adc_offset=%u,range=%ld..%ld\r\n", l + 1,
-                    (unsigned)OC::calibration_data.adc.offset[phys], (long)lo, (long)hi);
+      Serial.printf("INCAL,CH,%d,S,adc_offset=%u,range=%ld..%ld,apps=%s\r\n", l + 1,
+                    (unsigned)OC::calibration_data.adc.offset[phys], (long)lo, (long)hi,
+                    AppsSource(phys));
     }
   }
 }
@@ -555,7 +606,7 @@ FLASHMEM static void FreqTask(uint32_t now) {
 // =============================================================================
 
 FLASHMEM void Task() {
-  const bool sampling = stream_on || flow.state == FLOW_MEASURE;
+  const bool sampling = stream_on || q_ins.open;
   const uint32_t now = millis();
   uint32_t q[kChannels];
   bool have = false;
@@ -573,7 +624,7 @@ FLASHMEM void Task() {
     stream_next_ms += kStreamPeriodMs;
     if (int32_t(now - stream_next_ms) > 100) stream_next_ms = now + kStreamPeriodMs;  // resync after a stall
   }
-  if (flow.state != FLOW_IDLE) FlowTask(now, have ? q : nullptr);
+  if (flow.state != FLOW_IDLE) FlowTask(have ? q : nullptr);
   if (freq_on) FreqTask(now);
 }
 
@@ -618,8 +669,9 @@ FLASHMEM bool Consume(int cmd) {
     if (cmd == 'c') {
       if (millis() - q_clear_arm_ms >= 3000 || !q_clear_arm_ms) {
         q_clear_arm_ms = millis() | 1;
-        Serial.println("INCAL,ARMED,Qc again within 3s clears every input's calibration "
-                       "(inputs fall back to the shared scale + offset)");
+        Serial.println("INCAL,ARMED,Qc again within 3s clears every input's Q calibration "
+                       "(an input with a curve file keeps its curve until the curve is "
+                       "cleared; the rest fall back to the shared scale + offset)");
         return true;
       }
       q_clear_arm_ms = 0;
@@ -652,16 +704,26 @@ FLASHMEM bool Consume(int cmd) {
   return false;
 }
 
+FLASHMEM void CalRoutineTakeover() {
+  if (flow.state != FLOW_IDLE) FlowAbort("Cal Routine started");  // releases its holds
+  d_state = D_IDLE;  // a half-typed 'd' or 'Q' argument is dropped too
+  q_state = Q_IDLE;
+}
+
 FLASHMEM void Command(char key) {
   switch (key) {
     case 'v':
       if (stream_on) StreamStop();
       else StreamStart();
       break;
+    // The Cal Routine owns the outputs while it runs: a console hold or Q
+    // would drive a jack under its measurement. 'v' only reads, so it stays.
     case 'd':
+      if (CalRoutinePorts::MeterOwned()) { Serial.println("DAC,ERR,BUSY_CAL"); break; }
       d_state = D_WAIT_CH;
       break;
     case 'Q':
+      if (CalRoutinePorts::MeterOwned()) { Serial.println("INCAL,ERR,BUSY_CAL"); break; }
       q_state = Q_WAIT_SUB;
       break;
     case 'n':

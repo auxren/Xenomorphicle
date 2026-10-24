@@ -29,6 +29,7 @@ extern uint_fast8_t MENU_REDRAW;
 #endif
 #include "Backup.h"
 #include "SETTINGS.h"
+#include "CalRoutine.h"
 
 namespace OC {
 
@@ -41,6 +42,7 @@ static AppContainer<void
   , AppTweighty
 #endif
   , AppBackup
+  , AppCalRoutine
 > app_container;
 
 // The firmware boots into Captain MIDI on T41; Captain is not in this build

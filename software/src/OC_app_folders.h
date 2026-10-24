@@ -108,6 +108,7 @@ static const DefaultEntry kDefaults[] = {
   { TWOCCS("MI"), FOLDER_SYSTEM },   // Captain MIDI
   { TWOCCS("2E"), FOLDER_SYSTEM },   // 200e Modules
   { TWOCCS("RF"), FOLDER_SYSTEM },   // References, voltages
+  { TWOCCS("CR"), FOLDER_SYSTEM },   // Cal Routine
 
   // Starts out of the way, one turn from being brought back.
 };
@@ -154,6 +155,41 @@ inline uint8_t DefaultFor(uint16_t app_id) {
     if (e.app_id == app_id) return e.folder;
   return kFallbackFolder;
 }
+
+// ---- the stored arrangement and the roster it was written against ----------
+//
+// The two words are position-indexed, so they mean nothing without the roster
+// they were written for. RosterStamp() identifies one: the app count in the
+// low 16 bits, an FNV-1a hash of every app id in container order above it.
+// Any insertion, removal or reordering changes it.
+//
+// Out of line (OC_app_folders.cpp, FLASHMEM): boot and preset-recall code only.
+uint64_t RosterStamp(const uint16_t *ids, size_t n);
+
+enum StampMatch : uint8_t {
+  STAMP_OTHER,         // a different roster, or no stamp: the words are refused
+  STAMP_SAME,          // written against exactly this roster
+  STAMP_ONE_APPENDED,  // written against this roster minus its LAST app
+};
+
+// How a stored stamp relates to the running roster ids[0, n). Only two shapes
+// are ever accepted: the same roster, and the same roster with exactly one app
+// appended at the end (the stamp of ids[0, n-1), count n-1 included). Every
+// other change -- an insertion, a removal, a reorder, two apps appended --
+// is STAMP_OTHER, as before.
+StampMatch MatchStamp(uint64_t stored, const uint16_t *ids, size_t n);
+
+// Every app in its default folder (keyed by app ID).
+void SeedDefaults(State &s, const uint16_t *ids, size_t n);
+
+// Applies a stored arrangement (w0, w1, and its stamp when have_stamp) to s
+// for the running roster ids[0, n). STAMP_SAME takes both words as they are.
+// STAMP_ONE_APPENDED takes them for positions 0..n-2, which name the same apps
+// as when they were written, and seeds only the new last slot from its default:
+// adding an app at the end must not reset the owner's whole layout. Anything
+// else seeds every app from its default. Returns the match.
+StampMatch ApplyStored(State &s, uint64_t w0, uint64_t w1, bool have_stamp, uint64_t stamp,
+                       const uint16_t *ids, size_t n);
 
 }  // namespace AppFolders
 }  // namespace OC

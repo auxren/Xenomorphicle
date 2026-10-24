@@ -22,14 +22,15 @@ stray typing is harmless but will spew capture bytes.
 |---|---|
 | `z` | print this key map with live toggle states |
 | `t` | selftest — one-shot health report (see below) |
-| `T` | real-time budget report: every counter with PASS/FAIL per ceiling (docs/Timing-Budget.md); `T` again within 3 s resets the counters |
+| `T` | real-time budget report: every counter with PASS/FAIL per ceiling (docs/Timing-Budget.md); `T` again within 3 s resets the counters. Both `t` and `T` also print `adc capture: realigns=<n>`: how many times the 8-input ADC capture was restarted after a lost reading (or by `X`); it should stay 0 |
+| `X` | force 16 restarts of the 8-input ADC capture, each at a different point in the trigger cycle, then print `ADC,REALIGN,count=<n>` (the running total). A bench check that the input order survives a restart: with outputs patched to inputs, panel input n must still read as `v` column n afterwards |
 | `a` | activate Captain MIDI (suspend/switch/resume, same path as the app menu; for headless benches where boot recall restored a different app) |
 | `A` | list the app table (index, id, name), then type 2 decimal digits to switch to one by index — same path as `a`, any app. This is how a cross-app preset slot gets made from a headless bench |
 | `I` | toggle app ISR |
 | `D` | toggle display redraw |
 | `L` | toggle app loop |
 | `i` | scan all I2C addresses |
-| `u` | dump USB host port device identities (VID/PID/product) + the Captain MIDI per-device profile table |
+| `u` | dump USB host port device identities (VID/PID/product), then the bench DMM line `meter: vid=XXXX pid=XXXX connected=<0\|1>` (see `e` below; `0000` when none is attached), then the Captain MIDI per-device profile table |
 | `j` | **press the panel** — then one key: `l` `r` `a` `b` `z` `x` `y` tap that button (capitals hold it), `[` `]` turn encL one detent, `-` `+` turn encR. Goes through the real UI event queue, so it reaches whatever screen is up; any other key cancels. This is how a headless bench walks the 200e app (`jl` on the module list starts a scan; `jr` picks the target) |
 
 ### Preset engine / bus
@@ -85,6 +86,44 @@ all of it from a host and logs CSV.
 | `Q` | **per-input calibration** against a DAC output: `Q<i><o>` one input, `Qa<o>` inputs 1-8 in turn; the module prompts for the patch, sets three voltages itself, fits, verifies, and stores only on `y` with the residual under 10 mV. `Qp` prints it, `Qc` twice within 3 s clears it. While the dialog is open **every byte belongs to it**; any key but `y` aborts |
 | `n` | toggle the **frequency counter** on TR1: `FREQ,<ms>,<hz>,<periods>,<note>,<cents>` every 250 ms (or `FREQ,<ms>,NOSIG`). Refuses while an app owns the counter; TR1 is not a trigger input while it runs |
 
+### USB bench DMM (USBTMC)
+A USBTMC meter on the USB host port (or the host hub) is claimed by class
+(interface `FE/03`), not by VID/PID; verified with a Siglent SDM3065X
+(`F4EC:1203`). Only the allowlisted SCPI lines the calibration routine needs
+can be sent: `*IDN?`, `*CLS`, `CONF:VOLT:DC <range>`, `VOLT:DC:NPLC <n>`,
+`VOLT:DC:AZ <ON|OFF|ONCE>`, `TRIG:SOUR IMM`, `READ?`, `SYST:ERR?` (short or
+long forms, any case). Everything else, every `CAL...` above all, is refused
+before a byte reaches the meter.
+
+| key | action |
+|---|---|
+| `e` | **one SCPI line to the meter**: `e<line>⏎`, e.g. `e*IDN?⏎`, `eCONF:VOLT:DC 20⏎`, `eREAD?⏎`. Printable characters up to Enter, at most 64; any control byte cancels (`METER,ERR,cancelled ...`), and an over-long line is cancelled with the rest of it swallowed up to its Enter. A line ending in `?` waits for the reply; any other completes when the meter accepts it. An optional `@<ms> ` prefix sets that query's timeout (1-60000 ms, default 5000), e.g. `e@200 READ?⏎`; it is console syntax and never reaches the meter. Answers, printed when the query ends (the console keeps working meanwhile; 5 s timeout): `METER,DONE,<reply>` (empty for a command), `METER,REFUSED` (not on the allowlist), `METER,TIMEOUT`, or `METER,ERR,<why>` with `<why>` one of `NOT_CONNECTED`, `BUSY`, `DISCONNECT` (unplugged mid-query), `BAD_REPLY`, `OVERFLOW` (reply over 255 chars), `NO_PROGRESS`, `OUT_STUCK` (an earlier command never left the controller), `XFER_ERR_IN` / `XFER_ERR_OUT` (a bulk transfer failed: STALL, babble or transaction errors), `RECOVERING` (the resync below is still running: retry in a moment), `RECOVER_FAILED` (the resync gave up after 3 s; the next query is allowed anyway), `QUEUE`, `FRAME` |
+
+After any query that fails mid-exchange (timeout, garbled reply, bulk
+transfer error) the driver resynchronises the meter on its own before it
+accepts the next one, without blocking anything: CLEAR_FEATURE(ENDPOINT_HALT)
+on whichever bulk endpoint errored, then USBTMC INITIATE_CLEAR and
+CHECK_CLEAR_STATUS every 10 ms (reading out anything the meter still had
+queued), then a Bulk-OUT halt clear. A late answer to an abandoned query is
+recognised by its tag and discarded, so it cannot shift every later reply by
+one. No replug is needed.
+
+The plan called this key `U`; `U` is already the audio-graph reorder
+(`docs/Timing-Budget.md`), so the meter is on `e`.
+
+**Bench pending (Oren, with the bench owner's agreement): flash `T41_console`
+and check, then record the results here.**
+
+- [ ] `u` shows `meter: vid=F4EC pid=1203 connected=1`.
+- [ ] `e*IDN?⏎` prints `METER,DONE,Siglent Technologies,SDM3065X,...`.
+- [ ] `eCONF:VOLT:DC 20⏎` then `eREAD?⏎` returns a reading.
+- [ ] `eCAL:VAL 1⏎` prints `METER,REFUSED`.
+- [ ] Unplugging the meter mid-`READ?` gives `TIMEOUT` or `ERR`, and the console keeps working.
+- [ ] USB-MIDI on the host hub still works.
+- [ ] 10 meter replugs with no module USB drop (design gate 6).
+- [ ] Unplug the meter during a pending `eREAD?`, plug it back in, and the next `eREAD?` works without any further replug.
+- [ ] Forced timeout: `eVOLT:DC:NPLC 100⏎`, then `e@200 READ?⏎` gives `METER,TIMEOUT`. A query sent within ~3 s may answer `METER,ERR,RECOVERING`. After that, `eVOLT:DC:NPLC 1⏎` and `eREAD?⏎` succeed with a fresh reading (not the late one), with no replug. Repeat 3 times to make sure the replies do not drift off by one.
+
 ### Files
 | key | action |
 |---|---|
@@ -106,6 +145,32 @@ of them.
 | `C` | **clear/reset the config file** (GLOBALS.CFG rewritten empty) |
 | `F` | **erase ALL LittleFS files** — presets, config, CRASH.LOG, everything |
 | `Z` | **reboot into HalfKay** so a host can flash — stops playing (see "Flashing headlessly") |
+
+## Cal Routine log lines (`CALR`)
+
+While the Cal Routine app runs it logs one line per step on the console. The format is defined by `software/src/CalRoutineFlow.cpp` and the golden file `software/test/fixtures/calr_lines.txt` (its `CALR#` header lines name each kind's fields in order). Lines are `CALR,<KIND>,<field>,...`, comma-separated, outputs and inputs 1-based:
+
+- `MODE` the routine: `OUTPUTS`, `INPUTS` or `SELF`
+- `WARN` `NO_MARKER`: Inputs was started on outputs Cal Routine did not calibrate (the owner may go on)
+- `METER` the meter's identity
+- `STATE` timestamp (ms), stage, current output and input
+- `OUT` an output starts
+- `NODE` one table entry: target, code, measured value, iterations, rail flag
+- `REREAD` a repeat reading of a table entry and its spread
+- `SWEEP` one in-between check point and its residual
+- `ORES` an output's result: PASS or not, reason, worst error, rail mask
+- `PATCH` the patch check, one per output raised alone: the inputs it moved (hex mask) and its own input's shift in raw counts (about 1960 when patched)
+- `PRES` the patch check's result: PASS, FAIL or NO_READING (a window gave no samples; masks 00), outputs that moved another input (`crossed`), outputs that did not move their own (`missing`), hex masks
+- `IN` an input's span: its source output (output n for input n) and covered span (`lo_mv`, `hi_mv`); all 8 at the start of the sweep
+- `IPT` one input measurement point (all 8 inputs are logged for each sweep voltage)
+- `IRES` an input's result: verdict, gain, offset, hold-out and line deviation
+- `RETRY` a meter query was repeated
+- `MERR` the meter's error queue was not empty after its setup (`SETUP`) or an output's autozero (`ZERO`): the reply; the run then fails `METER_CONFIG`
+- `LOST` / `BACK` / `REDO` the meter was lost, came back, the output restarts
+- `RESULT` can-save flag and the output and input pass masks
+- `SAVE` the save result; `DISCARD`; `CANCEL` (stage); `FAIL` (reason)
+
+`tools/hwqa/cvmeter.py` parses them (`parse_calr`).
 
 ## Reading the selftest (`t`)
 

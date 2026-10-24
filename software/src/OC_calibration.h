@@ -201,13 +201,17 @@ void calibration_reset();
 #ifdef ARDUINO_TEENSY41
 // Per-input CV calibration (console 'Q', CvMeter.cpp). Loaded by
 // calibration_load() from its own page (OC_config.h, EEPROM_INPUTCAL_*);
-// valid_mask == 0 on every unit that has not run it. Only the console CV
-// meter reads it -- apps stay on calibration_data.adc.
+// valid_mask == 0 on every unit that has not run it. The apps see it through
+// InputCal (InputCal.h), rebuilt on every load and save; a channel's curve
+// file, when it has one, takes precedence over its line here.
 extern CvMeterMath::InputCalibration input_calibration;
 extern bool input_calibration_loaded;
 // Writes the page (EEPROM, only the bytes that changed). No screen, unlike
 // calibration_save(). Loop context.
 void input_calibration_save();
+// At boot: prints which stored per-input calibration predates the
+// deterministic ADC33131D start (AdcSlotMap.h). Moves nothing.
+void input_map_check();
 #endif
 
 }; // namespace OC

@@ -8,9 +8,9 @@ pitch in cents. Everything is driven from the [bench console](bench-console)
 (unlock with `pew!`); `tools/hwqa/cvmeter.py` does the same from a host and
 logs CSV.
 
-None of this changes how apps read their inputs. The per-input calibration is
-used by the meter only; apps stay on the shared scale and offset they always
-used (see [What apps see](#what-apps-see)).
+Every app reads an input through the same per-input calibration the meter
+uses, once one is stored; an input without one reads exactly as it always did
+(see [What apps see](#what-apps-see)).
 
 ## Commands
 
@@ -64,9 +64,9 @@ CV,123456,7,2,4095.00,3685.50,...,0.0,1000.2,...,CCSSSSSS,H..L...H
 | `ms` | module uptime, milliseconds |
 | `seq` | line counter since the stream started, including dropped lines |
 | `dropped` | lines dropped so far because the host was not reading |
-| `raw1..8` | ADC counts (0-4095, two decimals): the mean of every reading in the 20 ms window, inputs in panel order |
+| `raw1..8` | ADC counts (0-4095, two decimals): the mean of every reading in the 20 ms window, inputs in panel order (column n is panel input n; before the input-map fix of 2026-10-24 some builds read every column one input over, see [Input map fix](Input-Map-Fix)) |
 | `mv1..8` | millivolts, one decimal |
-| `cal` | 8 characters: `C` = this input has its own calibration, `S` = shared scale + offset |
+| `cal` | 8 characters: `C` = this input has its own calibration (its curve file or its `Q` line, the same one the apps use), `S` = shared scale + offset |
 | `clip` | 8 characters: `L` a reading reached raw 0-1, `H` reached 4094-4095, `.` neither. Raw goes **down** as volts go up on this hardware, so `L` is the top of the voltage range and `H` the bottom |
 
 `v` again stops it and prints `CV#,stopped,lines=<n>,dropped=<n>`.
@@ -93,8 +93,8 @@ INCAL,RESULT,in=<i>,out=<o>,gain_uv=<uV/count>,offset_mv=<mV>,resid_mv=<mV>,nois
 INCAL,SAVED,in=<i>          INCAL,DISCARDED,in=<i>
 INCAL,ABORT,in=<i>,<why>    INCAL,ERR,...     INCAL,DONE     (end of Qa)
 INCAL#,version=1,mask=<hex>,stored=<yes|no>,scale=<pitch scale>,octave_mv=<1000|1200>
-INCAL,CH,<i>,C,gain_uv=..,offset_mv=..,verify_mv=..,src=<o>,range=<lo>..<hi>
-INCAL,CH,<i>,S,adc_offset=..,range=<lo>..<hi>
+INCAL,CH,<i>,C,gain_uv=..,offset_mv=..,verify_mv=..,src=<o>,range=<lo>..<hi>,apps=<curve|line|shared>
+INCAL,CH,<i>,S,adc_offset=..,range=<lo>..<hi>,apps=<curve|line|shared>
 ```
 
 Lines that start with two spaces are prose for a person and can be ignored by
@@ -153,8 +153,12 @@ A fit is stored only if every check passes:
 | `MONOTONIC` | the verification reading does not lie between the two fit readings |
 | `RESIDUAL` | the line misses the verification point by more than **10 mV** |
 
-`Qp` prints what is stored; `Qc` twice clears it (inputs go back to the
-shared scale and offset).
+`Qp` prints what is stored, and in `apps=` what the apps use for each input;
+`Qc` twice clears the `Q` lines. An input that also has a Cal Routine curve
+keeps using its curve: the curve takes precedence over the line, and `Qc`
+does not touch the curve files. Storing a new `Q` line (`y` at the commit
+prompt) does: that input's curve is dropped from the curve file, so the new
+line is what the apps use (a `note:` line says so).
 
 ### Where it is stored
 
@@ -170,13 +174,48 @@ EEPROM). A page from a newer layout, or a stored gain that fails the sanity
 window, is ignored rather than trusted. The explicit EEPROM erase in the
 factory reset leaves it alone, as it leaves the DAC/ADC page alone.
 
+Every page holding per-input data -- the DAC/ADC page's 0 V offsets, this
+page and the curve files -- records in a reserved byte whether it was
+measured with the [input-map fix](Input-Map-Fix). Nothing is moved because
+of it; at boot the console prints a line naming any calibration stored
+before the fix, which should be run again.
+
 ## What apps see
 
-Nothing new. Apps read `OC::ADC::value()` and the pitch from the shared scale
-in the ADC interrupt, and that path is unchanged: the per-input calibration
-feeds the console meter only. Switching apps over would change every app's
-pitch response at once, from an ISR, on the strength of a calibration taken
-against the DAC rather than a meter; that wants its own bench check first.
+The per-input calibration, in every app, from the moment it is stored.
+
+- **Which calibration.** Per input: its Cal Routine curve (17 points, in
+  `ICURVE_A.BIN` / `ICURVE_B.BIN`) when the file is valid and holds one for
+  that input; else its `Q` line (`ICA1`); else the shared scale and offset
+  from Setup / Calibrate, exactly as before. Anything out of range in either
+  store (a curve that is not strictly falling, a line outside the sanity
+  window, a table that would overflow) is ignored for that input rather than
+  trusted. `Qp` shows the choice per input (`apps=`).
+- **Where it applies.** `IO::Read` in the core ISR, which fills every app's
+  `cv.values` and `cv.pitch_values`, and `OC::ADC::calibrated_value()` /
+  `calibrated_pitch()`, the one accessor for the apps that read the ADC
+  directly (QQ and DQ's CV bars, ASR's slew CV, Sequins' 10 V input map,
+  Passencore's chord CVs, the Sampler's gate and rate CV, Scope's CV trace
+  and the counts it prints, H1200's debug view).
+  The console meter (`v`, `Qp` ranges) uses the same tables. Both values the
+  apps get move together, so a voltage an app shows is the calibrated one.
+- **How.** At load and after every save the calibration is turned into one
+  17-point integer table per input in DTCM (`InputCal.h`), and the ISR
+  interpolates it: integers only, a shift, two multiplies and a few adds per
+  calibrated input per tick. A calibrated input's pitch uses the nominal
+  1536 pitch units per 1.2 V on true volts, in place of the shared
+  `pitch_cv_scale`.
+- **Unchanged.** An input with no calibration runs the stock code
+  (`ADC::value()`, `value_to_pitch()`) with the same arithmetic; a unit with
+  nothing stored behaves exactly as before. The random seed at boot,
+  Setup / Calibrate's own screens and the debug screens stay on the raw
+  reading.
+- **Gates from CV inputs** (Quadrants and every applet, via
+  `pitch_values > GATE_THRESHOLD`, about 1.5 V) switch at a true 1.5 V on a
+  calibrated input instead of the shared estimate of it. The comparator has
+  no hysteresis to stay within; the threshold moves by the calibration
+  correction at 1.5 V, a few mV to a few tens of mV on a real unit (the
+  15 % gain acceptance bounds it near 0.2 V), against gate swings of 5-10 V.
 
 ## The frequency counter
 
@@ -207,27 +246,42 @@ Two ADC paths exist. On every Xenomorpher it is the external 8-channel
 ADC33131D, chosen at boot from the hardware ID (`OC_gpio.cpp:176`).
 
 **ADC33131D path (Xenomorpher).** Each sample is a signed 16-bit reading
-(`OC_ADC.cpp:36`); negative sums are clamped to 0 (`OC_ADC.cpp:448`), doubled
-(`:457`) and cut to 12 bits before smoothing (`OC_ADC.h:128`). So every input
-is a 0-4095 window and **no reading can go past either end**. On Northern
-Light hardware 0 V is set at the top of that window, raw 4095
-(`OC_calibration.h:19`, used at `OC_calibration.cpp:106`): volts rise as
-raw falls. The default scale is 409.6 counts per pitch octave
-(`OC_ADC.h:42` with `value_to_pitch`, `OC_ADC.h:110`), and on this hardware
-an octave is 1.2 V (the calibration screens, `apps/SETTINGS.h:375` and
-`:409`; `gfxPrintVoltage`, `HSUtils.cpp:806`). That makes the firmware's
-model of an uncalibrated unit **0 V to 12.0 V at 2.93 mV per count**, and a
-Buchla 0-10 V CV lands no lower than raw ~682: by that model **the top of
-0-10 V does not clip**, with about 2 V to spare.
+(`OC_ADC.cpp:37`); negative sums are clamped to 0 (`OC_ADC.cpp:531`), doubled
+(`:542`) and cut to 12 bits before smoothing (`OC_ADC.h:157`). Which reading
+in a frame belongs to which panel input is `AdcSlotForPanelInput`
+(`AdcSlotMap.h`), fixed by the order `ADC33131D_Start()` brings the capture up in. So every input
+is a 0-4095 window and **no reading can go past either end**. Volts rise as
+raw falls. The firmware's default model puts 0 V at the top of the window,
+raw 4095 (`OC_calibration.h:19`, used at `OC_calibration.cpp:106`), with
+409.6 counts per 1.2 V octave (`OC_ADC.h:43` with `value_to_pitch`,
+`OC_ADC.h:114`; the calibration screens, `apps/SETTINGS.h:375` and `:409`):
+0 V to 12.0 V at 2.93 mV per count. **That model is not where the hardware
+puts the ends.**
 
-The bottom has no margin at all: 0 V is the rail. Anything below 0 V reads
-0 V, and a unit's stored 0 V offset can itself be rail-limited (an offset of
-exactly 4095 means "at or beyond the end of the window").
+**What the front end really does** (Xenomorphicle main, schematic notes in
+`hardware/xenomorpher/README.md`; bench-confirmed 2026-10-24). Each input is
+jack -> 100 ohm -> TL074 buffer -> per-input gain trimmer -> inverting MCP604
+stage (-44k9/100k, offset from the -5 V reference rail) -> MCP33131D at a
+5.0 V reference: Vadc = 4.50 V - 0.449 x k x Vin, with the gain trimmer at
+k ~ 0.945.
 
-What the firmware cannot tell you is where the analog front end really puts
-those ends: the divider in front of the ADC33131D is not in the code, and
-the model above is only as good as each unit's stored offset and scale
-(which the existing calibration takes from CV1 alone). The stream's
+- **0 V is not the rail.** 0 V reads raw ~3635-3685 on every input (the
+  schematic predicts ~3685; the bench saw ~3635). There are about 400 counts
+  of headroom below 0 V.
+- **The span is about -1.35 V to +10.65 V.** That is `CVRANGE`'s figure on
+  input 1, computed with the stored nominal scale (≈ 2.93 mV per count). The
+  slope measured on the bench unit was ≈ **2.75 mV per count**, so the true
+  span in volts is somewhat narrower than that figure.
+- **The top is set by the MCP604's rail**, not by the ADC: the op-amp output
+  runs into ground near 10.6-10.8 V at the jack. Where exactly depends on
+  that input's gain trim (k), so each input tops out at a slightly
+  different voltage. A Buchla 0-10 V CV fits, with only ~0.6 V to spare.
+
+So a stored offset of exactly 4095 means "at or beyond the end of the window"
+only in the sense of the firmware's model; on this hardware a sound unit's
+0 V offset sits near 3640. The model is only as good as each unit's stored
+offset and scale (which Setup's calibration takes from CV1 alone); Cal
+Routine's Inputs routine measures each input's own curve over its own span. The stream's
 `CVRANGE` lines print each input's actual readable range from the
 calibration in effect, and the `clip` flags show a rail being hit. **Bench
 check before relying on the top of the range:** hold an output at 10 V
@@ -235,7 +289,7 @@ check before relying on the top of the range:** hold an output at 10 V
 raw 0 and the `clip` flag stays `.`.
 
 **Internal ADC path (other hardware IDs only).** The Teensy's ADC2 in 12-bit
-mode with 4-sample hardware averaging (`OC_ADC.cpp:213`, `:223`), 0 V at
+mode with 4-sample hardware averaging (`OC_ADC.cpp:225`, `:235`), 0 V at
 2/3 of the window (`OC_calibration.h:20`). With 1 V octaves that is about
 -3.3 V to +6.7 V: a 10 V CV clips at about 6.7 V. Not used on a Xenomorpher.
 

@@ -259,7 +259,10 @@ FLASHMEM void AppScope::Render() const {
   if (!frozen_) {
     switch (kind) {
       case KIND_CV_IN:
-        last_raw_ = OC::ADC::value(ScopeAppNS::AdcChannelForSub(sub));
+        // Calibrated where the input has a per-input calibration
+        // (InputCal.h): the trace and the value counts it prints are the
+        // calibrated counts (true volts, 409.6 counts per octave).
+        last_raw_ = OC::ADC::calibrated_value(ScopeAppNS::AdcChannelForSub(sub));
         cv_ring_[cv_head_] = (int16_t)last_raw_;
         cv_head_ = (uint8_t)((cv_head_ + 1) % kRingSize);
         break;
@@ -367,7 +370,7 @@ FLASHMEM void AppScope::HandleEncoderEvent(const UI::Event &event) {
 }
 
 FLASHMEM void AppScope::GetIOConfig(OC::IOConfig &) const {
-  // Scope only ever reads OC::ADC::value()/OC::DAC::value() directly; it
+  // Scope only ever reads OC::ADC::calibrated_value()/OC::DAC::value() directly; it
   // does not route or drive anything through the panel I/O config.
 }
 

@@ -2,6 +2,7 @@
 #include "OC_gpio.h"
 #include "OC_io.h"
 #include "DMAChannel.h"
+#include "AdcSlotMap.h"
 #include <algorithm>
 
 ADC_CHANNEL ADC_CHANNEL_1=0, ADC_CHANNEL_2=1, ADC_CHANNEL_3=2, ADC_CHANNEL_4=3;
@@ -138,6 +139,18 @@ FLASHMEM
 static void Init_Teensy4_builtin_ADC();
 #if defined(ARDUINO_TEENSY41)
 FLASHMEM static void Init_Teensy41_ADC33131D_chip();  // boot only
+// Not static: FLASHMEM needs external linkage (externally_visible).
+FLASHMEM void ADC33131D_Start();  // boot, and re-alignment after an overrun
+// ADC33131D FlexIO2 pins (shared by the chip init and ADC33131D_Start)
+static constexpr int a2_flexio_pin =  12;  // Arduino pin 32, B0_12, Flexio2 pin 12
+static constexpr int a1_flexio_pin =  10;  // Arduino pin  6, B0_10, Flexio2 pin 10
+static constexpr int a0_flexio_pin =  17;  // Arduino pin  7, B1_01, Flexio2 pin 17
+static constexpr int cs_flexio_pin =  11;  // Arduino pin  9, B0_11, Flexio2 pin 11
+static constexpr int data_flexio_pin = 1;  // Arduino pin 12, B0_01, Flexio2 pin  1
+static constexpr int sck_flexio_pin = 16;  // Arduino pin  8, B1_00, Flexio2 pin 16
+// Scan_DMA's frame cursor; ADC33131D_Start() puts it back with the DMA.
+static uint32_t adc33131_old_poffset = 0;
+static volatile uint32_t adc33131_realigns = 0;
 #endif
 
 FLASHMEM
@@ -272,19 +285,10 @@ static void Init_Teensy4_builtin_ADC() {
 
 #if defined(ARDUINO_TEENSY41)
 FLASHMEM static void Init_Teensy41_ADC33131D_chip() {
-  // configure a timer to trigger FlexIO
-  const int comp1 = ((float)F_BUS_ACTUAL) / (ADC33131_SAMPLE_RATE) / 2.0f + 0.5f;
+  // The trigger timer (QTimer4.3) is configured and started by
+  // ADC33131D_Start(), last, once FlexIO and the DMA are armed. Stop it
+  // here so nothing reaches FlexIO while the clocks and pins are set up.
   TMR4_ENBL &= ~(1<<3);
-  TMR4_SCTRL3 = TMR_SCTRL_OEN | TMR_SCTRL_FORCE;
-  TMR4_CSCTRL3 = TMR_CSCTRL_CL1(1) | TMR_CSCTRL_TCF1EN;
-  TMR4_CNTR3 = 0;
-  TMR4_LOAD3 = 0;
-  TMR4_COMP13 = comp1;
-  TMR4_CMPLD13 = comp1;
-  TMR4_CTRL3 = TMR_CTRL_CM(1) | TMR_CTRL_PCS(8) | TMR_CTRL_LENGTH | TMR_CTRL_OUTMODE(3);
-  TMR4_DMA3 = TMR_DMA_CMPLD1DE;
-  TMR4_CNTR3 = 0;
-  TMR4_ENBL |= (1<<3);
 
   // connect the timer output the FlexIO2 EXT input 0
   CCM_CCGR2 |= CCM_CCGR2_XBAR1(CCM_CCGR_ON);
@@ -298,12 +302,6 @@ FLASHMEM static void Init_Teensy41_ADC33131D_chip() {
   CCM_CCGR3 |= CCM_CCGR3_FLEXIO2(CCM_CCGR_ON);
 
   // take control of pins
-  const int a2_flexio_pin =  12;  // Arduino pin 32, B0_12, Flexio2 pin 12
-  const int a1_flexio_pin =  10;  // Arduino pin  6, B0_10, Flexio2 pin 10
-  const int a0_flexio_pin =  17;  // Arduino pin  7, B1_01, Flexio2 pin 17
-  const int cs_flexio_pin =  11;  // Arduino pin  9, B0_11, Flexio2 pin 11
-  const int data_flexio_pin = 1;  // Arduino pin 12, B0_01, Flexio2 pin  1
-  const int sck_flexio_pin = 16;  // Arduino pin  8, B1_00, Flexio2 pin 16
   IOMUXC_SW_MUX_CTL_PAD_GPIO_B0_12 = 4; // page 516
   IOMUXC_SW_MUX_CTL_PAD_GPIO_B0_10 = 4; // page 514
   IOMUXC_SW_MUX_CTL_PAD_GPIO_B1_01 = 4; // page 521
@@ -312,13 +310,60 @@ FLASHMEM static void Init_Teensy41_ADC33131D_chip() {
   IOMUXC_SW_PAD_CTL_PAD_GPIO_B0_01 = 0x100C0;
   IOMUXC_SW_MUX_CTL_PAD_GPIO_B1_00 = 4; // page 520
 
-  // configure FlexIO timers
+  dma0.begin();
+  ADC33131D_Start();
+}
+
+// FlexIO, DMA and trigger, started so that which frame slot holds which mux
+// address is the same on every boot of every build (AdcSlotMap.h).
+//
+// Why this is needed. The QTimer trigger clocks two things on opposite
+// edges: the mux shifters step the address on each RISING edge (mux_timer,
+// trigger active high), and the SPI read starts on each FALLING edge
+// (baud_timer, trigger active low, CS chained to it). The old init started
+// the trigger first and enabled FlexIO some microseconds later, after the
+// clock, pin, FlexIO and DMA setup had run from flash. Whether the trigger
+// was high or low at FLEXEN therefore depended on how long that code took:
+// fixed for one image, different for another. With it low, the first edge
+// is rising and the mux steps before the first read; with it high, the first
+// read comes before any step. Every reading after that is one mux address
+// apart between the two, and the bench saw exactly that: panel n in slot
+// (n+5)&7 on image 88d35b7d and (n+4)&7 on 5ebcde9f, with only the slot
+// table changed between them (2026-10-24).
+//
+// What this does instead. FlexIO is enabled with the trigger stopped and
+// held low, so neither timer can see an edge, and an already-asserted
+// trigger cannot pass for one: low reads as "not asserted" to the
+// active-high mux timer. The baud timer may or may not take an
+// already-asserted active-low trigger as a start, depending on FlexIO's edge
+// detector, so any reading it makes then is discarded before the DMA is
+// armed. Only then does the trigger start, and its first edge is rising.
+// Readings and mux steps are counted from the same first edge on every
+// build, whatever the init code's timing. test/test_adc_slot_map.cpp checks
+// this against the bench pair under each FlexIO edge-detection model the
+// pair allows.
+//
+// Also the re-alignment after a data overrun (Scan_DMA): FLASHMEM, about 3 us
+// of busy-wait, from the core ISR on that rare path.
+FLASHMEM void ADC33131D_Start() {
   IMXRT_FLEXIO_t *flexio = (IMXRT_FLEXIO_t *)IMXRT_FLEXIO2_ADDRESS;
-  // disable and reset, in case of re-init
+  // 1. Stop everything. FlexIO first, so that forcing the trigger low below
+  //    is not an edge it acts on. Then the trigger timer, from whatever state
+  //    it is in (at boot it was never started; on a re-align its OFLAG can be
+  //    high mid-cycle): disable the channel AND clear CTRL (count mode 0),
+  //    because FORCE is only reliable with the counter disabled, then force
+  //    OFLAG to VAL = 0. Every timer register is rewritten below, so the
+  //    result does not depend on what was there before.
   flexio->CTRL &= ~FLEXIO_CTRL_FLEXEN;
+  TMR4_ENBL &= ~(1<<3);
+  TMR4_CTRL3 = 0;
+  TMR4_SCTRL3 = TMR_SCTRL_OEN | TMR_SCTRL_FORCE;   // OFLAG = VAL = 0: trigger low
+  dma0.disable();
   flexio->CTRL |= FLEXIO_CTRL_SWRST;
   flexio->CTRL &= ~FLEXIO_CTRL_SWRST;
 
+  // 2. Configure FlexIO (disabled).
+  // configure FlexIO timers
   const int baud_timer = 0;
   const int cs_timer = 1;
   const int mux_timer = 2;
@@ -382,8 +427,8 @@ FLASHMEM static void Init_Teensy41_ADC33131D_chip() {
     FLEXIO_SHIFTCTL_PINSEL(data_flexio_pin);
   flexio->SHIFTSDEN |= (1 << data_shifter);
 
-  // use a DMA channel to capture FlexIO output
-  dma0.begin();
+  // 3. DMA: one 16-bit reading per request, wrapping at the end of the
+  //    buffer (a whole number of 8-reading frames). Configured, not armed.
   dma0.TCD->SADDR = &(flexio->SHIFTBUFBIS[data_shifter]);
   dma0.TCD->SOFF = 0;
   dma0.TCD->ATTR = DMA_TCD_ATTR_SSIZE(1) | DMA_TCD_ATTR_DSIZE(1);
@@ -396,14 +441,53 @@ FLASHMEM static void Init_Teensy41_ADC33131D_chip() {
   dma0.TCD->BITER_ELINKNO = sizeof(adc_buffer) / 2;
   dma0.TCD->CSR = 0;
   dma0.triggerAtHardwareEvent(DMAMUX_SOURCE_FLEXIO2_REQUEST0); // request # of data_shifter
-  dma0.enable();
 
-  // start FlexIO running
+  // 4. Enable FlexIO with the trigger stopped and low.
   flexio->SHIFTSTAT = 0xFF;
   flexio->SHIFTERR = 0xFF;
   flexio->TIMSTAT = 0xFF;
+#ifdef OC_ADC_INIT_SKEW_NS
+  // Bench knob: build with -DOC_ADC_INIT_SKEW_NS=<ns> to move FLEXEN in time
+  // the way a different image's init timing did. With the trigger stopped it
+  // must change nothing (try 0, 1700 and 3300: half and one trigger period).
+  delayNanoseconds(OC_ADC_INIT_SKEW_NS);
+#endif
   flexio->CTRL = FLEXIO_CTRL_FLEXEN;
+
+  // 5. A read started by FLEXEN itself, if FlexIO's edge detector made one,
+  //    is 16 bits at 15 MHz (~1.1 us). Let it finish and throw it away, so
+  //    the DMA's first reading is always the first falling edge's.
+  delayNanoseconds(3000);
+  (void)flexio->SHIFTBUFBIS[data_shifter];
+  flexio->SHIFTERR = 0xFF;
+
+  // 6. Arm the DMA at the start of the buffer, then configure the trigger in
+  //    full and start it. Its first edge is rising (out of the forced low):
+  //    the counter starts from 0 and toggles OFLAG at the first compare.
+  adc33131_old_poffset = 0;
+  dma0.enable();
+  const int comp1 = ((float)F_BUS_ACTUAL) / (ADC33131_SAMPLE_RATE) / 2.0f + 0.5f;
+  TMR4_CSCTRL3 = TMR_CSCTRL_CL1(1) | TMR_CSCTRL_TCF1EN;
+  TMR4_LOAD3 = 0;
+  TMR4_COMP13 = comp1;
+  TMR4_CMPLD13 = comp1;
+  TMR4_DMA3 = TMR_DMA_CMPLD1DE;
+  TMR4_CNTR3 = 0;
+  TMR4_CTRL3 = TMR_CTRL_CM(1) | TMR_CTRL_PCS(8) | TMR_CTRL_LENGTH | TMR_CTRL_OUTMODE(3);
+  TMR4_ENBL |= (1<<3);
 }
+
+/*static*/ FLASHMEM void ADC::Realign() {
+  if (!ADC33131D_Uses_FlexIO) return;
+  // Not concurrently with Scan_DMA (core ISR), which reads the DMA cursor
+  // and may itself restart the capture.
+  __disable_irq();
+  ++adc33131_realigns;
+  ADC33131D_Start();
+  __enable_irq();
+}
+
+/*static*/ FLASHMEM uint32_t ADC::realign_count() { return adc33131_realigns; }
 #endif // ARDUINO_TEENSY41
 
 #endif // __IMXRT1062__
@@ -423,9 +507,23 @@ FLASHMEM static void Init_Teensy41_ADC33131D_chip() {
 
   #if defined(ARDUINO_TEENSY41)
   if (ADC33131D_Uses_FlexIO) {
+    // A data overrun means a reading was lost (the DMA did not empty the
+    // shifter within one trigger period), and every later reading would sit
+    // one slot over. It is the only way the alignment can change after
+    // ADC33131D_Start(): the DMA and the mux are both clocked by the trigger,
+    // and a reading cannot go missing without the next one overrunning it.
+    // Restart from the known state; this pass's frames are discarded.
+    // Bit 0 only: the data shifter. The mux shifters' bits are set every 32
+    // steps by design (their SHIFTBUF is never refilled; it repeats).
+    IMXRT_FLEXIO_t *flexio = (IMXRT_FLEXIO_t *)IMXRT_FLEXIO2_ADDRESS;
+    if (flexio->SHIFTERR & 1) {
+      ++adc33131_realigns;
+      ADC33131D_Start();
+      return;
+    }
     // FlexIO DMA separately deposits each 16 bit reading into memory, so we
     // first need to figure out how many full 8 reading frames we have (if any).
-    static uint32_t old_poffset = 0;
+    uint32_t &old_poffset = adc33131_old_poffset;
     uint32_t poffset = ((uint32_t)p - (uint32_t)adc_buffer) & 0xFFF0;
     size_t count = ((poffset - old_poffset) % sizeof(adc_buffer)) / sizeof(adc33131_frame_t);
     if (count > 0) {
@@ -454,15 +552,17 @@ FLASHMEM static void Init_Teensy41_ADC33131D_chip() {
       for (size_t j=0; j < 8; j++) Serial.printf("%4x  ", sum[j] / count);
       Serial.println();
       #endif
+      // Which slot carries which panel input: AdcSlotMap.h. Fixed because
+      // ADC33131D_Start() counts readings and mux steps from the same edge.
       const int mult = 2;
-      update<ADC_CHANNEL_5>(sum[0] * mult / count);
-      update<ADC_CHANNEL_6>(sum[1] * mult / count);
-      update<ADC_CHANNEL_7>(sum[2] * mult / count);
-      update<ADC_CHANNEL_8>(sum[3] * mult / count);
-      update<ADC_CHANNEL_1>(sum[4] * mult / count);
-      update<ADC_CHANNEL_2>(sum[5] * mult / count);
-      update<ADC_CHANNEL_3>(sum[6] * mult / count);
-      update<ADC_CHANNEL_4>(sum[7] * mult / count);
+      update<ADC_CHANNEL_1>(sum[AdcSlotForPanelInput(0)] * mult / count);
+      update<ADC_CHANNEL_2>(sum[AdcSlotForPanelInput(1)] * mult / count);
+      update<ADC_CHANNEL_3>(sum[AdcSlotForPanelInput(2)] * mult / count);
+      update<ADC_CHANNEL_4>(sum[AdcSlotForPanelInput(3)] * mult / count);
+      update<ADC_CHANNEL_5>(sum[AdcSlotForPanelInput(4)] * mult / count);
+      update<ADC_CHANNEL_6>(sum[AdcSlotForPanelInput(5)] * mult / count);
+      update<ADC_CHANNEL_7>(sum[AdcSlotForPanelInput(6)] * mult / count);
+      update<ADC_CHANNEL_8>(sum[AdcSlotForPanelInput(7)] * mult / count);
       old_poffset = (old_poffset + count * sizeof(adc33131_frame_t)) % sizeof(adc_buffer);
     }
     return;

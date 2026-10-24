@@ -15,6 +15,7 @@ Not everything can fit at once on Teensy 3.2 hardware, but you can use the [defa
  * [Acid Curds](Acid-Curds) - Quad 8-step chord progression sequencer
  * [Automatonnetz](Automatonnetz) - Neo-Riemannian transformations on a 5x5 matrix sequence!
  * [Calibr8or](Calibr8or) - Quad performance quantizer with pitch tracking calibration
+ * [Cal Routine](Cal-Routine) - Calibrate outputs and inputs against a USB bench meter
  * [Captain MIDI](Captain-MIDI) - Configurable CV-to-MIDI and MIDI-to-CV interface
  * [CopierMaschine](CopierMaschine) - Quantizing Analogue Shift Register
  * [The Darkest Timeline](The-Darkest-Timeline) - Parallel universe sequencer

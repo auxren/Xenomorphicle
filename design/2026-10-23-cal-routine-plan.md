@@ -113,7 +113,7 @@
   - `float LocalSlope(const uint16_t table[kNodes], const double measured_mv[kNodes], int k);` gives codes per mV from neighbouring measured nodes, or the nominal value when not enough nodes are known.
   - `enum TableVerdict { TABLE_OK, TABLE_NOT_MONOTONE, TABLE_SLOPE };`
   - `TableVerdict CheckTable(const uint16_t table[kNodes]);` requires codes strictly increasing and each step's codes per 1200 mV within ±15 % of nominal.
-  - `int SweepPoints(int32_t out_mv[], int cap);` returns the verify-sweep targets: 4 points between each pair of nodes, 0–12000 mV, nodes excluded, in ascending order.
+  - `int SweepPoints(int32_t out_mv[], int cap);` returns the verify-sweep targets: 4 points between each pair of nodes, 0–12000 mV, nodes excluded, in ascending order. (Halved in Task 10: 2 points, at k·1200 + 400 and + 800 mV, 20 in all.)
   - `struct InputSweepPoint { int32_t mv; CvMeterMath::PointStats stats; };`
   - `CvMeterMath::Verdict BuildInputCurve(const InputSweepPoint *pts, int n, int16_t mv_x2_out[kCurvePoints], CvMeterMath::Fit *line, float *worst_dev_mv, float *holdout_mv);` resamples the points onto raw 0, 256, …, 4096 (true mV × 2, linear between measured points, linear extrapolation at the ends). Even-indexed points build the curve and odd-indexed points give `holdout_mv`. It also returns the least-squares `line`, and checks RAIL, NOISY, FLAT, SIGN, GAIN (on the line) and MONOTONIC (raw strictly monotone, mV increasing).
   - `void CurveToValueTable(const int16_t mv_x2[kCurvePoints], int32_t value_q8_out[kCurvePoints]);` gives value counts × 256 at each breakpoint (`mV × 4096 / 12000 × 256`).
@@ -125,7 +125,7 @@
   - `node_converges_bowed`: a DAC with a smooth bow of 4 mV peak at mid-scale converges at every node. The sweep residual between nodes is computed and reported, not hidden.
   - `rail_entry_flagged_not_clipped`: a DAC that tops out at 11 900 mV leaves entry 10 at 65535 with `at_rail` set, and `CheckTable` still returns `TABLE_OK` with entries monotone.
   - `table_checks`: a non-monotone table gives `TABLE_NOT_MONOTONE`, and a step 30 % off nominal gives `TABLE_SLOPE`.
-  - `sweep_points`: 40 points, ascending, none equal to a node, all within 0…12000.
+  - `sweep_points`: 40 points, ascending, none equal to a node, all within 0…12000. (Task 10: 20 points, the values above.)
   - `summarize`: the median of {1,9,2,3,2} is 2 with spread 8; `ReadingTrusted` is false for spread 0.6 and true for 0.3.
   - `input_curve_linear`: a linear input gives a curve within 0.5 mV of the line everywhere and `holdout_mv ≤ 0.5`.
   - `input_curve_bent`: a 6 mV S-bend input gives curve error ≤ 1 mV at the held-out points, while the line's worst deviation is ≥ 5 mV.
@@ -200,6 +200,37 @@
 - [ ] **Step 3: Implement** `InputCal` and the `IO::Read` change. Move each direct reader that treats the reading as a voltage or pitch onto `ADC::calibrated_value`/`calibrated_pitch`. Leave the random seed (`Main.cpp:617`) and Sampler's sample stream raw, and add a comment in each saying why. Gates from `pitch_values` (`HSIOFrame.cpp:775`): confirm in the commit body that the shift is within the gate hysteresis.
 - [ ] **Step 4: Run** `./run-host-tests.sh && SAN=1 ./run-host-tests.sh` and build all 4 envs. **Bench (Oren):** on `T41_console`, with a heavy app (Quadrants with applets) and all 8 inputs calibrated, the core ISR max is ≤ 40 µs with 0 missed ticks (`docs/Timing-Budget.md` method). Record the before and after figures.
 - [ ] **Step 5: Commit** `inputs: per-input calibration curves applied for every app (IO::Read + shared accessor)`.
+
+### Task 5a: Input channel rotation fix (bench finding, 2026-10-24)
+
+**Background (bench, 2026-10-24).** On the Xenomorpher, a CV into **panel input n** arrives at firmware `ADC_CHANNEL_n+1`. Panel 8 arrives at channel 1. The `v` stream shows it, and so do apps: Oren saw a CV into panel 3 show up as CV4 in Quadrants. It is stable across three reboots. The outputs are correct. The slot table at `software/src/OC_ADC.cpp:~451-458` (`update<ADC_CHANNEL_5>(sum[0]) … update<ADC_CHANNEL_4>(sum[7])`) assigns each frame slot to the channel one past the jack it carries.
+
+**Files:**
+- Modify: `software/src/OC_ADC.cpp` (the slot→channel map, on the ADC33131D/FlexIO path only), with a migration hook at load (`software/src/OC_calibration.cpp`)
+- Create: `software/src/AdcSlotMap.h/.cpp` (pure map plus migration helpers)
+- Modify: `software/src/apps/Backup.h` (restoring a pre-fix dump)
+- Test: `software/test/test_adc_slot_map.cpp`, `run-host-tests.sh`
+
+**Interfaces:**
+- Produces:
+  - `int AdcSlotForPanelInput(int panel /*0-7*/)`: the frame slot that carries panel input n.
+  - `void RotateLegacyInputData(uint16_t offset[8], CvMeterMath::InputCalibration &ica, InputCurveRecord *curves /*nullable*/)`: moves legacy per-channel entries so that index n describes panel input n. It rotates arrays and `valid_mask` bits; `source_output` values are output labels and stay as they are.
+  - EEPROM marker `[4144,4148)` = `'A','M',1,0` ("input map v1"), written once the migration has run.
+
+- [ ] **Step 1: Root cause.**
+  - Using the ADC33131D datasheet and the FlexIO/DMA setup (`OC_ADC.cpp` FlexIO init), establish why the frame is rotated by one reading, for example one-conversion pipeline latency or the first-reading phase.
+  - Record the finding in a comment at the map.
+  - If the root cause is per-boot phase rather than fixed latency, stop and report.
+- [ ] **Step 2: Write failing tests:**
+  - `map_matches_bench` (panel n → slot per the bench observation, for all 8).
+  - `rotate_moves_each_entry_one_place`.
+  - `rotate_moves_mask_bits`.
+  - `rotate_idempotent_guarded` (the migration runs only when the marker is absent).
+  - `fresh_unit_no_rotation_needed` (a unit with no stored per-input data writes the marker and changes nothing).
+  - `prefix_backup_restore_rotated` (calibration bytes restored from a dump without the marker are rotated).
+- [ ] **Step 3: Implement** the map fix (FlexIO path only). On the first boot after the fix, when the marker is absent, rotate `calibration_data.adc.offset[]`, the `ICA1` page and both curve files, then write the marker. Save each page through its normal save path, curves last. Backup: a restore of the calibration region from a dump that predates the fix is rotated before it is applied. The dump carries no map marker, so a new dump must add one; old dumps are treated as legacy.
+- [ ] **Step 4: Run** host tests normally and with SAN, and build all 4 envs. **Bench (Oren):** for every panel input 1–8, holding output 1 at 8.4 V into it shows on `v` column n and as CVn in Quadrants. Input 2's existing `Q` fit (made on panel 1) now reports as input 1.
+- [ ] **Step 5: Commit** `inputs: fix the one-slot input channel rotation on the ADC33131D path; migrate stored per-input data once`.
 
 ### Task 6: The calibration flow engine (pure, injectable)
 
@@ -292,3 +323,23 @@ Behaviour:
 - [ ] **Step 3: Implement** the parser and the simulated meter, then write the docs. The operator page covers what you need (a USBTMC meter on the host jack), the steps, what the results mean (1 mV = 1 cent), and what Setup / Calibrate does to a Cal Routine calibration. The checklist carries the design's gates 1–6, word for word.
 - [ ] **Step 4: Run** `python3 tools/hwqa/test_cvmeter.py` and `./run-host-tests.sh`. Expected: pass.
 - [ ] **Step 5: Commit** `docs+hwqa: Cal Routine operator page, bench checklist, CALR parser and simulated meter`.
+
+---
+
+## Addendum 2026-10-24: Tasks 9–10 (design §9)
+
+### Task 9: Meter measurement rule at NPLC 10
+**Files:** `software/src/CalRoutineFlow.{h,cpp}`, `software/test/test_calroutine_flow.cpp`, `software/test/fixtures/calr_lines.txt`, `tools/hwqa/cvmeter.py` (fixture parity), docs run-time text.
+- kMeterSetup = `*CLS`, `CONF:VOLT:DC 20`, `VOLT:DC:NPLC 10`, `VOLT:DC:AZ ON`, `TRIG:SOUR IMM`, `SYST:ERR?`; drop the per-output `AZ ONCE` re-zero (keep a per-output `SYST:ERR?` only if still meaningful, else remove with its test).
+- Measurement: settle 150 ms → one throwaway `READ?` (logged, not used) → `kReadings = 3` → median/spread/trust as now; re-read set once, then NOISY.
+- Node final value: after the iteration settles on a code, take `kFinalReadings = 10` (same throwaway first) and report/store that median as the node's measured value.
+- FakeMeter models the bench: a reading in progress at a code change returns the mid value; NPLC < 10 is not modelled as valid. Tests: `throwaway_after_code_change` (a straddling reading never reaches the median), `node_final_uses_10_readings`, run-time model updated (≈25 min target; report the modelled figure).
+
+### Task 10: Separate Outputs / Inputs / Self routines; Inputs all-8 at once (1→1 … 8→8)
+**Files:** `CalRoutineFlow.{h,cpp}` (modes + all-8 input stage), `apps/CalRoutine.h`, `apps/CalRoutinePorts.{h,cpp}` (InputPort reads all 8 in one window; OutputPort holds all 8), `CalRoutineSave` (mode-aware), tests, fixture, docs (`docs/_apps/Cal-Routine.md`, checklist).
+- `enum class Mode { Outputs, Inputs, Self }`; `Begin(..., Mode)`. Results carry which parts are present; `CanSave()` = outputs part all pass (Outputs/Self) / at least one input passed (Inputs).
+- `CalRoutineSave` writes only the present parts, keeping the existing order among them; marker only with outputs.
+- Inputs stage: patch screen "Patch out 1→in 1 … 8→8"; patch check (each output alone high → only its own input moves; else PATCH error naming the jacks); then for each sweep point hold all 8 outputs at the point voltage (each via its own table), one settle+window, record all 8 inputs; per-input BuildInputCurve; span per input = overlap of that output's non-rail span and the input's range.
+- Inputs-only warns when the marker is absent (outputs not Cal Routine-calibrated) — continue/cancel.
+- CALR lines for the new stage/patch check; fixture + hwqa parser parity.
+- Tests: `mode_outputs_saves_only_tables`, `mode_inputs_saves_only_curves`, `inputs_all8_one_sweep` (fake bent inputs per channel, all pass, curve accuracy as today), `patch_check_catches_swap`, `inputs_warn_without_marker`, `self_runs_both`.

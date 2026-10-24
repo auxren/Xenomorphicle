@@ -221,5 +221,160 @@ class Simulated(unittest.TestCase):
         self.assertEqual(rc, 0)
 
 
+CALR_FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "..", "..", "software", "test", "fixtures", "calr_lines.txt")
+
+
+def calr_fixture():
+    with open(CALR_FIXTURE) as f:
+        lines = [l.rstrip("\n") for l in f if l.strip() and not l.startswith("#,") and
+                 (l.startswith("CALR"))]
+    return ([l for l in lines if l.startswith("CALR#")],
+            [l for l in lines if not l.startswith("CALR#")])
+
+
+class ParseCalr(unittest.TestCase):
+    def test_headers_match_field_table(self):
+        heads, _ = calr_fixture()
+        table = {}
+        for h in heads:
+            f = h.split(",")
+            if f[1].startswith("version"):
+                continue
+            table[f[1]] = f[2:]
+        self.assertEqual(table, {k: list(v) for k, v in cvmeter.CALR_FIELDS.items()})
+
+    def test_every_golden_line_parses_to_its_field_count(self):
+        _, lines = calr_fixture()
+        self.assertEqual(len(lines), 24)
+        for l in lines:
+            d = cvmeter.parse_calr(l)
+            self.assertIsNotNone(d, l)
+            self.assertEqual([k for k in d if k != "sub"],
+                             list(cvmeter.CALR_FIELDS[d["sub"]]), l)
+
+    def test_values(self):
+        by = {}
+        _, lines = calr_fixture()
+        for l in lines:
+            d = cvmeter.parse_calr(l)
+            by[d["sub"]] = d
+        self.assertEqual(by["NODE"]["measured_mv"], 8400.094)
+        self.assertEqual(by["MERR"]["step"], "SETUP")
+        self.assertEqual(by["MERR"]["reply"], '-113;"Undefined header"')
+        self.assertEqual(by["NODE"]["code"], 45873)
+        self.assertEqual(by["ORES"]["rail_mask"], 0x400)
+        self.assertEqual(by["ORES"]["result"], "PASS")
+        self.assertEqual(by["IN"]["lo_mv"], 600)
+        self.assertEqual(by["IN"]["hi_mv"], 10800)
+        self.assertEqual(by["IRES"]["gain_uv"], -2930.5)
+        self.assertEqual(by["RESULT"]["out_pass"], 0xFF)
+        self.assertEqual(by["RESULT"]["in_pass"], 0xF7)
+        self.assertEqual(by["RESULT"]["can_save"], 1)
+        self.assertEqual(by["RETRY"]["scpi"], "READ?")
+        self.assertTrue(by["METER"]["identity"].startswith("Siglent"))
+        self.assertEqual(by["FAIL"]["reason"], "METER_TIMEOUT")
+        self.assertEqual(by["MODE"]["mode"], "SELF")
+        self.assertEqual(by["WARN"]["reason"], "NO_MARKER")
+        self.assertEqual(by["PATCH"]["out"], 3)
+        self.assertEqual(by["PATCH"]["moved"], 0x10)
+        self.assertEqual(by["PATCH"]["own_delta_raw"], 3.25)
+        self.assertEqual(by["PRES"]["result"], "FAIL")
+        self.assertEqual(by["PRES"]["crossed"], 0x14)
+        self.assertEqual(by["PRES"]["missing"], 0x08)
+
+    def test_summary_names_patch_faults(self):
+        lines = ["CALR,MODE,INPUTS", "CALR,PATCH,3,10,0.50", "CALR,PATCH,5,04,1.00",
+                 "CALR,PRES,FAIL,14,14"]
+        res = cvmeter.summarize_calr([cvmeter.parse_calr(l) for l in lines])
+        self.assertEqual(res["mode"], "INPUTS")
+        self.assertEqual(res["patch"], {"result": "FAIL", "crossed": 0x14, "missing": 0x14,
+                                        "moved": {3: 0x10, 5: 0x04}})
+
+    def test_rejects_wrong_count_and_other_tags(self):
+        self.assertIsNone(cvmeter.parse_calr("CALR,OUT,3,4"))
+        self.assertIsNone(cvmeter.parse_calr("CALR,NOPE,1"))
+        self.assertIsNone(cvmeter.parse_calr("CALR#,OUT,out"))
+        self.assertIsNone(cvmeter.parse_calr("CV,1,2"))
+        self.assertIsNone(cvmeter.parse_calr("CALR,OUT,x"))
+
+
+class ParseMeter(unittest.TestCase):
+    def test_lines(self):
+        self.assertEqual(cvmeter.parse_meter("METER,DONE,+1.20000E+00"), ("DONE", "+1.20000E+00"))
+        self.assertEqual(cvmeter.parse_meter("METER,DONE,"), ("DONE", ""))
+        self.assertEqual(cvmeter.parse_meter('METER,DONE,+0,"No error"'), ("DONE", '+0,"No error"'))
+        self.assertEqual(cvmeter.parse_meter("METER,REFUSED"), ("REFUSED", None))
+        self.assertEqual(cvmeter.parse_meter("METER,TIMEOUT"), ("TIMEOUT", None))
+        self.assertEqual(cvmeter.parse_meter("METER,ERR,BUSY_CAL"), ("ERR", "BUSY_CAL"))
+        self.assertIsNone(cvmeter.parse_meter("CV,1"))
+        self.assertIsNone(cvmeter.parse_meter("METER,WHAT"))
+
+
+class SimMeterAndCalRoutine(unittest.TestCase):
+    def setUp(self):
+        self.sim = cvmeter.SimModule(seed=3)
+
+    def ask(self, text):
+        self.sim.write((text + "\n").encode())
+        line = self.sim.readline()
+        return cvmeter.parse_meter(line), line
+
+    def test_meter_queries(self):
+        (kind, val), _ = self.ask("e*IDN?")
+        self.assertEqual(kind, "DONE")
+        self.assertIn("SDM3065X", val)
+        self.assertEqual(self.ask("eVOLT:DC:AZ ONCE")[0], ("DONE", ""))
+        self.assertEqual(self.ask("eSYST:ERR?")[0][1], '+0,"No error"')
+        self.assertEqual(self.ask("eRM -RF /")[0], ("REFUSED", None))
+
+    def test_meter_reads_held_output(self):
+        self.sim.write(b"d11200\n")
+        self.sim.readline()
+        self.sim.meter_output = 0
+        kind, val = self.ask("e@200 READ?")[0]
+        self.assertEqual(kind, "DONE")
+        self.assertAlmostEqual(float(val), 1.2, places=3)
+
+    def test_meter_absent_and_timeout(self):
+        self.sim.meter = None
+        self.assertEqual(self.ask("eREAD?")[0], ("ERR", "NOT_CONNECTED"))
+        self.sim.meter = "ok"
+        self.sim.meter_timeouts = 1
+        self.assertEqual(self.ask("e@200 READ?")[0], ("TIMEOUT", None))
+        self.assertEqual(self.ask("eREAD?")[0][0], "DONE")
+
+    def test_end_to_end_run_all_pass(self):
+        self.sim.start_cal_routine()
+        # the console refuses the meter while the routine owns it
+        self.assertEqual(self.ask("eREAD?")[0], ("ERR", "BUSY_CAL"))
+        lines = []
+        while True:
+            l = self.sim.readline()
+            if l is None:
+                break
+            lines.append(l)
+        self.assertEqual(lines[0], "CALR#,version=2")
+        parsed = [cvmeter.parse_calr(l) for l in lines if l.startswith("CALR,")]
+        self.assertTrue(all(p is not None for p in parsed))
+        res = cvmeter.summarize_calr(parsed)
+        self.assertTrue(res["saved"])
+        self.assertEqual(res["out_pass"], 0xFF)
+        self.assertEqual(res["in_pass"], 0xFF)
+        self.assertEqual(len(res["outputs"]), 8)
+        self.assertEqual(len(res["inputs"]), 8)
+        self.assertTrue(all(o["result"] == "PASS" and o["worst_mv"] <= 1.0
+                            for o in res["outputs"].values()))
+        self.assertTrue(all(i["result"] == "PASS" for i in res["inputs"].values()))
+        self.assertEqual(res["mode"], "SELF")
+        self.assertEqual(res["patch"]["result"], "PASS")
+        self.assertEqual(res["patch"]["moved"], {o: 1 << (o - 1) for o in range(1, 9)})
+        sweeps = [p for p in parsed if p["sub"] == "SWEEP"]
+        self.assertEqual(len(sweeps), 8 * 20)                  # 2 verify points per node gap
+        ins = [p for p in parsed if p["sub"] == "IN"]
+        self.assertEqual([(p["in"], p["src_out"]) for p in ins], [(i, i) for i in range(1, 9)])
+        self.assertEqual(self.ask("eREAD?")[0][0], "DONE")   # released after the run
+
+
 if __name__ == "__main__":
     unittest.main()

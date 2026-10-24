@@ -35,6 +35,9 @@
 // same button again in the same place re-armed the overwrite. Now encL only
 // ever asks or cancels, and the single irreversible commit in this app is a B
 // press on a screen that exists only to state what B will do.
+#include "../InputCurveFiles.h"
+#include "CalRoutinePorts.h"
+
 OC_APP_CLASS(AppBackup, TWOCCS("BU"), "Back It Up!", "Backup / Restore"),
   public SystemExclusiveHandler {
 public:
@@ -44,6 +47,9 @@ public:
     receiving = 0;
     packet = 0;
     restore_armed_ = 0;
+    curve_got_ = 0;
+    curve_pending_ = 0;
+    curve_save_failed_ = 0;
   }
 
   void Controller() {
@@ -57,6 +63,9 @@ public:
   void ToggleReceiveMode() {
     receiving = 1 - receiving;
     packet = 0;
+    curve_got_ = 0;
+    curve_pending_ = 0;
+    curve_save_failed_ = 0;
   }
 
   void ToggleCalibration() {
@@ -127,6 +136,13 @@ public:
       packet = 0;
       uint8_t V[33];
 
+      // The per-input calibration curves live in LittleFS, not EEPROM. They
+      // go out first, as their own 'V' packets, so a restore has them before
+      // the calibration region's last packet ends the listen. A module with
+      // no stored curves sends none, and firmware that predates them ignores
+      // the 'V' packets (it only answers to 'B').
+      if (calibration) SendCurveRecord();
+
       uint8_t start = calibration ? 0 : (EEPROM_CALIBRATIONDATA_END / 32);
       uint8_t end = calibration ? (EEPROM_CALIBRATIONDATA_END / 32)
                              : (EEPROMStorage::LENGTH / 32);
@@ -137,7 +153,11 @@ public:
         packet = p;
 
         // Wrap into 32-byte packets
-        for (int b = 0; b < 32; b++) V[ix++] = EEPROM.read(address++);
+        // The Cal Routine marker and the per-input calibration (ICA1) describe
+        // THIS unit's calibration and never travel in a data dump: they are
+        // sent as 0 (what every reader takes as "absent"). See NeverTravels().
+        for (int b = 0; b < 32; b++, address++)
+          V[ix++] = NeverTravels(address) ? 0 : EEPROM.read(address);
 
         UnpackedData unpacked;
         unpacked.set_data(ix, V);
@@ -149,12 +169,18 @@ public:
 
   void OnReceiveSysEx() {
     uint8_t V[33];
-    if (ExtractSysExData(V, 'B')) {
+    if (!ExtractSysExData(V, 'B')) {
+      if (calibration && ExtractSysExData(V, 'V')) ReceiveCurvePacket(V);
+      return;
+    }
+    {
       uint8_t ix = 0;
       uint8_t p = V[ix++]; // Get packet number
       packet = p;
       uint16_t address = p * 32;
-      for (int b = 0; b < 32; b++) EEPROM.write(address++, V[ix++]);
+      // ...and a restore never writes them, from any dump (see OnSendSysEx).
+      for (int b = 0; b < 32; b++, address++, ix++)
+        if (!NeverTravels(address)) EEPROM.write(address, V[ix]);
 
       // Last packet: the EEPROM now holds the backup, and the live copies
       // must be reloaded from it. Not here -- this runs in the app ISR
@@ -171,11 +197,59 @@ public:
     }
   }
 
+  // Curve record framing: the 300-byte InputCurveRecord in kCurvePackets
+  // packets of [index, 32 data bytes] under sysex id 'V'; the last is padded.
+  static constexpr uint8_t kCurvePackets = (sizeof(InputCurveRecord) + 31) / 32;
+
+  void SendCurveRecord() {
+    InputCurveRecord rec;
+    if (!InputCurveLoadFromFlash(&rec, nullptr)) return;
+    const uint8_t *raw = (const uint8_t *)&rec;
+    for (uint8_t i = 0; i < kCurvePackets; i++) {
+      uint8_t V[33] = {0};
+      V[0] = i;
+      const size_t off = i * 32;
+      const size_t n = (sizeof(rec) - off) < 32 ? (sizeof(rec) - off) : 32;
+      memcpy(V + 1, raw + off, n);
+      UnpackedData unpacked;
+      unpacked.set_data(33, V);
+      PackedData packed = unpacked.pack();
+      SendSysEx(packed, 'V');
+    }
+  }
+
+  // ISR context: collect only. The CRC decides whether the record is kept, and
+  // the flash write waits for Loop().
+  void ReceiveCurvePacket(const uint8_t *V) {
+    if (curve_pending_ || V[0] >= kCurvePackets) return;
+    const size_t off = V[0] * 32;
+    const size_t n = (sizeof(curve_rx_) - off) < 32 ? (sizeof(curve_rx_) - off) : 32;
+    memcpy((uint8_t *)&curve_rx_ + off, V + 1, n);
+    curve_got_ |= (uint16_t)(1u << V[0]);
+    if (curve_got_ == (uint16_t)((1u << kCurvePackets) - 1)) {
+      curve_got_ = 0;
+      if (InputCurveValid(curve_rx_)) curve_pending_ = 1;
+    }
+  }
+
   // Loop context: apply a finished restore.
   void ApplyPendingReload() {
     const uint8_t what = reload_pending_;
     if (!what) return;
     reload_pending_ = 0;
+    // The curves commit only now, after the final calibration packet: an
+    // abandoned restore never writes them over the old EEPROM calibration.
+    if (curve_pending_) {
+      if (what == RELOAD_CALIBRATION) {
+        // seq is reassigned by the store, so the restored curves become the
+        // newest copy and the other slot keeps the previous one.
+        if (!InputCurveSaveToFlash(curve_rx_)) {
+          curve_save_failed_ = 1;
+          Serial.println("Backup: restored input curves could NOT be saved");
+        }
+      }
+      curve_pending_ = 0;
+    }
     if (what == RELOAD_CALIBRATION) {
       // Init() never reloaded calibration -- that happens once, in setup() --
       // so a restored calibration took effect only after the next power
@@ -184,17 +258,50 @@ public:
       // tables are read per sample, so the values apply without a re-init.
       OC::calibration_load();
       OC::SetFlipMode(OC::calibration_data.flipcontrols());
+      // The tables now in use came from the dump, not from this unit's Cal
+      // Routine: the marker (which never travels) must stop saying so, or
+      // Setup would tell the owner the restored tables are the Cal Routine's.
+      if (CalRoutinePorts::MarkerSet()) CalRoutinePorts::MarkerWrite(0);
     } else {
       OC::ReinitApps(false);
     }
   }
 
 private:
+  // EEPROM bytes a dump never carries and a restore never writes, whichever
+  // region it is:
+  // - The Cal Routine marker [4140,4144): it says where THIS unit's tables
+  //   came from.
+  // - The per-input calibration page ICA1 [EEPROM_INPUTCAL_START,
+  //   EEPROM_INPUTCAL_END) = [4164,4276). It is calibration, like the DAC/ADC
+  //   page (a factory erase keeps it too: OC_apps.cpp), but it sits at the
+  //   top of the EEPROM, inside the span the Data region's packets cover
+  //   (224 .. 133 * 32 = 4256). Restoring a data dump over it wrote 92 of its
+  //   112 bytes and left the rest, so its checksum failed at the next boot and
+  //   the apps lost their per-input line fits (the Cal Routine's fallback
+  //   behind its curves, and the only per-input calibration of a console-Q
+  //   unit). The packet framing is unchanged: these bytes go out as 0 and
+  //   come in ignored, so dumps stay interchangeable with older firmware.
+  static bool NeverTravels(uint16_t a) {
+#ifdef EEPROM_CALROUTINE_MARKER_START
+    if (a >= EEPROM_CALROUTINE_MARKER_START && a < EEPROM_CALROUTINE_MARKER_END) return true;
+#endif
+#ifdef EEPROM_INPUTCAL_START
+    if (a >= EEPROM_INPUTCAL_START && a < EEPROM_INPUTCAL_END) return true;
+#endif
+    (void)a;
+    return false;
+  }
+
   bool calibration = 0;
   bool receiving = 0;
   uint8_t packet = 0;
   bool restore_armed_ = 0;
   enum : uint8_t { RELOAD_CALIBRATION = 1, RELOAD_APPDATA = 2 };
+  InputCurveRecord curve_rx_;
+  uint16_t curve_got_ = 0;
+  bool curve_save_failed_ = 0;
+  volatile uint8_t curve_pending_ = 0;   // a complete, CRC-valid record awaits Loop()
   volatile uint8_t reload_pending_ = 0;   // set in the ISR, consumed in Loop()
   uint32_t armed_ms_ = 0;    // millis() the confirm screen appeared
   bool b_down_solo_ = 0;     // B went down alone, after that screen appeared
@@ -242,7 +349,8 @@ private:
       return;
     }
 
-    if (packet > 0) graphics.print("Done!");
+    if (curve_save_failed_) graphics.print("Curves NOT saved!");
+    else if (packet > 0) graphics.print("Done!");
     else graphics.print("Restore or Backup?");
 
     graphics.setPrintPos(0, 25);

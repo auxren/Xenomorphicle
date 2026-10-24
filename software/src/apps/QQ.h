@@ -1572,7 +1572,8 @@ void QuantizerChannel::RenderScreensaver(weegfx::coord_t start_x) const {
       break;
     default: {
       graphics.setPixel(start_x + QQ_OFFSET_X - 16, 4);
-      int32_t cv = OC::ADC::value(static_cast<ADC_CHANNEL>(source));
+      // Calibrated where the input has a per-input calibration (InputCal.h).
+      int32_t cv = OC::ADC::calibrated_value(static_cast<ADC_CHANNEL>(source));
       cv = (cv * 24 + 2047) >> 12;
       if (cv < 0)
         graphics.drawRect(start_x + QQ_OFFSET_X - 16 + cv, 6, -cv, 2);

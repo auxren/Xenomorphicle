@@ -71,6 +71,7 @@ namespace menu = OC::menu;
 #endif
 #include "Backup.h"
 #include "SETTINGS.h"
+#include "CalRoutine.h"
 
 
 namespace OC {
@@ -180,6 +181,9 @@ static DMAMEM AppContainer<void // this space intentionally left blank
 #endif
   , AppScaleEditor
   , AppBackup
+  // Last, so adding it moved no other app's position (the switcher files
+  // apps by position). It makes the maximal roster exactly kMaxApps.
+  , AppCalRoutine
 > app_container;
 
 static_assert(decltype(app_container)::TotalAppDataStorageSize() < AppData::kAppDataSize,
@@ -191,8 +195,9 @@ static_assert(decltype(app_container)::TotalAppDataStorageSize() < AppData::kApp
 // since the switcher is the only route between apps, a build that booted into
 // one would open on SYSTEM with the running app simply not listed.
 //
-// The maximal roster is at 31 of 32 today; uncommenting Passencore makes it
-// exactly 32. Fail the build rather than ship a silently invisible app.
+// The maximal roster is at 32 of 32 today (Cal Routine was the 32nd), so
+// uncommenting Passencore now needs kMaxApps raised first. Fail the build
+// rather than ship a silently invisible app.
 static_assert(decltype(app_container)::kNumApps <= OC::AppFolders::kMaxApps,
               "More apps than the app switcher can file: raise "
               "OC::AppFolders::kMaxApps (and widen State::bits) first.");

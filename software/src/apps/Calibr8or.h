@@ -751,8 +751,10 @@ public:
     // X-press view: the calibrated instantaneous voltage actually arriving on
     // this channel's input, as opposed to DrawInterface's normal
     // outgoing/calibration display. HS::frame.In(ch) is the same
-    // ADC::value_to_pitch() pitch value HSApplication's own channel meter
-    // reads; IO::pitch_to_millivolts() is the same linear pitch->mV
+    // IO::Read pitch value HSApplication's own channel meter reads --
+    // ADC::value_to_pitch(), or the per-input calibration on true volts where
+    // the input has one (InputCal.h), so this meter needs no change of its
+    // own; IO::pitch_to_millivolts() is the same linear pitch->mV
     // conversion References.h's screensaver uses, just without that view's
     // extra octave-relative offset, since this is a literal signed voltmeter
     // reading, not a quantized note display.

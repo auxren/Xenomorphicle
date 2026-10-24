@@ -75,6 +75,15 @@ suite test_sampler_math             ../src/SamplerMath.cpp
 suite test_sample_convert
 suite test_preset_op_queue
 suite test_cvmeter_math             ../src/CvMeterMath.cpp
+suite test_calroutine_math          ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp
+suite test_usbtmc                   ../src/UsbTmc.cpp
+suite test_app_folders              ../src/OC_app_folders.cpp
+suite test_input_curve_store        ../src/InputCurveStore.cpp
+suite test_adc_slot_map             ../src/CvMeterMath.cpp ../src/InputCurveStore.cpp
+suite test_input_cal                ../src/InputCal.cpp ../src/CalRoutineMath.cpp \
+                                    ../src/CvMeterMath.cpp ../src/InputCurveStore.cpp
+suite test_calroutine_flow          ../src/CalRoutineFlow.cpp ../src/CalRoutineMath.cpp \
+                                    ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
 
 # Counted, not typed: the literal that used to live here said 25 while 26
 # suites ran, which is the same hand-maintained-list drift this file exists

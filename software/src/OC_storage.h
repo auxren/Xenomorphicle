@@ -70,6 +70,13 @@ using InputCalibrationStorage = PageStorage<EEPROMStorage, EEPROM_INPUTCAL_START
 static_assert(EEPROM_APPDATA_BINARY_SIZE == 3900, "app-data blob size changed: stored app data would no longer validate");
 static_assert(AppDataStorage::PAGES == 1, "app-data page count changed: the page would move");
 static_assert(EEPROM_APPDATA_START + AppDataStorage::PAGESIZE <= EEPROM_INPUTCAL_START, "app-data page overlaps the input calibration");
+#ifndef XENO_SIM
+// Target layout only: on the 64-bit host simulator AppData::used is 8 bytes
+// and the page runs past 4140 (into the marker, never into ICA1). The
+// simulator has no meter, so nothing there writes the marker.
+static_assert(EEPROM_APPDATA_START + AppDataStorage::PAGESIZE <= EEPROM_CALROUTINE_MARKER_START, "app-data page overlaps the Cal Routine marker");
+#endif
+static_assert(EEPROM_CALROUTINE_MARKER_END <= EEPROM_INPUTCAL_START, "Cal Routine marker overlaps the input calibration");
 static_assert(InputCalibrationStorage::PAGES == 1, "input calibration page does not fit its region");
 static_assert(EEPROM_INPUTCAL_END <= EEPROM_PRESETBUS_START, "input calibration overlaps the preset-bus record");
 static_assert(sizeof(CalibrationData) + 12 <= EEPROM_CALIBRATIONDATA_END - EEPROM_CALIBRATIONDATA_START, "DAC/ADC calibration page outgrew its region");
