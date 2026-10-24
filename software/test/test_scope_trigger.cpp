@@ -21,6 +21,9 @@ static int failures = 0;
 
 using namespace ScopeTrigger;
 
+static constexpr int kR = 4096 / 2 + 4;  // scratch for the autocorrelation
+static float g_r[kR];
+
 static const double kRate = 48000.0;
 static const double kPi = 3.14159265358979323846;
 
@@ -43,15 +46,18 @@ static void test_period_sine() {
   printf("test_period_sine\n");
   std::vector<float> x(1536);
   for (size_t i = 0; i < x.size(); ++i) x[i] = (float)std::sin(2 * kPi * 1000 * i / kRate);
-  const float p = EstimatePeriod(x.data(), (int)x.size(), 2, 768);
+  const float p = EstimatePeriod(x.data(), (int)x.size(), 2, 768, g_r, kR);
   CHECK(std::fabs(p - 48.f) <= 0.5f);
+  // scratch too small or missing reads as no period, never an overrun
+  CHECK(EstimatePeriod(x.data(), (int)x.size(), 2, 768, g_r, 100) == 0.f);
+  CHECK(EstimatePeriod(x.data(), (int)x.size(), 2, 768, nullptr, 0) == 0.f);
 }
 
 static void test_period_ringmod_full_repeat() {
   printf("test_period_ringmod_full_repeat\n");
   std::vector<float> x(1536);
   for (size_t i = 0; i < x.size(); ++i) x[i] = (float)RingMod(i / kRate, 220, 770, 1.8);
-  const float p = EstimatePeriod(x.data(), (int)x.size(), 2, 768);
+  const float p = EstimatePeriod(x.data(), (int)x.size(), 2, 768, g_r, kR);
   printf("  ringmod period %.2f (expect 436.36)\n", p);
   CHECK(std::fabs(p - 436.36f) <= 2.f);
 }
@@ -61,11 +67,11 @@ static void test_clipped_square_locks() {
   std::vector<float> x(1536);
   for (size_t i = 0; i < x.size(); ++i)
     x[i] = std::sin(2 * kPi * 500 * (i + 0.5) / kRate) >= 0 ? 32767.f : -32767.f;
-  const float p = EstimatePeriod(x.data(), (int)x.size(), 2, 768);
+  const float p = EstimatePeriod(x.data(), (int)x.size(), 2, 768, g_r, kR);
   CHECK(std::fabs(p - 96.f) <= 1.f);
   AutoTrigger a;
   a.Reset();
-  const int s = a.Find(x.data(), (int)x.size(), 384);
+  const int s = a.Find(x.data(), (int)x.size(), 384, g_r, kR);
   CHECK(a.Locked());
   CHECK(s >= 1 && s + 384 <= (int)x.size());
   CHECK(x[s] > 0 && x[s - 1] < 0);  // starts on the rising edge
@@ -74,15 +80,15 @@ static void test_clipped_square_locks() {
 static void test_no_period_on_flat() {
   printf("test_no_period_on_flat\n");
   std::vector<float> x(1536, 2500.f);
-  CHECK(EstimatePeriod(x.data(), (int)x.size(), 2, 768) == 0.f);
+  CHECK(EstimatePeriod(x.data(), (int)x.size(), 2, 768, g_r, kR) == 0.f);
   AutoTrigger a;
   a.Reset();
-  CHECK(a.Find(x.data(), (int)x.size(), 384) == (int)x.size() - 384);
+  CHECK(a.Find(x.data(), (int)x.size(), 384, g_r, kR) == (int)x.size() - 384);
   CHECK(!a.Locked());
   CHECK(a.Period() == 0.f);
   // a tiny wiggle below min_pp is flat too
   for (size_t i = 0; i < x.size(); ++i) x[i] = 2500.f + (float)std::sin(i * 0.3) * 0.1f;
-  CHECK(a.Find(x.data(), (int)x.size(), 384, 5.f) == (int)x.size() - 384);
+  CHECK(a.Find(x.data(), (int)x.size(), 384, g_r, kR, 5.f) == (int)x.size() - 384);
   CHECK(!a.Locked());
 }
 
@@ -103,7 +109,7 @@ static void test_jitter_steady_ringmod() {
   int locked = 0;
   for (int k = 0; k < 50; ++k) {
     Frame(x, k * adv, [](double t) { return RingMod(t, 220, 770, 1.8); });
-    const int s = a.Find(x.data(), (int)x.size(), 384);
+    const int s = a.Find(x.data(), (int)x.size(), 384, g_r, kR);
     if (!a.Locked()) continue;
     ++locked;
     const double ph = std::fmod(k * adv + s, P);
@@ -127,7 +133,7 @@ static void test_morph_stays_on_feature() {
   for (int k = 0; k < 50; ++k) {
     const double depth = 1.2 + 1.2 * k / 49.0;
     Frame(x, k * adv, [depth](double t) { return RingMod(t, 220, 770, depth); });
-    const int s = a.Find(x.data(), (int)x.size(), 384);
+    const int s = a.Find(x.data(), (int)x.size(), 384, g_r, kR);
     if (!a.Locked()) continue;
     ++locked;
     const double ph = std::fmod(k * adv + s, P);
@@ -147,13 +153,13 @@ static void test_period_change_relocks() {
   a.Reset();
   for (int k = 0; k < 10; ++k) {
     Frame(x, k * 1234.56, [](double t) { return RingMod(t, 220, 770, 1.8); });
-    a.Find(x.data(), (int)x.size(), 384);
+    a.Find(x.data(), (int)x.size(), 384, g_r, kR);
   }
   CHECK(std::fabs(a.Period() - 436.36f) <= 4.4f);
   bool ok = false;
   for (int k = 10; k < 13; ++k) {  // period 48000/165 = 290.9
     Frame(x, k * 1234.56, [](double t) { return RingMod(t, 330, 1155, 1.8); });
-    a.Find(x.data(), (int)x.size(), 384);
+    a.Find(x.data(), (int)x.size(), 384, g_r, kR);
     if (a.Locked() && std::fabs(a.Period() - 290.91f) <= 2.91f) ok = true;
   }
   CHECK(ok);

@@ -13,7 +13,7 @@ namespace ScopeCapture {
 
 using namespace ScopeSources;
 
-DMAMEM ScopeRing g_rings[kMaxTraces];
+ScopeRing *g_rings = nullptr;
 ScopeEdgeRing g_edges[4];
 volatile int8_t g_audio_slot[4] = {-1, -1, -1, -1};
 volatile int8_t g_cvin_slot[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
@@ -59,7 +59,16 @@ void DetachEdge() {
 
 }  // namespace
 
+FLASHMEM void Bind(ScopeRing *rings) {
+  if (!rings) Disarm();  // never leave a slot pointing at freed storage
+  g_rings = rings;
+}
+
 FLASHMEM void Arm(const Source *list, int n, int time_idx, int fft_slot, int ext_tr) {
+  if (!g_rings) {
+    Disarm();
+    return;
+  }
   if (n > kMaxTraces) n = kMaxTraces;
   if (n < 0) n = 0;
   DetachEdge();

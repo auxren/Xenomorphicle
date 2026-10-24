@@ -2,10 +2,8 @@
 #if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define SCOPE_CODE FLASHMEM
-#define SCOPE_BSS DMAMEM  // loop-context work buffers: RAM2, not RAM1
 #else
 #define SCOPE_CODE
-#define SCOPE_BSS
 #endif
 
 #include "ScopeFft.h"
@@ -19,21 +17,14 @@ namespace {
 constexpr int kLog2N = 10;
 constexpr double kPi = 3.14159265358979323846;
 
-SCOPE_BSS float re_[kN];
-SCOPE_BSS float im_[kN];
-SCOPE_BSS float cos_[kN / 2];
-SCOPE_BSS float sin_[kN / 2];
-SCOPE_BSS float win_[kN];
-bool tables_ = false;
-
-void Tables() {
-  if (tables_) return;
+void Tables(Work &w) {
+  if (w.tables) return;
   for (int i = 0; i < kN / 2; ++i) {
-    cos_[i] = (float)cos(2 * kPi * i / kN);
-    sin_[i] = (float)sin(2 * kPi * i / kN);
+    w.cos_t[i] = (float)cos(2 * kPi * i / kN);
+    w.sin_t[i] = (float)sin(2 * kPi * i / kN);
   }
-  for (int i = 0; i < kN; ++i) win_[i] = (float)(0.5 - 0.5 * cos(2 * kPi * i / kN));  // periodic Hann
-  tables_ = true;
+  for (int i = 0; i < kN; ++i) w.win[i] = (float)(0.5 - 0.5 * cos(2 * kPi * i / kN));  // periodic Hann
+  w.tables = true;
 }
 
 float TopHz(float rate_hz) {
@@ -49,8 +40,10 @@ float HzAt(float c, float rate_hz) {
 
 }  // namespace
 
-SCOPE_CODE void MagnitudeDb(const float *in, float *db_out) {
-  Tables();
+SCOPE_CODE void MagnitudeDb(const float *in, float *db_out, Work &w) {
+  Tables(w);
+  float *const re_ = w.re, *const im_ = w.im, *const cos_ = w.cos_t, *const sin_ = w.sin_t;
+  const float *const win_ = w.win;
   for (int i = 0; i < kN; ++i) {
     // bit-reversed load, windowed
     unsigned r = 0;

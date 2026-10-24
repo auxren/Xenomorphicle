@@ -2,10 +2,8 @@
 #if defined(__IMXRT1062__)
 #include <Arduino.h>
 #define SCOPE_CODE FLASHMEM
-#define SCOPE_BSS DMAMEM  // loop-context work buffer: RAM2, not RAM1
 #else
 #define SCOPE_CODE
-#define SCOPE_BSS
 #endif
 
 #include "ScopeTrigger.h"
@@ -74,7 +72,8 @@ int Candidates(const float *x, int n, int window, float mean, float hyst, int *o
 
 }  // namespace
 
-SCOPE_CODE float EstimatePeriod(const float *x, int n, int min_lag, int max_lag, float min_pp) {
+SCOPE_CODE float EstimatePeriod(const float *x, int n, int min_lag, int max_lag, float *r,
+                                int r_len, float min_pp) {
   if (!x || n < 8) return 0.f;
   if (min_lag < 2) min_lag = 2;
   if (max_lag > n / 2) max_lag = n / 2;
@@ -94,9 +93,8 @@ SCOPE_CODE float EstimatePeriod(const float *x, int n, int min_lag, int max_lag,
   }
 
   // r(L) for L in [min_lag - 1, max_lag + 1]: one extra each side for peaks.
-  static SCOPE_BSS float r[4096 / 2 + 4];
   const int first = min_lag - 1, last = max_lag + 1;
-  if (last - first + 1 > (int)(sizeof(r) / sizeof(r[0]))) return 0.f;
+  if (!r || last - first + 1 > r_len) return 0.f;
   for (int L = first; L <= last; ++L) {
     if (L >= 1) {
       const double a = x[n - L] - mean, b = x[L - 1] - mean;
@@ -164,12 +162,13 @@ SCOPE_CODE void AutoTrigger::Reset() {
   locked_ = false;
 }
 
-SCOPE_CODE int AutoTrigger::Find(const float *x, int n, int window, float min_pp) {
+SCOPE_CODE int AutoTrigger::Find(const float *x, int n, int window, float *r, int r_len,
+                                 float min_pp) {
   if (!x || window < 1 || window > n || window > kMaxWindow) {
     locked_ = false;
     return n > window ? n - window : 0;
   }
-  const float p = EstimatePeriod(x, n, 2, n / 2, min_pp);
+  const float p = EstimatePeriod(x, n, 2, n / 2, r, r_len, min_pp);
   if (p <= 0.f) {
     Reset();
     return n - window;

@@ -33,7 +33,9 @@ constexpr int kAudioInLatencySamples = 128;
 // commit_cyc is stamped.
 constexpr int kCvInLatencyFrames = 1;
 
-extern ScopeRing g_rings[ScopeSources::kMaxTraces];
+// Points at kMaxTraces rings the caller owns (the Scope's lazy arena), set by
+// Bind() while the Scope is open; null otherwise. Arm() needs it bound.
+extern ScopeRing *g_rings;
 extern ScopeEdgeRing g_edges[4];
 extern volatile int8_t g_audio_slot[4];  // tap: 0 in L, 1 in R, 2 out L, 3 out R
 extern volatile int8_t g_cvin_slot[8];
@@ -43,6 +45,10 @@ extern volatile int8_t g_tr_slot[4];
 // Loop context. Binds list[0..n) to slots 0..n-1 with each ring's decimation
 // for time_idx; slot fft_slot (or -1) is captured undecimated for the FFT.
 // ext_tr (0..3, or -1) arms that TR jack's edge interrupt.
+// Loop context. Bind(rings) before Arm(); Bind(nullptr) after Disarm() and
+// before the storage is freed. Disarm() leaves the rings readable (a frozen
+// Scope shows them), so freeing is a separate, later step.
+void Bind(ScopeRing *rings);
 void Arm(const ScopeSources::Source *list, int n, int time_idx, int fft_slot, int ext_tr);
 void Disarm();
 int SlotCount();

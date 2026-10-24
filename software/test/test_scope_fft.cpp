@@ -20,13 +20,15 @@ static int failures = 0;
 
 using namespace ScopeFft;
 
+static Work g_work;
+
 static const double kPi = 3.14159265358979323846;
 
 static void test_peak_sine() {
   printf("test_peak_sine\n");
   std::vector<float> x(kN), db(kN / 2 + 1);
   for (int i = 0; i < kN; ++i) x[i] = (float)(0.5 * std::sin(2 * kPi * 550 * i / 48000.0));
-  MagnitudeDb(x.data(), db.data());
+  MagnitudeDb(x.data(), db.data(), g_work);
   float pk_db = 0;
   const float hz = PeakHz(db.data(), 48000.f, &pk_db);
   printf("  peak %.1f Hz at %.2f dB\n", hz, pk_db);
@@ -34,7 +36,7 @@ static void test_peak_sine() {
   CHECK(std::fabs(pk_db - (-6.02f)) <= 1.f);
 
   for (int i = 0; i < kN; ++i) x[i] = (float)std::sin(2 * kPi * 46.875 * 64 * i / 48000.0);
-  MagnitudeDb(x.data(), db.data());
+  MagnitudeDb(x.data(), db.data(), g_work);
   PeakHz(db.data(), 48000.f, &pk_db);
   CHECK(std::fabs(pk_db) <= 0.5f);  // on-bin full-scale sine reads 0 dB
 }
@@ -44,7 +46,7 @@ static void test_ringmod_sidebands() {
   std::vector<float> x(kN), db(kN / 2 + 1);
   for (int i = 0; i < kN; ++i)
     x[i] = (float)(0.8 * std::sin(2 * kPi * 770 * i / 48000.0) * std::sin(2 * kPi * 220 * i / 48000.0));
-  MagnitudeDb(x.data(), db.data());
+  MagnitudeDb(x.data(), db.data(), g_work);
   uint8_t rows[128];
   Columns(db.data(), 48000.f, 52, rows);
   // the two largest local maxima
@@ -64,7 +66,7 @@ static void test_ringmod_sidebands() {
 static void test_silence_floor() {
   printf("test_silence_floor\n");
   std::vector<float> x(kN, 0.f), db(kN / 2 + 1);
-  MagnitudeDb(x.data(), db.data());
+  MagnitudeDb(x.data(), db.data(), g_work);
   bool finite = true;
   for (float v : db) if (!std::isfinite(v) || v < -120.5f) finite = false;
   CHECK(finite);

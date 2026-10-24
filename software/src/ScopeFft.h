@@ -17,7 +17,14 @@ constexpr float kFloorDb = -120.f;
 constexpr float kRowTopDb = 0.f;     // top of the plot
 constexpr float kRowBottomDb = -90.f;
 
-void MagnitudeDb(const float *in /*kN*/, float *db_out /*kN/2+1*/);
+// Work buffers (~16 KB) the caller owns, so the Scope can hold them on the heap
+// only while it is open. The twiddle and window tables fill on first use.
+struct Work {
+  float re[kN], im[kN], cos_t[kN / 2], sin_t[kN / 2], win[kN];
+  bool tables = false;
+};
+
+void MagnitudeDb(const float *in /*kN*/, float *db_out /*kN/2+1*/, Work &w);
 // Strongest bin above 20 Hz, parabolic-interpolated; its level in *peak_db.
 float PeakHz(const float *db, float rate_hz, float *peak_db = nullptr);
 // 20 Hz .. min(20 kHz, rate/2), log10-spaced over 128 columns; each column

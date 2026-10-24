@@ -31,7 +31,10 @@ constexpr int kMaxWindow = 512;  // the app shows at most 128 buckets; tests use
 
 // Period in samples (sub-sample, parabolic), or 0 when there is none: a flat
 // input, peak-to-peak below min_pp, or no lag correlating at 0.5 or better.
-float EstimatePeriod(const float *x, int n, int min_lag, int max_lag, float min_pp = 0.f);
+// r/r_len is caller-owned scratch of at least (max_lag - min_lag + 3) floats;
+// too little (or null) reads as no period.
+float EstimatePeriod(const float *x, int n, int min_lag, int max_lag, float *r, int r_len,
+                     float min_pp = 0.f);
 
 // Start of the window-long frame beginning at the LATEST qualifying crossing
 // of `level` that still leaves `window` samples after it, or -1. A crossing
@@ -47,7 +50,7 @@ public:
   void Reset();
   // Start index of the frame to display. Untriggered (Locked() false) it is
   // the frame ending at the newest sample, n - window.
-  int Find(const float *x, int n, int window, float min_pp = 0.f);
+  int Find(const float *x, int n, int window, float *r, int r_len, float min_pp = 0.f);
   bool Locked() const { return locked_; }
   float Period() const { return period_; }
 

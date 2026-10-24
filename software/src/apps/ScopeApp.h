@@ -41,8 +41,9 @@
 #include "../ScopeSettings.h"
 #include "../ScopeSources.h"
 #include "../ScopeTrigger.h"
+#include <new>  // placement new, std::nothrow
+#include <stdlib.h>
 #ifdef XENO_CODEC_AUDIO
-#include <new>  // std::nothrow
 #include "../Audio/AudioScopeCapture.h"
 #include "../AudioIO.h"
 #endif
@@ -124,12 +125,41 @@ inline uint32_t LatencyCyc(Source s) {
   }
 }
 
-// Working buffers: loop context only.
-static DMAMEM float g_mv[kAnalyse];
-static DMAMEM float g_lo[kAnalyse];
-static DMAMEM float g_hi[kAnalyse];
-static DMAMEM float g_fft_in[ScopeFft::kN];
-static DMAMEM float g_fft_db[ScopeFft::kN / 2 + 1];
+// Everything the Scope needs beyond its settings -- the capture rings and the
+// loop-context work buffers -- in ONE block taken from the heap when the
+// Scope is opened and returned when it closes. Static buffers would cost
+// ~70 KB of RAM2 on every boot, Scope open or not; with an armed firmware
+// card taking 229 KB at boot that starved a later unchecked allocation and
+// boot-looped the unit. Null whenever the Scope is not open (or when the
+// allocation failed: the Scope then says so instead of drawing).
+struct Arena {
+  ScopeRing rings[ScopeSources::kMaxTraces];
+  float mv[kAnalyse], lo[kAnalyse], hi[kAnalyse];
+  float fft_in[ScopeFft::kN], fft_db[ScopeFft::kN / 2 + 1];
+  float acorr[kAnalyse / 2 + 4];  // EstimatePeriod scratch: lags up to n/2, plus 3
+  ScopeFft::Work fft;
+};
+static Arena *g_arena = nullptr;
+static bool g_open = false;  // between RESUME and SUSPEND
+
+FLASHMEM static bool AllocArena() {
+  if (g_arena) return true;
+  void *p = malloc(sizeof(Arena));
+  if (!p) return false;  // checked: no exceptions, a null here is the error state
+  g_arena = new (p) Arena();
+  ScopeCapture::Bind(g_arena->rings);
+  return true;
+}
+
+// Loop context. Unmaps the capture slots first, so no ISR can write a ring
+// that is about to be freed (Bind(nullptr) disarms).
+FLASHMEM static void FreeArena() {
+  ScopeCapture::Bind(nullptr);
+  if (g_arena) {
+    free(g_arena);
+    g_arena = nullptr;
+  }
+}
 
 }  // namespace ScopeAppNS
 
@@ -238,7 +268,10 @@ FLASHMEM void AppScope::Rearm(bool keep_frozen) {
   const bool fft = set_.view == 1 && ts >= 0 && !TrigIsTr();
   const int ext = set_.trig_mode >= ScopeAppNS::TM_EXT ? set_.trig_mode - ScopeAppNS::TM_EXT : -1;
   armed_time_idx_ = TimeIdx();
-  if (frozen_) {
+  if (ScopeAppNS::g_open && !ScopeAppNS::AllocArena()) {
+    // Retried on every re-arm, so closing something else and pressing a key recovers.
+    ScopeCapture::Disarm();
+  } else if (frozen_) {
     ScopeCapture::Disarm();
   } else {
     ScopeCapture::Arm(list_, n_, armed_time_idx_, fft ? ts : -1, ext);
@@ -313,8 +346,15 @@ FLASHMEM size_t AppScope::RestoreAppData(util::StreamBufferReader &stream_buffer
 
 FLASHMEM void AppScope::HandleAppEvent(OC::AppEvent event) {
   switch (event) {
-    case OC::APP_EVENT_RESUME: Rearm(); break;
-    case OC::APP_EVENT_SUSPEND: ScopeCapture::Disarm(); break;
+    case OC::APP_EVENT_RESUME:
+      ScopeAppNS::g_open = true;
+      Rearm();
+      break;
+    case OC::APP_EVENT_SUSPEND:
+      ScopeAppNS::g_open = false;
+      ScopeCapture::Disarm();
+      ScopeAppNS::FreeArena();
+      break;
     default: break;
   }
 }
@@ -510,6 +550,7 @@ FLASHMEM void AppScope::RenderPicker() const {
 
 FLASHMEM void AppScope::RenderSpectrum() const {
   using namespace ScopeAppNS;
+  Arena &ar = *g_arena;  // Render() checked it
   const int ts = TrigSlot();
   char pk[12] = "pk --";
   const char *none = "";
@@ -521,17 +562,17 @@ FLASHMEM void AppScope::RenderSpectrum() const {
     const float rate = RateHz(s);
     if (c >= (uint32_t)ScopeFft::kN && r.Decim() == 1) {
       for (int i = 0; i < ScopeFft::kN; ++i)
-        g_fft_in[i] = ToMv(s, r.At(c - ScopeFft::kN + i).lo) / fs;
+        ar.fft_in[i] = ToMv(s, r.At(c - ScopeFft::kN + i).lo) / fs;
       if (KindOf(s) == KIND_CV_IN || KindOf(s) == KIND_CV_OUT) {  // DC would swamp bin 0..1
         float m = 0;
-        for (int i = 0; i < ScopeFft::kN; ++i) m += g_fft_in[i];
+        for (int i = 0; i < ScopeFft::kN; ++i) m += ar.fft_in[i];
         m /= ScopeFft::kN;
-        for (int i = 0; i < ScopeFft::kN; ++i) g_fft_in[i] -= m;
+        for (int i = 0; i < ScopeFft::kN; ++i) ar.fft_in[i] -= m;
       }
-      ScopeFft::MagnitudeDb(g_fft_in, g_fft_db);
-      peak_hz_ = ScopeFft::PeakHz(g_fft_db, rate);
+      ScopeFft::MagnitudeDb(ar.fft_in, ar.fft_db, ar.fft);
+      peak_hz_ = ScopeFft::PeakHz(ar.fft_db, rate);
       uint8_t rows[kCols];
-      ScopeFft::Columns(g_fft_db, rate, kPlotH, rows);
+      ScopeFft::Columns(ar.fft_db, rate, kPlotH, rows);
       for (int x = 0; x < kCols; ++x)
         if (rows[x]) graphics.drawVLine(x, 64 - rows[x], rows[x]);
       const float grid[3] = {100.f, 1000.f, 10000.f};
@@ -550,6 +591,17 @@ FLASHMEM void AppScope::RenderSpectrum() const {
 FLASHMEM void AppScope::Render() const {
   using namespace ScopeAppNS;
   if (picker_) { RenderPicker(); return; }
+  if (!g_arena) {
+    if (g_open) {  // a failed allocation, not a closed Scope (the screensaver draws too)
+      DrawHeader("", "", "");
+      graphics.setPrintPos(1, 26);
+      graphics.print("not enough memory");
+      graphics.setPrintPos(1, 36);
+      graphics.printf("need %d KB free", (int)((sizeof(Arena) + 1023) / 1024));
+    }
+    return;
+  }
+  Arena &ar = *g_arena;
   if (n_ == 0) {
     DrawHeader("", "", "");
     graphics.setPrintPos(1, 30);
@@ -591,25 +643,25 @@ FLASHMEM void AppScope::Render() const {
   if (m > 0) {
     for (int i = 0; i < m; ++i) {
       const ScopeBucket b = tr.At(base + i);
-      g_lo[i] = ToMv(tsrc, b.lo);
-      g_hi[i] = ToMv(tsrc, b.hi);
-      g_mv[i] = 0.5f * (g_lo[i] + g_hi[i]);
+      ar.lo[i] = ToMv(tsrc, b.lo);
+      ar.hi[i] = ToMv(tsrc, b.hi);
+      ar.mv[i] = 0.5f * (ar.lo[i] + ar.hi[i]);
     }
-    lo = g_lo[0];
-    hi = g_hi[0];
-    for (int i = 0; i < m; ++i) { lo = fminf(lo, g_lo[i]); hi = fmaxf(hi, g_hi[i]); }
+    lo = ar.lo[0];
+    hi = ar.hi[0];
+    for (int i = 0; i < m; ++i) { lo = fminf(lo, ar.lo[i]); hi = fmaxf(hi, ar.hi[i]); }
   }
   float period_s = 0.f;
   if (m >= window) {
     if (set_.trig_mode == TM_AUTO) {
-      idx = atrig_.Find(g_mv, m, window, kMinPpMv);
+      idx = atrig_.Find(ar.mv, m, window, ar.acorr, (int)(sizeof(ar.acorr) / sizeof(ar.acorr[0])), kMinPpMv);
       locked_ = atrig_.Locked();
       if (locked_) period_s = atrig_.Period() * tsn.bucket_s;
     } else if (set_.trig_mode == TM_LEVEL) {
       if (level_follow_) live_level_mv_ = (int16_t)(0.5f * (lo + hi));
-      idx = ScopeTrigger::LevelTrigger(g_mv, m, window, LevelMv(), 0.02f * (hi - lo), true);
+      idx = ScopeTrigger::LevelTrigger(ar.mv, m, window, LevelMv(), 0.02f * (hi - lo), true);
       locked_ = idx >= 0;
-      period_s = ScopeTrigger::EstimatePeriod(g_mv, m, 2, m / 2, kMinPpMv) * tsn.bucket_s;
+      period_s = ScopeTrigger::EstimatePeriod(ar.mv, m, 2, m / 2, ar.acorr, (int)(sizeof(ar.acorr) / sizeof(ar.acorr[0])), kMinPpMv) * tsn.bucket_s;
     } else {  // external: the newest TR edge that leaves a full window
       const ScopeEdgeRing &e = ScopeCapture::g_edges[set_.trig_mode - TM_EXT];
       const uint32_t ne = e.Count();
@@ -633,7 +685,7 @@ FLASHMEM void AppScope::Render() const {
   // Auto timebase, in every trigger mode: from the period when there is one,
   // otherwise towards whichever way the buckets say the signal lies.
   if (set_.time_auto && !frozen_ && m > 0) {
-    const int dir = period_s > 0 ? 0 : ScopeRange::NoPeriodDir(g_lo, g_hi, m, kMinPpMv);
+    const int dir = period_s > 0 ? 0 : ScopeRange::NoPeriodDir(ar.lo, ar.hi, m, kMinPpMv);
     if (atime_.Update(period_s, now_ms, dir) != time_idx) pending_time_idx_ = atime_.Idx();
   }
   // first column's bucket number on the source ring; before a full screen
