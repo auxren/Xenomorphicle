@@ -11,17 +11,24 @@ struct InputCurveRecord;
 
 // ---------------------------------------------------------------------------
 // The calibration routine's step machine (design/cal-routine-design.md
-// 6.2-6.4): configure the USB DMM, closed-loop set all 11 DAC table points
-// of each of the 8 outputs, verify each output with a 40-point sweep, then
-// sweep each of the 8 inputs from calibrated output A and build its curve.
+// 6.2-6.4, 9.2-9.3), in three modes (Mode below):
+//   Outputs  configure the USB DMM, closed-loop set all 11 DAC table points
+//            of each of the 8 outputs, verify each with a 20-point sweep.
+//   Inputs   no meter: the owner patches output A -> input 1 ... H -> 8; a
+//            patch check proves it (each output raised alone moves only its
+//            own input), then one sweep holds all 8 outputs at each point
+//            (each through its own table) and reads all 8 inputs in one
+//            window; each input gets its own curve.
+//   Self     Outputs, then Inputs on the new tables.
 // It produces Results; the app (Cal Routine) shows them and saves them
-// through CalRoutineSave().
+// through CalRoutineSave(), which writes only the parts the mode measured.
 //
 // Pure: the meter, the outputs, the inputs and the clock sit behind the
 // ports below, so the whole flow is host-tested (test/test_calroutine_flow.cpp)
 // against simulated hardware. Compiled in every env, all of it in flash
 // (none of it is ISR code). Tick() does bounded work: at most one meter
-// Poll() and one port call of each kind per call.
+// Poll() and one port call of each kind per call, except that setting the
+// outputs for an input window is 8 Holds and an input point logs 8 lines.
 //
 // Indexing: outputs and inputs are PANEL labels 0..7 (A..H, 1..8)
 // everywhere here, in the ports and in Results. The glue maps them to the
@@ -32,6 +39,9 @@ struct InputCurveRecord;
 // ---------------------------------------------------------------------------
 
 namespace CalRoutine {
+
+// Which routine runs. Self is 0, so zeroed Results are a Self run's.
+enum class Mode : uint8_t { Self = 0, Outputs = 1, Inputs = 2 };
 
 // The USB DMM. Implemented over USBTMCDevice (src/drivers/USBTMCDevice.h):
 // Begin = BeginQuery, Poll maps Done -> 1 (reply = Reply()), Busy -> 0,
@@ -47,8 +57,9 @@ struct MeterPort {
   virtual const char *Identity() const = 0;
 };
 
-// The 8 CV outputs. Only the output under test is ever held; ReleaseAll
-// lets go of everything this port holds (the glue may track its own holds
+// The 8 CV outputs. The output stages hold only the output under test; the
+// input stages hold all 8 (each at its own code). ReleaseAll lets go of
+// everything this port holds (the glue may track its own holds
 // so that it does not release outputs held by someone else).
 struct OutputPort {
   virtual void Hold(int out, uint16_t code) = 0;
@@ -61,12 +72,13 @@ struct OutputPort {
                              int32_t mv) const = 0;
 };
 
-// The 8 CV inputs. StartWindow begins averaging input `in`; WindowDone,
-// asked once the flow's measure time has passed, fills *s with what was
-// gathered since (false: not ready yet, ask again).
+// The 8 CV inputs, all in one window (the ADC samples them together).
+// StartWindow begins averaging every input; WindowDone, asked once the flow's
+// measure time has passed, fills s[0..7] (panel order) with what was gathered
+// since (false: not ready yet, ask again).
 struct InputPort {
-  virtual void StartWindow(int in) = 0;
-  virtual bool WindowDone(CvMeterMath::PointStats *s) = 0;
+  virtual void StartWindow() = 0;
+  virtual bool WindowDone(CvMeterMath::PointStats s[8]) = 0;
 };
 
 struct Clock {
@@ -113,9 +125,20 @@ constexpr uint32_t kInMeasureMs = 600;
 constexpr uint32_t kInWindowTimeoutMs = 1000;  // WindowDone still false after this: no samples
 constexpr int32_t kInStepMv = 600;         // input sweep spacing and first point
 constexpr int kMaxInputPoints = 20;
-constexpr float kInTopGuardCounts = 32.f;  // a point this close to raw 0 ends the sweep
-constexpr int kSourceOutput = 0;           // output A is every input's source
-constexpr int kSweepPoints = 40;
+constexpr float kInTopGuardCounts = 32.f;  // a point this close to raw 0 ends that input's sweep
+constexpr int kSweepPoints = 20;           // output verify points (CalRoutineMath::SweepPoints)
+// Input n's source is output n (panel A -> 1 ... H -> 8).
+// The patch check: all 8 outputs at kPatchLowMv, then each in turn at
+// kPatchHighMv alone. An input "moves" when its mean shifts by more than
+// kPatchMoveCounts from the all-low window. A correct patch moves its input
+// by 5.4 V / ~2.75 mV per count = ~1960 counts (~1840 at 2.93, the nominal
+// scale); an unpatched or other input moves by the noise and crosstalk, a few
+// counts at most. 1000 counts (~2.75 V) is half way: about 900 counts of margin
+// on each side, so neither a gain trim at its end (+-15 %, GAIN's window) nor
+// a noisy input (NOISY is 24 counts p-p) can flip a verdict.
+constexpr int32_t kPatchLowMv = 600;
+constexpr int32_t kPatchHighMv = 6000;
+constexpr float kPatchMoveCounts = 1000.f;
 
 // The meter setup, in order (all on UsbTmc::ScpiAllowed's list): DC volts on
 // the fixed 20 V range, NPLC 10 with autozero ON (below NPLC 10 the SDM3065X
@@ -129,14 +152,35 @@ constexpr int kSweepPoints = 40;
 // itself: there is no per-output re-zero and no per-output error query.
 //
 // Run time: each READ? is ~0.53 s, so the readings dominate. Per output:
-// 11 nodes x (iteration measurements x 4 READ? + 11 READ? final) plus 40
-// sweep points x 4 READ?; the test_run_time_model test prints the modelled
-// figure for Outputs + Inputs (the inputs use no meter).
+// 11 nodes x (iteration measurements x 4 READ? + 11 READ? final) plus 20
+// sweep points x 4 READ?. The inputs use no meter: 9 patch-check windows and
+// about 18 sweep windows of 0.9 s each. test_run_time_model prints the
+// modelled figures for each routine.
 extern const char *const kMeterSetup[6];
 extern const char *const kErrorQuery;  // "SYST:ERR?"
 
-// Settles one CV output at a code, then averages one input: the measuring
-// step of both the routine's input part and the console's Q.
+// Waits the input settle time, then averages all 8 inputs in one window:
+// the measuring step of the routine's input part (whatever the caller set
+// the outputs to) and, through InputPoint, of the console's Q.
+class InputWindow {
+ public:
+  void Start(InputPort &in, Clock &clock);
+  // True once measured (s[0..7] filled; samples == 0 when the input port
+  // never delivered).
+  bool Tick(CvMeterMath::PointStats s[8]);
+  bool active() const { return phase_ != P_IDLE; }
+  void Stop() { phase_ = P_IDLE; }
+
+ private:
+  enum Phase : uint8_t { P_IDLE, P_SETTLE, P_MEASURE };
+  InputPort *in_ = nullptr;
+  Clock *clock_ = nullptr;
+  uint32_t t0_ = 0;
+  Phase phase_ = P_IDLE;
+};
+
+// Settles one CV output at a code, then averages one input (one channel of
+// the all-8 window): the console Q's measuring step.
 class InputPoint {
  public:
   void Start(OutputPort &out, InputPort &in, Clock &clock, int out_label, uint16_t code,
@@ -144,17 +188,12 @@ class InputPoint {
   // True once the point is measured (*s filled; samples == 0 when the input
   // port never delivered). The output stays held.
   bool Tick(CvMeterMath::PointStats *s);
-  bool active() const { return phase_ != P_IDLE; }
-  void Stop() { phase_ = P_IDLE; }
+  bool active() const { return win_.active(); }
+  void Stop() { win_.Stop(); }
 
  private:
-  enum Phase : uint8_t { P_IDLE, P_SETTLE, P_MEASURE };
-  OutputPort *out_ = nullptr;
-  InputPort *in_ = nullptr;
-  Clock *clock_ = nullptr;
+  InputWindow win_;
   int in_label_ = 0;
-  uint32_t t0_ = 0;
-  Phase phase_ = P_IDLE;
 };
 
 }  // namespace CalRoutine
@@ -166,10 +205,15 @@ class CalRoutineFlow {
   using InputPort = CalRoutine::InputPort;
   using Clock = CalRoutine::Clock;
   using SavePort = CalRoutine::SavePort;
+  using Mode = CalRoutine::Mode;
 
+  // WarnMarker: Inputs only, the outputs were not calibrated by Cal Routine
+  // (Continue goes on, Cancel stops). PromptPatch: patch A->1 ... H->8.
+  // CheckPatch: the patch check runs. PatchFailed: it found a crossed or an
+  // empty jack (Continue checks again; Skip goes on without the empty ones).
   enum class Stage {
     Idle, NoMeter, ConfigMeter, PromptOutput, CalOutput, SweepOutput,
-    PromptInput, CalInput, Results, Failed
+    WarnMarker, PromptPatch, CheckPatch, PatchFailed, CalInput, Results, Failed
   };
 
   // Why an output did not pass (Results::out_reason).
@@ -197,28 +241,39 @@ class CalRoutineFlow {
     int32_t in_lo_mv[8];
     int32_t in_hi_mv[8];
     float in_line_dev_mv[8];    // worst curve-vs-line deviation (ICA1's verify)
+    uint8_t in_skipped;         // inputs left out at the patch check (panel mask)
+    uint8_t mode;               // Mode: which parts were measured
 
-    bool CanSave() const;       // all 8 outputs passed
+    bool HasOutputs() const;    // Outputs or Self: the tables are new
+    bool HasInputs() const;     // Inputs or Self: the curves are new
+    // Outputs, Self: all 8 outputs passed. Inputs: at least one input passed.
+    bool CanSave() const;
   };
 
   void SetLog(CalRoutine::LogFn fn) { log_ = fn; }
 
-  // Starts a run: NoMeter until the meter is connected, then ConfigMeter.
-  void Begin(MeterPort &meter, OutputPort &out, InputPort &in, Clock &clock);
+  // Starts a run. Outputs, Self: NoMeter until the meter is connected, then
+  // ConfigMeter. Inputs: PromptPatch, or WarnMarker first when
+  // !outputs_marked (the Cal Routine marker is absent: the tables the inputs
+  // are measured against were not set by Cal Routine). The meter is not used.
+  void Begin(MeterPort &meter, OutputPort &out, InputPort &in, Clock &clock,
+             Mode mode = Mode::Self, bool outputs_marked = true);
   void Tick();
-  // The owner confirmed the patch (PromptOutput / PromptInput).
+  // PromptOutput, PromptPatch: the owner confirmed the patch. WarnMarker: go
+  // on anyway. PatchFailed: the patch was fixed, check it again.
   void Continue();
-  // PromptInput only: leave this input uncalibrated and go on.
+  // PatchFailed with no crossing (only empty jacks): leave the inputs whose
+  // outputs moved nothing uncalibrated and measure the others.
   void Skip();
   // Any stage: releases every hold, forgets the run's results, goes to Idle.
   void Cancel();
   // Results stage only: measure output o (panel label) again -- after a
   // NOISY lead or a failed check. Sets the meter up again, prompts for the
   // output (PromptOutput), runs it, and comes back to Results. Every other
-  // output keeps what it measured. When o is the inputs' source (output A)
-  // all 8 inputs are measured again afterwards, since their curves were
-  // built on its table. False (nothing changes) outside Results or for an
-  // o out of range.
+  // output keeps what it measured. In Self the inputs are then patched,
+  // checked and measured again (input o's curve hangs on output o's table,
+  // and the patch was disturbed to reach the meter). False (nothing changes)
+  // outside Results, in Inputs mode, or for an o out of range.
   bool RetryOutput(int o);
 
   // Results stage: CalRoutineSave(), logged. True on success (then Idle).
@@ -227,16 +282,24 @@ class CalRoutineFlow {
   void Discard();
 
   Stage stage() const { return stage_; }
+  Mode mode() const { return mode_; }
   int current_output() const { return cur_out_; }  // -1 when none
   int current_input() const { return cur_in_; }    // -1 when none
   // Progress, for the screen. CalOutput: the table entry being set (0..10);
   // SweepOutput: the verify point and how many there are; CalInput: the
-  // source voltage and the points taken so far.
+  // sweep voltage and the points taken so far; CheckPatch: the output being
+  // raised (patch_index, -1 during the all-low window).
   int node_index() const { return node_k_; }
   int sweep_index() const { return sweep_i_; }
   int sweep_points() const { return n_sweep_; }
   int32_t input_mv() const { return ip_mv_; }
-  int input_points() const { return n_ipts_; }
+  int input_points() const { return n_sweep_in_; }
+  int patch_index() const { return p_i_; }
+  // After the patch check: the inputs output o moved (panel mask), outputs
+  // that moved another input, and outputs that did not move their own.
+  uint8_t patch_moved(int o) const { return o >= 0 && o < 8 ? p_moved_[o] : 0; }
+  uint8_t patch_crossed() const { return p_crossed_; }
+  uint8_t patch_missing() const { return p_missing_; }
   // NoMeter after the meter went away mid-run, and for how long (Failed
   // after kReconnectMs).
   bool meter_lost() const { return lost_; }
@@ -251,6 +314,7 @@ class CalRoutineFlow {
   bool CanSave() const;
 
   static const char *StageName(Stage s);
+  static const char *ModeName(Mode m);
   static const char *OutReasonName(uint8_t r);
 
   // ---- internals: results of one meter query / one measurement ----
@@ -271,6 +335,7 @@ class CalRoutineFlow {
   void TickNode();
   void TickSweep();
   void TickInput();
+  void TickPatch();
   void StartOutput(int o);
   void StartNode();
   void StartFinal();
@@ -278,10 +343,13 @@ class CalRoutineFlow {
   void StartSweep();
   void FinishOutput(OutReason r);
   void NextAfterOutput();
-  void StartInput(int i);
-  void StartInputPoint();
-  void FinishInput();
-  void NextAfterInput();
+  void ToInputs();
+  void StartPatchCheck();
+  void HoldPatch();
+  void FinishPatchCheck();
+  void StartInputs();
+  void HoldInputPoint();
+  void FinishInputs();
   void FinishRun();
 
   void QStart(const char *scpi, uint32_t timeout_ms);
@@ -298,6 +366,7 @@ class CalRoutineFlow {
   CalRoutine::LogFn log_ = nullptr;
 
   Stage stage_ = Stage::Idle;
+  Mode mode_ = Mode::Self;
   int cur_out_ = -1;
   int cur_in_ = -1;
   uint32_t now_ = 0;
@@ -345,22 +414,34 @@ class CalRoutineFlow {
   int sweep_i_ = 0;
   uint16_t sweep_code_ = 0;
 
-  // input in progress
-  CalRoutine::InputPoint ipoint_;
-  CalRoutineMath::InputSweepPoint ipts_[CalRoutine::kMaxInputPoints];
-  int n_ipts_ = 0;
-  int32_t ip_mv_ = 0;
-  uint16_t ip_code_ = 0;
-  int32_t ip_top_mv_ = 0;     // the input sweep's span on output A, clear of its rail segments
+  // inputs in progress (all 8 at once)
+  CalRoutine::InputWindow iwin_;
+  CvMeterMath::PointStats istats_[8];
+  CalRoutineMath::InputSweepPoint ipts_[8][CalRoutine::kMaxInputPoints];
+  int n_ipts_[8] = {};
+  int32_t ip_lo_mv_[8] = {};  // input n's span on output n, clear of its rail segments
+  int32_t ip_top_mv_[8] = {};
+  uint16_t ip_code_[8] = {};
+  uint8_t ip_open_ = 0;       // inputs still sweeping (panel mask)
+  int32_t ip_mv_ = 0;         // the sweep voltage
+  int n_sweep_in_ = 0;        // sweep points taken
+  // patch check
+  int p_i_ = -1;              // output raised; -1 the all-low window
+  float p_low_[8] = {};       // each input's mean with every output low
+  uint8_t p_moved_[8] = {};
+  uint8_t p_crossed_ = 0;
+  uint8_t p_missing_ = 0;
 
   Results results_;
 };
 
-// Writes Results through the port, in this order: DAC table, curves, lines,
-// marker, autotune reset, input reload. valid_mask bit n = in_pass[n];
-// source[n] = 1 (output A, 1-based as ICA1 stores it) for every input.
-// Refuses (false, nothing called) unless results.CanSave(); stops at the
-// first failing step (false; the marker is then never written).
+// Writes the parts Results hold through the port, in this order: DAC table,
+// curves, lines, marker, autotune reset, input reload. Outputs: DAC table,
+// marker, autotune. Inputs: curves, lines, reload. Self: all six (the marker
+// is only ever written with the tables). valid_mask bit n = in_pass[n];
+// source[n] = n + 1 (output n, 1-based as ICA1 stores it). Refuses (false,
+// nothing called) unless results.CanSave(); stops at the first failing step
+// (false; the marker is then never written).
 bool CalRoutineSave(const CalRoutineFlow::Results &results, CalRoutine::SavePort &port);
 
 // Console Q: one input against one output at three DAC settings (two fit
@@ -453,6 +534,16 @@ int Save(char *buf, size_t n, bool ok);
 int Discard(char *buf, size_t n);
 int Cancel(char *buf, size_t n, const char *stage);
 int Fail(char *buf, size_t n, const char *reason);
+// mode: "OUTPUTS" / "INPUTS" / "SELF" (CalRoutineFlow::ModeName), at Begin.
+int RunMode(char *buf, size_t n, const char *mode);
+// reason: "NO_MARKER" (Inputs without a Cal Routine output calibration).
+int Warn(char *buf, size_t n, const char *reason);
+// The patch check, one line per output raised: the inputs it moved (panel
+// mask) and its own input's shift in raw counts (positive = up in volts).
+int Patch(char *buf, size_t n, int out, uint8_t moved, float own_delta_raw);
+// crossed: outputs that moved another input; missing: outputs that did not
+// move their own (output masks).
+int PatchResult(char *buf, size_t n, bool pass, uint8_t crossed, uint8_t missing);
 
 // The console Q's lines (docs/CV-Meter.md; golden: test/fixtures/cvmeter_lines.txt).
 // out / in here are panel labels 0..7, printed 1-based.

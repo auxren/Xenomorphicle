@@ -67,9 +67,9 @@ enum TableVerdict { TABLE_OK, TABLE_NOT_MONOTONE, TABLE_SLOPE };
 // one before it and the step is not short by more than the tolerance.
 TableVerdict CheckTable(const uint16_t table[kNodes]);
 
-// Verify-sweep targets: 4 evenly spaced points between each pair of nodes
-// (240 mV apart), 0..12000 mV, nodes excluded, ascending. Returns the count
-// written (40 when cap >= 40).
+// Verify-sweep targets: 2 evenly spaced points between each pair of nodes
+// (k x 1200 + 400 and + 800 mV), 0..12000 mV, nodes excluded, ascending.
+// Returns the count written (20 when cap >= 20).
 int SweepPoints(int32_t out_mv[], int cap);
 
 // ---- input curve ---------------------------------------------------------------

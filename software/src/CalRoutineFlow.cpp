@@ -76,7 +76,7 @@ CALR_CODE void Builder::Hex(unsigned v, int digits) {
 CALR_CODE int Builder::Done() const { return int(pos); }
 
 static const char *const kHeaders[] = {
-  "CALR#,version=1",
+  "CALR#,version=2",
   "CALR#,METER,identity",
   "CALR#,STATE,ms,stage,out,in",
   "CALR#,OUT,out",
@@ -97,6 +97,10 @@ static const char *const kHeaders[] = {
   "CALR#,DISCARD",
   "CALR#,CANCEL,stage",
   "CALR#,FAIL,reason",
+  "CALR#,MODE,mode",
+  "CALR#,WARN,reason",
+  "CALR#,PATCH,out,moved,own_delta_raw",
+  "CALR#,PRES,result,crossed,missing",
 };
 
 CALR_CODE int HeaderCount() { return int(sizeof(kHeaders) / sizeof(kHeaders[0])); }
@@ -329,6 +333,42 @@ CALR_CODE int Fail(char *buf, size_t n, const char *reason) {
   return l.Done();
 }
 
+CALR_CODE int RunMode(char *buf, size_t n, const char *mode) {
+  Builder l;
+  l.Init(buf, n);
+  l.Str("CALR,MODE");
+  l.Field(mode);
+  return l.Done();
+}
+
+CALR_CODE int Warn(char *buf, size_t n, const char *reason) {
+  Builder l;
+  l.Init(buf, n);
+  l.Str("CALR,WARN");
+  l.Field(reason);
+  return l.Done();
+}
+
+CALR_CODE int Patch(char *buf, size_t n, int out, uint8_t moved, float own_delta_raw) {
+  Builder l;
+  l.Init(buf, n);
+  l.Str("CALR,PATCH");
+  l.Int(Label(out));
+  l.Hex(moved, 2);
+  l.Fix(own_delta_raw, 2);
+  return l.Done();
+}
+
+CALR_CODE int PatchResult(char *buf, size_t n, bool pass, uint8_t crossed, uint8_t missing) {
+  Builder l;
+  l.Init(buf, n);
+  l.Str("CALR,PRES");
+  l.Field(pass ? "PASS" : "FAIL");
+  l.Hex(crossed, 2);
+  l.Hex(missing, 2);
+  return l.Done();
+}
+
 // The console Q's lines, as CvMeter.cpp printed them before (docs/CV-Meter.md).
 CALR_CODE int IncalPatch(char *buf, size_t n, int in, int out, const int32_t mv[3]) {
   if (!n) return 0;
@@ -387,23 +427,19 @@ const char *const kMeterSetup[6] = {
 };
 const char *const kErrorQuery = "SYST:ERR?";
 
-CALR_CODE void InputPoint::Start(OutputPort &out, InputPort &in, Clock &clock, int out_label,
-                                 uint16_t code, int in_label) {
-  out_ = &out;
+CALR_CODE void InputWindow::Start(InputPort &in, Clock &clock) {
   in_ = &in;
   clock_ = &clock;
-  in_label_ = in_label;
-  out.Hold(out_label, code);
   t0_ = clock.Ms();
   phase_ = P_SETTLE;
 }
 
-CALR_CODE bool InputPoint::Tick(CM::PointStats *s) {
+CALR_CODE bool InputWindow::Tick(CM::PointStats s[8]) {
   if (phase_ == P_IDLE) return false;
   const uint32_t now = clock_->Ms();
   if (phase_ == P_SETTLE) {
     if (now - t0_ < kInSettleMs) return false;
-    in_->StartWindow(in_label_);
+    in_->StartWindow();
     t0_ = now;
     phase_ = P_MEASURE;
     return false;
@@ -414,12 +450,28 @@ CALR_CODE bool InputPoint::Tick(CM::PointStats *s) {
     return true;
   }
   if (now - t0_ >= kInMeasureMs + kInWindowTimeoutMs) {
-    s->mean_raw = s->min_raw = s->max_raw = 0.f;
-    s->samples = 0;
+    for (int i = 0; i < 8; ++i) {
+      s[i].mean_raw = s[i].min_raw = s[i].max_raw = 0.f;
+      s[i].samples = 0;
+    }
     phase_ = P_IDLE;
     return true;
   }
   return false;
+}
+
+CALR_CODE void InputPoint::Start(OutputPort &out, InputPort &in, Clock &clock, int out_label,
+                                 uint16_t code, int in_label) {
+  in_label_ = in_label;
+  out.Hold(out_label, code);
+  win_.Start(in, clock);
+}
+
+CALR_CODE bool InputPoint::Tick(CM::PointStats *s) {
+  CM::PointStats all[8];
+  if (!win_.Tick(all)) return false;
+  *s = all[in_label_ & 7];
+  return true;
 }
 
 }  // namespace CalRoutine
@@ -429,7 +481,20 @@ using namespace CalRoutine;
 // =============================================================================
 // The flow
 
+CALR_CODE bool CalRoutineFlow::Results::HasOutputs() const {
+  return mode != uint8_t(Mode::Inputs);
+}
+
+CALR_CODE bool CalRoutineFlow::Results::HasInputs() const {
+  return mode != uint8_t(Mode::Outputs);
+}
+
 CALR_CODE bool CalRoutineFlow::Results::CanSave() const {
+  if (!HasOutputs()) {
+    for (int i = 0; i < 8; ++i)
+      if (in_pass[i]) return true;
+    return false;
+  }
   for (int o = 0; o < 8; ++o)
     if (!out_pass[o]) return false;
   return true;
@@ -447,10 +512,22 @@ CALR_CODE const char *CalRoutineFlow::StageName(Stage s) {
     case Stage::PromptOutput: return "PROMPT_OUT";
     case Stage::CalOutput: return "CAL_OUT";
     case Stage::SweepOutput: return "SWEEP_OUT";
-    case Stage::PromptInput: return "PROMPT_IN";
+    case Stage::WarnMarker: return "WARN_MARKER";
+    case Stage::PromptPatch: return "PROMPT_PATCH";
+    case Stage::CheckPatch: return "CHECK_PATCH";
+    case Stage::PatchFailed: return "PATCH_FAIL";
     case Stage::CalInput: return "CAL_IN";
     case Stage::Results: return "RESULTS";
     case Stage::Failed: return "FAILED";
+  }
+  return "?";
+}
+
+CALR_CODE const char *CalRoutineFlow::ModeName(Mode m) {
+  switch (m) {
+    case Mode::Outputs: return "OUTPUTS";
+    case Mode::Inputs: return "INPUTS";
+    case Mode::Self: return "SELF";
   }
   return "?";
 }
@@ -482,22 +559,38 @@ CALR_CODE void CalRoutineFlow::SetStage(Stage s) {
   CALR_LOG(State, now_, StageName(s), cur_out_, cur_in_);
 }
 
-CALR_CODE void CalRoutineFlow::Begin(MeterPort &meter, OutputPort &out, InputPort &in, Clock &clock) {
+CALR_CODE void CalRoutineFlow::Begin(MeterPort &meter, OutputPort &out, InputPort &in, Clock &clock,
+                                     Mode mode, bool outputs_marked) {
   out.ReleaseAll();  // a Begin mid-run never leaves the previous run's output held
   meter_ = &meter;
   out_ = &out;
   in_ = &in;
   clock_ = &clock;
   now_ = clock.Ms();
+  mode_ = mode;
   memset(&results_, 0, sizeof(results_));
+  results_.mode = uint8_t(mode);
   for (int o = 0; o < 8; ++o) {
-    for (int k = 0; k < CR::kNodes; ++k) results_.table[o][k] = out.TableCode(o, k);
+    for (int k = 0; k < CR::kNodes; ++k) {
+      results_.table[o][k] = out.TableCode(o, k);
+      // Inputs only: an entry pinned at 65535 is taken as a rail entry (a Cal
+      // Routine table keeps an unreachable entry there; a nominal table's 12 V
+      // entry is 65535 too). That only narrows the input's span to 10.8 V,
+      // above the inputs' own top (~10.65 V). Code 0 at entry 0 is a normal
+      // 0 V, so the bottom is not inferred.
+      if (mode == Mode::Inputs) results_.at_rail[o][k] = k > 0 && results_.table[o][k] == 65535;
+    }
     results_.out_reason[o] = OUT_NOT_RUN;
     results_.in_verdict[o] = CM::VERDICT_NO_SAMPLES;
   }
   q_phase_ = Q_NONE;
   m_phase_ = M_NONE;
-  ipoint_.Stop();
+  iwin_.Stop();
+  p_i_ = -1;
+  p_crossed_ = p_missing_ = 0;
+  memset(p_moved_, 0, sizeof(p_moved_));
+  ip_open_ = 0;
+  n_sweep_in_ = 0;
   lost_ = false;
   resume_out_ = -1;
   retry_out_ = -1;
@@ -505,6 +598,16 @@ CALR_CODE void CalRoutineFlow::Begin(MeterPort &meter, OutputPort &out, InputPor
   cur_out_ = -1;
   cur_in_ = -1;
   for (int i = 0; i < L::HeaderCount(); ++i) Log(L::Header(i));
+  CALR_LOG(RunMode, ModeName(mode));
+  if (mode == Mode::Inputs) {
+    if (!outputs_marked) {
+      CALR_LOG(Warn, "NO_MARKER");
+      SetStage(Stage::WarnMarker);
+    } else {
+      SetStage(Stage::PromptPatch);
+    }
+    return;
+  }
   if (meter.Connected()) StartConfig();
   else SetStage(Stage::NoMeter);
 }
@@ -517,7 +620,7 @@ CALR_CODE void CalRoutineFlow::StartConfig() {
 }
 
 CALR_CODE void CalRoutineFlow::Tick() {
-  if (!meter_) return;
+  if (!meter_ || stage_ == Stage::Idle) return;
   now_ = clock_->Ms();
   switch (stage_) {
     case Stage::NoMeter:
@@ -534,8 +637,11 @@ CALR_CODE void CalRoutineFlow::Tick() {
       else if (stage_ == Stage::CalOutput) TickNode();
       else TickSweep();
       break;
+    case Stage::CheckPatch:
+      TickPatch();  // the meter is not in the input part
+      break;
     case Stage::CalInput:
-      TickInput();  // the meter is not in this loop
+      TickInput();
       break;
     default:
       break;
@@ -548,32 +654,27 @@ CALR_CODE void CalRoutineFlow::Continue() {
   if (stage_ == Stage::PromptOutput) {
     if (!meter_->Connected()) Lost();
     else StartOutput(cur_out_);
-  } else if (stage_ == Stage::PromptInput) {
-    StartInput(cur_in_);
+  } else if (stage_ == Stage::WarnMarker) {
+    SetStage(Stage::PromptPatch);
+  } else if (stage_ == Stage::PromptPatch || stage_ == Stage::PatchFailed) {
+    StartPatchCheck();
   }
 }
 
+// Only empty jacks (no crossing): the inputs whose outputs moved nothing are
+// left out, logged SKIP, and saved as not calibrated.
 CALR_CODE void CalRoutineFlow::Skip() {
-  if (!meter_ || stage_ != Stage::PromptInput) return;
+  if (!meter_ || stage_ != Stage::PatchFailed || p_crossed_) return;
   now_ = clock_->Ms();
-  const int i = cur_in_;
-  results_.in_pass[i] = false;
-  results_.in_verdict[i] = CM::VERDICT_NO_SAMPLES;
-  results_.in_points[i] = 0;
-  results_.in_holdout_mv[i] = 0.f;
-  results_.in_line_dev_mv[i] = 0.f;
-  results_.in_lo_mv[i] = results_.in_hi_mv[i] = 0;
-  results_.line[i].gain = results_.line[i].offset_mv = 0.f;
-  memset(results_.curve_mv_x2[i], 0, sizeof(results_.curve_mv_x2[i]));
-  CALR_LOG(InResult, i, "SKIP", CM::VERDICT_NO_SAMPLES, results_.line[i], 0.f, 0.f, 0);
-  NextAfterInput();
+  results_.in_skipped = p_missing_;
+  StartInputs();
 }
 
 CALR_CODE void CalRoutineFlow::Cancel() {
   if (stage_ == Stage::Idle) return;
   if (clock_) now_ = clock_->Ms();
   if (out_) out_->ReleaseAll();
-  ipoint_.Stop();
+  iwin_.Stop();
   q_phase_ = Q_NONE;
   m_phase_ = M_NONE;
   lost_ = false;
@@ -585,7 +686,7 @@ CALR_CODE void CalRoutineFlow::Cancel() {
 }
 
 CALR_CODE bool CalRoutineFlow::RetryOutput(int o) {
-  if (!meter_ || stage_ != Stage::Results || o < 0 || o > 7) return false;
+  if (!meter_ || stage_ != Stage::Results || mode_ == Mode::Inputs || o < 0 || o > 7) return false;
   now_ = clock_->Ms();
   out_->ReleaseAll();
   retry_out_ = o;
@@ -602,7 +703,7 @@ CALR_CODE bool CalRoutineFlow::RetryOutput(int o) {
 
 CALR_CODE void CalRoutineFlow::Fail(const char *reason) {
   out_->ReleaseAll();
-  ipoint_.Stop();
+  iwin_.Stop();
   q_phase_ = Q_NONE;
   m_phase_ = M_NONE;
   lost_ = false;
@@ -950,16 +1051,10 @@ CALR_CODE void CalRoutineFlow::FinishOutput(OutReason reason) {
 }
 
 CALR_CODE void CalRoutineFlow::NextAfterOutput() {
-  if (retry_out_ >= 0) {  // a RetryOutput: back to Results, through the inputs if it was A
-    const int o = retry_out_;
+  if (retry_out_ >= 0) {  // a RetryOutput: back to Results, through the inputs in Self
     retry_out_ = -1;
-    if (o == kSourceOutput) {
-      cur_out_ = -1;
-      cur_in_ = 0;
-      SetStage(Stage::PromptInput);
-    } else {
-      FinishRun();
-    }
+    if (mode_ == Mode::Self) ToInputs();
+    else FinishRun();
     return;
   }
   if (cur_out_ < 7) {
@@ -967,97 +1062,200 @@ CALR_CODE void CalRoutineFlow::NextAfterOutput() {
     SetStage(Stage::PromptOutput);
     return;
   }
-  cur_out_ = -1;
-  cur_in_ = 0;
-  SetStage(Stage::PromptInput);
+  if (mode_ == Mode::Self) ToInputs();
+  else FinishRun();
 }
 
-// ---- inputs ------------------------------------------------------------------
+// ---- inputs: patched A -> 1 ... H -> 8, all 8 at once -------------------------
 
-// The source's span: only table segments whose both ends are real (not at
-// the rail). Next to a rail entry, CodeForMv interpolates towards a code
-// that does not give that entry's voltage, so a point there would be
-// labelled with a voltage the output is not producing (a 12 V entry pinned
-// at 65535 makes "11400 mV" about 11420 mV) and bend every input's curve.
-CALR_CODE void CalRoutineFlow::StartInput(int i) {
+CALR_CODE void CalRoutineFlow::ToInputs() {
   out_->ReleaseAll();
-  cur_in_ = i;
-  n_ipts_ = 0;
-  const bool *rail = results_.at_rail[kSourceOutput];
-  int k_lo = 0;
-  while (k_lo < CR::kNodes - 1 && rail[k_lo]) ++k_lo;
-  int k_hi = k_lo;
-  while (k_hi + 1 < CR::kNodes && !rail[k_hi + 1]) ++k_hi;
-  // From kInStepMv, or from the first real entry when entry 0 is at the rail.
-  ip_mv_ = k_lo ? k_lo * CR::kNodeMv : kInStepMv;
-  ip_top_mv_ = k_hi * CR::kNodeMv;
-  CALR_LOG(In, i, kSourceOutput, ip_mv_, ip_top_mv_);
-  SetStage(Stage::CalInput);
-  if (ip_top_mv_ < ip_mv_ + 3 * kInStepMv) {  // under 4 points: cannot build a curve
-    FinishInput();
+  cur_out_ = -1;
+  cur_in_ = -1;
+  SetStage(Stage::PromptPatch);
+}
+
+// The patch check: one window with all 8 outputs low, then one per output
+// raised alone. An input that moves by more than kPatchMoveCounts is "moved".
+CALR_CODE void CalRoutineFlow::StartPatchCheck() {
+  out_->ReleaseAll();
+  p_i_ = -1;
+  p_crossed_ = p_missing_ = 0;
+  memset(p_moved_, 0, sizeof(p_moved_));
+  results_.in_skipped = 0;
+  SetStage(Stage::CheckPatch);
+  HoldPatch();
+}
+
+CALR_CODE void CalRoutineFlow::HoldPatch() {
+  for (int o = 0; o < 8; ++o)
+    out_->Hold(o, out_->CodeForMv(o, results_.table[o], o == p_i_ ? kPatchHighMv : kPatchLowMv));
+  iwin_.Start(*in_, *clock_);
+}
+
+CALR_CODE void CalRoutineFlow::TickPatch() {
+  if (!iwin_.Tick(istats_)) return;
+  if (p_i_ < 0) {
+    for (int i = 0; i < 8; ++i) p_low_[i] = istats_[i].samples ? istats_[i].mean_raw : 0.f;
+  } else {
+    const int o = p_i_;
+    uint8_t moved = 0;
+    float own = 0.f;
+    for (int i = 0; i < 8; ++i) {
+      // Volts rise as raw falls: a positive shift is the input going up.
+      const float d = istats_[i].samples ? p_low_[i] - istats_[i].mean_raw : 0.f;
+      if (fabsf(d) > kPatchMoveCounts) moved = uint8_t(moved | (1u << i));
+      if (i == o) own = d;
+    }
+    p_moved_[o] = moved;
+    if (moved & ~(1u << o)) p_crossed_ = uint8_t(p_crossed_ | (1u << o));
+    if (!(moved & (1u << o))) p_missing_ = uint8_t(p_missing_ | (1u << o));
+    CALR_LOG(Patch, o, moved, own);
+  }
+  if (++p_i_ < 8) {
+    HoldPatch();
     return;
   }
-  StartInputPoint();
+  FinishPatchCheck();
 }
 
-CALR_CODE void CalRoutineFlow::StartInputPoint() {
-  ip_code_ = out_->CodeForMv(kSourceOutput, results_.table[kSourceOutput], ip_mv_);
-  ipoint_.Start(*out_, *in_, *clock_, kSourceOutput, ip_code_, cur_in_);
+CALR_CODE void CalRoutineFlow::FinishPatchCheck() {
+  out_->ReleaseAll();
+  p_i_ = -1;
+  const bool pass = !p_crossed_ && !p_missing_;
+  CALR_LOG(PatchResult, pass, p_crossed_, p_missing_);
+  if (pass) StartInputs();
+  else SetStage(Stage::PatchFailed);
 }
 
-// Every kInStepMv across the span StartInput chose on output A; a point near
-// raw 0 (the input's top rail) ends the sweep and is not used. Points near
-// raw 4095 are kept, so an unpatched input fails RAIL rather than vanishing.
-CALR_CODE void CalRoutineFlow::TickInput() {
-  CM::PointStats s;
-  if (!ipoint_.Tick(&s)) return;
-  const bool used = !s.samples || s.mean_raw >= kInTopGuardCounts;
-  CALR_LOG(InPoint, cur_in_, ip_mv_, ip_code_, s, used);
-  if (used) {
-    ipts_[n_ipts_].mv = ip_mv_;
-    ipts_[n_ipts_].stats = s;
-    ++n_ipts_;
+// Each input's span is that of its own output: only table segments whose
+// both ends are real (not at the rail). Next to a rail entry, CodeForMv
+// interpolates towards a code that does not give that entry's voltage, so a
+// point there would be labelled with a voltage the output is not producing
+// (a 12 V entry pinned at 65535 makes "11400 mV" about 11420 mV) and bend the
+// input's curve. The input's own range ends its sweep (kInTopGuardCounts).
+CALR_CODE void CalRoutineFlow::StartInputs() {
+  out_->ReleaseAll();
+  cur_out_ = cur_in_ = -1;
+  ip_open_ = 0;
+  n_sweep_in_ = 0;
+  int32_t lo_all = 0;
+  for (int i = 0; i < 8; ++i) {
+    n_ipts_[i] = 0;
+    results_.in_pass[i] = false;
+    results_.in_verdict[i] = CM::VERDICT_NO_SAMPLES;
+    if (results_.in_skipped & (1u << i)) continue;
+    const bool *rail = results_.at_rail[i];
+    int k_lo = 0;
+    while (k_lo < CR::kNodes - 1 && rail[k_lo]) ++k_lo;
+    int k_hi = k_lo;
+    while (k_hi + 1 < CR::kNodes && !rail[k_hi + 1]) ++k_hi;
+    // From kInStepMv, or from the first real entry when entry 0 is at the rail.
+    ip_lo_mv_[i] = k_lo ? k_lo * CR::kNodeMv : kInStepMv;
+    ip_top_mv_[i] = k_hi * CR::kNodeMv;
+    CALR_LOG(In, i, i, ip_lo_mv_[i], ip_top_mv_[i]);
+    // Under 4 points: no curve can be built; FinishInputs fails it NO_SAMPLES.
+    if (ip_top_mv_[i] < ip_lo_mv_[i] + 3 * kInStepMv) continue;
+    if (!ip_open_ || ip_lo_mv_[i] < lo_all) lo_all = ip_lo_mv_[i];
+    ip_open_ = uint8_t(ip_open_ | (1u << i));
   }
-  if (!used || !s.samples || n_ipts_ >= kMaxInputPoints || ip_mv_ + kInStepMv > ip_top_mv_) {
-    FinishInput();
+  SetStage(Stage::CalInput);
+  if (!ip_open_) {
+    FinishInputs();
+    return;
+  }
+  // Sweep points sit on the kInStepMv grid, so every input sees the same
+  // voltages; an input whose span starts higher joins when the sweep gets there.
+  ip_mv_ = lo_all;
+  HoldInputPoint();
+}
+
+// Every output at the sweep voltage through its own table, clamped into its
+// span (an output outside its span takes no part in its input's curve).
+CALR_CODE void CalRoutineFlow::HoldInputPoint() {
+  for (int o = 0; o < 8; ++o) {
+    int32_t mv = ip_mv_;
+    if (mv < ip_lo_mv_[o]) mv = ip_lo_mv_[o];
+    if (mv > ip_top_mv_[o]) mv = ip_top_mv_[o];
+    if (results_.in_skipped & (1u << o)) mv = kPatchLowMv;
+    ip_code_[o] = out_->CodeForMv(o, results_.table[o], mv);
+    out_->Hold(o, ip_code_[o]);
+  }
+  iwin_.Start(*in_, *clock_);
+}
+
+// One window per point for all 8 inputs. For each open input: a point near
+// raw 0 (its top rail) ends its sweep and is not used; points near raw 4095
+// are kept, so a dead input fails RAIL rather than vanishing; a failed
+// window ends every sweep. A failed input does not stop the others.
+CALR_CODE void CalRoutineFlow::TickInput() {
+  if (!iwin_.Tick(istats_)) return;
+  ++n_sweep_in_;
+  int32_t top_open = 0;
+  for (int i = 0; i < 8; ++i) {
+    if (!(ip_open_ & (1u << i)) || ip_mv_ < ip_lo_mv_[i]) {
+      if (ip_open_ & (1u << i)) top_open = ip_top_mv_[i] > top_open ? ip_top_mv_[i] : top_open;
+      continue;
+    }
+    const CM::PointStats &s = istats_[i];
+    const bool used = !s.samples || s.mean_raw >= kInTopGuardCounts;
+    CALR_LOG(InPoint, i, ip_mv_, ip_code_[i], s, used);
+    if (used) {
+      ipts_[i][n_ipts_[i]].mv = ip_mv_;
+      ipts_[i][n_ipts_[i]].stats = s;
+      ++n_ipts_[i];
+    }
+    if (!used || !s.samples || n_ipts_[i] >= kMaxInputPoints || ip_mv_ + kInStepMv > ip_top_mv_[i]) {
+      ip_open_ = uint8_t(ip_open_ & ~(1u << i));
+      continue;
+    }
+    if (ip_top_mv_[i] > top_open) top_open = ip_top_mv_[i];
+  }
+  if (!ip_open_ || ip_mv_ + kInStepMv > top_open) {
+    FinishInputs();
     return;
   }
   ip_mv_ += kInStepMv;
-  StartInputPoint();
+  HoldInputPoint();
 }
 
-CALR_CODE void CalRoutineFlow::FinishInput() {
+CALR_CODE void CalRoutineFlow::FinishInputs() {
   out_->ReleaseAll();
-  ipoint_.Stop();
-  const int i = cur_in_;
-  int16_t curve[CR::kCurvePoints] = {};
-  CM::Fit line = {0.f, 0.f};
-  float dev = 0.f, holdout = 0.f;
-  const CM::Verdict v = CR::BuildInputCurve(ipts_, n_ipts_, curve, &line, &dev, &holdout);
-  const bool pass = v == CM::VERDICT_OK;
-  results_.in_verdict[i] = v;
-  results_.in_pass[i] = pass;
-  results_.line[i] = line;
-  results_.in_holdout_mv[i] = holdout;
-  results_.in_points[i] = uint8_t(n_ipts_);
-  results_.in_line_dev_mv[i] = dev;
-  int32_t lo = 0, hi = 0;
-  for (int k = 0; k < n_ipts_; ++k) {
-    if (k == 0 || ipts_[k].mv < lo) lo = ipts_[k].mv;
-    if (k == 0 || ipts_[k].mv > hi) hi = ipts_[k].mv;
-  }
-  results_.in_lo_mv[i] = lo;
-  results_.in_hi_mv[i] = hi;
-  memcpy(results_.curve_mv_x2[i], curve, sizeof(curve));
-  CALR_LOG(InResult, i, pass ? "PASS" : "FAIL", v, line, holdout, dev, n_ipts_);
-  NextAfterInput();
-}
-
-CALR_CODE void CalRoutineFlow::NextAfterInput() {
-  if (cur_in_ < 7) {
-    ++cur_in_;
-    SetStage(Stage::PromptInput);
-    return;
+  iwin_.Stop();
+  ip_open_ = 0;
+  for (int i = 0; i < 8; ++i) {
+    if (results_.in_skipped & (1u << i)) {
+      results_.in_pass[i] = false;
+      results_.in_verdict[i] = CM::VERDICT_NO_SAMPLES;
+      results_.in_points[i] = 0;
+      results_.in_holdout_mv[i] = results_.in_line_dev_mv[i] = 0.f;
+      results_.in_lo_mv[i] = results_.in_hi_mv[i] = 0;
+      results_.line[i].gain = results_.line[i].offset_mv = 0.f;
+      memset(results_.curve_mv_x2[i], 0, sizeof(results_.curve_mv_x2[i]));
+      CALR_LOG(InResult, i, "SKIP", CM::VERDICT_NO_SAMPLES, results_.line[i], 0.f, 0.f, 0);
+      continue;
+    }
+    const int n = n_ipts_[i];
+    int16_t curve[CR::kCurvePoints] = {};
+    CM::Fit line = {0.f, 0.f};
+    float dev = 0.f, holdout = 0.f;
+    const CM::Verdict v = CR::BuildInputCurve(ipts_[i], n, curve, &line, &dev, &holdout);
+    const bool pass = v == CM::VERDICT_OK;
+    results_.in_verdict[i] = v;
+    results_.in_pass[i] = pass;
+    results_.line[i] = line;
+    results_.in_holdout_mv[i] = holdout;
+    results_.in_points[i] = uint8_t(n);
+    results_.in_line_dev_mv[i] = dev;
+    int32_t lo = 0, hi = 0;
+    for (int k = 0; k < n; ++k) {
+      if (k == 0 || ipts_[i][k].mv < lo) lo = ipts_[i][k].mv;
+      if (k == 0 || ipts_[i][k].mv > hi) hi = ipts_[i][k].mv;
+    }
+    results_.in_lo_mv[i] = lo;
+    results_.in_hi_mv[i] = hi;
+    memcpy(results_.curve_mv_x2[i], curve, sizeof(curve));
+    CALR_LOG(InResult, i, pass ? "PASS" : "FAIL", v, line, holdout, dev, n);
   }
   FinishRun();
 }
@@ -1097,18 +1295,21 @@ CALR_CODE void CalRoutineFlow::Discard() {
 
 CALR_CODE bool CalRoutineSave(const CalRoutineFlow::Results &r, CalRoutine::SavePort &port) {
   if (!r.CanSave()) return false;
+  const bool outs = r.HasOutputs(), ins = r.HasInputs();
   uint8_t mask = 0;
   uint8_t source[8];
   for (int i = 0; i < 8; ++i) {
     if (r.in_pass[i]) mask = uint8_t(mask | (1u << i));
-    source[i] = uint8_t(kSourceOutput + 1);
+    source[i] = uint8_t(i + 1);  // input n's source is output n, 1-based
   }
-  if (!port.SaveDacTable(r.table)) return false;
-  if (!port.SaveCurves(r.curve_mv_x2, mask, source)) return false;
-  if (!port.SaveLines(r.line, mask, source, r.in_line_dev_mv)) return false;
-  port.WriteMarker();
-  port.ResetAutotune();
-  port.ReloadInputs();
+  if (outs && !port.SaveDacTable(r.table)) return false;
+  if (ins && !port.SaveCurves(r.curve_mv_x2, mask, source)) return false;
+  if (ins && !port.SaveLines(r.line, mask, source, r.in_line_dev_mv)) return false;
+  if (outs) {
+    port.WriteMarker();
+    port.ResetAutotune();
+  }
+  if (ins) port.ReloadInputs();
   return true;
 }
 

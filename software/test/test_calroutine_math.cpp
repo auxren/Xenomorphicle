@@ -139,13 +139,15 @@ static void test_table_checks() {
 
 static void test_sweep_points() {
   int32_t p[64];
-  CHECK(SweepPoints(p, 64) == 40);
-  for (int i = 0; i < 40; ++i) {
+  // 2 points between each pair of nodes, at k * 1200 + 400 and + 800 mV.
+  CHECK(SweepPoints(p, 64) == 20);
+  for (int i = 0; i < 20; ++i) {
+    CHECK(p[i] == (i / 2) * 1200 + (i % 2 ? 800 : 400));
     CHECK(p[i] > 0 && p[i] < 12000);
     CHECK(p[i] % 1200 != 0);
     if (i) CHECK(p[i] > p[i - 1]);
   }
-  CHECK(SweepPoints(p, 10) == 10);  // capped, not overrun
+  CHECK(SweepPoints(p, 7) == 7);  // capped, not overrun
 }
 
 static void test_summarize() {

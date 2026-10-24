@@ -245,35 +245,41 @@ FLASHMEM uint16_t Outputs_::CodeForMv(int, const uint16_t table[CalRoutineMath::
 // only repeats it (CvMeter.cpp, the same window).
 static constexpr uint32_t kSampleIntervalUs = 180;
 
+// All 8 inputs in one window: the ADC converts them together, so a window
+// costs 8 smoothed reads per sample instead of 1.
 struct Inputs_ : CalRoutine::InputPort {
   bool open = false;
-  int phys = 0;
-  uint64_t sum = 0;
-  uint32_t lo = 0, hi = 0, n = 0;
+  uint64_t sum[8] = {};
+  uint32_t lo[8] = {}, hi[8] = {};
+  uint32_t n = 0;
   uint32_t last_us = 0;
-  void StartWindow(int in) override;
-  bool WindowDone(PointStats *s) override;
+  void StartWindow() override;
+  bool WindowDone(PointStats s[8]) override;
   void Sample();
 };
 
 static Inputs_ inputs;
 
-FLASHMEM void Inputs_::StartWindow(int in) {
-  phys = PanelInPhys(in);
-  sum = 0;
-  lo = 0xFFFFFFFFu;
-  hi = 0;
+FLASHMEM void Inputs_::StartWindow() {
+  for (int i = 0; i < 8; ++i) {
+    sum[i] = 0;
+    lo[i] = 0xFFFFFFFFu;
+    hi[i] = 0;
+  }
   n = 0;
   last_us = micros() - kSampleIntervalUs;
   open = true;
 }
 
-FLASHMEM bool Inputs_::WindowDone(PointStats *s) {
+// s[] in panel order (input 1..8); the sums are kept that way too.
+FLASHMEM bool Inputs_::WindowDone(PointStats s[8]) {
   open = false;
-  s->samples = n;
-  s->mean_raw = n ? float(sum) / (256.f * float(n)) : 0.f;
-  s->min_raw = n ? float(lo) * (1.f / 256.f) : 0.f;
-  s->max_raw = n ? float(hi) * (1.f / 256.f) : 0.f;
+  for (int i = 0; i < 8; ++i) {
+    s[i].samples = n;
+    s[i].mean_raw = n ? float(sum[i]) / (256.f * float(n)) : 0.f;
+    s[i].min_raw = n ? float(lo[i]) * (1.f / 256.f) : 0.f;
+    s[i].max_raw = n ? float(hi[i]) * (1.f / 256.f) : 0.f;
+  }
   return true;
 }
 
@@ -282,10 +288,12 @@ FLASHMEM void Inputs_::Sample() {
   const uint32_t now = micros();
   if (now - last_us < kSampleIntervalUs) return;
   last_us = now;
-  const uint32_t q = OC::ADC::smoothed_raw_q8(phys);
-  sum += q;
-  if (q < lo) lo = q;
-  if (q > hi) hi = q;
+  for (int i = 0; i < 8; ++i) {
+    const uint32_t q = OC::ADC::smoothed_raw_q8(PanelInPhys(i));
+    sum[i] += q;
+    if (q < lo[i]) lo[i] = q;
+    if (q > hi[i]) hi[i] = q;
+  }
   ++n;
 }
 

@@ -146,6 +146,10 @@ CALR_FIELDS = {
     "DISCARD": (),
     "CANCEL": ("stage",),
     "FAIL": ("reason",),
+    "MODE": ("mode",),
+    "WARN": ("reason",),
+    "PATCH": ("out", "moved", "own_delta_raw"),
+    "PRES": ("result", "crossed", "missing"),
 }
 _CALR_KIND = {"ms": "i", "out": "i", "in": "i", "k": "i", "target_mv": "i", "code": "i",
               "measured_mv": "f", "iters": "i", "rail": "i", "spread_mv": "f",
@@ -153,15 +157,16 @@ _CALR_KIND = {"ms": "i", "out": "i", "in": "i", "k": "i", "target_mv": "i", "cod
               "rail_mask": "h", "src_out": "i", "lo_mv": "i", "hi_mv": "i", "mv": "i",
               "mean_raw": "f", "pp_raw": "f", "samples": "i", "used": "i",
               "gain_uv": "f", "offset_mv": "f", "holdout_mv": "f", "line_dev_mv": "f",
-              "points": "i", "attempt": "i", "can_save": "i", "out_pass": "h", "in_pass": "h"}
+              "points": "i", "attempt": "i", "can_save": "i", "out_pass": "h", "in_pass": "h",
+              "moved": "h", "own_delta_raw": "f", "crossed": "h", "missing": "h"}
 
 
 def parse_calr(line):
     """CALR,<SUB>,... -> {"sub": SUB, field: value, ...} or None.
 
     None for a '#' header, another tag, an unknown SUB, a wrong field count
-    or a field that does not parse. Masks (rail_mask, out_pass, in_pass) are
-    hex in the line and ints here.
+    or a field that does not parse. Masks (rail_mask, out_pass, in_pass,
+    moved, crossed, missing) are hex in the line and ints here.
     """
     f = line.strip().split(",")
     if len(f) < 2 or f[0] != "CALR" or f[1] not in CALR_FIELDS:
@@ -183,13 +188,27 @@ def parse_calr(line):
 
 
 def summarize_calr(parsed):
-    """Fold parsed CALR dicts into the figures an operator reads: per output
-    and input results, the RESULT masks, and whether the run saved."""
+    """Fold parsed CALR dicts into the figures an operator reads: the mode,
+    per output and input results, the patch check (the last one wins: a
+    failed check is followed by another once the patch is fixed), the
+    RESULT masks, and whether the run saved."""
     res = {"outputs": {}, "inputs": {}, "saved": False, "failed": None, "cancelled": None,
-           "out_pass": None, "in_pass": None, "can_save": None, "identity": None}
+           "out_pass": None, "in_pass": None, "can_save": None, "identity": None,
+           "mode": None, "warn": None, "patch": None}
+    moved = {}
     for d in parsed:
         s = d["sub"]
-        if s == "ORES":
+        if s == "MODE":
+            res["mode"] = d["mode"]
+        elif s == "WARN":
+            res["warn"] = d["reason"]
+        elif s == "PATCH":
+            moved[d["out"]] = d["moved"]
+        elif s == "PRES":
+            res["patch"] = {"result": d["result"], "crossed": d["crossed"],
+                            "missing": d["missing"], "moved": moved}
+            moved = {}
+        elif s == "ORES":
             res["outputs"][d["out"]] = d      # the last result of an output wins (retry)
         elif s == "IRES":
             res["inputs"][d["in"]] = d
@@ -552,11 +571,13 @@ class SimModule:
 
     def start_cal_routine(self):
         """Queue the CALR lines of a whole, all-pass Self run (8 outputs
-        against the meter, then output A into each input) and own the meter
-        until they have been read."""
+        against the meter, then outputs patched A->1 ... H->8: the patch
+        check and one all-8 input sweep) and own the meter until they have
+        been read."""
         r = self.rng
-        L = ["CALR#,version=1"]
+        L = ["CALR#,version=2"]
         L += ["CALR#," + sub + ("," + ",".join(f) if f else "") for sub, f in CALR_FIELDS.items()]
+        L.append("CALR,MODE,SELF")
         L.append("CALR,METER," + self.METER_ID.replace(",", ";"))
         ms = 1000
 
@@ -572,20 +593,29 @@ class SimModule:
                 code = round(t * 5.4613)
                 line("NODE", o, k, t, code, f"{t + r.gauss(0, 0.1):.3f}", 3, 0)
             line("REREAD", o, 3600, 19661, f"{abs(r.gauss(0, 0.4)):.3f}")
-            for t in range(600, 12000, 1200):
-                line("SWEEP", o, t, round(t * 5.4613), f"{t + r.gauss(0, 0.2):.3f}",
-                     f"{r.gauss(0, 0.2):.3f}", 1)
+            for k in range(10):                       # 2 verify points per node gap
+                for t in (k * 1200 + 400, k * 1200 + 800):
+                    line("SWEEP", o, t, round(t * 5.4613), f"{t + r.gauss(0, 0.2):.3f}",
+                         f"{r.gauss(0, 0.2):.3f}", 1)
             line("ORES", o, "PASS", "OK", f"{abs(r.gauss(0, 0.2)):.3f}", 10560, 0)
+        ms += 5000
+        line("STATE", ms, "PROMPT_PATCH", 0, 0)
+        line("STATE", ms + 2000, "CHECK_PATCH", 0, 0)
+        for o in range(1, 9):
+            line("PATCH", o, f"{1 << (o - 1):02X}", f"{1963 + r.gauss(0, 20):.2f}")
+        line("PRES", "PASS", "00", "00")
+        ms += 10000
+        line("STATE", ms, "CAL_IN", 0, 0)
         for i in range(1, 9):
-            ms += 15000
-            line("STATE", ms, "CAL_IN", 1, i)
-            line("IN", i, 1, 600, 10800)
-            for mv in range(600, 10801, 1200):
-                raw = 4095.0 - mv / 2.93
+            line("IN", i, i, 600, 10800)
+        for mv in range(600, 10201, 600):                # all 8 inputs per window
+            for i in range(1, 9):
+                raw = 3640.0 - mv / 2.75
                 line("IPT", i, mv, round(mv * 5.4613), f"{raw:.2f}", "2.25", 3333, 1)
-            line("IRES", i, "PASS", "OK", f"{-2930.0 + r.gauss(0, 2):.1f}",
-                 f"{12000 + r.gauss(0, 0.5):.2f}", f"{abs(r.gauss(0, 0.5)):.2f}",
-                 f"{abs(r.gauss(0, 0.8)):.2f}", 19)
+        for i in range(1, 9):
+            line("IRES", i, "PASS", "OK", f"{-2750.0 + r.gauss(0, 2):.1f}",
+                 f"{10010 + r.gauss(0, 0.5):.2f}", f"{abs(r.gauss(0, 0.5)):.2f}",
+                 f"{abs(r.gauss(0, 0.8)):.2f}", 17)
         line("RESULT", 1, "FF", "FF")
         line("SAVE", "OK")
         self.calr = L

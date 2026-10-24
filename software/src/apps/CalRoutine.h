@@ -20,22 +20,25 @@
 
 #pragma once
 
-// Cal Routine (design/cal-routine-design.md 6.2): closed-loop calibration of
-// the 8 CV outputs and the 8 CV inputs with a USB bench DMM on the host jack.
-// The step machine is CalRoutineFlow (host-tested); this file is its screens
-// and controls, CalRoutinePorts.cpp its hardware.
+// Cal Routine (design/cal-routine-design.md 6.2, 9.2): closed-loop
+// calibration of the 8 CV outputs against a USB bench DMM on the host jack
+// (Outputs), of the 8 CV inputs against the outputs patched A->1 ... H->8
+// (Inputs, no meter), or both in turn (Self). The menu is the kMenu table
+// below: later rows (bus modules) append there. The step machine is
+// CalRoutineFlow (host-tested); this file is its screens and controls,
+// CalRoutinePorts.cpp its hardware.
 //
 // Controls, on every screen: encL press = back / cancel (never destructive:
 // a cancel releases every output and writes nothing; on Results, where it
 // would throw away a finished run, it asks first and a second encL within
 // 3 s discards), encR press = go on.
-// A = skip an input at its prompt, or retry the output under the Results
-// cursor. The one write -- Save -- is a B press on a confirm screen of its
+// A = go on without the empty input jacks after a failed patch check, or
+// retry the output under the Results cursor. The one write -- Save -- is a B press on a confirm screen of its
 // own (Backup.h's two-step confirm: kConfirmDeadMs, B down solo, nothing
 // else held), reached only from a Results screen whose outputs all passed.
 //
 // Inversion marks what encR will act on (docs/ui-redesign/Established-Rules.md,
-// L-06): the menu entry encR opens. The Results cursor, which encL moves and
+// L-06): the menu entry encR opens (either encoder turns the menu). The Results cursor, which encL moves and
 // encR does not act on, is a leading '>'.
 //
 // Run time: the flow runs from Loop(); SUSPEND, SCREENSAVER_ON and the app
@@ -48,6 +51,22 @@
 #include "CalRoutinePorts.h"
 #include "../CalRoutineFlow.h"
 
+// The Cal Routine menu, one row per routine; a later routine (a bus module)
+// is one more row and one more action.
+enum CalRoutineMenuAction : uint8_t { CALR_MENU_OUTPUTS, CALR_MENU_INPUTS, CALR_MENU_SELF };
+struct CalRoutineMenuEntry {
+  const char *name;  // the row, after one leading space (20 columns)
+  const char *hint;  // the line under the list for the selected row (21 columns)
+  uint8_t action;    // CalRoutineMenuAction
+};
+static const CalRoutineMenuEntry kCalRoutineMenu[] = {
+  {"Outputs", "A-H with a USB meter", CALR_MENU_OUTPUTS},
+  {"Inputs", "A>1 ... H>8, no meter", CALR_MENU_INPUTS},
+  {"Self (both)", "outputs, then inputs", CALR_MENU_SELF},
+};
+static constexpr int kCalRoutineMenuRows =
+    int(sizeof(kCalRoutineMenu) / sizeof(kCalRoutineMenu[0]));
+
 OC_APP_CLASS(AppCalRoutine, TWOCCS("CR"), "Cal Routine", "Calibration") {
 public:
   OC_APP_INTERFACE_DECLARE(AppCalRoutine, 0);
@@ -57,17 +76,22 @@ protected:
 
 private:
   using Stage = CalRoutineFlow::Stage;
+  using Mode = CalRoutine::Mode;
   enum Screen : uint8_t { SCR_MENU, SCR_UNSUPPORTED, SCR_NOTICE, SCR_RUN, SCR_CONFIRM, SCR_SAVED };
 
   // Same value and reasoning as Backup.h / the 200e write confirm.
   static constexpr uint32_t kConfirmDeadMs = 350;
   static constexpr uint32_t kDiscardWindowMs = 3000;
-  static constexpr int kRows = 16;     // Results: outputs A-H, then inputs 1-8
+  // Results rows: 0-7 outputs A-H, 8-15 inputs 1-8; a run shows the ones
+  // its mode measured (RowFirst() .. RowLast()).
+  static constexpr int kRows = 16;
   static constexpr int kListRows = 4;  // of them on screen at once
 
   Screen screen_ = SCR_MENU;
   Stage last_stage_ = Stage::Idle;
-  uint8_t skipped_ = 0;       // inputs skipped at their prompt (panel mask)
+  Mode mode_ = Mode::Self;    // the routine chosen in the menu
+  int8_t menu_sel_ = 0;       // kCalRoutineMenu row
+  int8_t menu_top_ = 0;       // first menu row on screen
   int8_t cursor_ = 0;         // Results row
   int8_t top_ = 0;            // first Results row on screen
   bool save_pending_ = false; // B committed; Loop() saves
@@ -80,7 +104,11 @@ private:
   bool b_down_solo_ = false;  // B went down alone, after that screen appeared
 
   void StartRun();
+  void OpenMenuEntry();
   void EndRun(Screen next);
+  int RowFirst() const;
+  int RowLast() const;
+  const char *ModeName() const;
   void ArmSave();
   void HandleConfirm(const UI::Event &event);
   void HandlePress(const UI::Event &event);
@@ -96,6 +124,8 @@ private:
   void DrawNotice() const;
   void DrawUnsupported() const;
   void DrawRun() const;
+  void DrawInputStages(Stage s) const;
+  void DrawPatchFailed() const;
   void DrawNoMeter() const;
   void DrawResults() const;
   void DrawFailed() const;
@@ -161,18 +191,35 @@ FLASHMEM void AppCalRoutine::Volts(char *buf, size_t n, int32_t mv) {
 // ---- run ---------------------------------------------------------------------
 
 FLASHMEM void AppCalRoutine::StartRun() {
-  skipped_ = 0;
   discard_armed_ms_ = 0;
-  cursor_ = 0;
-  top_ = 0;
+  cursor_ = int8_t(mode_ == Mode::Inputs ? 8 : 0);
+  top_ = cursor_;
   save_pending_ = false;
   CalRoutinePorts::Open();
   OC::ui.preempt_screensaver(true);
   CalRoutinePorts::Flow().SetLog(CalRoutinePorts::ConsoleLog);
+  // Inputs warns (and lets the owner go on) when the output tables it
+  // measures against were not set by Cal Routine.
   CalRoutinePorts::Flow().Begin(CalRoutinePorts::Meter(), CalRoutinePorts::Outputs(), CalRoutinePorts::Inputs(),
-              CalRoutinePorts::Clock());
+              CalRoutinePorts::Clock(), mode_, CalRoutinePorts::MarkerSet());
   last_stage_ = CalRoutinePorts::Flow().stage();
   screen_ = SCR_RUN;
+}
+
+FLASHMEM void AppCalRoutine::OpenMenuEntry() {
+  const uint8_t action = kCalRoutineMenu[menu_sel_].action;
+  mode_ = action == CALR_MENU_OUTPUTS ? Mode::Outputs
+        : action == CALR_MENU_INPUTS ? Mode::Inputs : Mode::Self;
+  if (!CalRoutinePorts::HardwareSupported()) screen_ = SCR_UNSUPPORTED;
+  else if (mode_ == Mode::Inputs) StartRun();  // no meter: the USB notice does not apply
+  else screen_ = SCR_NOTICE;
+}
+
+FLASHMEM int AppCalRoutine::RowFirst() const { return mode_ == Mode::Inputs ? 8 : 0; }
+FLASHMEM int AppCalRoutine::RowLast() const { return mode_ == Mode::Outputs ? 7 : kRows - 1; }
+
+FLASHMEM const char *AppCalRoutine::ModeName() const {
+  return mode_ == Mode::Outputs ? "Outputs" : mode_ == Mode::Inputs ? "Inputs" : "Self";
 }
 
 // The flow is Idle (cancelled, discarded or saved) when this is called.
@@ -196,13 +243,13 @@ FLASHMEM bool AppCalRoutine::DiscardArmed() const {
 }
 
 FLASHMEM bool AppCalRoutine::CursorOnFailedOutput() const {
-  return cursor_ < 8 && !CalRoutinePorts::Flow().results().out_pass[cursor_];
+  return mode_ != Mode::Inputs && cursor_ < 8 && !CalRoutinePorts::Flow().results().out_pass[cursor_];
 }
 
 FLASHMEM void AppCalRoutine::MoveCursor(int delta) {
   int c = cursor_ + delta;
-  if (c < 0) c = 0;
-  if (c > kRows - 1) c = kRows - 1;
+  if (c < RowFirst()) c = RowFirst();
+  if (c > RowLast()) c = RowLast();
   cursor_ = int8_t(c);
   if (cursor_ < top_) top_ = cursor_;
   if (cursor_ > top_ + kListRows - 1) top_ = int8_t(cursor_ - (kListRows - 1));
@@ -277,7 +324,7 @@ FLASHMEM void AppCalRoutine::HandlePress(const UI::Event &event) {
   const bool a = event.control == OC::CONTROL_BUTTON_A;
   switch (screen_) {
     case SCR_MENU:
-      if (r) screen_ = CalRoutinePorts::HardwareSupported() ? SCR_NOTICE : SCR_UNSUPPORTED;
+      if (r) OpenMenuEntry();
       break;
     case SCR_UNSUPPORTED:
       if (l || r) screen_ = SCR_MENU;
@@ -311,18 +358,13 @@ FLASHMEM void AppCalRoutine::HandlePress(const UI::Event &event) {
         break;
       }
       discard_armed_ms_ = 0;  // any other press is a no
-      if (s == Stage::PromptOutput || s == Stage::PromptInput) {
-        if (r) CalRoutinePorts::Flow().Continue();
-        else if (a && s == Stage::PromptInput) {
-          skipped_ = uint8_t(skipped_ | (1u << CalRoutinePorts::Flow().current_input()));
-          CalRoutinePorts::Flow().Skip();
-        }
+      if (s == Stage::PromptOutput || s == Stage::PromptPatch || s == Stage::WarnMarker ||
+          s == Stage::PatchFailed) {
+        if (r) CalRoutinePorts::Flow().Continue();  // PatchFailed: check again
+        else if (a && s == Stage::PatchFailed) CalRoutinePorts::Flow().Skip();
       } else if (s == Stage::Results) {
         if (r && CalRoutinePorts::Flow().CanSave()) ArmSave();
-        else if (a && CursorOnFailedOutput()) {
-          if (cursor_ == CalRoutine::kSourceOutput) skipped_ = 0;  // inputs run again
-          CalRoutinePorts::Flow().RetryOutput(cursor_);
-        }
+        else if (a && CursorOnFailedOutput()) CalRoutinePorts::Flow().RetryOutput(cursor_);
       }
       break;
     }
@@ -337,6 +379,15 @@ FLASHMEM void AppCalRoutine::HandleButtonEvent(const UI::Event &event) {
 }
 
 FLASHMEM void AppCalRoutine::HandleEncoderEvent(const UI::Event &event) {
+  if (screen_ == SCR_MENU) {
+    int sel = menu_sel_ + event.value;
+    if (sel < 0) sel = 0;
+    if (sel > kCalRoutineMenuRows - 1) sel = kCalRoutineMenuRows - 1;
+    menu_sel_ = int8_t(sel);
+    if (menu_sel_ < menu_top_) menu_top_ = menu_sel_;
+    if (menu_sel_ > menu_top_ + kListRows - 1) menu_top_ = int8_t(menu_sel_ - (kListRows - 1));
+    return;
+  }
   if (screen_ == SCR_RUN && CalRoutinePorts::Flow().stage() == Stage::Results &&
       event.control == OC::CONTROL_ENCODER_L)
     MoveCursor(event.value);
@@ -345,17 +396,24 @@ FLASHMEM void AppCalRoutine::HandleEncoderEvent(const UI::Event &event) {
 // ---- screens -----------------------------------------------------------------
 
 FLASHMEM void AppCalRoutine::DrawMenuScreen() const {
+  char b[24];
   Title("Cal Routine");
-  Row(0, " Self");
-  graphics.invertRect(0, 14, 128, 9);  // encR opens it
-  Row(1, " outputs A-H, then");
-  Row(2, " inputs 1-8, with a");
-  Row(3, " USB meter");
+  for (int k = 0; k < kListRows; ++k) {
+    const int i = menu_top_ + k;
+    if (i >= kCalRoutineMenuRows) break;
+    snprintf(b, sizeof(b), " %s", kCalRoutineMenu[i].name);
+    Row(k, b);
+    if (i == menu_sel_) graphics.invertRect(0, 14 + 8 * k, 128, 9);  // encR opens it
+  }
+  Row(4, kCalRoutineMenu[menu_sel_].hint);
+  graphics.drawLine(0, 46, 127, 46);
   Footer("               R:open");
 }
 
 FLASHMEM void AppCalRoutine::DrawUnsupported() const {
-  Title("Cal Routine: Self");
+  char b[24];
+  snprintf(b, sizeof(b), "Cal Routine: %s", ModeName());
+  Title(b);
   Row(0, "Needs a 1.2V/oct unit");
   Row(1, "with 0V at entry 0");
   Row(2, "(Xenomorpher). This");
@@ -365,7 +423,9 @@ FLASHMEM void AppCalRoutine::DrawUnsupported() const {
 }
 
 FLASHMEM void AppCalRoutine::DrawNotice() const {
-  Title("Cal Routine: Self");
+  char b[24];
+  snprintf(b, sizeof(b), "Cal Routine: %s", ModeName());
+  Title(b);
   Row(0, "Meter alone on the");
   Row(1, "host jack: no hub, no");
   Row(2, "other USB devices.");
@@ -376,7 +436,9 @@ FLASHMEM void AppCalRoutine::DrawNotice() const {
 
 FLASHMEM void AppCalRoutine::DrawNoMeter() const {
   char b[24];
-  Title(CalRoutinePorts::Flow().retry_output() >= 0 ? "Retry: meter" : "Self: meter");
+  if (CalRoutinePorts::Flow().retry_output() >= 0) snprintf(b, sizeof(b), "Retry: meter");
+  else snprintf(b, sizeof(b), "%s: meter", ModeName());
+  Title(b);
   if (CalRoutinePorts::Flow().meter_lost()) {
     const uint32_t gone = CalRoutinePorts::Flow().lost_for_ms();
     const uint32_t left = gone >= CalRoutine::kReconnectMs ? 0 : (CalRoutine::kReconnectMs - gone + 999) / 1000;
@@ -401,7 +463,6 @@ FLASHMEM void AppCalRoutine::DrawRun() const {
   char b[24], v[12];
   const Stage s = CalRoutinePorts::Flow().stage();
   const int o = CalRoutinePorts::Flow().current_output();
-  const int in = CalRoutinePorts::Flow().current_input();
   const bool retry = CalRoutinePorts::Flow().retry_output() >= 0;
   const char *cancel = retry ? "L:cancel all" : "L:cancel";
   switch (s) {
@@ -409,7 +470,11 @@ FLASHMEM void AppCalRoutine::DrawRun() const {
       DrawNoMeter();
       return;
     case Stage::ConfigMeter:
-      Title(retry ? "Retry: meter" : "Self: meter");
+      if (retry) Title("Retry: meter");
+      else {
+        snprintf(b, sizeof(b), "%s: meter", ModeName());
+        Title(b);
+      }
       snprintf(b, sizeof(b), "Meter: %.14s", CalRoutinePorts::MeterModel());
       Row(0, b);
       Row(1, "Setting it up...");
@@ -450,26 +515,14 @@ FLASHMEM void AppCalRoutine::DrawRun() const {
       Footer(cancel);
       return;
     }
-    case Stage::PromptInput:
-      snprintf(b, sizeof(b), "Input %d  (%d/8)", in + 1, in + 1);
-      Title(b);
-      Row(0, "Patch output A into");
-      snprintf(b, sizeof(b), "input %d. Nothing", in + 1);
-      Row(1, b);
-      snprintf(b, sizeof(b), "else on input %d.", in + 1);
-      Row(2, b);
-      Row(3, "The meter may stay.");
-      Footer("L:cancel A:skip R:go");
-      return;
+    case Stage::WarnMarker:
+    case Stage::PromptPatch:
+    case Stage::CheckPatch:
     case Stage::CalInput:
-      snprintf(b, sizeof(b), "Input %d  (%d/8)", in + 1, in + 1);
-      Title(b);
-      Volts(v, sizeof(v), CalRoutinePorts::Flow().input_mv());
-      snprintf(b, sizeof(b), "A at %sV, point %d", v, CalRoutinePorts::Flow().input_points() + 1);
-      Row(0, b);
-      Bar(1, CalRoutinePorts::Flow().input_mv(), 12000);
-      Row(3, "Leave the cables be.");
-      Footer(cancel);
+      DrawInputStages(s);
+      return;
+    case Stage::PatchFailed:
+      DrawPatchFailed();
       return;
     case Stage::Results:
       DrawResults();
@@ -480,6 +533,93 @@ FLASHMEM void AppCalRoutine::DrawRun() const {
     case Stage::Idle:
       Title("Cal Routine");
       return;
+  }
+}
+
+// The input part: no meter, every output patched into its own input.
+FLASHMEM void AppCalRoutine::DrawInputStages(Stage s) const {
+  char b[24], v[12];
+  const CalRoutineFlow &f = CalRoutinePorts::Flow();
+  switch (s) {
+    case Stage::WarnMarker:
+      Title("Inputs: warning");
+      Row(0, "The outputs were not");
+      Row(1, "set by Cal Routine:");
+      Row(2, "inputs will be only");
+      Row(3, "as good as they are.");
+      Row(4, "Outputs first is best");
+      Footer("L:cancel    R:go on");
+      return;
+    case Stage::PromptPatch:
+      Title("Inputs: patch");
+      Row(0, "Patch outputs into");
+      Row(1, "inputs: A>1 B>2 C>3");
+      Row(2, "D>4 E>5 F>6 G>7 H>8");
+      Row(3, "Nothing else on them");
+      Row(4, "Meter not needed.");
+      Footer("L:cancel      R:check");
+      return;
+    case Stage::CheckPatch: {
+      Title("Inputs: patch check");
+      const int o = f.patch_index();
+      if (o < 0) snprintf(b, sizeof(b), "All outputs low");
+      else snprintf(b, sizeof(b), "Raising output %c", 'A' + o);
+      Row(0, b);
+      Bar(1, o + 1, 9);
+      Row(3, "Leave the cables be.");
+      Footer("L:cancel");
+      return;
+    }
+    default: {  // CalInput
+      Title("Inputs 1-8");
+      Volts(v, sizeof(v), f.input_mv());
+      snprintf(b, sizeof(b), "All at %sV, pt %d", v, f.input_points() + 1);
+      Row(0, b);
+      Bar(1, f.input_mv(), 10800);
+      Row(3, "Leave the cables be.");
+      Footer("L:cancel");
+      return;
+    }
+  }
+}
+
+// What the patch check found, one line per output that is wrong, by panel
+// name: "C reaches 5, not 3" (a crossed or stacked cable) or "D: input 4
+// silent" (nothing in the jack, or a dead cable).
+FLASHMEM void AppCalRoutine::DrawPatchFailed() const {
+  const CalRoutineFlow &f = CalRoutinePorts::Flow();
+  char b[40], list[20];  // Row() cuts every line at 21 columns
+  Title("Patch check FAILED");
+  const uint8_t bad = uint8_t(f.patch_crossed() | f.patch_missing());
+  int nbad = 0;
+  for (int o = 0; o < 8; ++o) nbad += (bad >> o) & 1;
+  const int shown = nbad <= 4 ? nbad : 3;  // else the 4th row says how many more
+  int row = 0;
+  for (int o = 0; o < 8 && row < shown; ++o) {
+    if (!(bad & (1u << o))) continue;
+    const uint8_t moved = f.patch_moved(o);
+    if (!moved) {
+      snprintf(b, sizeof(b), "%c: input %d silent", 'A' + o, o + 1);
+    } else {
+      int len = 0;
+      list[0] = 0;
+      for (int i = 0; i < 8; ++i)
+        if (moved & (1u << i)) len += snprintf(list + len, sizeof(list) - size_t(len), len ? ",%d" : "%d", i + 1);
+      if (moved & (1u << o)) snprintf(b, sizeof(b), "%c reaches %s", 'A' + o, list);
+      else snprintf(b, sizeof(b), "%c reaches %s, not %d", 'A' + o, list, o + 1);
+    }
+    Row(row++, b);
+  }
+  if (nbad > shown) {
+    snprintf(b, sizeof(b), "...and %d more", nbad - shown);
+    Row(3, b);
+  }
+  if (!f.patch_crossed()) {
+    Row(4, "A: skip silent ones");
+    Footer("L:stop A:skip R:again");
+  } else {
+    Row(4, "Fix, then R:again.");
+    Footer("L:cancel     R:again");
   }
 }
 
@@ -519,7 +659,7 @@ FLASHMEM void AppCalRoutine::ResultRow(int r, char *buf, size_t n) const {
     return;
   }
   const int i = r - 8;
-  if (skipped_ & (1u << i)) {
+  if (res.in_skipped & (1u << i)) {
     snprintf(buf, n, "%d skipped", i + 1);
   } else if (res.in_pass[i]) {
     Centi(m, sizeof(m), res.in_holdout_mv[i]);
@@ -568,7 +708,7 @@ FLASHMEM void AppCalRoutine::ResultDetail(int r, char *buf, size_t n) const {
     return;
   }
   const int i = r - 8;
-  if (skipped_ & (1u << i)) {
+  if (res.in_skipped & (1u << i)) {
     snprintf(buf, n, "uncalibrated if saved");
     return;
   }
@@ -587,16 +727,24 @@ FLASHMEM void AppCalRoutine::ResultDetail(int r, char *buf, size_t n) const {
 FLASHMEM void AppCalRoutine::DrawResults() const {
   const CalRoutineFlow::Results &res = CalRoutinePorts::Flow().results();
   char b[24], line[24];
-  int failed = 0;
-  for (int o = 0; o < 8; ++o) failed += !res.out_pass[o];
-  if (!failed) Title("Results: can save");
-  else {
-    snprintf(b, sizeof(b), "Results: %d out FAIL", failed);
+  if (res.HasOutputs()) {
+    int failed = 0;
+    for (int o = 0; o < 8; ++o) failed += !res.out_pass[o];
+    if (!failed) Title("Results: can save");
+    else {
+      snprintf(b, sizeof(b), "Results: %d out FAIL", failed);
+      Title(b);
+    }
+  } else {
+    int ok = 0;
+    for (int i = 0; i < 8; ++i) ok += res.in_pass[i];
+    if (ok) snprintf(b, sizeof(b), "Results: %d/8 in ok", ok);
+    else snprintf(b, sizeof(b), "Results: no input ok");
     Title(b);
   }
   for (int k = 0; k < kListRows; ++k) {
     const int r = top_ + k;
-    if (r >= kRows) break;
+    if (r > RowLast()) break;
     ResultRow(r, b, sizeof(b));
     snprintf(line, sizeof(line), "%c%s", r == cursor_ ? '>' : ' ', b);
     Row(k, line);
@@ -626,16 +774,28 @@ FLASHMEM void AppCalRoutine::DrawConfirm() const {
     if (res.in_pass[i]) ++ok;
     else uncal = uint8_t(uncal | (1u << i));
   }
-  Row(0, "Outputs A-H: new.");
-  snprintf(b, sizeof(b), "Inputs: %d new curves", ok);
-  Row(1, b);
+  char u[24];
+  u[0] = 0;
   if (uncal == 0xFF) {
-    Row(2, "Uncal: all");  // 8 numbers with spaces would be 22 columns
+    snprintf(u, sizeof(u), "Uncal: all");  // 8 numbers with spaces would be 22 columns
   } else if (uncal) {
-    int len = snprintf(b, sizeof(b), "Uncal:");
-    for (int i = 0; i < 8 && len > 0 && size_t(len) < sizeof(b); ++i)
-      if (uncal & (1u << i)) len += snprintf(b + len, sizeof(b) - size_t(len), " %d", i + 1);
-    Row(2, b);
+    int len = snprintf(u, sizeof(u), "Uncal:");
+    for (int i = 0; i < 8 && len > 0 && size_t(len) < sizeof(u); ++i)
+      if (uncal & (1u << i)) len += snprintf(u + len, sizeof(u) - size_t(len), " %d", i + 1);
+  }
+  snprintf(b, sizeof(b), "Inputs: %d new curves", ok);
+  if (!res.HasInputs()) {
+    Row(0, "Outputs A-H: new.");
+    Row(1, "Inputs: unchanged.");
+    Row(2, "Set with no load.");
+  } else if (!res.HasOutputs()) {
+    Row(0, b);
+    Row(1, u);
+    Row(2, "Outputs: unchanged.");
+  } else {
+    Row(0, "Outputs A-H: new.");
+    Row(1, b);
+    Row(2, u);
   }
   Row(3, "Replaces the stored");
   Row(4, "calibration.");
@@ -649,16 +809,27 @@ FLASHMEM void AppCalRoutine::DrawConfirm() const {
 FLASHMEM void AppCalRoutine::DrawSaved() const {
   if (save_ok_) {
     Title("Saved");
-    Row(0, "Outputs A-H and the");
-    Row(1, "passed inputs now");
-    Row(2, "use this calibration");
-    Row(3, "in every app.");
+    if (mode_ == Mode::Outputs) {
+      Row(0, "Outputs A-H now use");
+      Row(1, "this calibration in");
+      Row(2, "every app.");
+    } else if (mode_ == Mode::Inputs) {
+      Row(0, "The passed inputs");
+      Row(1, "now use this");
+      Row(2, "calibration in every");
+      Row(3, "app.");
+    } else {
+      Row(0, "Outputs A-H and the");
+      Row(1, "passed inputs now");
+      Row(2, "use this calibration");
+      Row(3, "in every app.");
+    }
     Footer("               R:done");
     return;
   }
   Title("SAVE FAILED");
   const char *at = CalRoutinePorts::SaveFailedAt();
-  if (!strcmp(at, "CURVES")) {
+  if (!strcmp(at, "CURVES") && mode_ == Mode::Self) {
     Row(0, "Output tables saved;");
     Row(1, "input curve file NOT");
     Row(2, "written: the inputs");

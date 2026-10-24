@@ -14,7 +14,8 @@
 //   Outputs  DAC::Hold / DAC::Release on the physical channel behind each
 //            panel label; ReleaseAll lets go of this port's holds only.
 //            Tables from calibration_data.dac.
-//   Inputs   ADC::smoothed_raw_q8, averaged by Service() while a window is open.
+//   Inputs   ADC::smoothed_raw_q8 of all 8 inputs, averaged by Service()
+//            while a window is open.
 //   Clock    millis().
 //   Save     calibration_data.dac -> calibration_save(); the curve record ->
 //            InputCurveSaveToFlash; ICA1 -> input_calibration_save(); the

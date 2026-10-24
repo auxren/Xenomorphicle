@@ -72,11 +72,14 @@ Steps: start a run, unplug the meter during an output. Pass: the screen says the
 
 ### C. Real run time
 
-- [ ] Time a whole run from start to Results (the `ms` field of `CALR,STATE` lines gives it). Model: about 30 minutes for Outputs plus Inputs (26 / 30 / 36 min at 450 / 530 / 650 ms per `READ?`; each measurement is a settle, one throwaway and 3 readings, a node's final value 10). Pass: within 33 minutes; record the figure and update `docs/_apps/Cal-Routine.md`.
+- [ ] Time each routine from start to Results (the `ms` field of `CALR,STATE` lines gives it). Model (`test_run_time_model`): **Outputs about 22 minutes** (19 / 22 / 27 min at 450 / 530 / 650 ms per `READ?`; each measurement is a settle, one throwaway and 3 readings, a node's final value 10; 20 verify points per output), **Inputs about 25 seconds** of measuring (no meter) plus the patching, **Self about 22 minutes**. Pass: Outputs and Self within 25 minutes, Inputs within 1 minute; record the figures and update `docs/_apps/Cal-Routine.md`.
 
 ### D. Screens on hardware
 
-- [ ] The run screens (meter, output prompt, measuring, input prompt, measuring) read correctly, name the jacks as the panel does, and show the USB advice (meter alone on the host jack, do not touch its cable).
+- [ ] The menu shows Outputs, Inputs, Self (both); either encoder moves it and the hint line follows.
+- [ ] The run screens (meter, output prompt, measuring, patch prompt, patch check, input sweep) read correctly, name the jacks as the panel does, and show the USB advice (meter alone on the host jack, do not touch its cable) for Outputs and Self only.
+- [ ] Inputs on a unit without the Cal Routine marker shows the warning; R goes on, L cancels with nothing held.
+- [ ] Patch check: swap two cables (e.g. into inputs 3 and 5): the screen names both ("C reaches 5, not 3", "E reaches 3, not 5") and A does nothing; fix and R checks again. Pull one cable: "D: input 4 silent", A goes on without it and input 4 is listed as skipped. Every output is released on the fail screen.
 - [ ] The Results screen: figures per output and input, rail flags, the cursor, retry on a failed output, discard needing two presses.
 - [ ] The Save confirm screen and the Saved screen (and the "not written" variant).
 - [ ] Setup's DAC steps show the warning that they replace a Cal Routine calibration, and Setup's ADC steps do not change a Cal Routine input.
@@ -84,7 +87,7 @@ Steps: start a run, unplug the meter during an output. Pass: the screen says the
 ### E. Input map
 
 - [x] PASSED, 2026-10-24 (adc3c3cc): panel n gives firmware n for all 8 inputs at boot and after 3 x 16 forced re-aligns at random trigger phase (`X`; count 48). After a counter reset and 16 more: core isr 16 us, missed 0, 0/11 FAIL (an earlier 5/11 was the known boot-time spike). Earlier builds with a fixed table rotated the inputs by one and were reopened; the deterministic start is confirmed on the normal build and on the 1700 ns and 3300 ns skew builds.
-- [ ] Re-check on the release image: 8 outputs patched to 8 inputs (output n into input n), panel n gives firmware n for every n, and `X` (`ADC,REALIGN,count=n`; `realigns=` in `t`/`T`) leaves the mapping unchanged. Output and input 7 once reached only about 3.3 V: check that cable.
+- [ ] Re-check on the release image: 8 outputs patched to 8 inputs (output n into input n), panel n gives firmware n for every n (Cal Routine's Inputs patch check now proves this on every run: `CALR,PRES,PASS,00,00`), and `X` (`ADC,REALIGN,count=n`; `realigns=` in `t`/`T`) leaves the mapping unchanged. Output and input 7 once reached only about 3.3 V: check that cable.
 
 ### F. Hub effect
 

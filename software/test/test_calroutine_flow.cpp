@@ -1,7 +1,8 @@
 // Host tests for the calibration routine's step machine (src/CalRoutineFlow.h)
 // against simulated hardware: a bowed DAC per output, a USB meter that reads
 // it (with noise, latency, transient errors, unplugging), and bent ADC inputs
-// that read output A. Also the console Q on the same input stage, the save
+// patched 1:1 to the outputs (output A -> input 1 ... H -> 8, any patch the
+// test sets). Also the console Q on the same input stage, the save
 // sequence and the CALR/INCAL line formats (fixtures/calr_lines.txt,
 // fixtures/cvmeter_lines.txt). Standalone (no gtest):
 //   g++ -std=c++17 -Wall -Wsign-compare -Werror -O2 -o build/test_calroutine_flow
@@ -73,12 +74,13 @@ struct SimDac {
 struct FakeOutputs : OutputPort {
   const SimDac *dac;
   uint16_t stored[8][CR::kNodes];
-  int held = -1;
-  uint16_t held_code = 0;
+  uint8_t mask = 0;           // outputs held
+  uint16_t code[8] = {};      // ... and their codes
+  int held = -1;              // the one held output; -1 none, -2 several
+  uint16_t held_code = 0;     // its code
   int holds = 0, releases = 0;
-  bool two_held = false;  // a second output was held while one already was
   // What the output was holding since the start, for a meter whose reading
-  // spans a code change.
+  // spans a code change (the meter is on one output; several held = none).
   const FakeClock *clk = nullptr;
   struct Seg { int64_t t; int out; uint16_t code; };
   std::vector<Seg> hist{{0, -1, 0}};
@@ -101,17 +103,23 @@ struct FakeOutputs : OutputPort {
       for (int k = 0; k < CR::kNodes; ++k)
         stored[o][k] = uint16_t(std::lround(k * 1200 * double(CR::kNominalCodesPerMv)));
   }
-  void Hold(int out, uint16_t code) override {
-    if (held >= 0 && held != out) two_held = true;
-    held = out;
-    held_code = code;
+  void Recount() {
+    held = -1;
+    for (int o = 0; o < 8; ++o)
+      if (mask & (1u << o)) held = held == -1 ? o : -2;
+    held_code = held >= 0 ? code[held] : 0;
+    if (clk) hist.push_back({int64_t(clk->Abs()), held >= 0 ? held : -1, held_code});
+  }
+  void Hold(int out, uint16_t c) override {
+    mask = uint8_t(mask | (1u << out));
+    code[out] = c;
     ++holds;
-    if (clk) hist.push_back({int64_t(clk->Abs()), out, code});
+    Recount();
   }
   void ReleaseAll() override {
-    held = -1;
+    mask = 0;
     ++releases;
-    if (clk) hist.push_back({int64_t(clk->Abs()), -1, 0});
+    Recount();
   }
   uint16_t TableCode(int out, int k) const override { return stored[out][k]; }
   uint16_t CodeForMv(int, const uint16_t t[CR::kNodes], int32_t mv) const override {
@@ -121,7 +129,7 @@ struct FakeOutputs : OutputPort {
     const double f = (mv - k * 1200) / 1200.0;
     return uint16_t(std::lround(t[k] + f * (double(t[k + 1]) - double(t[k]))));
   }
-  double OutMv(int o) const { return held == o ? dac->Mv(o, held_code) : 0.0; }
+  double OutMv(int o) const { return o >= 0 && (mask & (1u << o)) ? dac->Mv(o, code[o]) : 0.0; }
 };
 
 // What a reading looks like after the meter's NR3 text and ParseReading.
@@ -212,7 +220,11 @@ struct FakeMeter : MeterPort {
   const char *Identity() const override { return "Siglent Technologies,SDM3065X,SDM36GBX000000,1.01.01.25\n"; }
 };
 
-// Input i reads output A: raw = 4095 - v * 4096/12000 * (1 + gain) - offset + bend sin.
+// Input i reads the output patched into it (patch[i]; -1 = nothing, 0 V):
+// raw = zero - v * counts_per_mv * (1 + gain) - offset + bend sin. The default
+// model is the firmware's nominal one (0 V at raw 4095, 12 V at raw 0);
+// Realistic() is the bench's (0 V near raw 3635-3685, ~2.75 mV per count,
+// so the top of the window is near 10.65 V).
 struct FakeInputs : InputPort {
   FakeOutputs *outs;
   FakeClock *clk;
@@ -220,34 +232,47 @@ struct FakeInputs : InputPort {
   double offset[8] = {2.0, -3.0, 1.0, 0.5, -1.5, 2.5, 0.0, -2.0};
   double bend[8] = {3.0, 2.0, 4.0, 1.0, 2.5, 3.5, 1.5, 2.0};
   double pp[8] = {2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0};
-  int started = -1;
+  double zero[8] = {4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095};
+  double counts_per_mv = 4096.0 / 12000.0;
+  int patch[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  bool started = false;
   uint32_t start_ms = 0;
-  const CalRoutineFlow *flow = nullptr;  // when set: only its current input may be sampled
   int windows = 0;
   bool short_window = false;  // WindowDone asked before 600 ms
+  std::vector<uint8_t> window_mask;  // outputs held when each window started
   FakeInputs(FakeOutputs *o, FakeClock *c) : outs(o), clk(c) {}
-  double Raw(int i, double v) const {
-    double r = 4095.0 - v * (4096.0 / 12000.0) * (1.0 + gain[i]) - offset[i] +
-               bend[i] * std::sin(kPi * v / 12000.0);
-    return std::fmax(0.0, std::fmin(4095.0, r));
+  void Realistic() {
+    const double z[8] = {3641, 3652, 3635, 3685, 3660, 3647, 3672, 3638};
+    const double g[8] = {0.02, -0.03, 0.01, 0.035, -0.015, 0.0, 0.025, -0.02};
+    const double b[8] = {3.0, -2.0, 4.5, 1.0, -3.5, 2.5, 5.0, -1.5};
+    for (int i = 0; i < 8; ++i) { zero[i] = z[i]; gain[i] = g[i]; bend[i] = b[i]; offset[i] = 0; }
+    counts_per_mv = 1.0 / 2.75;
   }
-  void StartWindow(int in) override {
-    if (flow) CHECK(in == flow->current_input());
-    started = in;
+  double Unclamped(int i, double v) const {
+    return zero[i] - v * counts_per_mv * (1.0 + gain[i]) - offset[i] + bend[i] * std::sin(kPi * v / 12000.0);
+  }
+  double Raw(int i, double v) const { return std::fmax(0.0, std::fmin(4095.0, Unclamped(i, v))); }
+  void StartWindow() override {
+    started = true;
     start_ms = clk->t;
+    window_mask.push_back(outs->mask);
   }
-  bool WindowDone(CM::PointStats *s) override {
+  bool WindowDone(CM::PointStats s[8]) override {
     if (clk->t - start_ms < 600) short_window = true;
-    const double v = outs->OutMv(kSourceOutput);
-    const double m = Raw(started, v);
-    s->mean_raw = float(m);
-    s->min_raw = float(std::fmax(0.0, m - pp[started] / 2));
-    s->max_raw = float(std::fmin(4095.0, m + pp[started] / 2));
-    s->samples = 3333;
+    for (int i = 0; i < 8; ++i) {
+      const double m = Raw(i, outs->OutMv(patch[i]));
+      s[i].mean_raw = float(m);
+      s[i].min_raw = float(std::fmax(0.0, m - pp[i] / 2));
+      s[i].max_raw = float(std::fmin(4095.0, m + pp[i] / 2));
+      s[i].samples = 3333;
+    }
     ++windows;
+    started = false;
     return true;
   }
 };
+
+typedef CalRoutine::Mode Mode;
 
 struct Rig {
   SimDac dac;
@@ -257,38 +282,41 @@ struct Rig {
   FakeInputs ins{&outs, &clk};
   CalRoutineFlow flow;
   uint32_t t_begin = 0;
-  bool hold_rule_broken = false;  // a Hold on anything but the output under test
+  // Outputs stages hold only the output under test; the input stages may
+  // hold any; nothing is held anywhere else.
+  bool hold_rule_broken = false;
   Rig() {
     g_log.clear();
     outs.clk = &clk;
     flow.SetLog(capture);
-    ins.flow = &flow;
   }
-  void Begin() {
+  void Begin(Mode m = Mode::Self, bool marked = true) {
     t_begin = clk.t;
-    flow.Begin(meter, outs, ins, clk);
+    flow.Begin(meter, outs, ins, clk, m, marked);
   }
   void Step(uint32_t ms = 5) {
     flow.Tick();
     const Stage s = flow.stage();
-    if (outs.held >= 0) {
+    if (outs.mask) {
       const bool out_stage = s == Stage::CalOutput || s == Stage::SweepOutput;
-      const bool in_stage = s == Stage::CalInput;
+      const bool in_stage = s == Stage::CheckPatch || s == Stage::CalInput;
       if (out_stage && outs.held != flow.current_output()) hold_rule_broken = true;
-      if (in_stage && outs.held != kSourceOutput) hold_rule_broken = true;
       if (!out_stage && !in_stage) hold_rule_broken = true;
     }
     clk.t += ms;
   }
   // Runs, pressing Continue at every prompt, until `until` returns true or
-  // the run ends. Returns false on the time limit.
+  // the run ends (Results, Failed, Idle, or a failed patch check). Returns
+  // false on the time limit.
   bool Run(std::function<bool()> until = nullptr, uint32_t limit_ms = 60u * 60u * 1000u) {
     const uint32_t t0 = clk.t;
     while (clk.t - t0 < limit_ms) {
       const Stage s = flow.stage();
       if (until && until()) return true;
-      if (s == Stage::Results || s == Stage::Failed || s == Stage::Idle) return true;
-      if (s == Stage::PromptOutput || s == Stage::PromptInput) flow.Continue();
+      if (s == Stage::Results || s == Stage::Failed || s == Stage::Idle || s == Stage::PatchFailed)
+        return true;
+      if (s == Stage::PromptOutput || s == Stage::PromptPatch || s == Stage::WarnMarker)
+        flow.Continue();
       Step();
     }
     return false;
@@ -426,29 +454,34 @@ static void test_query_retries_after_transient_errors() {
 
 static void test_cancel_any_stage_releases_all() {
   const Stage stages[] = {Stage::NoMeter, Stage::ConfigMeter, Stage::PromptOutput,
-                          Stage::CalOutput, Stage::SweepOutput, Stage::PromptInput,
+                          Stage::CalOutput, Stage::SweepOutput, Stage::WarnMarker,
+                          Stage::PromptPatch, Stage::CheckPatch, Stage::PatchFailed,
                           Stage::CalInput, Stage::Results, Stage::Failed};
   for (Stage want : stages) {
     Rig r;
     if (want == Stage::NoMeter) r.meter.connected = false;
-    r.Begin();
+    if (want == Stage::PatchFailed) r.ins.patch[2] = -1;
+    if (want == Stage::WarnMarker) r.Begin(Mode::Inputs, false);
+    else r.Begin();
     bool reached = false;
     const uint32_t t0 = r.clk.t;
     while (r.clk.t - t0 < 60u * 60u * 1000u) {
       const Stage s = r.flow.stage();
       if (s == want && (want != Stage::CalOutput || r.outs.held >= 0) &&
-          (want != Stage::CalInput || r.outs.held >= 0)) { reached = true; break; }
+          (want != Stage::CheckPatch || r.outs.mask) &&
+          (want != Stage::CalInput || r.outs.mask == 0xFF)) { reached = true; break; }
       if (s == Stage::Results && want != Stage::Results) break;
       if (want == Stage::Failed && s == Stage::CalOutput) r.meter.never_answer = true;
       if (want != Stage::PromptOutput && s == Stage::PromptOutput) r.flow.Continue();
-      if (want != Stage::PromptInput && s == Stage::PromptInput) r.flow.Continue();
+      if (want != Stage::PromptPatch && s == Stage::PromptPatch) r.flow.Continue();
+      if (want != Stage::WarnMarker && s == Stage::WarnMarker) r.flow.Continue();
       if (s == Stage::NoMeter && want == Stage::NoMeter) { reached = true; break; }
       r.Step();
     }
     CHECK(reached);
     r.flow.Cancel();
     CHECK(r.flow.stage() == Stage::Idle);
-    CHECK(r.outs.held == -1);
+    CHECK(r.outs.held == -1 && r.outs.mask == 0);
     CHECK(!r.flow.CanSave());
     CHECK(!r.flow.results().CanSave());
     // Nothing moves after a cancel.
@@ -515,7 +548,6 @@ static void test_holds_only_current_output() {
   r.Begin();
   CHECK(r.Run());
   CHECK(r.flow.stage() == Stage::Results);
-  CHECK(!r.outs.two_held);
   CHECK(!r.hold_rule_broken);
 }
 
@@ -532,12 +564,15 @@ static void test_failed_input_is_uncalibrated() {
     if (i != 3) CHECK(res.in_pass[i]);
   CHECK(r.flow.CanSave());
   CHECK(count_prefix("CALR,IRES,4,FAIL,NOISY,") == 1);
-  // Skip leaves an input uncalibrated too.
+  // Skip (an unpatched input at the patch check) leaves it uncalibrated too.
   Rig s;
+  s.ins.patch[5] = -1;
   s.Begin();
-  CHECK(s.Run([&] { return s.flow.stage() == Stage::PromptInput && s.flow.current_input() == 5; }));
+  CHECK(s.Run());
+  CHECK(s.flow.stage() == Stage::PatchFailed);
   s.flow.Skip();
   CHECK(s.Run());
+  CHECK(s.flow.stage() == Stage::Results);
   CHECK(!s.flow.results().in_pass[5]);
   CHECK(s.flow.results().in_pass[6]);
   CHECK(s.flow.CanSave());
@@ -629,8 +664,7 @@ static double true_mv_at(const FakeInputs &ins, int i, double raw) {
   for (int it = 0; it < 80; ++it) {
     const double mid = 0.5 * (lo + hi);
     // Raw() clamps; use the unclamped model so the inversion is exact.
-    const double r = 4095.0 - mid * (4096.0 / 12000.0) * (1.0 + ins.gain[i]) - ins.offset[i] +
-                     ins.bend[i] * std::sin(kPi * mid / 12000.0);
+    const double r = ins.Unclamped(i, mid);
     if (r > raw) lo = mid; else hi = mid;
   }
   return 0.5 * (lo + hi);
@@ -650,15 +684,21 @@ static void test_input_span_capped_below_source_rail() {
     const auto &res = r.flow.results();
     CHECK(res.at_rail[0][10]);
     CHECK(res.at_rail[0][0] == (bottom == 1));
+    // Only input 1 hangs on output A; the others keep their own outputs' spans.
     const int32_t lo = bottom ? 1200 : 600, hi = 10800;
     char want[64];
     snprintf(want, sizeof(want), "CALR,IN,1,1,%ld,%ld", (long)lo, (long)hi);
     CHECK(count_prefix(want) == 1);
+    for (int i = 2; i <= 8; ++i) {
+      snprintf(want, sizeof(want), "CALR,IN,%d,%d,600,12000", i, i);
+      CHECK(count_prefix(want) == 1);
+    }
     for (const auto &l : g_log) {
       if (l.compare(0, 9, "CALR,IPT,") != 0) continue;
       int in, mv;
-      if (sscanf(l.c_str(), "CALR,IPT,%d,%d,", &in, &mv) == 2) CHECK(mv >= lo && mv <= hi);
+      if (sscanf(l.c_str(), "CALR,IPT,%d,%d,", &in, &mv) == 2 && in == 1) CHECK(mv >= lo && mv <= hi);
     }
+    CHECK(res.in_lo_mv[0] == lo && res.in_hi_mv[0] == hi);
     for (int i = 0; i < 8; ++i) {
       CHECK(res.in_pass[i]);
       CHECK(res.in_holdout_mv[i] <= 1.0f);
@@ -666,12 +706,12 @@ static void test_input_span_capped_below_source_rail() {
       double worst = 0;
       for (int b = 0; b < CR::kCurvePoints; ++b) {
         const double t = true_mv_at(r.ins, i, double(b << CR::kCurveShift));
-        if (t < lo || t > hi) continue;
+        if (t < res.in_lo_mv[i] || t > res.in_hi_mv[i]) continue;
         worst = std::fmax(worst, std::fabs(res.curve_mv_x2[i][b] / 2.0 - t));
       }
       CHECK(worst <= 1.0);
       if (worst > 1.0) printf("  input %d: worst curve error %.2f mV in %ld..%ld mV\n", i + 1,
-                              worst, (long)lo, (long)hi);
+                              worst, (long)res.in_lo_mv[i], (long)res.in_hi_mv[i]);
     }
     CHECK(r.flow.CanSave());
   }
@@ -686,9 +726,9 @@ static void test_rebegin_releases() {
   CHECK(r.outs.held == -1);
   CHECK(r.flow.stage() == Stage::NoMeter);
   r.meter.connected = true;
-  CHECK(r.Run([&] { return r.flow.stage() == Stage::CalInput && r.outs.held >= 0; }));
+  CHECK(r.Run([&] { return r.flow.stage() == Stage::CalInput && r.outs.mask == 0xFF; }));
   r.flow.Begin(r.meter, r.outs, r.ins, r.clk);
-  CHECK(r.outs.held == -1);
+  CHECK(r.outs.mask == 0);
   CHECK(r.flow.stage() == Stage::ConfigMeter);
 }
 
@@ -803,6 +843,8 @@ static void test_node_final_uses_10_readings() {
   CHECK(finals == CR::kNodes);
   CHECK(sweeps >= kSweepPoints);
   // Node 5's logged measured value is the median of the 10 after the throwaway.
+  CHECK(fin.size() > 5);
+  if (fin.size() <= 5) return;
   const auto &g = fin[5];
   std::vector<double> v;
   for (size_t j = 1; j < g.size(); ++j) v.push_back(r.meter.read_mv[g[j]]);
@@ -836,7 +878,7 @@ static void test_run_time_model() {
     CHECK(r.flow.stage() == Stage::Results && r.flow.CanSave());
     uint32_t t_in = 0;  // when the input part began
     for (const auto &l : g_log) {
-      if (l.compare(0, 10, "CALR,STATE") != 0 || l.find(",PROMPT_IN,0,1") == std::string::npos) continue;
+      if (l.compare(0, 10, "CALR,STATE") != 0 || l.find(",PROMPT_PATCH,") == std::string::npos) continue;
       unsigned long t = 0;
       sscanf(l.c_str(), "CALR,STATE,%lu,", &t);
       t_in = uint32_t(t);
@@ -845,7 +887,20 @@ static void test_run_time_model() {
     const double outs_min = (t_in - r.t_begin) / 60000.0;
     printf("  model, READ? %3u ms: %.1f min (outputs %.1f, inputs %.1f), %d READ?\n",
            unsigned(ms), r.Minutes(), outs_min, r.Minutes() - outs_min, r.meter.reads);
-    if (ms == 530) CHECK(r.Minutes() > 25.0 && r.Minutes() < 33.0);
+    if (ms == 530) CHECK(r.Minutes() > 15.0 && r.Minutes() < 24.0);
+  }
+  // Each routine alone, at 530 ms per READ?.
+  {
+    Rig o;
+    o.Begin(Mode::Outputs);
+    CHECK(o.Run() && o.flow.stage() == Stage::Results);
+    Rig i;
+    i.ins.Realistic();
+    i.Begin(Mode::Inputs);
+    CHECK(i.Run() && i.flow.stage() == Stage::Results);
+    printf("  model, READ? 530 ms: Outputs %.1f min, Inputs %.1f min (patch check + sweep, no meter)\n",
+           o.Minutes(), i.Minutes());
+    CHECK(i.Minutes() < 1.5);
   }
 }
 
@@ -900,6 +955,7 @@ struct FakeSave : SavePort {
 static CalRoutineFlow::Results passing_results() {
   CalRoutineFlow::Results r;
   memset(&r, 0, sizeof(r));
+  r.mode = uint8_t(Mode::Self);
   for (int i = 0; i < 8; ++i) { r.out_pass[i] = true; r.in_pass[i] = true; }
   r.in_pass[3] = false;
   r.table[0][1] = 6553;
@@ -913,7 +969,7 @@ static void test_save_sequence_order() {
   const std::vector<std::string> want = {"dac", "curves", "lines", "marker", "autotune", "reload"};
   CHECK(s.calls == want);
   CHECK(s.curve_mask == 0xF7 && s.line_mask == 0xF7);
-  for (int i = 0; i < 8; ++i) CHECK(s.src[i] == 1);
+  for (int i = 0; i < 8; ++i) CHECK(s.src[i] == i + 1);  // input n's source is output n
   CHECK(s.table00 == 6553);
   // Through the flow, after a real run.
   Rig rig;
@@ -937,7 +993,7 @@ static void test_save_refused_unless_can_save() {
   // The flow refuses outside Results, and after a cancel.
   Rig rig;
   rig.Begin();
-  CHECK(rig.Run([&] { return rig.flow.stage() == Stage::PromptInput; }));
+  CHECK(rig.Run([&] { return rig.flow.stage() == Stage::PromptPatch; }));
   FakeSave fs;
   CHECK(!rig.flow.Save(fs));
   CHECK(fs.calls.empty());
@@ -1008,21 +1064,24 @@ static void test_retry_output() {
   CHECK(res.out_pass[2]);
   CHECK(r.flow.CanSave());
   CHECK(count_prefix("CALR,OUT,3") == 2);
-  CHECK(count_prefix("CALR,IN,") == 8);  // C is not the source: inputs kept
+  // Every input hangs on its own output, so after a retry in Self the patch
+  // is checked and all 8 inputs are measured again (input 3 on C's new table).
+  CHECK(count_prefix("CALR,IN,") == 16);
+  CHECK(count_prefix("CALR,PRES,PASS") == 2);
   for (int o = 0; o < 8; ++o) {
     if (o == 2) continue;
     CHECK(res.out_pass[o] == before.out_pass[o]);
     for (int k = 0; k < CR::kNodes; ++k) CHECK(res.table[o][k] == before.table[o][k]);
   }
-  for (int i = 0; i < 8; ++i) CHECK(res.in_pass[i] == before.in_pass[i]);
+  for (int i = 0; i < 8; ++i) CHECK(res.in_pass[i]);
   CHECK(count_prefix("CALR,RESULT,1,FF,") == 1);
 
-  // Output A again: the inputs are measured again on its new table.
+  // Output A again: the same.
   CHECK(r.flow.RetryOutput(0));
   CHECK(r.Run());
   CHECK(r.flow.stage() == Stage::Results);
   CHECK(count_prefix("CALR,OUT,1") == 2);
-  CHECK(count_prefix("CALR,IN,") == 16);
+  CHECK(count_prefix("CALR,IN,") == 24);
   CHECK(r.flow.CanSave());
   FakeSave fs;
   CHECK(r.flow.Save(fs));
@@ -1031,7 +1090,7 @@ static void test_retry_output() {
   Rig c;
   c.Begin();
   CHECK(!c.flow.RetryOutput(0));  // ConfigMeter
-  CHECK(c.Run([&] { return c.flow.stage() == Stage::PromptInput; }));
+  CHECK(c.Run([&] { return c.flow.stage() == Stage::PromptPatch; }));
   CHECK(!c.flow.RetryOutput(1));
   CHECK(c.Run());
   CHECK(c.flow.RetryOutput(5));
@@ -1089,11 +1148,17 @@ static std::string legacy_result(int in, int out, const CM::Fit &fit, float resi
   return line;
 }
 
+// The Q's input (2) gets the scripted point; the other channels of the window
+// get something else, which the Q must not read.
 struct ScriptedInputs : InputPort {
   CM::PointStats pts[3];
   int i = 0;
-  void StartWindow(int) override {}
-  bool WindowDone(CM::PointStats *s) override { *s = pts[i++ % 3]; return true; }
+  void StartWindow() override {}
+  bool WindowDone(CM::PointStats s[8]) override {
+    for (int c = 0; c < 8; ++c) s[c] = {1.f, 0.f, 2000.f, 7};
+    s[2] = pts[i++ % 3];
+    return true;
+  }
 };
 
 static void test_q_lines_unchanged() {
@@ -1227,6 +1292,10 @@ static void test_calr_lines_golden() {
   Discard(b, sizeof(b)); is("DISCARD");
   Cancel(b, sizeof(b), "SWEEP_OUT"); is("CANCEL");
   Fail(b, sizeof(b), "METER_TIMEOUT"); is("FAIL");
+  RunMode(b, sizeof(b), "SELF"); is("MODE");
+  Warn(b, sizeof(b), "NO_MARKER"); is("WARN");
+  Patch(b, sizeof(b), 2, 0x10, 3.25f); is("PATCH");
+  PatchResult(b, sizeof(b), false, 0x14, 0x08); is("PRES");
   // Every SUB in the fixture has a header and the example has its field count.
   std::map<std::string, size_t> nf;
   for (int i = 1; i < HeaderCount(); ++i) {
@@ -1245,9 +1314,11 @@ static void test_calr_lines_golden() {
   Rig r;
   r.meter.extra = [](int n) { return (n >= 5 && n < 8) ? ((n & 1) ? 0.5 : -0.5) : 0.0; };
   r.Begin();
+  r.ins.patch[2] = -1;  // input 3 unpatched: the patch check fails, A skips it
   CHECK(r.Run([&] { return r.meter.reads >= 40; }));
   r.meter.fail_next = 1;
-  CHECK(r.Run([&] { return r.flow.stage() == Stage::PromptInput && r.flow.current_input() == 2; }));
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::PatchFailed);
   r.flow.Skip();
   CHECK(r.Run());
   FakeSave fs;
@@ -1270,8 +1341,286 @@ static void test_calr_lines_golden() {
   CHECK(heads_seen == HeaderCount());
   for (const char *sub : {"CALR,METER,", "CALR,STATE,", "CALR,OUT,", "CALR,NODE,", "CALR,REREAD,",
                           "CALR,SWEEP,", "CALR,ORES,", "CALR,IN,", "CALR,IPT,", "CALR,IRES,",
-                          "CALR,RETRY,", "CALR,RESULT,", "CALR,SAVE,"})
+                          "CALR,RETRY,", "CALR,RESULT,", "CALR,SAVE,", "CALR,MODE,",
+                          "CALR,PATCH,", "CALR,PRES,"})
     CHECK(count_prefix(sub) > 0);
+}
+
+// ---- separate routines; all-8 inputs; patch check -------------------------------
+
+static std::vector<std::string> stages_seen() {
+  std::vector<std::string> v;
+  for (const auto &l : g_log) {
+    if (l.compare(0, 11, "CALR,STATE,") != 0) continue;
+    const size_t a = l.find(',', 11) + 1, b = l.find(',', a);
+    v.push_back(l.substr(a, b - a));
+  }
+  return v;
+}
+static bool saw(const std::vector<std::string> &v, const char *stage) {
+  return std::find(v.begin(), v.end(), std::string(stage)) != v.end();
+}
+
+static void test_mode_outputs_saves_only_tables() {
+  Rig r;
+  r.Begin(Mode::Outputs);
+  CHECK(count_prefix("CALR,MODE,OUTPUTS") == 1);
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Results);
+  const auto st = stages_seen();
+  CHECK(saw(st, "CAL_OUT") && saw(st, "SWEEP_OUT"));
+  CHECK(!saw(st, "PROMPT_PATCH") && !saw(st, "CHECK_PATCH") && !saw(st, "CAL_IN"));
+  CHECK(r.ins.windows == 0);
+  CHECK(r.flow.results().HasOutputs() && !r.flow.results().HasInputs());
+  CHECK(r.flow.CanSave());  // no input passed, and none is needed
+  FakeSave fs;
+  CHECK(r.flow.Save(fs));
+  const std::vector<std::string> want = {"dac", "marker", "autotune"};
+  CHECK(fs.calls == want);
+  // A failed output still blocks it.
+  auto res = passing_results();
+  res.mode = uint8_t(Mode::Outputs);
+  for (int i = 0; i < 8; ++i) res.in_pass[i] = false;
+  FakeSave a;
+  CHECK(CalRoutineSave(res, a) && a.calls == want);
+  res.out_pass[4] = false;
+  FakeSave b;
+  CHECK(!CalRoutineSave(res, b) && b.calls.empty());
+}
+
+static void test_mode_inputs_saves_only_curves() {
+  Rig r;
+  r.meter.connected = false;  // no meter is needed
+  r.Begin(Mode::Inputs);
+  CHECK(count_prefix("CALR,MODE,INPUTS") == 1);
+  CHECK(r.flow.stage() == Stage::PromptPatch);
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Results);
+  CHECK(r.meter.sent.empty());
+  const auto st = stages_seen();
+  CHECK(!saw(st, "CAL_OUT") && !saw(st, "NOMETER") && !saw(st, "CONFIG"));
+  const auto &res = r.flow.results();
+  CHECK(!res.HasOutputs() && res.HasInputs());
+  for (int o = 0; o < 8; ++o)
+    for (int k = 0; k < CR::kNodes; ++k) CHECK(res.table[o][k] == r.outs.stored[o][k]);
+  for (int i = 0; i < 8; ++i) CHECK(res.in_pass[i]);
+  CHECK(r.flow.CanSave());
+  FakeSave fs;
+  CHECK(r.flow.Save(fs));
+  const std::vector<std::string> want = {"curves", "lines", "reload"};
+  CHECK(fs.calls == want);
+  CHECK(fs.curve_mask == 0xFF && fs.line_mask == 0xFF);
+  for (int i = 0; i < 8; ++i) CHECK(fs.src[i] == i + 1);
+  // One passed input is enough; none is not. Outputs play no part.
+  auto x = passing_results();
+  x.mode = uint8_t(Mode::Inputs);
+  for (int i = 0; i < 8; ++i) { x.in_pass[i] = i == 6; x.out_pass[i] = false; }
+  FakeSave a;
+  CHECK(CalRoutineSave(x, a) && a.calls == want && a.curve_mask == 0x40);
+  x.in_pass[6] = false;
+  FakeSave b;
+  CHECK(!CalRoutineSave(x, b) && b.calls.empty());
+}
+
+// The bench's inputs (0 V near raw 3640, ~2.75 mV per count, top near 10.65 V),
+// each bent differently, patched A->1 ... H->8: one sweep holds all 8 outputs
+// at each point (each through its own table) and reads all 8 inputs in one
+// window.
+// The stored tables of a unit whose outputs were calibrated before (what
+// Inputs alone relies on).
+static void calibrate_stored(Rig &r) {
+  for (int o = 0; o < 8; ++o) {
+    uint16_t t[CR::kNodes];
+    bool rail[CR::kNodes];
+    ref_table(r.dac, o, r.outs.stored[o], 0.0, t, rail);
+    memcpy(r.outs.stored[o], t, sizeof(t));
+  }
+}
+
+static void test_inputs_all8_one_sweep() {
+  Rig r;
+  r.ins.Realistic();
+  calibrate_stored(r);
+  r.Begin(Mode::Inputs);
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Results);
+  CHECK(!r.hold_rule_broken && r.outs.mask == 0);
+  CHECK(!r.ins.short_window);
+  const auto &res = r.flow.results();
+  // Windows: the patch check's 9 (one low, then each output raised), then one
+  // per sweep point with all 8 outputs held.
+  CHECK(r.ins.windows >= 9 + 15);
+  int sweep_windows = 0;
+  for (size_t w = 9; w < r.ins.window_mask.size(); ++w) {
+    CHECK(r.ins.window_mask[w] == 0xFF);
+    ++sweep_windows;
+  }
+  CHECK(sweep_windows <= kMaxInputPoints);
+  // Every input is logged at every point until its own top ends its sweep:
+  // all 8 at the first point, and each input's used points plus at most the
+  // one that ended it.
+  int ipts = 0, first = 0, used_sum = 0;
+  for (const auto &l : g_log) {
+    if (l.compare(0, 9, "CALR,IPT,") != 0) continue;
+    ++ipts;
+    int in, mv;
+    if (sscanf(l.c_str(), "CALR,IPT,%d,%d,", &in, &mv) == 2 && mv == kInStepMv) ++first;
+  }
+  for (int i = 0; i < 8; ++i) used_sum += r.flow.results().in_points[i];
+  CHECK(first == 8);
+  CHECK(ipts >= used_sum && ipts <= used_sum + 8 && ipts <= 8 * sweep_windows);
+  for (int i = 0; i < 8; ++i) {
+    CHECK(res.in_pass[i]);
+    CHECK(res.in_verdict[i] == CM::VERDICT_OK);
+    CHECK(res.in_points[i] >= 15);
+    CHECK(res.in_lo_mv[i] == kInStepMv);
+    CHECK(res.in_hi_mv[i] >= 9600 && res.in_hi_mv[i] <= 10800);  // the input's own top
+    CHECK(res.in_holdout_mv[i] <= 1.0f);
+    double worst = 0;
+    for (int b = 0; b < CR::kCurvePoints; ++b) {
+      const double t = true_mv_at(r.ins, i, double(b << CR::kCurveShift));
+      if (t < res.in_lo_mv[i] || t > res.in_hi_mv[i]) continue;
+      worst = std::fmax(worst, std::fabs(res.curve_mv_x2[i][b] / 2.0 - t));
+    }
+    CHECK(worst <= 1.0);
+    if (worst > 1.0) printf("  input %d: worst curve error %.2f mV\n", i + 1, worst);
+  }
+  // Each point's code for input n is output n's own table at that voltage.
+  for (const auto &l : g_log) {
+    int in, mv, code;
+    if (sscanf(l.c_str(), "CALR,IPT,%d,%d,%d,", &in, &mv, &code) != 3) continue;
+    CHECK(code == r.outs.CodeForMv(in - 1, r.outs.stored[in - 1], mv));
+  }
+  CHECK(r.Minutes() < 1.5);
+}
+
+static void test_patch_check_catches_swap() {
+  Rig r;
+  r.ins.patch[2] = 4;  // input 3 has output E
+  r.ins.patch[4] = 2;  // input 5 has output C
+  r.Begin(Mode::Inputs);
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::PatchFailed);
+  CHECK(r.outs.mask == 0);
+  CHECK(r.flow.patch_crossed() == 0x14);   // outputs C and E
+  CHECK(r.flow.patch_missing() == 0x14);   // ... and neither moved its own input
+  CHECK(r.flow.patch_moved(2) == 0x10);    // C moves input 5
+  CHECK(r.flow.patch_moved(4) == 0x04);    // E moves input 3
+  for (int o = 0; o < 8; ++o)
+    if (o != 2 && o != 4) CHECK(r.flow.patch_moved(o) == (1u << o));
+  CHECK(count_prefix("CALR,PATCH,3,10,") == 1);
+  CHECK(count_prefix("CALR,PATCH,5,04,") == 1);
+  CHECK(count_prefix("CALR,PRES,FAIL,14,14") == 1);
+  CHECK(count_prefix("CALR,IPT,") == 0);  // nothing measured on a wrong patch
+  r.flow.Skip();  // a crossing cannot be skipped
+  CHECK(r.flow.stage() == Stage::PatchFailed);
+  // Fixed: Continue checks again and runs.
+  r.ins.patch[2] = 2;
+  r.ins.patch[4] = 4;
+  r.flow.Continue();
+  CHECK(r.flow.stage() == Stage::CheckPatch);
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Results);
+  CHECK(count_prefix("CALR,PRES,PASS,00,00") == 1);
+  for (int i = 0; i < 8; ++i) CHECK(r.flow.results().in_pass[i]);
+}
+
+static void test_patch_check_catches_missing() {
+  Rig r;
+  r.ins.patch[3] = -1;  // nothing in input 4
+  r.Begin(Mode::Inputs);
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::PatchFailed);
+  CHECK(r.flow.patch_crossed() == 0);
+  CHECK(r.flow.patch_missing() == 0x08);
+  CHECK(r.flow.patch_moved(3) == 0);
+  CHECK(count_prefix("CALR,PATCH,4,00,") == 1);
+  CHECK(count_prefix("CALR,PRES,FAIL,00,08") == 1);
+  // A goes on without it.
+  r.flow.Skip();
+  CHECK(r.flow.stage() == Stage::CalInput);
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Results);
+  const auto &res = r.flow.results();
+  CHECK(res.in_skipped == 0x08);
+  CHECK(!res.in_pass[3]);
+  for (int i = 0; i < 8; ++i)
+    if (i != 3) CHECK(res.in_pass[i]);
+  CHECK(count_prefix("CALR,IRES,4,SKIP,") == 1);
+  CHECK(count_prefix("CALR,IN,4,") == 0);
+  CHECK(r.flow.CanSave());
+  // A stacked cable (output B into inputs 2 and 3, C nowhere) is a crossing.
+  Rig m;
+  m.ins.patch[2] = 1;
+  m.Begin(Mode::Inputs);
+  CHECK(m.Run());
+  CHECK(m.flow.stage() == Stage::PatchFailed);
+  CHECK(m.flow.patch_moved(1) == 0x06 && m.flow.patch_crossed() == 0x02 &&
+        m.flow.patch_missing() == 0x04);
+}
+
+static void test_inputs_warn_without_marker() {
+  {
+    Rig r;
+    r.Begin(Mode::Inputs, false);
+    CHECK(r.flow.stage() == Stage::WarnMarker);
+    CHECK(count_prefix("CALR,WARN,NO_MARKER") == 1);
+    for (int i = 0; i < 100; ++i) r.Step();
+    CHECK(r.flow.stage() == Stage::WarnMarker && r.outs.holds == 0);
+    r.flow.Continue();  // go on anyway
+    CHECK(r.flow.stage() == Stage::PromptPatch);
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Results && r.flow.CanSave());
+  }
+  {
+    Rig r;
+    r.Begin(Mode::Inputs, false);
+    r.flow.Cancel();  // or not
+    CHECK(r.flow.stage() == Stage::Idle && r.outs.holds == 0);
+  }
+  {
+    Rig r;
+    r.Begin(Mode::Inputs, true);
+    CHECK(r.flow.stage() == Stage::PromptPatch);
+    CHECK(count_prefix("CALR,WARN,") == 0);
+    // The marker only matters to Inputs: Self calibrates the outputs first.
+    Rig s;
+    s.Begin(Mode::Self, false);
+    CHECK(s.flow.stage() == Stage::ConfigMeter && count_prefix("CALR,WARN,") == 0);
+  }
+}
+
+static void test_self_runs_both() {
+  Rig r;
+  r.outs.stored[3][5] = uint16_t(r.outs.stored[3][5] + 400);  // D's stored table is off
+  r.Begin(Mode::Self);
+  CHECK(count_prefix("CALR,MODE,SELF") == 1);
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Results);
+  const auto st = stages_seen();
+  // Outputs first, then the patch, its check and the inputs.
+  const auto first = [&](const char *s) {
+    return int(std::find(st.begin(), st.end(), std::string(s)) - st.begin());
+  };
+  CHECK(first("CAL_OUT") < first("PROMPT_PATCH"));
+  CHECK(first("PROMPT_PATCH") < first("CHECK_PATCH"));
+  CHECK(first("CHECK_PATCH") < first("CAL_IN"));
+  CHECK(first("CAL_IN") < first("RESULTS"));
+  CHECK(!saw(st, "WARN_MARKER"));
+  const auto &res = r.flow.results();
+  CHECK(res.HasOutputs() && res.HasInputs());
+  for (int i = 0; i < 8; ++i) CHECK(res.out_pass[i] && res.in_pass[i]);
+  // The inputs ran on the new tables, not the stored ones.
+  CHECK(res.table[3][5] != r.outs.stored[3][5]);
+  for (const auto &l : g_log) {
+    int in, mv, code;
+    if (sscanf(l.c_str(), "CALR,IPT,%d,%d,%d,", &in, &mv, &code) != 3) continue;
+    CHECK(code == r.outs.CodeForMv(in - 1, res.table[in - 1], mv));
+  }
+  FakeSave fs;
+  CHECK(r.flow.Save(fs));
+  const std::vector<std::string> want = {"dac", "curves", "lines", "marker", "autotune", "reload"};
+  CHECK(fs.calls == want);
 }
 
 int main() {
@@ -1302,6 +1651,13 @@ int main() {
   test_q_lines_unchanged();
   test_q_commit_drops_curve();
   test_calr_lines_golden();
+  test_mode_outputs_saves_only_tables();
+  test_mode_inputs_saves_only_curves();
+  test_inputs_all8_one_sweep();
+  test_patch_check_catches_swap();
+  test_patch_check_catches_missing();
+  test_inputs_warn_without_marker();
+  test_self_runs_both();
   printf("test_calroutine_flow: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
 }

@@ -298,27 +298,29 @@ FLASHMEM uint16_t QOutputs::CodeForMv(int, const uint16_t table[CalRoutineMath::
   return code;
 }
 
-// Averages one input from the loop's sampling (Task()) while the window is open.
+// Averages all 8 inputs from the loop's sampling (Task()) while the window is
+// open (the Window already sums every channel); the Q reads its own one.
 struct QInputs : CalRoutine::InputPort {
   bool open;
-  int phys;
   Window win;
-  void StartWindow(int in) override;
-  bool WindowDone(PointStats *s) override;
+  void StartWindow() override;
+  bool WindowDone(PointStats s[8]) override;
 };
 
-FLASHMEM void QInputs::StartWindow(int in) {
-  phys = InPhys(in);
+FLASHMEM void QInputs::StartWindow() {
   win.Reset();
   open = true;
 }
 
-FLASHMEM bool QInputs::WindowDone(PointStats *s) {
+FLASHMEM bool QInputs::WindowDone(PointStats s[8]) {
   open = false;
-  s->samples = win.n;
-  s->mean_raw = win.n ? float(win.sum[phys]) / (256.f * float(win.n)) : 0.f;
-  s->min_raw = win.n ? float(win.lo[phys]) * (1.f / 256.f) : 0.f;
-  s->max_raw = win.n ? float(win.hi[phys]) * (1.f / 256.f) : 0.f;
+  for (int i = 0; i < 8; ++i) {
+    const int phys = InPhys(i);
+    s[i].samples = win.n;
+    s[i].mean_raw = win.n ? float(win.sum[phys]) / (256.f * float(win.n)) : 0.f;
+    s[i].min_raw = win.n ? float(win.lo[phys]) * (1.f / 256.f) : 0.f;
+    s[i].max_raw = win.n ? float(win.hi[phys]) * (1.f / 256.f) : 0.f;
+  }
   return true;
 }
 

@@ -149,7 +149,7 @@ means a sweep or many points, in case the response is not linear): after the 11 
 about 4 points between each pair of nodes (≈ 0.3 V apart, 0–12 V) through the normal pitch-to-code
 path. The worst residual is the output's figure, and any point over 1 mV is named on the results
 screen with its voltage. The 11 nodes are what the table can store; the sweep makes a bend the table
-cannot follow visible rather than assumed away. Expected run time is a few minutes for all 8 outputs (*Claude's estimate*).
+cannot follow visible rather than assumed away. Run time: see §9.1 (the meter rule there sets it).
 
 On save, any valid autotune table is reset (`autotune_calibration_data.Reset()`) so the new base
 table takes effect on every channel (*Claude's call*; the tables are RAM-only anyway).
@@ -275,7 +275,11 @@ Meter setup: `CONF:VOLT:DC 20`, `VOLT:DC:NPLC 10`, `VOLT:DC:AZ ON`, `TRIG:SOUR I
 After every DAC code change: settle 150 ms, **one throwaway `READ?`**, then **3** readings → median +
 spread (trusted ≤ 0.5 mV; one re-read set, then NOISY). Each output node's **final** value (the one
 reported and stored as measured) is the median of **10** readings. Sweep points use the 3-reading rule.
-Modelled Outputs + Inputs run ≈ 30 min at 0.53 s per `READ?` (Outputs ≈ 28; to be measured).
+**Verify sweep halved** (Oren, 2026-10-24): **2 points between each pair of nodes** (k·1200 + 400 and
+k·1200 + 800 mV), 20 per output, replacing §6.3's "about 4" (40).
+Modelled at 0.53 s per `READ?` (`test_run_time_model`): **Outputs ≈ 22 min**, **Inputs ≈ 0.4 min**
+(no meter: 9 patch-check windows and ~18 sweep windows of 0.9 s, plus the owner's patching),
+**Self ≈ 22 min**; 19 / 27 min for Self at 0.45 / 0.65 s per `READ?`. To be measured on the bench.
 
 ### 9.2 Separate routines
 The Cal Routine list becomes **Outputs**, **Inputs**, **Self (both)** (later rows, e.g. bus modules,
@@ -289,6 +293,11 @@ outputs together** through the input sweep points (each output through its own c
 measures **all 8 inputs in one window per point** (the ADC samples all channels together). Settle and
 window as the Q flow (300 ms / 600 ms). Verdicts per input as today; a failed input does not stop the
 others. A patch check first: each output in turn is raised alone and must move only its own input
-(catches a mis-patch, and is the input-map check for free). Bench: a patched Xenomorpher input loads
+(catches a mis-patch, and is the input-map check for free; *Claude's call*: all 8 low at 0.6 V, then
+each output alone at 6 V; an input "moves" when its mean shifts by more than 1000 counts, half the
+~1960 a patched input moves, so ~900 counts of margin either way; a check that finds only empty
+jacks lets the owner go on without them, a crossing must be fixed). Each input's span is its own
+output's non-rail span, ended by the input's own top (near 10.65 V; §6.4's "0 V at the rail" and
+"≈ 12 V" are corrected in `docs/CV-Meter.md`). Bench: a patched Xenomorpher input loads
 an output by a near-constant ~1.2 mV (measured 2026-10-24 at 1.2 V and 9.6 V), under half an input
 count; outputs stay calibrated unloaded (reference condition), and the results screen/docs say so.

@@ -85,9 +85,9 @@ CALROUTINE_MATH_CODE
 int SweepPoints(int32_t out_mv[], int cap) {
   int n = 0;
   for (int k = 0; k < kNodes - 1; ++k)
-    for (int j = 1; j <= 4; ++j) {
+    for (int j = 1; j <= 2; ++j) {
       if (n >= cap) return n;
-      out_mv[n++] = k * kNodeMv + j * (kNodeMv / 5);
+      out_mv[n++] = k * kNodeMv + j * (kNodeMv / 3);
     }
   return n;
 }

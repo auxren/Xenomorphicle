@@ -150,6 +150,8 @@ of them.
 
 While the Cal Routine app runs it logs one line per step on the console. The format is defined by `software/src/CalRoutineFlow.cpp` and the golden file `software/test/fixtures/calr_lines.txt` (its `CALR#` header lines name each kind's fields in order). Lines are `CALR,<KIND>,<field>,...`, comma-separated, outputs and inputs 1-based:
 
+- `MODE` the routine: `OUTPUTS`, `INPUTS` or `SELF`
+- `WARN` `NO_MARKER`: Inputs was started on outputs Cal Routine did not calibrate (the owner may go on)
 - `METER` the meter's identity
 - `STATE` timestamp (ms), stage, current output and input
 - `OUT` an output starts
@@ -157,8 +159,10 @@ While the Cal Routine app runs it logs one line per step on the console. The for
 - `REREAD` a repeat reading of a table entry and its spread
 - `SWEEP` one in-between check point and its residual
 - `ORES` an output's result: PASS or not, reason, worst error, rail mask
-- `IN` an input starts: source output and covered span (`lo_mv`, `hi_mv`)
-- `IPT` one input measurement point
+- `PATCH` the patch check, one per output raised alone: the inputs it moved (hex mask) and its own input's shift in raw counts (about 1960 when patched)
+- `PRES` the patch check's result: PASS or FAIL, outputs that moved another input (`crossed`), outputs that did not move their own (`missing`), hex masks
+- `IN` an input's span: its source output (output n for input n) and covered span (`lo_mv`, `hi_mv`); all 8 at the start of the sweep
+- `IPT` one input measurement point (all 8 inputs are logged for each sweep voltage)
 - `IRES` an input's result: verdict, gain, offset, hold-out and line deviation
 - `RETRY` a meter query was repeated
 - `MERR` the meter's error queue was not empty after its setup (`SETUP`) or an output's autozero (`ZERO`): the reply; the run then fails `METER_CONFIG`

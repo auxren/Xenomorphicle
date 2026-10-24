@@ -246,7 +246,7 @@ class ParseCalr(unittest.TestCase):
 
     def test_every_golden_line_parses_to_its_field_count(self):
         _, lines = calr_fixture()
-        self.assertEqual(len(lines), 20)
+        self.assertEqual(len(lines), 24)
         for l in lines:
             d = cvmeter.parse_calr(l)
             self.assertIsNotNone(d, l)
@@ -274,6 +274,22 @@ class ParseCalr(unittest.TestCase):
         self.assertEqual(by["RETRY"]["scpi"], "READ?")
         self.assertTrue(by["METER"]["identity"].startswith("Siglent"))
         self.assertEqual(by["FAIL"]["reason"], "METER_TIMEOUT")
+        self.assertEqual(by["MODE"]["mode"], "SELF")
+        self.assertEqual(by["WARN"]["reason"], "NO_MARKER")
+        self.assertEqual(by["PATCH"]["out"], 3)
+        self.assertEqual(by["PATCH"]["moved"], 0x10)
+        self.assertEqual(by["PATCH"]["own_delta_raw"], 3.25)
+        self.assertEqual(by["PRES"]["result"], "FAIL")
+        self.assertEqual(by["PRES"]["crossed"], 0x14)
+        self.assertEqual(by["PRES"]["missing"], 0x08)
+
+    def test_summary_names_patch_faults(self):
+        lines = ["CALR,MODE,INPUTS", "CALR,PATCH,3,10,0.50", "CALR,PATCH,5,04,1.00",
+                 "CALR,PRES,FAIL,14,14"]
+        res = cvmeter.summarize_calr([cvmeter.parse_calr(l) for l in lines])
+        self.assertEqual(res["mode"], "INPUTS")
+        self.assertEqual(res["patch"], {"result": "FAIL", "crossed": 0x14, "missing": 0x14,
+                                        "moved": {3: 0x10, 5: 0x04}})
 
     def test_rejects_wrong_count_and_other_tags(self):
         self.assertIsNone(cvmeter.parse_calr("CALR,OUT,3,4"))
@@ -338,7 +354,7 @@ class SimMeterAndCalRoutine(unittest.TestCase):
             if l is None:
                 break
             lines.append(l)
-        self.assertEqual(lines[0], "CALR#,version=1")
+        self.assertEqual(lines[0], "CALR#,version=2")
         parsed = [cvmeter.parse_calr(l) for l in lines if l.startswith("CALR,")]
         self.assertTrue(all(p is not None for p in parsed))
         res = cvmeter.summarize_calr(parsed)
@@ -350,6 +366,13 @@ class SimMeterAndCalRoutine(unittest.TestCase):
         self.assertTrue(all(o["result"] == "PASS" and o["worst_mv"] <= 1.0
                             for o in res["outputs"].values()))
         self.assertTrue(all(i["result"] == "PASS" for i in res["inputs"].values()))
+        self.assertEqual(res["mode"], "SELF")
+        self.assertEqual(res["patch"]["result"], "PASS")
+        self.assertEqual(res["patch"]["moved"], {o: 1 << (o - 1) for o in range(1, 9)})
+        sweeps = [p for p in parsed if p["sub"] == "SWEEP"]
+        self.assertEqual(len(sweeps), 8 * 20)                  # 2 verify points per node gap
+        ins = [p for p in parsed if p["sub"] == "IN"]
+        self.assertEqual([(p["in"], p["src_out"]) for p in ins], [(i, i) for i in range(1, 9)])
         self.assertEqual(self.ask("eREAD?")[0][0], "DONE")   # released after the run
 
 

@@ -250,25 +250,36 @@ ADC33131D, chosen at boot from the hardware ID (`OC_gpio.cpp:176`).
 (`:542`) and cut to 12 bits before smoothing (`OC_ADC.h:157`). Which reading
 in a frame belongs to which panel input is `AdcSlotForPanelInput`
 (`AdcSlotMap.h`), fixed by the order `ADC33131D_Start()` brings the capture up in. So every input
-is a 0-4095 window and **no reading can go past either end**. On Northern
-Light hardware 0 V is set at the top of that window, raw 4095
-(`OC_calibration.h:19`, used at `OC_calibration.cpp:106`): volts rise as
-raw falls. The default scale is 409.6 counts per pitch octave
-(`OC_ADC.h:43` with `value_to_pitch`, `OC_ADC.h:114`), and on this hardware
-an octave is 1.2 V (the calibration screens, `apps/SETTINGS.h:375` and
-`:409`; `gfxPrintVoltage`, `HSUtils.cpp:806`). That makes the firmware's
-model of an uncalibrated unit **0 V to 12.0 V at 2.93 mV per count**, and a
-Buchla 0-10 V CV lands no lower than raw ~682: by that model **the top of
-0-10 V does not clip**, with about 2 V to spare.
+is a 0-4095 window and **no reading can go past either end**. Volts rise as
+raw falls. The firmware's default model puts 0 V at the top of the window,
+raw 4095 (`OC_calibration.h:19`, used at `OC_calibration.cpp:106`), with
+409.6 counts per 1.2 V octave (`OC_ADC.h:43` with `value_to_pitch`,
+`OC_ADC.h:114`; the calibration screens, `apps/SETTINGS.h:375` and `:409`):
+0 V to 12.0 V at 2.93 mV per count. **That model is not where the hardware
+puts the ends.**
 
-The bottom has no margin at all: 0 V is the rail. Anything below 0 V reads
-0 V, and a unit's stored 0 V offset can itself be rail-limited (an offset of
-exactly 4095 means "at or beyond the end of the window").
+**What the front end really does** (Xenomorphicle main, schematic notes in
+`hardware/xenomorpher/README.md`; bench-confirmed 2026-10-24). Each input is
+jack -> 100 ohm -> TL074 buffer -> per-input gain trimmer -> inverting MCP604
+stage (-44k9/100k, offset from the -5 V reference rail) -> MCP33131D at a
+5.0 V reference: Vadc = 4.50 V - 0.449 x k x Vin, with the gain trimmer at
+k ~ 0.945.
 
-What the firmware cannot tell you is where the analog front end really puts
-those ends: the divider in front of the ADC33131D is not in the code, and
-the model above is only as good as each unit's stored offset and scale
-(which the existing calibration takes from CV1 alone). The stream's
+- **0 V is not the rail.** 0 V reads raw ~3635-3685 on every input (the
+  schematic predicts ~3685; the bench saw ~3635). There are about 400 counts
+  of headroom below 0 V.
+- **The span is about -1.35 V to +10.65 V** (the `CVRANGE` line on input 1),
+  about **2.75 mV per count**.
+- **The top is set by the MCP604's rail**, not by the ADC: the op-amp output
+  runs into ground near 10.6-10.8 V at the jack. Where exactly depends on
+  that input's gain trim (k), so each input tops out at a slightly
+  different voltage. A Buchla 0-10 V CV fits, with only ~0.6 V to spare.
+
+So a stored offset of exactly 4095 means "at or beyond the end of the window"
+only in the sense of the firmware's model; on this hardware a sound unit's
+0 V offset sits near 3640. The model is only as good as each unit's stored
+offset and scale (which Setup's calibration takes from CV1 alone); Cal
+Routine's Inputs routine measures each input's own curve over its own span. The stream's
 `CVRANGE` lines print each input's actual readable range from the
 calibration in effect, and the `clip` flags show a rail being hit. **Bench
 check before relying on the top of the range:** hold an output at 10 V

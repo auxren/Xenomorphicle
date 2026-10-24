@@ -9,7 +9,7 @@
 # fixed decimals, outputs and inputs 1-based (0 = none), masks in upper-case
 # hex (bit n = output/input n+1; rail_mask bit k = table entry k). The
 # CALR# lines name each SUB's fields in order.
-CALR#,version=1
+CALR#,version=2
 CALR#,METER,identity
 CALR#,STATE,ms,stage,out,in
 CALR#,OUT,out
@@ -30,6 +30,10 @@ CALR#,SAVE,result
 CALR#,DISCARD
 CALR#,CANCEL,stage
 CALR#,FAIL,reason
+CALR#,MODE,mode
+CALR#,WARN,reason
+CALR#,PATCH,out,moved,own_delta_raw
+CALR#,PRES,result,crossed,missing
 CALR,METER,Siglent Technologies;SDM3065X;SDM36GBX000000;1.01.01.25
 CALR,STATE,123456,CAL_OUT,4,0
 CALR,OUT,3
@@ -50,3 +54,7 @@ CALR,SAVE,OK
 CALR,DISCARD
 CALR,CANCEL,SWEEP_OUT
 CALR,FAIL,METER_TIMEOUT
+CALR,MODE,SELF
+CALR,WARN,NO_MARKER
+CALR,PATCH,3,10,3.25
+CALR,PRES,FAIL,14,08

@@ -113,7 +113,7 @@
   - `float LocalSlope(const uint16_t table[kNodes], const double measured_mv[kNodes], int k);` gives codes per mV from neighbouring measured nodes, or the nominal value when not enough nodes are known.
   - `enum TableVerdict { TABLE_OK, TABLE_NOT_MONOTONE, TABLE_SLOPE };`
   - `TableVerdict CheckTable(const uint16_t table[kNodes]);` requires codes strictly increasing and each step's codes per 1200 mV within ±15 % of nominal.
-  - `int SweepPoints(int32_t out_mv[], int cap);` returns the verify-sweep targets: 4 points between each pair of nodes, 0–12000 mV, nodes excluded, in ascending order.
+  - `int SweepPoints(int32_t out_mv[], int cap);` returns the verify-sweep targets: 4 points between each pair of nodes, 0–12000 mV, nodes excluded, in ascending order. (Halved in Task 10: 2 points, at k·1200 + 400 and + 800 mV, 20 in all.)
   - `struct InputSweepPoint { int32_t mv; CvMeterMath::PointStats stats; };`
   - `CvMeterMath::Verdict BuildInputCurve(const InputSweepPoint *pts, int n, int16_t mv_x2_out[kCurvePoints], CvMeterMath::Fit *line, float *worst_dev_mv, float *holdout_mv);` resamples the points onto raw 0, 256, …, 4096 (true mV × 2, linear between measured points, linear extrapolation at the ends). Even-indexed points build the curve and odd-indexed points give `holdout_mv`. It also returns the least-squares `line`, and checks RAIL, NOISY, FLAT, SIGN, GAIN (on the line) and MONOTONIC (raw strictly monotone, mV increasing).
   - `void CurveToValueTable(const int16_t mv_x2[kCurvePoints], int32_t value_q8_out[kCurvePoints]);` gives value counts × 256 at each breakpoint (`mV × 4096 / 12000 × 256`).
@@ -125,7 +125,7 @@
   - `node_converges_bowed`: a DAC with a smooth bow of 4 mV peak at mid-scale converges at every node. The sweep residual between nodes is computed and reported, not hidden.
   - `rail_entry_flagged_not_clipped`: a DAC that tops out at 11 900 mV leaves entry 10 at 65535 with `at_rail` set, and `CheckTable` still returns `TABLE_OK` with entries monotone.
   - `table_checks`: a non-monotone table gives `TABLE_NOT_MONOTONE`, and a step 30 % off nominal gives `TABLE_SLOPE`.
-  - `sweep_points`: 40 points, ascending, none equal to a node, all within 0…12000.
+  - `sweep_points`: 40 points, ascending, none equal to a node, all within 0…12000. (Task 10: 20 points, the values above.)
   - `summarize`: the median of {1,9,2,3,2} is 2 with spread 8; `ReadingTrusted` is false for spread 0.6 and true for 0.3.
   - `input_curve_linear`: a linear input gives a curve within 0.5 mV of the line everywhere and `holdout_mv ≤ 0.5`.
   - `input_curve_bent`: a 6 mV S-bend input gives curve error ≤ 1 mV at the held-out points, while the line's worst deviation is ≥ 5 mV.
