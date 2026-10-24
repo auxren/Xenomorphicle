@@ -190,8 +190,10 @@ isn't at risk of ever getting lost"):
    newest valid one; a save writes the older slot, so a power cut or torn write can only damage the
    copy being written. Writes go through `OC::RT::PersistenceWindow` (`docs/Timing-Budget.md`).
 4. **Reformat survival:** `PhzConfig` reformats when the partition will not mount
-   (`PhzConfig.cpp:150-169`). Its layout migration carries `GLOBALS.*` across a format
-   (`PhzConfig.cpp:~179-183`); the curve files join that list. The unrecoverable case is a partition
+   (`PhzConfig.cpp:150-169`). Its layout migration (`XenoFS::migrate_legacy`, `PhzConfig.cpp:185`)
+   already lifts every file into RAM and carries it across a format, with `GLOBALS.*` first. The
+   curve files get that same first-priority treatment, and their names stay under the 16-byte limit
+   (`Held::name[16]`). The unrecoverable case is a partition
    that is already unreadable, and there layer 2 still holds.
 5. **Export:** the curves are included in the Backup app's SysEx dump and restore.
 
