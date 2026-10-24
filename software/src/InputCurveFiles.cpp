@@ -3,7 +3,6 @@
 
 #include "InputCurveFiles.h"
 #include "AdcSlotMap.h"
-#include "OC_ADC.h"
 #include "PhzConfig.h"
 #include "RtStats.h"
 
@@ -31,31 +30,17 @@ class PhzCurveStorage : public CurveStorage {
 
 }  // namespace
 
-bool InputCurveLoadFromFlashRaw(InputCurveRecord *out, int *slot) {
+bool InputCurveLoadFromFlash(InputCurveRecord *out, int *slot) {
   PhzCurveStorage st;
   return InputCurveLoad(st, out, slot);
 }
 
-// Loop context only (not reentrant): the 300-byte scratch records live in
-// DMAMEM, off the loop stack and out of DTCM, like InputCal::Reload's.
-bool InputCurveLoadFromFlash(InputCurveRecord *out, int *slot, bool *legacy) {
-  DMAMEM static InputCurveRecord scratch;
-  InputCurveRecord *rec = out ? out : &scratch;
-  const bool ok = InputCurveLoadFromFlashRaw(rec, slot);
-  bool rotated = false;
-  if (ok) {
-    int chan[8];
-    OC::ADC::ChannelTable(chan);
-    rotated = InputCurveNormalize(*rec, chan);
-  }
-  if (legacy) *legacy = rotated;
-  return ok;
-}
-
 bool InputCurveSaveToFlash(const InputCurveRecord &rec) {
   PhzCurveStorage st;
-  DMAMEM static InputCurveRecord stamped;
+  // Every record this firmware writes was measured through the fixed input
+  // map (AdcSlotMap.h); the store re-encodes (seq, CRC).
+  DMAMEM static InputCurveRecord stamped;  // 300 bytes, off the loop stack
   stamped = rec;
-  CurveMapFlag(stamped) = kInputMapV1;  // the store re-encodes (seq, CRC)
+  CurveMapFlag(stamped) = kInputMapV1;
   return InputCurveSave(st, stamped);
 }

@@ -1,9 +1,16 @@
-// Host tests for the ADC33131D frame-slot map and the one-time migration of
-// stored per-input data (src/AdcSlotMap.cpp).
+// Host tests for the ADC33131D frame-slot map (src/AdcSlotMap.h).
 //   g++ -std=c++17 -Wall -Werror -O2 -o build/test_adc_slot_map \
-//     test_adc_slot_map.cpp ../src/AdcSlotMap.cpp ../src/InputCurveStore.cpp
+//     test_adc_slot_map.cpp ../src/CvMeterMath.cpp ../src/InputCurveStore.cpp
+//
+// The map cannot be read off the datasheet (not in the tree), and the FlexIO
+// reference leaves one detail open: whether a trigger that is already
+// asserted when FlexIO is enabled counts as an edge. So this models the
+// capture start event by event, for every combination of the unknowns, keeps
+// the combinations that reproduce the bench (the old init gave a different
+// slot depending on the trigger level at FLEXEN), fits the one free constant
+// to the bench pair, and checks that the new start gives AdcSlotForPanelInput
+// under every one of them.
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 
 #include "../src/AdcSlotMap.h"
@@ -11,347 +18,119 @@
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
 
-namespace CM = CvMeterMath;
+// ---- model of the capture start -------------------------------------------
+//
+// Trigger edges alternate. The mux shifters step on RISING edges (mux timer,
+// trigger active high); a reading starts on each FALLING edge (baud timer,
+// trigger active low) and is deposited in buffer order from slot 0.
+struct Semantics {
+  bool load_on_enable;  // the mux shifter outputs SHIFTBUF bit 0 at timer enable
+                        // (else its first rising edge loads it without stepping)
+  bool spurious_read;   // an asserted active-low trigger at FLEXEN starts a reading
+  bool spurious_step;   // an asserted active-high trigger at FLEXEN counts as a rising edge
+};
 
-static const int kIdentity[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-// ADC::Init with flip180: ADC_CHANNEL_1 = 7 ... ADC_CHANNEL_8 = 0.
-static const int kFlipped[8] = {7, 6, 5, 4, 3, 2, 1, 0};
-// Pinout_Detect for CalSynthXL: ADC_CHANNEL_1..8 = 4,5,6,7,0,1,2,3.
-static const int kCalSynth[8] = {4, 5, 6, 7, 0, 1, 2, 3};
+enum Start { OLD_TRIGGER_LOW, OLD_TRIGGER_HIGH, NEW_START };
 
-static CM::InputCalibration make_ica(uint8_t mask) {
-  CM::InputCalibration c;
-  CM::InputCalReset(c);
-  c.valid_mask = mask;
-  for (int i = 0; i < 8; ++i) {
-    c.gain[i] = -3.f - 0.01f * i;
-    c.offset_mv[i] = 12000.f + i;
-    c.verify_mv10[i] = int16_t(10 + i);
-    c.source_output[i] = uint8_t(1 + (i % 4));  // output labels, 1-based
+// Mux steps taken before reading k, minus k, in steady state (k large): the
+// constant c in "reading k is taken with address index k + c".
+static int phase(const Semantics &m, Start st) {
+  int steps = 0;          // address index
+  bool loaded = m.load_on_enable;
+  auto rising = [&]() { if (loaded) ++steps; else loaded = true; };
+  int k = 0;              // readings deposited so far
+  int c = 0;
+  const bool high = (st == OLD_TRIGGER_HIGH);
+  // At FLEXEN.
+  if (high && m.spurious_step) rising();
+  if (!high && m.spurious_read && st == OLD_TRIGGER_LOW) ++k;  // NEW_START discards it
+  // Then free-running edges, starting with the one opposite to the level.
+  bool next_rising = !high;
+  for (int e = 0; e < 64; ++e, next_rising = !next_rising) {
+    if (next_rising) { rising(); continue; }
+    c = steps - k;        // this reading is index k, taken at address index `steps`
+    ++k;
   }
   return c;
 }
 
-static InputCurveRecord make_curves(uint8_t mask, uint8_t map_flag) {
-  InputCurveRecord r;
-  memset(&r, 0, sizeof r);
-  r.seq = 7;
-  r.valid_mask = mask;
-  r.reserved2[0] = map_flag;
-  for (int i = 0; i < 8; ++i) r.source_output[i] = uint8_t(8 - i);
-  for (int i = 0; i < 8; ++i)
-    for (int j = 0; j < 17; ++j) r.mv_x2[i][j] = int16_t(i * 1000 + j);
-  InputCurveEncode(r);
-  return r;
+// Panel n's mux address is n + W, and the ADC returns a conversion L readings
+// late: slot = n + W + L - c. W + L is one unknown constant, D.
+static int slot(int n, int D, int c) { return ((n + D - c) % 8 + 8) % 8; }
+
+static void new_start_matches_bench_under_every_consistent_model() {
+  int consistent = 0;
+  for (int bits = 0; bits < 8; ++bits) {
+    const Semantics m = {bool(bits & 1), bool(bits & 2), bool(bits & 4)};
+    const int c_low = phase(m, OLD_TRIGGER_LOW), c_high = phase(m, OLD_TRIGGER_HIGH);
+    // The bench: two images, two slots one apart. A model in which the old
+    // init does not depend on the trigger level cannot explain it.
+    if (c_low == c_high) continue;
+    CHECK(c_low - c_high == 1 || c_high - c_low == 1);
+    ++consistent;
+    // Fit D: {slot under low, slot under high} = {(n+4)&7, (n+5)&7} for n = 0.
+    int D = -1;
+    for (int d = 0; d < 8; ++d) {
+      const int a = slot(0, d, c_low), b = slot(0, d, c_high);
+      if ((a == 4 && b == 5) || (a == 5 && b == 4)) D = d;
+    }
+    CHECK(D >= 0);
+    const int c_new = phase(m, NEW_START);
+    for (int n = 0; n < 8; ++n) CHECK(slot(n, D, c_new) == AdcSlotForPanelInput(n));
+  }
+  CHECK(consistent > 0);
 }
 
-// ---- the map -----------------------------------------------------------------
-
-// Bench, 2026-10-24: 8.4 V into panel 1 read on ADC_CHANNEL_2, panel 2 on
-// ADC_CHANNEL_3, panel 8 on ADC_CHANNEL_1, under the old slot table.
-static void map_matches_bench() {
-  const int expect[8] = {5, 6, 7, 0, 1, 2, 3, 4};
-  for (int n = 0; n < 8; ++n) CHECK(AdcSlotForPanelInput(n) == expect[n]);
-  // The old table gave slot AdcLegacySlotForPanelInput(ch) to channel ch.
-  // Panel n arrives in slot AdcSlotForPanelInput(n), which the old table
-  // handed to channel n+1 (wrapping 8 -> 1): the bench observation.
-  for (int n = 0; n < 8; ++n) {
-    int legacy_ch = -1;
-    for (int ch = 0; ch < 8; ++ch)
-      if (AdcLegacySlotForPanelInput(ch) == AdcSlotForPanelInput(n)) legacy_ch = ch;
-    CHECK(legacy_ch == (n + 1) % 8);
+// The old init really was level-dependent in the models above, by one slot,
+// and in the direction the bench saw: one of the two levels reproduces image
+// 88d35b7d (panel 1 -> ADC_CHANNEL_2 under the old table) and the other
+// 5ebcde9f (panel 1 -> ADC_CHANNEL_8 under the +1 table).
+static void old_start_reproduces_both_images() {
+  for (int bits = 0; bits < 8; ++bits) {
+    const Semantics m = {bool(bits & 1), bool(bits & 2), bool(bits & 4)};
+    const int c_low = phase(m, OLD_TRIGGER_LOW), c_high = phase(m, OLD_TRIGGER_HIGH);
+    if (c_low == c_high) continue;
+    const int c_new = phase(m, NEW_START);
+    // NEW_START equals whichever old case put panel n in (n+4)&7.
+    CHECK(c_new == c_low || c_new == c_high);
+    // The other case is the one slot later: image 88d35b7d.
+    const int other = (c_new == c_low) ? c_high : c_low;
+    CHECK(c_new - other == 1);
   }
-  // A permutation: every slot carries exactly one panel input.
+}
+
+static void map_is_a_permutation_top_row_on_4_to_7() {
   int seen = 0;
   for (int n = 0; n < 8; ++n) seen |= 1 << AdcSlotForPanelInput(n);
   CHECK(seen == 0xFF);
+  const int expect[8] = {4, 5, 6, 7, 0, 1, 2, 3};
+  for (int n = 0; n < 8; ++n) CHECK(AdcSlotForPanelInput(n) == expect[n]);
 }
 
-// ---- rotation ----------------------------------------------------------------
+// ---- the page flags -----------------------------------------------------------
 
-static void rotate_moves_each_entry_one_place() {
-  uint16_t off[8];
-  for (int i = 0; i < 8; ++i) off[i] = uint16_t(4000 + i);
-  CM::InputCalibration ica = make_ica(0xFF);
-  InputCurveRecord rec = make_curves(0xFF, 0);
-  const CM::InputCalibration ica0 = ica;
-  const InputCurveRecord rec0 = rec;
-  RotateLegacyInputData(off, ica, &rec);  // the unflipped default table
-  // Panel n's data was stored at index n+1 (wrapping); it is now at n.
-  for (int n = 0; n < 8; ++n) {
-    const int old = (n + 1) % 8;
-    CHECK(off[n] == 4000 + old);
-    CHECK(ica.gain[n] == ica0.gain[old]);
-    CHECK(ica.offset_mv[n] == ica0.offset_mv[old]);
-    CHECK(ica.verify_mv10[n] == ica0.verify_mv10[old]);
-    // source_output moves with its input; the value (an output label) does not change.
-    CHECK(ica.source_output[n] == ica0.source_output[old]);
-    CHECK(rec.source_output[n] == rec0.source_output[old]);
-    for (int j = 0; j < 17; ++j) CHECK(rec.mv_x2[n][j] == rec0.mv_x2[old][j]);
-  }
-  // Nothing else in either record moves.
-  CHECK(ica.version == ica0.version);
-  CHECK(rec.seq == rec0.seq);
-  // A null curve record is allowed.
-  RotateLegacyInputData(off, ica, nullptr);
-  CHECK(off[0] == 4002);
-}
+static void flags_mark_pages_from_before_the_fix() {
+  CvMeterMath::InputCalibration c;
+  CvMeterMath::InputCalReset(c);
+  CHECK(!IcaPredatesFix(c));            // nothing fitted: nothing to re-run
+  c.valid_mask = 0x02;
+  CHECK(IcaPredatesFix(c));             // older firmware left the byte 0
+  IcaMapFlag(c) = kInputMapV1;
+  CHECK(!IcaPredatesFix(c) && c.reserved0[0] == kInputMapV1);
 
-static void rotate_moves_mask_bits() {
-  // Bit 1 (stored for panel 1) moves to bit 0; bit 0 (panel 8) to bit 7.
-  uint16_t off[8] = {};
-  CM::InputCalibration ica = make_ica(0x03);
-  InputCurveRecord rec = make_curves(0x02, 0);
-  RotateLegacyInputData(off, ica, &rec);
-  CHECK(ica.valid_mask == 0x81);
-  CHECK(rec.valid_mask == 0x01);
-  ica = make_ica(0x80);  // panel 7's fit, stored at index 7
-  RotateLegacyIca(ica, kIdentity);
-  CHECK(ica.valid_mask == 0x40);
-}
-
-// Flip mode permutes ADC_CHANNEL_n; the stored data is indexed by the
-// physical index those names hold, so the move follows the table in force.
-static void rotate_follows_flip_and_calsynth_tables() {
-  // Under flip, label n's physical index is 8-n (0-based value), and the old
-  // scan put physical jack m at ADC_CHANNEL_(m+1): index i's data moves to
-  // index i+1 (wrapping).
-  uint16_t off[8];
-  for (int i = 0; i < 8; ++i) off[i] = uint16_t(i);
-  RotateLegacyOffsets(off, kFlipped);
-  for (int i = 0; i < 8; ++i) CHECK(off[i] == (i + 7) % 8);
-
-  // General rule for any table: new[chan[m]] = old[chan[m+1]].
-  for (int i = 0; i < 8; ++i) off[i] = uint16_t(100 + i);
-  uint16_t old[8];
-  memcpy(old, off, sizeof old);
-  RotateLegacyOffsets(off, kCalSynth);
-  for (int m = 0; m < 8; ++m) CHECK(off[kCalSynth[m]] == old[kCalSynth[(m + 1) % 8]]);
-
-  CM::InputCalibration ica = make_ica(0x01);  // index 0: label 8 under flip
-  RotateLegacyIca(ica, kFlipped);
-  CHECK(ica.valid_mask == 0x02);
-}
-
-// ---- the curve record normalizes on load -------------------------------------
-
-static void legacy_curve_record_normalizes_once() {
-  InputCurveRecord rec = make_curves(0x02, 0);
-  CHECK(InputCurveValid(rec));
-  CHECK(InputCurveNormalize(rec, kIdentity));   // legacy: rotated
-  CHECK(rec.valid_mask == 0x01);
-  CHECK(rec.reserved2[0] == kInputMapV1);
-  CHECK(InputCurveValid(rec));                  // CRC follows the change
-  const InputCurveRecord once = rec;
-  CHECK(!InputCurveNormalize(rec, kIdentity));  // already mapped: untouched
-  CHECK(memcmp(&rec, &once, sizeof rec) == 0);
-}
-
-// ---- the boot migration --------------------------------------------------------
-
-struct Unit {
-  uint8_t marker[4];
-  uint16_t off[8];
-  uint8_t cal_flag;
-  bool cal_loaded;
-  CM::InputCalibration ica;
-  bool ica_loaded;
-  InputCurveRecord rec;
-  bool curves_loaded;
-  InputMapPages pages() {
-    InputMapPages p;
-    p.marker = marker;
-    p.cal_loaded = cal_loaded;
-    p.cal_offset = off;
-    p.cal_flag = &cal_flag;
-    p.ica_loaded = ica_loaded;
-    p.ica = &ica;
-    p.curves_loaded = curves_loaded;
-    p.curves = &rec;
-    return p;
-  }
-};
-
-static Unit legacy_unit() {
-  Unit u;
-  memset(u.marker, 0xFF, sizeof u.marker);  // never written
-  for (int i = 0; i < 8; ++i) u.off[i] = uint16_t(4000 + i);
-  u.cal_flag = 0;
-  u.cal_loaded = true;
-  u.ica = make_ica(0x02);
-  u.ica_loaded = true;
-  u.rec = make_curves(0x04, 0);
-  u.curves_loaded = true;
-  return u;
-}
-
-static void migration_rotates_every_page_and_saves_in_order() {
-  Unit u = legacy_unit();
-  InputMapPages p = u.pages();
-  const InputMapPlan plan = InputMapPrepare(p, kIdentity);
-  CHECK(plan.run && plan.save_cal && plan.save_ica && plan.save_curves);
-  CHECK(u.off[0] == 4001);
-  CHECK(u.cal_flag == kInputMapV1);
-  CHECK(u.ica.valid_mask == 0x01 && IcaMapFlag(u.ica) == kInputMapV1);
-  CHECK(u.rec.valid_mask == 0x02 && CurveMapFlag(u.rec) == kInputMapV1);
-  CHECK(InputCurveValid(u.rec));
-}
-
-static void rotate_idempotent_guarded() {
-  // Marker present and every page flagged: nothing moves, nothing is saved,
-  // and the marker is not rewritten.
-  Unit u = legacy_unit();
-  memcpy(u.marker, kInputMapMarker, 4);
-  u.cal_flag = kInputMapV1;
-  IcaMapFlag(u.ica) = kInputMapV1;
-  u.curves_loaded = false;          // the caller skips the curve read
-  const Unit before = u;
-  InputMapPages p = u.pages();
-  const InputMapPlan plan = InputMapPrepare(p, kIdentity);
-  CHECK(!plan.run && !plan.save_cal && !plan.save_ica && !plan.save_curves);
-  CHECK(memcmp(u.off, before.off, sizeof u.off) == 0);
-  CHECK(memcmp(&u.ica, &before.ica, sizeof u.ica) == 0);
-  CHECK(memcmp(&u.rec, &before.rec, sizeof u.rec) == 0);
-  CHECK(InputMapMarkerPresent(kInputMapMarker));
-  const uint8_t near_miss[4] = {'A', 'M', 0, 0};
-  CHECK(!InputMapMarkerPresent(near_miss));
-
-  // Power lost after every page was saved but before the marker: the rerun
-  // finds each page already stamped and moves nothing a second time.
-  Unit v = legacy_unit();
-  InputMapPages p1 = v.pages();
-  InputMapPrepare(p1, kIdentity);
-  const Unit after_first = v;  // as saved; marker still absent
-  InputMapPages p2 = v.pages();
-  const InputMapPlan rerun = InputMapPrepare(p2, kIdentity);
-  CHECK(rerun.run && !rerun.save_cal && !rerun.save_ica && !rerun.save_curves);
-  CHECK(memcmp(v.off, after_first.off, sizeof v.off) == 0);
-  CHECK(memcmp(&v.ica, &after_first.ica, sizeof v.ica) == 0);
-  CHECK(memcmp(&v.rec, &after_first.rec, sizeof v.rec) == 0);
-
-  // Power lost after the calibration page only: the rerun leaves it and
-  // moves the two pages that were not saved yet.
-  Unit w = legacy_unit();
-  InputMapPages p3 = w.pages();
-  InputMapPrepare(p3, kIdentity);
-  w.ica = make_ica(0x02);          // ICA1 and the curves still as on disk
-  w.rec = make_curves(0x04, 0);
-  InputMapPages p4 = w.pages();
-  const InputMapPlan partial = InputMapPrepare(p4, kIdentity);
-  CHECK(!partial.save_cal && partial.save_ica && partial.save_curves);
-  CHECK(w.off[0] == 4001);         // once, not twice
-  CHECK(w.ica.valid_mask == 0x01 && w.rec.valid_mask == 0x02);
-}
-
-// A marker that arrived some other way (e.g. a data dump restored on a pre-fix
-// unit) must not hide a legacy page: CAL1 and ICA1 are in RAM at every boot,
-// so their own flags are always checked. Only the curve read is skipped.
-static void marker_present_still_checks_eeprom_pages() {
-  Unit u = legacy_unit();           // CAL1 flag 0
-  memcpy(u.marker, kInputMapMarker, 4);
-  IcaMapFlag(u.ica) = kInputMapV1;
-  u.curves_loaded = false;
-  InputMapPages p = u.pages();
-  InputMapPlan plan = InputMapPrepare(p, kIdentity);
-  CHECK(!plan.run && plan.save_cal && !plan.save_ica && !plan.save_curves);
-  CHECK(u.off[0] == 4001 && u.off[7] == 4000 && u.cal_flag == kInputMapV1);
-
-  Unit v = legacy_unit();           // ICA1 flag 0 with a fitted channel
-  memcpy(v.marker, kInputMapMarker, 4);
-  v.cal_flag = kInputMapV1;
-  v.curves_loaded = false;
-  InputMapPages q = v.pages();
-  plan = InputMapPrepare(q, kIdentity);
-  CHECK(!plan.run && !plan.save_cal && plan.save_ica);
-  CHECK(v.ica.valid_mask == 0x01 && IcaMapFlag(v.ica) == kInputMapV1);
-  CHECK(v.off[0] == 4000);
-
-  // Even if the caller did read the curves, a present marker leaves them to
-  // the load-time normalization.
-  Unit w = legacy_unit();
-  memcpy(w.marker, kInputMapMarker, 4);
-  w.cal_flag = kInputMapV1;
-  IcaMapFlag(w.ica) = kInputMapV1;
-  InputMapPages r = w.pages();
-  plan = InputMapPrepare(r, kIdentity);
-  CHECK(!plan.save_curves && w.rec.valid_mask == 0x04);
-}
-
-static void fresh_unit_no_rotation_needed() {
-  Unit u = legacy_unit();
-  u.cal_loaded = false;            // defaults in RAM, no page
-  u.ica_loaded = false;
-  CM::InputCalReset(u.ica);
-  u.curves_loaded = false;
-  for (int i = 0; i < 8; ++i) u.off[i] = 4095;
-  const Unit before = u;
-  InputMapPages p = u.pages();
-  const InputMapPlan plan = InputMapPrepare(p, kIdentity);
-  CHECK(plan.run);                 // the caller writes the marker
-  CHECK(!plan.save_cal && !plan.save_ica && !plan.save_curves);
-  CHECK(memcmp(u.off, before.off, sizeof u.off) == 0);
-  // RAM is stamped so a later save records the fixed map.
-  CHECK(u.cal_flag == kInputMapV1 && IcaMapFlag(u.ica) == kInputMapV1);
-
-  // A stored ICA1 page with no fitted channel is not rewritten either.
-  Unit v = legacy_unit();
-  v.cal_loaded = false;
-  v.curves_loaded = false;
-  v.ica = make_ica(0x00);
-  InputMapPages q = v.pages();
-  const InputMapPlan plan2 = InputMapPrepare(q, kIdentity);
-  CHECK(plan2.run && !plan2.save_ica);
-}
-
-// A calibration-region restore clears the marker before its first byte lands,
-// so the dump's own page flag decides: a dump from before the fix has no flag
-// and is rotated; a newer dump carries the flag and is applied as it is.
-static void prefix_backup_restore_rotated() {
-  uint8_t marker[4];
-  memcpy(marker, kInputMapMarker, 4);
-  InputMapMarkerClear(marker);
-  CHECK(!InputMapMarkerPresent(marker));
-
-  Unit legacy = legacy_unit();      // the restored bytes: flag 0
-  memcpy(legacy.marker, marker, 4);
-  legacy.ica.reserved0[0] = kInputMapV1;   // ICA1 is not in the region: already migrated
-  legacy.ica.valid_mask = 0x01;
-  const CM::InputCalibration ica_before = legacy.ica;
-  legacy.curves_loaded = false;
-  InputMapPages p = legacy.pages();
-  const InputMapPlan plan = InputMapPrepare(p, kIdentity);
-  CHECK(plan.run && plan.save_cal && !plan.save_ica);
-  CHECK(legacy.off[0] == 4001 && legacy.off[7] == 4000);
-  CHECK(memcmp(&legacy.ica, &ica_before, sizeof legacy.ica) == 0);
-
-  Unit fresh = legacy_unit();       // a dump made by fixed firmware: flag set
-  memcpy(fresh.marker, marker, 4);
-  fresh.cal_flag = kInputMapV1;
-  fresh.ica_loaded = false;
-  fresh.curves_loaded = false;
-  InputMapPages q = fresh.pages();
-  const InputMapPlan plan2 = InputMapPrepare(q, kIdentity);
-  CHECK(!plan2.save_cal);
-  CHECK(fresh.off[0] == 4000);
-
-  // The dump's curve record ('V' packets) normalizes the same way.
-  InputCurveRecord old_rec = make_curves(0x02, 0);
-  CHECK(InputCurveNormalize(old_rec, kIdentity) && old_rec.valid_mask == 0x01);
-  InputCurveRecord new_rec = make_curves(0x02, kInputMapV1);
-  CHECK(!InputCurveNormalize(new_rec, kIdentity) && new_rec.valid_mask == 0x02);
+  InputCurveRecord r;
+  memset(&r, 0, sizeof r);
+  r.valid_mask = 0x01;
+  CHECK(CurvesPredateFix(r));
+  CurveMapFlag(r) = kInputMapV1;
+  CHECK(!CurvesPredateFix(r) && r.reserved2[0] == kInputMapV1);
 }
 
 int main() {
-  map_matches_bench();
-  rotate_moves_each_entry_one_place();
-  rotate_moves_mask_bits();
-  rotate_follows_flip_and_calsynth_tables();
-  legacy_curve_record_normalizes_once();
-  migration_rotates_every_page_and_saves_in_order();
-  rotate_idempotent_guarded();
-  marker_present_still_checks_eeprom_pages();
-  fresh_unit_no_rotation_needed();
-  prefix_backup_restore_rotated();
+  new_start_matches_bench_under_every_consistent_model();
+  old_start_reproduces_both_images();
+  map_is_a_permutation_top_row_on_4_to_7();
+  flags_mark_pages_from_before_the_fix();
   if (g_fail) {
     printf("test_adc_slot_map: %d FAILED\n", g_fail);
     return 1;

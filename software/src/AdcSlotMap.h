@@ -7,51 +7,43 @@
 #include "InputCurveStore.h"
 
 // ---------------------------------------------------------------------------
-// Which reading in an ADC33131D frame carries which panel input, and the
-// one-time move of stored per-input data that fixing it needs.
+// Which reading in an ADC33131D frame carries which panel input.
 //
-// The ADC33131D path (OC_ADC.cpp, Init_Teensy41_ADC33131D_chip / Scan_DMA)
-// deposits one 16-bit reading per conversion; eight consecutive readings make
-// a frame, and the frame's slot s is the reading taken at mux address s. The
-// original table assumed the reading in slot s was the input selected for
-// that same conversion (AdcLegacySlotForPanelInput). It is not: each SPI frame
-// returns the conversion started at the end of the PREVIOUS frame, so slot s
-// holds the input selected one conversion earlier. That is a fixed pipeline
-// latency, set by the FlexIO configuration (the mux shifter, the SPI read and
-// the DMA request are all clocked by the same trigger, started together from
-// a software reset), not a start-up phase. See the comment at the map in
-// OC_ADC.cpp for the mechanism.
+// The ADC33131D path (OC_ADC.cpp) deposits one 16-bit reading per trigger
+// period; eight consecutive readings from the start of adc_buffer make a
+// frame. Which panel input lands in which slot depends on how many mux steps
+// came before the first reading. Before 2026-10-24 that depended on the
+// trigger level at FLEXEN, i.e. on how long the init code took, so it
+// differed between builds (bench: panel n in slot (n+5)&7 on image
+// 88d35b7d, (n+4)&7 on 5ebcde9f). ADC33131D_Start() now starts the trigger
+// only after FlexIO and the DMA are armed, from a forced low, so the count
+// always starts at the same edge.
 //
-// Before the fix a CV into panel input n arrived at ADC_CHANNEL_(n+1), and
-// panel 8 at ADC_CHANNEL_1 (bench, 2026-10-24). Everything stored per input
-// -- the shared 0 V offsets (CAL1 adc.offset[]), the Q fits (ICA1) and the
-// curve files (ICURVE_A/B.BIN) -- was recorded through that map, so the entry
-// for panel n sits at the index ADC_CHANNEL_(n+1) names. RotateLegacy* moves
-// each entry to ADC_CHANNEL_n.
+// The slot below is what that start gives. test/test_adc_slot_map.cpp
+// derives it from the bench pair under every model of FlexIO's edge
+// detection the pair allows, and every one gives this answer. It is also the
+// table this code had before (Phazerville's), which was right whenever the
+// old init happened to find the trigger low.
 //
-// Pure and host-tested (test/test_adc_slot_map.cpp).
+// Pure and host-tested.
 // ---------------------------------------------------------------------------
 
 constexpr int kAdcSlots = 8;
 
-// The slot the original table read panel input `panel` (0-7) from: the top
-// row (panels 1-4) on mux addresses 4-7, the second row on 0-3.
-constexpr int AdcLegacySlotForPanelInput(int panel) { return (panel + 4) & 7; }
-
-// Conversions between a mux address being selected and its reading arriving.
-constexpr int kAdcSlotLatency = 1;
-
-// The frame slot that carries panel input `panel` (0-7).
-constexpr int AdcSlotForPanelInput(int panel) {
-  return (AdcLegacySlotForPanelInput(panel) + kAdcSlotLatency) & 7;
-}
+// The frame slot that carries panel input `panel` (0-7): the top row (panels
+// 1-4) in slots 4-7, the second row in 0-3.
+constexpr int AdcSlotForPanelInput(int panel) { return (panel + 4) & 7; }
 
 // ---- stored data ---------------------------------------------------------
 
 // Every page this firmware writes carries kInputMapV1 in one reserved byte
 // (CAL1 reserved0[0], ICA1 reserved0[0], the curve record's reserved2[0]):
-// "indexed by the fixed map". Firmware that predates the fix left those bytes
-// 0, and ignores them when it reads a page, so the layout is unchanged.
+// "measured with the deterministic ADC33131D start". Older firmware left 0
+// there and ignores the byte when it reads a page, so no layout changes.
+// Nothing is moved because of it: which slot an older image read each input
+// from depended on that image's init timing, so older data cannot be put
+// right blindly. The flag only lets the firmware say that a page predates
+// the fix (OC::input_map_check()).
 constexpr uint8_t kInputMapV1 = 1;
 
 inline uint8_t &IcaMapFlag(CvMeterMath::InputCalibration &c) { return c.reserved0[0]; }
@@ -59,55 +51,12 @@ inline uint8_t IcaMapFlag(const CvMeterMath::InputCalibration &c) { return c.res
 inline uint8_t &CurveMapFlag(InputCurveRecord &r) { return r.reserved2[0]; }
 inline uint8_t CurveMapFlag(const InputCurveRecord &r) { return r.reserved2[0]; }
 
-// EEPROM [4144,4148) once the migration has run ("input map v1").
-constexpr uint8_t kInputMapMarker[4] = {'A', 'M', 1, 0};
-bool InputMapMarkerPresent(const uint8_t m[4]);
-// What a calibration-region restore writes first (see apps/Backup.h).
-void InputMapMarkerClear(uint8_t m[4]);
-
-// chan[n] is the value of ADC_CHANNEL_(n+1) in force (flip mode and some
-// hardware IDs permute it at boot); nullptr means the unflipped 0..7. The
-// stored data is indexed by those values, so new[chan[m]] = old[chan[m+1]].
-// Arrays and mask bits move; source_output values are output labels and are
-// moved with their input but never changed.
-void RotateLegacyOffsets(uint16_t offset[8], const int *chan);
-void RotateLegacyIca(CvMeterMath::InputCalibration &ica, const int *chan);
-void RotateLegacyCurves(InputCurveRecord &rec, const int *chan);
-void RotateLegacyInputData(uint16_t offset[8], CvMeterMath::InputCalibration &ica,
-                           InputCurveRecord *curves /*nullable*/, const int *chan = nullptr);
-
-// A valid curve record without the flag is rotated, stamped and re-encoded
-// (CRC); one with it is left alone. True when it was rotated.
-bool InputCurveNormalize(InputCurveRecord &rec, const int *chan);
-
-// ---- the boot migration --------------------------------------------------
-
-struct InputMapPages {
-  const uint8_t *marker;    // the 4 EEPROM bytes [4144,4148)
-  bool cal_loaded;          // a CAL1 page was loaded (else defaults in RAM)
-  uint16_t *cal_offset;     // calibration_data.adc.offset
-  uint8_t *cal_flag;        // calibration_data.reserved0[0]
-  bool ica_loaded;          // an ICA1 page was loaded
-  CvMeterMath::InputCalibration *ica;
-  bool curves_loaded;       // a valid curve record was read (raw, not normalized)
-  InputCurveRecord *curves;
-};
-
-struct InputMapPlan {
-  bool run;          // the marker was absent: write it once the saves succeed
-  bool save_cal;     // in this order: CAL1, ICA1, the curves, then the marker
-  bool save_ica;
-  bool save_curves;
-};
-
-// Every boot. CAL1 and ICA1 (both already in RAM) are checked on their own
-// flags whatever the marker says: a loaded page without the flag is rotated
-// and stamped in RAM and marked for saving. The curve record is handled only
-// while the marker is absent (the caller skips the file read otherwise; the
-// load-time InputCurveNormalize covers it at run time). Pages already
-// stamped (a rerun after power loss) are left alone, so a rerun is harmless.
-// RAM that came from defaults is stamped without a save: the defaults are
-// the same on every input.
-InputMapPlan InputMapPrepare(InputMapPages &p, const int *chan);
+// A stored page with per-input data in it that predates the fix.
+inline bool IcaPredatesFix(const CvMeterMath::InputCalibration &c) {
+  return c.valid_mask && IcaMapFlag(c) != kInputMapV1;
+}
+inline bool CurvesPredateFix(const InputCurveRecord &r) {
+  return r.valid_mask && CurveMapFlag(r) != kInputMapV1;
+}
 
 #endif

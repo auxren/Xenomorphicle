@@ -209,11 +209,9 @@ extern bool input_calibration_loaded;
 // Writes the page (EEPROM, only the bytes that changed). No screen, unlike
 // calibration_save(). Loop context.
 void input_calibration_save();
-// At boot (and after a calibration restore): moves stored per-input data to
-// the fixed input map (AdcSlotMap.h). CAL1 and ICA1 are checked on their own
-// map flags every time; the marker at EEPROM_INPUTMAP_MARKER_START only says
-// the curve file is done. Loop context, LittleFS up, after ADC::Init.
-void input_map_migrate();
+// At boot: prints which stored per-input calibration predates the
+// deterministic ADC33131D start (AdcSlotMap.h). Moves nothing.
+void input_map_check();
 #endif
 
 }; // namespace OC

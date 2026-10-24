@@ -74,8 +74,8 @@ const CalibrationData kCalibrationDefaults = {
   SH1106_128x64_Driver::kDefaultOffset,
   OC_CALIBRATION_DEFAULT_FLAGS,
   SCREENSAVER_TIMEOUT_S,
-  // reserved0[0]: the stored offsets follow the fixed input map (AdcSlotMap.h).
-  // Defaults are the same on every input, so they are mapped by definition.
+  // reserved0[0]: measured with the deterministic ADC33131D start
+  // (AdcSlotMap.h); defaults are the same on every input.
   { kInputMapV1, 0, 0 }, // reserved0
   0 // reserved1
 };
@@ -117,8 +117,8 @@ const CalibrationData kNLMCalibrationDefaults = {
   SH1106_128x64_Driver::kDefaultOffset,
   OC_CALIBRATION_DEFAULT_FLAGS,
   SCREENSAVER_TIMEOUT_S,
-  // reserved0[0]: the stored offsets follow the fixed input map (AdcSlotMap.h).
-  // Defaults are the same on every input, so they are mapped by definition.
+  // reserved0[0]: measured with the deterministic ADC33131D start
+  // (AdcSlotMap.h); defaults are the same on every input.
   { kInputMapV1, 0, 0 }, // reserved0
   0 // reserved1
 };
@@ -225,62 +225,33 @@ FLASHMEM void calibration_load() {
 #ifdef ARDUINO_TEENSY41
 FLASHMEM void input_calibration_save() {
   OC::input_calibration.version = CvMeterMath::InputCalibration::kVersion;
-  // Everything this firmware fits is indexed by the fixed input map.
+  // Every fit this firmware stores was measured with the deterministic start.
   IcaMapFlag(OC::input_calibration) = kInputMapV1;
   input_calibration_storage.Save(OC::input_calibration);
   input_calibration_loaded = true;
   InputCal::Reload();  // the apps follow the new page at once
 }
 
-// The one-time move of per-input data to the fixed ADC33131D slot map
-// (AdcSlotMap.h), checked on every boot (it costs nothing once done). Needs the final ADC_CHANNEL table (after ADC::Init's flip)
-// and LittleFS (the curve files), so setup() calls it after PhzConfig::Init;
-// a calibration-region restore (apps/Backup.h) calls it again.
-//
-// Order: CAL1, ICA1, the curves, then the marker -- and the marker only when
-// every save succeeded. Each page carries its own map flag, written in the
-// same save as its rotated data, so power lost anywhere leaves every page
-// either untouched (flag absent: rotated on the rerun) or done (flag set:
-// left alone on the rerun). A rerun can never rotate a page twice.
-FLASHMEM void input_map_migrate() {
-  uint8_t marker[4];
-  EEPROMStorage::read(EEPROM_INPUTMAP_MARKER_START, marker, sizeof marker);
-  const bool marker_present = InputMapMarkerPresent(marker);
-
-  int chan[8];
-  OC::ADC::ChannelTable(chan);
+// Says, once at boot, which stored per-input calibration predates the
+// deterministic ADC33131D start (AdcSlotMap.h). It moves nothing: an older
+// image read each input from a slot that depended on its own init timing,
+// so its data may be right or one input over, and only a new calibration
+// settles it. Loop context, LittleFS up.
+FLASHMEM void input_map_check() {
   DMAMEM static InputCurveRecord rec;  // 300 bytes, off the loop stack and out of DTCM
-  InputMapPages pages;
-  pages.marker = marker;
-  pages.cal_loaded = calibration_data_loaded;
-  pages.cal_offset = OC::calibration_data.adc.offset;
-  pages.cal_flag = &OC::calibration_data.reserved0[0];
-  pages.ica_loaded = input_calibration_loaded;
-  pages.ica = &OC::input_calibration;
-  // The marker only spares this flash read on every later boot; CAL1 and
-  // ICA1 are checked on their own flags each time (InputMapPrepare).
-  pages.curves_loaded = !marker_present && InputCurveLoadFromFlashRaw(&rec, nullptr);
-  pages.curves = &rec;
-  const InputMapPlan plan = InputMapPrepare(pages, chan);
-  if (!plan.run && !plan.save_cal && !plan.save_ica) return;  // the usual boot
-
-  // Only the curve save's result gates the marker: the two EEPROM page saves
-  // report nothing back, and a page that did not land keeps flag 0 and is
-  // simply moved again on the next boot.
-  bool ok = true;
-  if (plan.save_cal) OC::calibration_storage.Save(OC::calibration_data);
-  if (plan.save_ica) input_calibration_save();
-  if (plan.save_curves) ok = InputCurveSaveToFlash(rec);
-  if (plan.run && ok)
-    EEPROMStorage::update(EEPROM_INPUTMAP_MARKER_START, kInputMapMarker, sizeof kInputMapMarker);
-  Serial.printf("Input map v1: cal=%d ica=%d curves=%d ok=%d\r\n", plan.save_cal,
-                plan.save_ica, plan.save_curves, ok);
-  InputCal::Reload();
+  const bool cal = calibration_data_loaded && OC::calibration_data.reserved0[0] != kInputMapV1;
+  const bool ica = input_calibration_loaded && IcaPredatesFix(OC::input_calibration);
+  const bool curves = InputCurveLoadFromFlash(&rec, nullptr) && CurvesPredateFix(rec);
+  if (cal || ica || curves)
+    Serial.printf("Input map: stored before the input fix:%s%s%s -- re-run that calibration\r\n",
+                  cal ? " Setup-ADC" : "", ica ? " Q" : "", curves ? " curves" : "");
 }
 #endif
 
 FLASHMEM void calibration_save() {
   SERIAL_PRINTLN("Saving calibration data");
+  // Setup's save: its 0 V offset step ran with the deterministic ADC start.
+  OC::calibration_data.reserved0[0] = kInputMapV1;
   OC::calibration_storage.Save(OC::calibration_data);
 
   uint32_t start = millis();
