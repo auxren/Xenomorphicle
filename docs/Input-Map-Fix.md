@@ -35,10 +35,16 @@ has no way to tell which.
 
 - If the module was calibrated on older firmware (Setup's ADC steps, the
   console's `Q`, or the Cal Routine), **run that calibration again** after
-  updating. At boot the console prints a line naming any calibration stored
-  before the fix.
-- Calibration made after the update is recorded as such, and the line goes
-  away once each kind has been re-run.
+  updating. This includes the test builds of 2026-10-24 that moved stored
+  calibration by one input.
+- At boot the console prints a line naming what was measured before the fix:
+  Setup's 0 V offsets, and which inputs' `Q` fits and curves. The firmware
+  records it per measurement, not per save: an input leaves the line only
+  when that input is measured again (`Q`, or the Cal Routine's curves), and
+  the offsets only when Setup's 0 V offset step is run. Changing unrelated
+  settings never clears it.
+- Setup's octave (scale) steps are not tracked by the line. If you ran them
+  on older firmware, run them again too.
 - If you go back to older firmware, recalibrate there, and then update again,
   re-run that calibration after the update too. The fixed firmware cannot
   tell that it was recorded the old way.

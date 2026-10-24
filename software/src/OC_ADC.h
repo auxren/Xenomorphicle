@@ -78,6 +78,9 @@ public:
   // ADC33131D path: times the FlexIO/DMA capture was restarted after a data
   // overrun (Scan_DMA). Normally 0; each one is logged nowhere else.
   static uint32_t realign_count();
+  // ADC33131D path: restart the capture now, as an overrun does (counted).
+  // Loop context; ~10 us with interrupts off. The bench console's 'X'.
+  static void Realign();
   static void DMA_ISR();
   static void Read(IOFrame *ioframe);
   static void Scan_DMA();

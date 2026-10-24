@@ -2,7 +2,6 @@
 #include <Arduino.h>
 
 #include "InputCurveFiles.h"
-#include "AdcSlotMap.h"
 #include "PhzConfig.h"
 #include "RtStats.h"
 
@@ -37,10 +36,5 @@ bool InputCurveLoadFromFlash(InputCurveRecord *out, int *slot) {
 
 bool InputCurveSaveToFlash(const InputCurveRecord &rec) {
   PhzCurveStorage st;
-  // Every record this firmware writes was measured through the fixed input
-  // map (AdcSlotMap.h); the store re-encodes (seq, CRC).
-  DMAMEM static InputCurveRecord stamped;  // 300 bytes, off the loop stack
-  stamped = rec;
-  CurveMapFlag(stamped) = kInputMapV1;
-  return InputCurveSave(st, stamped);
+  return InputCurveSave(st, rec);
 }

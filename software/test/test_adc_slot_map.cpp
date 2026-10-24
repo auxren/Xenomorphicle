@@ -112,18 +112,32 @@ static void map_is_a_permutation_top_row_on_4_to_7() {
 static void flags_mark_pages_from_before_the_fix() {
   CvMeterMath::InputCalibration c;
   CvMeterMath::InputCalReset(c);
-  CHECK(!IcaPredatesFix(c));            // nothing fitted: nothing to re-run
-  c.valid_mask = 0x02;
-  CHECK(IcaPredatesFix(c));             // older firmware left the byte 0
-  IcaMapFlag(c) = kInputMapV1;
-  CHECK(!IcaPredatesFix(c) && c.reserved0[0] == kInputMapV1);
+  CHECK(IcaPredatesFix(c) == 0);              // nothing fitted: nothing to re-run
+  c.valid_mask = 0x06;
+  CHECK(IcaPredatesFix(c) == 0x06);           // older firmware left the bytes 0
+  c.reserved0[0] = 1;                         // interim images 22fb63a2 / 5ebcde9f
+  c.reserved0[1] = 0xFF;
+  CHECK(IcaPredatesFix(c) == 0x06);           // ...count as before the fix
+  c.reserved0[0] = 0;
+  c.reserved0[1] = 0;
+  MarkMeasuredWithFix(c, 0x02);               // one Q fit marks one input only
+  CHECK(c.reserved0[0] == kInputMapV2 && IcaPredatesFix(c) == 0x04);
+  MarkMeasuredWithFix(c, 0x04);
+  CHECK(IcaPredatesFix(c) == 0);
+  CvMeterMath::InputCalReset(c);              // Qc: everything cleared
+  CHECK(IcaFixedMask(c) == 0 && IcaPredatesFix(c) == 0);
 
   InputCurveRecord r;
   memset(&r, 0, sizeof r);
-  r.valid_mask = 0x01;
-  CHECK(CurvesPredateFix(r));
-  CurveMapFlag(r) = kInputMapV1;
-  CHECK(!CurvesPredateFix(r) && r.reserved2[0] == kInputMapV1);
+  r.valid_mask = 0x81;
+  CHECK(CurvesPredateFix(r) == 0x81);
+  r.reserved2[0] = 1;
+  r.reserved2[1] = 0xFF;
+  CHECK(CurvesPredateFix(r) == 0x81);         // interim flag 1: before the fix
+  MarkMeasuredWithFix(r, 0x80);
+  CHECK(r.reserved2[0] == kInputMapV2 && CurvesPredateFix(r) == 0x01);
+
+  CHECK(CalOffsetsPredateFix(0) && CalOffsetsPredateFix(1) && !CalOffsetsPredateFix(kInputMapV2));
 }
 
 int main() {

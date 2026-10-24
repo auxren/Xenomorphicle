@@ -25,6 +25,7 @@
 #endif
 #include "../PresetBus.h"
 #include "../PhzConfig.h"
+#include "../AdcSlotMap.h"
 
 extern "C" void _reboot_Teensyduino_();
 using namespace OC;
@@ -234,6 +235,7 @@ public:
             for (int i = 0; i < ADC_CHANNEL_COUNT; ++i) {
               OC::calibration_data.adc.offset[i] = OC::ADC::smoothed_raw_value(static_cast<ADC_CHANNEL>(i));
             }
+            OC::calibration_data.reserved0[0] = kInputMapV2;  // AdcSlotMap.h
           }
 
           break;
@@ -635,6 +637,7 @@ public:
                 for (int i = 0; i < ADC_CHANNEL_COUNT; ++i) {
                   OC::calibration_data.adc.offset[i] = OC::ADC::smoothed_raw_value(static_cast<ADC_CHANNEL>(i));
                 }
+                OC::calibration_data.reserved0[0] = kInputMapV2;  // AdcSlotMap.h
               }
 
               // long-press DOWN to auto-scale DAC values on current channel

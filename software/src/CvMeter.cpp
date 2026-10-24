@@ -12,6 +12,7 @@
 #include <Arduino.h>
 #include <math.h>
 #include "CvMeter.h"
+#include "AdcSlotMap.h"
 
 #ifdef CVMETER_ENABLED
 
@@ -459,6 +460,7 @@ FLASHMEM static void FlowCommit() {
   cal.verify_mv10[phys] = int16_t(r);
   cal.source_output[phys] = uint8_t(flow.out + 1);
   cal.valid_mask |= uint8_t(1u << phys);
+  MarkMeasuredWithFix(cal, uint8_t(1u << phys));  // AdcSlotMap.h
   input_calibration_save();
   // A curve takes precedence over the line, so an input with a curve would
   // ignore this Q: drop its curve, so the new line is what the apps use.

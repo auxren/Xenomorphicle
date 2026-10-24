@@ -74,9 +74,9 @@ const CalibrationData kCalibrationDefaults = {
   SH1106_128x64_Driver::kDefaultOffset,
   OC_CALIBRATION_DEFAULT_FLAGS,
   SCREENSAVER_TIMEOUT_S,
-  // reserved0[0]: measured with the deterministic ADC33131D start
-  // (AdcSlotMap.h); defaults are the same on every input.
-  { kInputMapV1, 0, 0 }, // reserved0
+  // reserved0[0]: input-map flag (AdcSlotMap.h), set by Setup's 0 V offset
+  // step. Defaults are the same on every input, so they need no re-run.
+  { kInputMapV2, 0, 0 }, // reserved0
   0 // reserved1
 };
 
@@ -117,9 +117,9 @@ const CalibrationData kNLMCalibrationDefaults = {
   SH1106_128x64_Driver::kDefaultOffset,
   OC_CALIBRATION_DEFAULT_FLAGS,
   SCREENSAVER_TIMEOUT_S,
-  // reserved0[0]: measured with the deterministic ADC33131D start
-  // (AdcSlotMap.h); defaults are the same on every input.
-  { kInputMapV1, 0, 0 }, // reserved0
+  // reserved0[0]: input-map flag (AdcSlotMap.h), set by Setup's 0 V offset
+  // step. Defaults are the same on every input, so they need no re-run.
+  { kInputMapV2, 0, 0 }, // reserved0
   0 // reserved1
 };
 
@@ -225,8 +225,6 @@ FLASHMEM void calibration_load() {
 #ifdef ARDUINO_TEENSY41
 FLASHMEM void input_calibration_save() {
   OC::input_calibration.version = CvMeterMath::InputCalibration::kVersion;
-  // Every fit this firmware stores was measured with the deterministic start.
-  IcaMapFlag(OC::input_calibration) = kInputMapV1;
   input_calibration_storage.Save(OC::input_calibration);
   input_calibration_loaded = true;
   InputCal::Reload();  // the apps follow the new page at once
@@ -239,19 +237,19 @@ FLASHMEM void input_calibration_save() {
 // settles it. Loop context, LittleFS up.
 FLASHMEM void input_map_check() {
   DMAMEM static InputCurveRecord rec;  // 300 bytes, off the loop stack and out of DTCM
-  const bool cal = calibration_data_loaded && OC::calibration_data.reserved0[0] != kInputMapV1;
-  const bool ica = input_calibration_loaded && IcaPredatesFix(OC::input_calibration);
-  const bool curves = InputCurveLoadFromFlash(&rec, nullptr) && CurvesPredateFix(rec);
-  if (cal || ica || curves)
-    Serial.printf("Input map: stored before the input fix:%s%s%s -- re-run that calibration\r\n",
-                  cal ? " Setup-ADC" : "", ica ? " Q" : "", curves ? " curves" : "");
+  const bool offsets = calibration_data_loaded &&
+                       CalOffsetsPredateFix(OC::calibration_data.reserved0[0]);
+  const uint8_t q = input_calibration_loaded ? IcaPredatesFix(OC::input_calibration) : 0;
+  const uint8_t curves = InputCurveLoadFromFlash(&rec, nullptr) ? CurvesPredateFix(rec) : 0;
+  // Masks by physical input (bit n = ADC_CHANNEL value n).
+  if (offsets || q || curves)
+    Serial.printf("Input map: measured before the input fix, re-run: offsets=%d q=%02X curves=%02X\r\n",
+                  offsets, q, curves);
 }
 #endif
 
 FLASHMEM void calibration_save() {
   SERIAL_PRINTLN("Saving calibration data");
-  // Setup's save: its 0 V offset step ran with the deterministic ADC start.
-  OC::calibration_data.reserved0[0] = kInputMapV1;
   OC::calibration_storage.Save(OC::calibration_data);
 
   uint32_t start = millis();

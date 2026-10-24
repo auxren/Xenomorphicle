@@ -1011,6 +1011,10 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
 #if defined(ARDUINO_TEENSY41)
   CaptainMidiHealth();
 #endif
+#if defined(ARDUINO_TEENSY41)
+  Serial.printf("adc capture: realigns=%lu (restarts after a data overrun, or 'X'; 0 is normal)\n",
+                (unsigned long)OC::ADC::realign_count());
+#endif
   OC::RT::Summary();
   Serial.println("=== selftest done ===");
 }
@@ -1714,6 +1718,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.println("-- system --");
 #if defined(__IMXRT1062__)
             Serial.println("t selftest   a activate Captain MIDI   A switch app by index (lists them)");
+            Serial.println("X force 16 ADC capture re-aligns at varied trigger phases (ADC,REALIGN,count=n)");
             Serial.println("j<key> press the panel: l r a b z x y tap, capitals hold, [ ] encL, - + encR");
 #endif
             Serial.printf("I app ISR [%s]   D display [%s]   L app loop [%s]\n",
@@ -2044,10 +2049,30 @@ FLASHMEM __attribute__((noinline)) void loop() {
             break;
 #endif
           case 't': SelfTest(); break;  // one-shot system health report
+#if defined(ARDUINO_TEENSY41)
+          case 'X': {
+            // Force 16 ADC33131D capture restarts, each at a different point
+            // in the 3.33 us trigger cycle (a growing step plus up to ~1 us of
+            // pseudo-random jitter), so the trigger output is high at some of
+            // them. Panel n must still read as firmware n afterwards.
+            uint32_t r = micros();
+            for (int i = 0; i < 16; ++i) {
+              r = r * 1664525u + 1013904223u;
+              delayNanoseconds(5000u + uint32_t(i) * 419u + (r >> 22));
+              OC::ADC::Realign();
+            }
+            Serial.printf("ADC,REALIGN,count=%lu\r\n", (unsigned long)OC::ADC::realign_count());
+            break;
+          }
+#endif
           case 'T': {  // real-time budget report; 'T' again within 3s resets
             static uint32_t last_T_ms = 0;
             const uint32_t now = millis();
             const bool reset = last_T_ms && now - last_T_ms < 3000;
+#if defined(ARDUINO_TEENSY41)
+            Serial.printf("adc capture: realigns=%lu (restarts after a data overrun, or 'X'; 0 is normal)\n",
+                          (unsigned long)OC::ADC::realign_count());
+#endif
             OC::RT::Report(reset);
             last_T_ms = reset ? 0 : now;
             break;

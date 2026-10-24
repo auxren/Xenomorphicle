@@ -22,7 +22,8 @@ stray typing is harmless but will spew capture bytes.
 |---|---|
 | `z` | print this key map with live toggle states |
 | `t` | selftest — one-shot health report (see below) |
-| `T` | real-time budget report: every counter with PASS/FAIL per ceiling (docs/Timing-Budget.md); `T` again within 3 s resets the counters |
+| `T` | real-time budget report: every counter with PASS/FAIL per ceiling (docs/Timing-Budget.md); `T` again within 3 s resets the counters. Both `t` and `T` also print `adc capture: realigns=<n>`: how many times the 8-input ADC capture was restarted after a lost reading (or by `X`); it should stay 0 |
+| `X` | force 16 restarts of the 8-input ADC capture, each at a different point in the trigger cycle, then print `ADC,REALIGN,count=<n>` (the running total). A bench check that the input order survives a restart: with outputs patched to inputs, panel input n must still read as `v` column n afterwards |
 | `a` | activate Captain MIDI (suspend/switch/resume, same path as the app menu; for headless benches where boot recall restored a different app) |
 | `A` | list the app table (index, id, name), then type 2 decimal digits to switch to one by index — same path as `a`, any app. This is how a cross-app preset slot gets made from a headless bench |
 | `I` | toggle app ISR |

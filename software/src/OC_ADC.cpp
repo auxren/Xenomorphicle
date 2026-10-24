@@ -285,22 +285,10 @@ static void Init_Teensy4_builtin_ADC() {
 
 #if defined(ARDUINO_TEENSY41)
 FLASHMEM static void Init_Teensy41_ADC33131D_chip() {
-  // configure a timer to trigger FlexIO
-  const int comp1 = ((float)F_BUS_ACTUAL) / (ADC33131_SAMPLE_RATE) / 2.0f + 0.5f;
-  // Configured but NOT started: ADC33131D_Start() starts it, last, once
-  // FlexIO and the DMA are armed. The output is forced low while it is
-  // stopped (FORCE with VAL = 0; the counter must be disabled for that).
+  // The trigger timer (QTimer4.3) is configured and started by
+  // ADC33131D_Start(), last, once FlexIO and the DMA are armed. Stop it
+  // here so nothing reaches FlexIO while the clocks and pins are set up.
   TMR4_ENBL &= ~(1<<3);
-  TMR4_CTRL3 = 0;
-  TMR4_SCTRL3 = TMR_SCTRL_OEN | TMR_SCTRL_FORCE;
-  TMR4_CSCTRL3 = TMR_CSCTRL_CL1(1) | TMR_CSCTRL_TCF1EN;
-  TMR4_CNTR3 = 0;
-  TMR4_LOAD3 = 0;
-  TMR4_COMP13 = comp1;
-  TMR4_CMPLD13 = comp1;
-  TMR4_CTRL3 = TMR_CTRL_CM(1) | TMR_CTRL_PCS(8) | TMR_CTRL_LENGTH | TMR_CTRL_OUTMODE(3);
-  TMR4_DMA3 = TMR_DMA_CMPLD1DE;
-  TMR4_CNTR3 = 0;
 
   // connect the timer output the FlexIO2 EXT input 0
   CCM_CCGR2 |= CCM_CCGR2_XBAR1(CCM_CCGR_ON);
@@ -360,11 +348,16 @@ FLASHMEM static void Init_Teensy41_ADC33131D_chip() {
 FLASHMEM void ADC33131D_Start() {
   IMXRT_FLEXIO_t *flexio = (IMXRT_FLEXIO_t *)IMXRT_FLEXIO2_ADDRESS;
   // 1. Stop everything. FlexIO first, so that forcing the trigger low below
-  //    is not an edge it acts on.
+  //    is not an edge it acts on. Then the trigger timer, from whatever state
+  //    it is in (at boot it was never started; on a re-align its OFLAG can be
+  //    high mid-cycle): disable the channel AND clear CTRL (count mode 0),
+  //    because FORCE is only reliable with the counter disabled, then force
+  //    OFLAG to VAL = 0. Every timer register is rewritten below, so the
+  //    result does not depend on what was there before.
   flexio->CTRL &= ~FLEXIO_CTRL_FLEXEN;
   TMR4_ENBL &= ~(1<<3);
+  TMR4_CTRL3 = 0;
   TMR4_SCTRL3 = TMR_SCTRL_OEN | TMR_SCTRL_FORCE;   // OFLAG = VAL = 0: trigger low
-  TMR4_CNTR3 = 0;
   dma0.disable();
   flexio->CTRL |= FLEXIO_CTRL_SWRST;
   flexio->CTRL &= ~FLEXIO_CTRL_SWRST;
@@ -468,11 +461,30 @@ FLASHMEM void ADC33131D_Start() {
   (void)flexio->SHIFTBUFBIS[data_shifter];
   flexio->SHIFTERR = 0xFF;
 
-  // 6. Arm the DMA at the start of the buffer, then start the trigger. Its
-  //    first edge is rising (out of the forced low).
+  // 6. Arm the DMA at the start of the buffer, then configure the trigger in
+  //    full and start it. Its first edge is rising (out of the forced low):
+  //    the counter starts from 0 and toggles OFLAG at the first compare.
   adc33131_old_poffset = 0;
   dma0.enable();
+  const int comp1 = ((float)F_BUS_ACTUAL) / (ADC33131_SAMPLE_RATE) / 2.0f + 0.5f;
+  TMR4_CSCTRL3 = TMR_CSCTRL_CL1(1) | TMR_CSCTRL_TCF1EN;
+  TMR4_LOAD3 = 0;
+  TMR4_COMP13 = comp1;
+  TMR4_CMPLD13 = comp1;
+  TMR4_DMA3 = TMR_DMA_CMPLD1DE;
+  TMR4_CNTR3 = 0;
+  TMR4_CTRL3 = TMR_CTRL_CM(1) | TMR_CTRL_PCS(8) | TMR_CTRL_LENGTH | TMR_CTRL_OUTMODE(3);
   TMR4_ENBL |= (1<<3);
+}
+
+/*static*/ FLASHMEM void ADC::Realign() {
+  if (!ADC33131D_Uses_FlexIO) return;
+  // Not concurrently with Scan_DMA (core ISR), which reads the DMA cursor
+  // and may itself restart the capture.
+  __disable_irq();
+  ++adc33131_realigns;
+  ADC33131D_Start();
+  __enable_irq();
 }
 
 /*static*/ FLASHMEM uint32_t ADC::realign_count() { return adc33131_realigns; }
