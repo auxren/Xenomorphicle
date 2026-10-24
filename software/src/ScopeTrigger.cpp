@@ -143,6 +143,21 @@ SCOPE_CODE int LevelTrigger(const float *x, int n, int window, float level, floa
   return found;
 }
 
+SCOPE_CODE float EdgePeriod(const uint32_t *t, int n) {
+  if (!t || n < 2) return 0.f;
+  constexpr int kMax = 64;
+  uint32_t d[kMax];
+  int m = 0;
+  for (int i = 1; i < n && m < kMax; ++i) d[m++] = t[i] - t[i - 1];
+  for (int i = 1; i < m; ++i) {  // insertion sort: m <= 63
+    const uint32_t v = d[i];
+    int j = i - 1;
+    while (j >= 0 && d[j] > v) { d[j + 1] = d[j]; --j; }
+    d[j + 1] = v;
+  }
+  return (float)d[m / 2];
+}
+
 SCOPE_CODE void AutoTrigger::Reset() {
   prev_len_ = 0;
   period_ = 0.f;

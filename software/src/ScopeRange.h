@@ -30,7 +30,6 @@ extern const uint16_t kVoltDivMv[kVoltCount];
 
 constexpr int kDefaultTimeIdx = 3;  // 1 ms/div
 constexpr int kDefaultVoltIdx = 6;  // 1 V/div
-constexpr int kAutoSlowestNoPeriod = 10;  // 200 ms/div
 
 int ClampTime(int idx);
 int ClampVolt(int idx);
@@ -41,14 +40,31 @@ uint16_t DecimFor(int time_idx, float rate_hz);
 // and the trace is then stretched.
 float ColsPerBucket(int time_idx, float rate_hz);
 
+// A screen column in seconds at time_idx.
+float ColSeconds(int time_idx);
+// The bucket (from the first column's) that column x falls in, by time:
+// a bucket is decim / rate seconds, which DecimFor's rounding makes
+// different from a column.
+int BucketForColumn(int x, float col_s, float bucket_s);
+// Buckets the 128-column screen spans.
+int WindowBuckets(float col_s, float bucket_s);
+// Bucket number behind_s before a ring's newest committed bucket.
+int AlignBucket(uint32_t committed, float bucket_s, float behind_s);
+// Which way auto time should step with no period: from the bucket ranges
+// of the analysed span. 0 when the span is flatter than min_pp.
+int NoPeriodDir(const float *lo, const float *hi, int n, float min_pp);
+
 void FormatTime(int idx, char *buf, size_t n);  // "100us", "1ms", "2s"
 void FormatVolt(int idx, char *buf, size_t n);  // "10mV", "1V"
 
 class AutoTime {
 public:
   void Reset(int idx);
-  // period_s <= 0: no period found.
-  int Update(float period_s, uint32_t now_ms);
+  // period_s <= 0: no period found; then no_period_dir says which way to
+  // look: +1 slower (the signal changes slowly across the screen), -1 faster
+  // (every bucket spans the whole range: far faster than a column), 0 hold
+  // (flat). See NoPeriodDir().
+  int Update(float period_s, uint32_t now_ms, int no_period_dir = +1);
   int Idx() const { return idx_; }
 
 private:

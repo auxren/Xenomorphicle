@@ -23,6 +23,8 @@
 // Loop context only; no allocation.
 // ---------------------------------------------------------------------------
 
+#include <stdint.h>
+
 namespace ScopeTrigger {
 
 constexpr int kMaxWindow = 512;  // the app shows at most 128 buckets; tests use 384
@@ -35,6 +37,10 @@ float EstimatePeriod(const float *x, int n, int min_lag, int max_lag, float min_
 // of `level` that still leaves `window` samples after it, or -1. A crossing
 // needs the signal to have been beyond level -/+ hyst first.
 int LevelTrigger(const float *x, int n, int window, float level, float hyst, bool rising);
+
+// Median spacing of n edge timestamps (any unit, wrapping uint32), or 0
+// with fewer than two. The median rides over a missed or doubled edge.
+float EdgePeriod(const uint32_t *t, int n);
 
 class AutoTrigger {
 public:

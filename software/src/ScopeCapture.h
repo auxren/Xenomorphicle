@@ -8,7 +8,8 @@
 //     FlexIO frame, 37.5 kHz per channel), OnCvFrame(), storing raw12 codes
 //   - CV out 1-8 and TR lanes: OnCoreTick() from AppScope::Process()
 //   - TR rising edges, when a TR is the trigger: a pin interrupt timestamps
-//     each one into an edge ring
+//     each one, in micros(), into an edge ring (microseconds, not cycles:
+//     the cycle counter wraps every ~7 s, shorter than a 2 s/div screen)
 // Each source maps to a slot through a small table; -1 means "not shown",
 // and an unmapped source costs one load and a branch. Disarm() unmaps all,
 // so a suspended Scope costs nothing beyond that.
@@ -27,10 +28,10 @@ namespace ScopeCapture {
 // real arrival, in samples: one input DMA block. Measured on the bench in
 // plan Task 9.
 constexpr int kAudioInLatencySamples = 128;
-// Scan_DMA() reads each frame about 25 frames after FlexIO wrote it (it
-// walks the 32-frame DMA buffer from the DMA's current position), so a CV
-// ring's commit_cyc trails the frame's real time by ~0.67 ms.
-constexpr int kCvInLatencyFrames = 25;
+// The frame hook runs on the frames written since Scan_DMA()'s last pass,
+// oldest first, so a CV ring's newest frame is about one frame old when
+// commit_cyc is stamped.
+constexpr int kCvInLatencyFrames = 1;
 
 extern ScopeRing g_rings[ScopeSources::kMaxTraces];
 extern ScopeEdgeRing g_edges[4];

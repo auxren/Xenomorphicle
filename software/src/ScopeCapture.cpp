@@ -34,12 +34,13 @@ uint8_t TrPin(int tr) {
   }
 }
 
-// 100 us between stored edges bounds an audio-rate clock on a TR jack.
-inline uint32_t MinGapCyc() { return F_CPU_ACTUAL / 10000; }
-void EdgeIsr0() { g_edges[0].Note(ARM_DWT_CYCCNT, MinGapCyc()); }
-void EdgeIsr1() { g_edges[1].Note(ARM_DWT_CYCCNT, MinGapCyc()); }
-void EdgeIsr2() { g_edges[2].Note(ARM_DWT_CYCCNT, MinGapCyc()); }
-void EdgeIsr3() { g_edges[3].Note(ARM_DWT_CYCCNT, MinGapCyc()); }
+// Edge times in microseconds; 100 us between stored edges bounds an
+// audio-rate clock on a TR jack.
+constexpr uint32_t kMinGapUs = 100;
+void EdgeIsr0() { g_edges[0].Note(micros(), kMinGapUs); }
+void EdgeIsr1() { g_edges[1].Note(micros(), kMinGapUs); }
+void EdgeIsr2() { g_edges[2].Note(micros(), kMinGapUs); }
+void EdgeIsr3() { g_edges[3].Note(micros(), kMinGapUs); }
 void (*const kEdgeIsr[4])() = {EdgeIsr0, EdgeIsr1, EdgeIsr2, EdgeIsr3};
 
 void Unmap() {

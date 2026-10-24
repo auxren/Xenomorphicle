@@ -54,6 +54,37 @@ SCOPE_CODE float ColsPerBucket(int time_idx, float rate_hz) {
   return c > 1.f ? c : 1.f;
 }
 
+SCOPE_CODE float ColSeconds(int time_idx) {
+  return kTimeDivUs[ClampTime(time_idx)] * 1e-6f / kColsPerDiv;
+}
+
+SCOPE_CODE int BucketForColumn(int x, float col_s, float bucket_s) {
+  if (bucket_s <= 0) return x;
+  return (int)floorf(x * col_s / bucket_s + 1e-4f);
+}
+
+SCOPE_CODE int WindowBuckets(float col_s, float bucket_s) {
+  return BucketForColumn(kDivsX * kColsPerDiv - 1, col_s, bucket_s) + 1;
+}
+
+SCOPE_CODE int AlignBucket(uint32_t committed, float bucket_s, float behind_s) {
+  return (int)committed - 1 - (int)lroundf(behind_s / bucket_s);
+}
+
+SCOPE_CODE int NoPeriodDir(const float *lo, const float *hi, int n, float min_pp) {
+  if (!lo || !hi || n <= 0) return 0;
+  float mn = lo[0], mx = hi[0];
+  double spread = 0;
+  for (int i = 0; i < n; ++i) {
+    if (lo[i] < mn) mn = lo[i];
+    if (hi[i] > mx) mx = hi[i];
+    spread += hi[i] - lo[i];
+  }
+  const float range = mx - mn;
+  if (range < min_pp) return 0;
+  return (spread / n) > 0.5 * range ? -1 : +1;
+}
+
 SCOPE_CODE void FormatTime(int idx, char *buf, size_t n) {
   if (!buf || !n) return;
   const uint32_t us = kTimeDivUs[ClampTime(idx)];
@@ -74,10 +105,10 @@ SCOPE_CODE void AutoTime::Reset(int idx) {
   pending_ = false;
 }
 
-SCOPE_CODE int AutoTime::Update(float period_s, uint32_t now_ms) {
+SCOPE_CODE int AutoTime::Update(float period_s, uint32_t now_ms, int no_period_dir) {
   int target;
   if (period_s > 0) target = TimeTarget(period_s);
-  else target = idx_ < kAutoSlowestNoPeriod ? idx_ + 1 : idx_;
+  else target = ClampTime(idx_ + (no_period_dir > 0 ? 1 : no_period_dir < 0 ? -1 : 0));
   if (target == idx_) {
     pending_ = false;
     return idx_;

@@ -65,6 +65,7 @@ constexpr int kAnalyse = 4 * kMaxWindow; // buckets the trigger looks at
 constexpr float kAudioFsMv = 9300.f;
 constexpr float kCvInMvPerCount = 1200.f / 409.6f;
 constexpr float kCvFsMv = 12000.f;       // FFT normalisation for CV sources
+constexpr float kMinPpMv = 5.f;          // flatter than this is no signal
 
 inline int Wrap(int i, int n) {
   if (n <= 0) return 0;
@@ -125,6 +126,8 @@ inline uint32_t LatencyCyc(Source s) {
 
 // Working buffers: loop context only.
 static DMAMEM float g_mv[kAnalyse];
+static DMAMEM float g_lo[kAnalyse];
+static DMAMEM float g_hi[kAnalyse];
 static DMAMEM float g_fft_in[ScopeFft::kN];
 static DMAMEM float g_fft_db[ScopeFft::kN / 2 + 1];
 
@@ -171,17 +174,21 @@ private:
   int TrigSlot() const;
   int16_t LevelMv() const { return level_follow_ ? live_level_mv_ : set_.trig_level_mv; }
   bool TrigIsTr() const;
-  void Rearm();
+  void Rearm(bool keep_frozen = false);
   void WireAudio();
   void SetFrozen(bool f);
   void AllAuto();
   void TurnField(int v);
   void PushField();
+  struct Snap {
+    uint32_t c;           // committed buckets
+    uint32_t newest_cyc;  // when its newest sample really arrived
+    float bucket_s;
+  };
   void Render() const;
   void RenderPicker() const;
   void RenderSpectrum() const;
   void DrawHeader(const char *trig_text, const char *time_text, const char *volt_text) const;
-  int StartFor(int slot, uint32_t src_newest_cyc, float back_s) const;
 };
 
 // ---------------------------------------------------------------------------
@@ -219,8 +226,12 @@ FLASHMEM bool AppScope::TrigIsTr() const {
   return s >= 0 && ScopeSources::KindOf(list_[s]) == ScopeSources::KIND_TR;
 }
 
-FLASHMEM void AppScope::Rearm() {
+// A change to what is shown, made while frozen, unfreezes: the rings hold
+// the old source list and timebase, and drawing them under the new ones
+// would show one source's samples labelled as another.
+FLASHMEM void AppScope::Rearm(bool keep_frozen) {
   using namespace ScopeSources;
+  if (!keep_frozen) frozen_ = false;
   n_ = MaskToList(ViewMask(), list_);
   if (set_.trig_src >= n_) set_.trig_src = 0;
   const int ts = TrigSlot();
@@ -259,7 +270,7 @@ FLASHMEM void AppScope::WireAudio() {
 
 FLASHMEM void AppScope::SetFrozen(bool f) {
   frozen_ = f;
-  Rearm();  // frozen: capture disarmed, the rings keep their last frame
+  Rearm(true);  // frozen: capture disarmed, the rings keep their last frame
 }
 
 FLASHMEM void AppScope::AllAuto() {
@@ -476,24 +487,6 @@ FLASHMEM void AppScope::DrawHeader(const char *trig_text, const char *time_text,
   }
 }
 
-// Bucket number on `slot`'s ring that lines up with the first column, given
-// how far (back_s) that column sits behind the trigger source's newest
-// sample. Only the newest-sample timestamps of the two rings are compared,
-// and those are always moments apart, so the 7 s wrap of the cycle counter
-// never matters even at 2 s/div.
-FLASHMEM int AppScope::StartFor(int slot, uint32_t src_newest_cyc, float back_s) const {
-  using namespace ScopeAppNS;
-  const ScopeRing &r = ScopeCapture::g_rings[slot];
-  const uint32_t c = r.Committed();
-  if (!c) return -1;
-  const Source s = list_[slot];
-  const float bucket_s = r.Decim() / RateHz(s);
-  const uint32_t newest_cyc = r.commit_cyc - LatencyCyc(s);
-  const float ahead_s = (float)(int32_t)(src_newest_cyc - newest_cyc) / (float)F_CPU_ACTUAL;
-  const float behind_s = back_s - ahead_s;  // first column, behind this ring's newest
-  return (int)c - 1 - (int)lroundf(behind_s / bucket_s);
-}
-
 FLASHMEM void AppScope::RenderPicker() const {
   using namespace ScopeSources;
   Source tmp[kMaxTraces];
@@ -567,60 +560,86 @@ FLASHMEM void AppScope::Render() const {
 
   const int time_idx = armed_time_idx_ >= 0 ? armed_time_idx_ : TimeIdx();
   const uint32_t now_ms = millis();
+  const float col_s = ScopeRange::ColSeconds(time_idx);
+
+  // --- one snapshot of every ring, taken together ---------------------------
+  // Each ring's newest bucket count and timestamp are read as a pair, all
+  // before any analysis, so a block that lands mid-draw cannot shift one
+  // trace against another.
+  Snap snap[ScopeSources::kMaxTraces];
+  for (int t = 0; t < n_; ++t) {
+    const ScopeRing &r = ScopeCapture::g_rings[t];
+    uint32_t cyc, c;
+    do { cyc = r.commit_cyc; c = r.Committed(); } while (cyc != r.commit_cyc);
+    snap[t].c = c;
+    snap[t].newest_cyc = cyc - LatencyCyc(list_[t]);
+    snap[t].bucket_s = r.Decim() / RateHz(list_[t]);
+  }
+  const uint32_t now_cyc = ARM_DWT_CYCCNT, now_us = micros();
 
   // --- the trigger source's recent buckets, in mV ---------------------------
   const int ts = TrigSlot();
   const Source tsrc = list_[ts];
-  const float rate = RateHz(tsrc);
-  const float cpb = ScopeRange::ColsPerBucket(time_idx, rate);
-  const int window = (int)ceilf(kCols / cpb);
   const ScopeRing &tr = ScopeCapture::g_rings[ts];
-  const uint32_t committed = tr.Committed();
-  const int m = (int)(committed < (uint32_t)kAnalyse ? committed : (uint32_t)kAnalyse);
-  const float bucket_s = tr.Decim() / rate;
-  const uint32_t bucket_cyc = (uint32_t)(bucket_s * F_CPU_ACTUAL);
-  int start = -1;  // bucket number of the first column
+  const Snap &tsn = snap[ts];
+  const int window = ScopeRange::WindowBuckets(col_s, tsn.bucket_s);
+  const int m = (int)(tsn.c < (uint32_t)kAnalyse ? tsn.c : (uint32_t)kAnalyse);
+  const uint32_t base = tsn.c - (uint32_t)m;
   float lo = 0, hi = 0;
-  if (m >= window) {
-    const uint32_t base = committed - (uint32_t)m;
+  int idx = -1;
+  locked_ = false;
+  if (m > 0) {
     for (int i = 0; i < m; ++i) {
       const ScopeBucket b = tr.At(base + i);
-      g_mv[i] = 0.5f * (ToMv(tsrc, b.lo) + ToMv(tsrc, b.hi));
+      g_lo[i] = ToMv(tsrc, b.lo);
+      g_hi[i] = ToMv(tsrc, b.hi);
+      g_mv[i] = 0.5f * (g_lo[i] + g_hi[i]);
     }
-    lo = hi = g_mv[0];
-    for (int i = 0; i < m; ++i) { lo = fminf(lo, g_mv[i]); hi = fmaxf(hi, g_mv[i]); }
-    int idx = -1;
+    lo = g_lo[0];
+    hi = g_hi[0];
+    for (int i = 0; i < m; ++i) { lo = fminf(lo, g_lo[i]); hi = fmaxf(hi, g_hi[i]); }
+  }
+  float period_s = 0.f;
+  if (m >= window) {
     if (set_.trig_mode == TM_AUTO) {
-      idx = atrig_.Find(g_mv, m, window, 5.f);  // 5 mV p-p: below that is flat
+      idx = atrig_.Find(g_mv, m, window, kMinPpMv);
       locked_ = atrig_.Locked();
+      if (locked_) period_s = atrig_.Period() * tsn.bucket_s;
     } else if (set_.trig_mode == TM_LEVEL) {
       if (level_follow_) live_level_mv_ = (int16_t)(0.5f * (lo + hi));
       idx = ScopeTrigger::LevelTrigger(g_mv, m, window, LevelMv(), 0.02f * (hi - lo), true);
       locked_ = idx >= 0;
+      period_s = ScopeTrigger::EstimatePeriod(g_mv, m, 2, m / 2, kMinPpMv) * tsn.bucket_s;
     } else {  // external: the newest TR edge that leaves a full window
       const ScopeEdgeRing &e = ScopeCapture::g_edges[set_.trig_mode - TM_EXT];
-      const uint32_t newest_cyc = tr.commit_cyc - LatencyCyc(tsrc);
-      locked_ = false;
-      for (uint32_t k = e.Count(), seen = 0; k > 0 && seen < (uint32_t)ScopeEdgeRing::kLen; --k, ++seen) {
-        const uint32_t edge = e.At(k - 1);
-        const int32_t behind = (int32_t)(newest_cyc - edge);
-        if (behind < 0) continue;
-        const int32_t back = (int32_t)lroundf((float)behind / (float)bucket_cyc);
-        const int i = m - 1 - back;
+      const uint32_t ne = e.Count();
+      // the source's newest sample, and each edge, as ages back from now
+      const float src_age_s = (float)(int32_t)(now_cyc - tsn.newest_cyc) / (float)F_CPU_ACTUAL;
+      for (uint32_t k = ne, seen = 0; k > 0 && seen < (uint32_t)ScopeEdgeRing::kLen; --k, ++seen) {
+        const float edge_age_s = (now_us - e.At(k - 1)) * 1e-6f;
+        const float behind_s = edge_age_s - src_age_s;
+        if (behind_s < 0) continue;
+        const int i = m - 1 - (int)lroundf(behind_s / tsn.bucket_s);
         if (i < 0) break;
         if (i + window <= m) { idx = i; locked_ = true; break; }
       }
+      uint32_t times[16];
+      const uint32_t take = ne < 16 ? ne : 16;
+      for (uint32_t k = 0; k < take; ++k) times[k] = e.At(ne - take + k);
+      period_s = ScopeTrigger::EdgePeriod(times, (int)take) * 1e-6f;
     }
     if (idx < 0) idx = m - window;  // free-running
-    start = (int)(base + idx);
-    // auto timebase from the period, when there is one
-    if (set_.time_auto && !frozen_) {
-      const float per_s = (set_.trig_mode == TM_AUTO && locked_) ? atrig_.Period() * bucket_s : 0.f;
-      if (atime_.Update(per_s, now_ms) != time_idx) pending_time_idx_ = atime_.Idx();
-    }
   }
-  const uint32_t src_newest_cyc = tr.commit_cyc - LatencyCyc(tsrc);
-  const float back_s = start >= 0 ? (float)(committed - 1 - (uint32_t)start) * bucket_s : 0.f;
+  // Auto timebase, in every trigger mode: from the period when there is one,
+  // otherwise towards whichever way the buckets say the signal lies.
+  if (set_.time_auto && !frozen_ && m > 0) {
+    const int dir = period_s > 0 ? 0 : ScopeRange::NoPeriodDir(g_lo, g_hi, m, kMinPpMv);
+    if (atime_.Update(period_s, now_ms, dir) != time_idx) pending_time_idx_ = atime_.Idx();
+  }
+  // first column's bucket number on the source ring; before a full screen
+  // has arrived, the newest data simply sits at the right
+  const int start = idx >= 0 ? (int)(base + idx) : (int)tsn.c - window;
+  const float back_s = ((float)tsn.c - 1.f - (float)start) * tsn.bucket_s;
 
   // --- header -----------------------------------------------------------
   char ttext[8], vtext[8], gtext[8];
@@ -641,42 +660,59 @@ FLASHMEM void AppScope::Render() const {
     snprintf(gtext, sizeof(gtext), "TR%d", set_.trig_mode - TM_EXT + 1);
   }
   DrawHeader(gtext, ttext, vtext);
-  if (start < 0) {
+  if (tsn.c == 0) {
     graphics.setPrintPos(1, 30);
-    graphics.print("waiting for signal");
+    graphics.print(frozen_ ? "frozen, no data" : "starting...");
     return;
   }
 
   // --- traces -----------------------------------------------------------
-  // Overlaid traces share trace 0's AutoVolt, fed with the union of their
-  // ranges; a stacked lane uses its own.
+  // Every trace is drawn by time: column x is col_s * x after the first
+  // column, and each trace finds that moment in its own ring. Overlaid
+  // traces share trace 0's AutoVolt, fed with the union of their ranges; a
+  // stacked lane uses its own.
   const int lanes = stacked ? n_ : 1;
   const int lane_h = kPlotH / lanes;
   const bool chips = stacked && lane_h >= 9;
   const int x0 = chips ? 8 : 0, x1 = chips ? 100 : kCols;
+  int st[ScopeSources::kMaxTraces];
+  for (int t = 0; t < n_; ++t) {
+    if (t == ts) { st[t] = start; continue; }
+    const float ahead_s = (float)(int32_t)(tsn.newest_cyc - snap[t].newest_cyc) / (float)F_CPU_ACTUAL;
+    st[t] = ScopeRange::AlignBucket(snap[t].c, snap[t].bucket_s, back_s - ahead_s);
+  }
+  // A column's min and max over the buckets it covers on trace t.
+  auto column = [&](int t, int x, float *clo, float *chi) -> bool {
+    const ScopeRing &r = ScopeCapture::g_rings[t];
+    const Snap &sn = snap[t];
+    const int b0 = ScopeRange::BucketForColumn(x - x0, col_s, sn.bucket_s);
+    int b1 = ScopeRange::BucketForColumn(x - x0 + 1, col_s, sn.bucket_s);
+    if (b1 <= b0) b1 = b0 + 1;
+    bool any = false;
+    for (int b = b0; b < b1; ++b) {
+      const int64_t bn = (int64_t)st[t] + b;
+      if (bn < 0 || bn >= (int64_t)sn.c || bn < (int64_t)sn.c - (ScopeRing::kLen - 64)) continue;
+      const ScopeBucket k = r.At((uint32_t)bn);
+      const float l = ToMv(list_[t], k.lo), h = ToMv(list_[t], k.hi);
+      if (!any) { *clo = l; *chi = h; any = true; }
+      else { *clo = fminf(*clo, l); *chi = fmaxf(*chi, h); }
+    }
+    return any;
+  };
+
   float u_lo = 1e9f, u_hi = -1e9f;
   for (int t = 0; t < n_; ++t) {
-    const Source s = list_[t];
-    const bool is_tr = KindOf(s) == KIND_TR;
     const ScopeRing &r = ScopeCapture::g_rings[t];
-    const int st = (t == ts) ? start : StartFor(t, src_newest_cyc, back_s);
-    const float tcpb = ScopeRange::ColsPerBucket(time_idx, RateHz(s));
-    const int tw = (int)ceilf((x1 - x0) / tcpb);
-    const uint32_t c = r.Committed();
-    // range over this trace's window
+    if (snap[t].c) last_mv_[t] = ToMv(list_[t], r.At(snap[t].c - 1).hi);
+    if (KindOf(list_[t]) == KIND_TR) continue;
     float tlo = 1e9f, thi = -1e9f;
-    for (int i = 0; i < tw; ++i) {
-      const int64_t bn = (int64_t)st + i;
-      if (bn < 0 || bn >= (int64_t)c || bn < (int64_t)c - ScopeRing::kLen) continue;
-      const ScopeBucket b = r.At((uint32_t)bn);
-      tlo = fminf(tlo, ToMv(s, b.lo));
-      thi = fmaxf(thi, ToMv(s, b.hi));
+    for (int x = x0; x < x1; ++x) {
+      float l, h;
+      if (column(t, x, &l, &h)) { tlo = fminf(tlo, l); thi = fmaxf(thi, h); }
     }
-    if (c) last_mv_[t] = ToMv(s, r.At(c - 1).hi);
-    if (!is_tr && thi >= tlo) {
-      if (stacked) { if (!frozen_) avolt_[t].Update((int32_t)tlo, (int32_t)thi, now_ms); }
-      else { u_lo = fminf(u_lo, tlo); u_hi = fmaxf(u_hi, thi); }
-    }
+    if (thi < tlo) continue;
+    if (stacked) { if (!frozen_) avolt_[t].Update((int32_t)tlo, (int32_t)thi, now_ms); }
+    else { u_lo = fminf(u_lo, tlo); u_hi = fmaxf(u_hi, thi); }
   }
   if (!stacked && u_hi >= u_lo && !frozen_) avolt_[0].Update((int32_t)u_lo, (int32_t)u_hi, now_ms);
 
@@ -689,16 +725,10 @@ FLASHMEM void AppScope::Render() const {
 
   static const uint8_t kStyle[4] = {0xFF, 0x55, 0xCF, 0x11};  // solid, dotted, dashed, sparse
   for (int t = 0; t < n_; ++t) {
-    const Source s = list_[t];
-    const bool is_tr = KindOf(s) == KIND_TR;
-    const ScopeRing &r = ScopeCapture::g_rings[t];
-    const uint32_t c = r.Committed();
-    const int st = (t == ts) ? start : StartFor(t, src_newest_cyc, back_s);
-    const float tcpb = ScopeRange::ColsPerBucket(time_idx, RateHz(s));
+    const bool is_tr = KindOf(list_[t]) == KIND_TR;
     const int lane = stacked ? t : 0;
     const int ytop = kTop + lane * lane_h, yh = stacked ? lane_h - 1 : kPlotH;
-    const int vi = stacked ? VoltIdx(t) : VoltIdx(0);
-    const float vdiv = ScopeRange::kVoltDivMv[vi];
+    const float vdiv = ScopeRange::kVoltDivMv[stacked ? VoltIdx(t) : VoltIdx(0)];
     const float center = stacked ? avolt_[t].CenterMv() : avolt_[0].CenterMv();
     const float vscale = yh / (ScopeRange::kDivsY * vdiv);
     const uint8_t style = stacked ? 0xFF : kStyle[t & 3];
@@ -713,18 +743,16 @@ FLASHMEM void AppScope::Render() const {
       return y < ytop ? ytop : y > ytop + yh - 1 ? ytop + yh - 1 : y;
     };
     int prev_y = -1, prev_x = -1;
-    for (float fx = 0; x0 + fx < x1; fx += tcpb) {
-      const int64_t bn = (int64_t)st + (int64_t)(fx / tcpb);
-      if (bn < 0 || bn >= (int64_t)c || bn < (int64_t)c - ScopeRing::kLen) { prev_y = -1; continue; }
-      const int x = x0 + (int)fx;
-      const ScopeBucket b = r.At((uint32_t)bn);
-      const int ylo = row(ToMv(s, b.lo)), yhi = row(ToMv(s, b.hi));
+    for (int x = x0; x < x1; ++x) {
+      float l, h;
+      if (!column(t, x, &l, &h)) { prev_y = -1; continue; }
       if (!(style & (1u << (x & 7)))) { prev_y = -1; continue; }
+      const int ylo = row(l), yhi = row(h), ym = (ylo + yhi) / 2;
       if (ylo != yhi) graphics.drawVLine(x, yhi, ylo - yhi + 1);
-      if (prev_y >= 0) graphics.drawLine(prev_x, prev_y, x, (ylo + yhi) / 2);
-      else graphics.setPixel(x, (ylo + yhi) / 2);
+      if (prev_y >= 0) graphics.drawLine(prev_x, prev_y, x, ym);
+      else graphics.setPixel(x, ym);
       prev_x = x;
-      prev_y = (ylo + yhi) / 2;
+      prev_y = ym;
     }
     char lab[8];
     if (stacked) {

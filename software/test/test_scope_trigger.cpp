@@ -176,7 +176,25 @@ static void test_level_trigger() {
   CHECK(LevelTrigger(x.data(), 100, 384, 0.f, 0.05f, true) == -1);  // window longer than data
 }
 
+static void test_edge_period() {
+  printf("test_edge_period\n");
+  // a 258 sync at 110 Hz in microseconds, with jitter and one missed edge
+  uint32_t e[12];
+  uint32_t t = 4000000000u;  // wraps during the run
+  int n = 0;
+  for (int k = 0; k < 13; ++k) {
+    t += 9091 + (k % 3) - 1;
+    if (k == 6) continue;  // missed
+    e[n++] = t;
+  }
+  const float p = EdgePeriod(e, n);
+  CHECK(std::fabs(p - 9091.f) <= 2.f);
+  CHECK(EdgePeriod(e, 1) == 0.f);
+  CHECK(EdgePeriod(e, 0) == 0.f);
+}
+
 int main() {
+  test_edge_period();
   test_period_sine();
   test_period_ringmod_full_repeat();
   test_clipped_square_locks();

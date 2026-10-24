@@ -67,8 +67,8 @@ private:
   volatile uint32_t committed_ = 0;
 };
 
-// Rising-edge timestamps (ARM_DWT_CYCCNT) for one TR jack, written from its
-// pin interrupt. Edges closer than min_gap_cyc to the previous stored one are
+// Rising-edge timestamps for one TR jack (the Scope stores micros()),
+// written from its pin interrupt. Edges closer than min_gap to the previous stored one are
 // dropped, which bounds what an audio-rate clock patched into TR can cost.
 class ScopeEdgeRing {
 public:
@@ -79,7 +79,7 @@ public:
     last_ = 0;
   }
 
-  void Note(uint32_t cyc, uint32_t min_gap_cyc) {
+  void Note(uint32_t cyc, uint32_t min_gap_cyc) {  // any wrapping unit
     const uint32_t n = count_;
     if (n && (uint32_t)(cyc - last_) < min_gap_cyc) return;
     buf_[n & (kLen - 1)] = cyc;

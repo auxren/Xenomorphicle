@@ -85,12 +85,58 @@ static void test_autotime_no_flap() {
   CHECK(a.Idx() == 5);
 }
 
-static void test_autotime_no_period_slows() {
-  printf("test_autotime_no_period_slows\n");
+static void test_autotime_no_period_dir() {
+  printf("test_autotime_no_period_dir\n");
   AutoTime a;
-  a.Reset(0);
-  for (uint32_t t = 0; t <= 20000; t += 50) a.Update(0.f, t);
-  CHECK(a.Idx() == 10);  // walks no further than 200 ms/div without a period
+  a.Reset(0);  // no period, signal slower than the screen: walk to the slowest
+  for (uint32_t t = 0; t <= 20000; t += 50) a.Update(0.f, t, +1);
+  CHECK(a.Idx() == kTimeCount - 1);
+  a.Reset(kTimeCount - 1);  // buckets dense: the signal is far faster, walk faster
+  for (uint32_t t = 0; t <= 20000; t += 50) a.Update(0.f, t, -1);
+  CHECK(a.Idx() == 0);
+  a.Reset(7);  // flat: nothing changes
+  for (uint32_t t = 0; t <= 20000; t += 50) a.Update(0.f, t, 0);
+  CHECK(a.Idx() == 7);
+}
+
+static void test_no_period_dir() {
+  printf("test_no_period_dir\n");
+  float lo[128], hi[128];
+  for (int i = 0; i < 128; ++i) { lo[i] = -1000; hi[i] = 1000; }  // a fast tone, every bucket full range
+  CHECK(NoPeriodDir(lo, hi, 128, 5.f) == -1);
+  for (int i = 0; i < 128; ++i) { lo[i] = hi[i] = 10.f * i; }      // a slow ramp
+  CHECK(NoPeriodDir(lo, hi, 128, 5.f) == +1);
+  for (int i = 0; i < 128; ++i) { lo[i] = 2500.f; hi[i] = 2501.f; } // flat
+  CHECK(NoPeriodDir(lo, hi, 128, 5.f) == 0);
+  CHECK(NoPeriodDir(lo, hi, 0, 5.f) == 0);
+}
+
+static void test_column_to_bucket_by_time() {
+  printf("test_column_to_bucket_by_time\n");
+  // 500 us/div at 48 kHz: a column is 31.25 us, but a bucket is 2 samples = 41.67 us
+  const float col = ColSeconds(2), bucket = DecimFor(2, 48000) / 48000.f;
+  CHECK(std::fabs(col - 31.25e-6f) < 1e-9f);
+  CHECK(DecimFor(2, 48000) == 2);
+  CHECK(BucketForColumn(0, col, bucket) == 0);
+  CHECK(BucketForColumn(127, col, bucket) == 95);
+  CHECK(WindowBuckets(col, bucket) == 96);  // the screen spans 96 buckets, not 128
+  // every column lands within one bucket of its true time
+  for (int x = 0; x < 128; ++x) {
+    const float t = x * col, tb = BucketForColumn(x, col, bucket) * bucket;
+    CHECK(t - tb >= -1e-9f && t - tb < bucket);
+  }
+  // 100 us/div audio: one sample spans 3.3 columns
+  CHECK(BucketForColumn(4, ColSeconds(0), 1 / 48000.f) == 1);
+  CHECK(WindowBuckets(ColSeconds(0), 1 / 48000.f) == 39);
+  // CV at 1 ms/div: decim 2 at 37.5 kHz is 53.3 us, columns 62.5 us
+  CHECK(WindowBuckets(ColSeconds(3), DecimFor(3, 37500) / 37500.f) == 149);
+}
+
+static void test_align_bucket() {
+  printf("test_align_bucket\n");
+  CHECK(AlignBucket(1000, 0.001f, 0.f) == 999);
+  CHECK(AlignBucket(1000, 0.001f, 0.0104f) == 989);
+  CHECK(AlignBucket(1000, 0.001f, -0.002f) == 1001);  // ahead of this ring's newest
 }
 
 static void test_autovolt_fast_attack_slow_release() {
@@ -181,7 +227,10 @@ int main() {
   test_tables_and_decim();
   test_autotime_walks_and_settles();
   test_autotime_no_flap();
-  test_autotime_no_period_slows();
+  test_autotime_no_period_dir();
+  test_no_period_dir();
+  test_column_to_bucket_by_time();
+  test_align_bucket();
   test_autovolt_fast_attack_slow_release();
   test_flat_input_holds();
   test_at_most_once_per_second();
