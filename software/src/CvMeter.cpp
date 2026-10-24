@@ -17,6 +17,7 @@
 #ifdef CVMETER_ENABLED
 
 #include "CalRoutineFlow.h"
+#include "apps/CalRoutinePorts.h"
 #include "CvMeterMath.h"
 #include "InputCal.h"
 #include "InputCurveFiles.h"
@@ -37,31 +38,9 @@ using namespace CvMeterMath;
 // physical index behind each label (flip mode and some hardware IDs remap
 // them at boot), and every calibration table is indexed physically.
 
-FLASHMEM static int InPhys(int label) {
-  switch (label) {
-    case 0: return ADC_CHANNEL_1;
-    case 1: return ADC_CHANNEL_2;
-    case 2: return ADC_CHANNEL_3;
-    case 3: return ADC_CHANNEL_4;
-    case 4: return ADC_CHANNEL_5;
-    case 5: return ADC_CHANNEL_6;
-    case 6: return ADC_CHANNEL_7;
-    default: return ADC_CHANNEL_8;
-  }
-}
-
-FLASHMEM static int OutPhys(int label) {
-  switch (label) {
-    case 0: return DAC_CHANNEL_A;
-    case 1: return DAC_CHANNEL_B;
-    case 2: return DAC_CHANNEL_C;
-    case 3: return DAC_CHANNEL_D;
-    case 4: return DAC_CHANNEL_E;
-    case 5: return DAC_CHANNEL_F;
-    case 6: return DAC_CHANNEL_G;
-    default: return DAC_CHANNEL_H;
-  }
-}
+// The same mapping the Cal Routine app uses (apps/CalRoutinePorts.h).
+FLASHMEM static int InPhys(int label) { return CalRoutinePorts::PanelInPhys(label); }
+FLASHMEM static int OutPhys(int label) { return CalRoutinePorts::PanelOutPhys(label); }
 
 // '1'..'8' or 'a'..'h' / 'A'..'H' -> 0..7, else -1
 FLASHMEM static int ParseOutput(int c) {

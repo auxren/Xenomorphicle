@@ -18,7 +18,9 @@
 #include <vector>
 
 #include "../src/CalRoutineFlow.h"
+#include "../src/CalRoutineMarker.h"
 #include "../src/InputCurveStore.h"
+#include "../src/UsbTmc.h"
 
 using namespace CalRoutine;
 namespace CM = CvMeterMath;
@@ -108,7 +110,10 @@ struct FakeMeter : MeterPort {
   FakeClock *clk;
   bool connected = true;
   bool never_answer = false;
-  uint32_t read_ms = 400;   // NPLC 10 + autozero at 50 Hz
+  // One READ? at NPLC 1, autozero off (kMeterSetup): 20 ms of integration at
+  // 50 Hz plus the meter's trigger and USB turnaround. NPLC 10 with autozero
+  // on was 400 ms here and ~20 min a run on the bench.
+  uint32_t read_ms = 60;
   uint32_t cmd_ms = 20;
   int fail_next = 0;        // next N completions report an error
   int refuse_begin = 0;     // next N Begin() calls are refused (driver recovering)
@@ -293,6 +298,16 @@ static void test_happy_path_all_pass() {
   // The meter setup, in order, before anything else.
   CHECK(r.meter.sent.size() > 5);
   for (int i = 0; i < 5 && r.meter.sent.size() > 5; ++i) CHECK(r.meter.sent[i] == kMeterSetup[i]);
+  // Then one fresh autozero per output, before its first reading.
+  CHECK(r.meter.sent.size() > 6 && r.meter.sent[5] == std::string(kOutputZero));
+  int zeros = 0;
+  for (const auto &l : r.meter.sent) zeros += l == kOutputZero;
+  CHECK(zeros == 1 + 8);  // kMeterSetup's own, then one per output
+  for (int i = 0; i < 8; ++i) {
+    CHECK(res.in_lo_mv[i] == kInStepMv);
+    CHECK(res.in_hi_mv[i] > res.in_lo_mv[i] + 9000);
+    CHECK(res.in_line_dev_mv[i] > 0.f);
+  }
   CHECK(!r.ins.short_window);
   CHECK(r.outs.held == -1);
   float worst = 0;
@@ -616,6 +631,69 @@ static void test_rebegin_releases() {
   CHECK(r.flow.stage() == Stage::ConfigMeter);
 }
 
+// Every line the flow sends passes the driver's allowlist, and the setup is
+// the fast one (NPLC 1, autozero once).
+static void test_meter_lines_allowed() {
+  for (const char *l : kMeterSetup) {
+    CHECK(UsbTmc::ScpiAllowed(l));
+    if (!UsbTmc::ScpiAllowed(l)) printf("  refused: %s\n", l);
+  }
+  CHECK(UsbTmc::ScpiAllowed(kOutputZero));
+  CHECK(UsbTmc::ScpiAllowed("READ?"));
+  CHECK(UsbTmc::ScpiAllowed("*IDN?"));  // the app's identity query
+  bool nplc1 = false, az_once = false, az_on = false;
+  for (const char *l : kMeterSetup) {
+    nplc1 |= std::string(l) == "VOLT:DC:NPLC 1";
+    az_once |= std::string(l) == "VOLT:DC:AZ ONCE";
+    az_on |= std::string(l) == "VOLT:DC:AZ ON";
+  }
+  CHECK(nplc1 && az_once && !az_on);
+  CHECK(std::string(kOutputZero) == "VOLT:DC:AZ ONCE");
+}
+
+// The modelled run time: what one Self run costs at a few READ? latencies.
+static void test_run_time_model() {
+  const uint32_t lat[] = {40, 60, 100};
+  for (uint32_t ms : lat) {
+    Rig r;
+    r.meter.read_ms = ms;
+    r.Begin();
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Results && r.flow.CanSave());
+    uint32_t t_in = 0;  // when the input part began
+    for (const auto &l : g_log) {
+      if (l.compare(0, 10, "CALR,STATE") != 0 || l.find(",PROMPT_IN,0,1") == std::string::npos) continue;
+      unsigned long t = 0;
+      sscanf(l.c_str(), "CALR,STATE,%lu,", &t);
+      t_in = uint32_t(t);
+      break;
+    }
+    const double outs_min = (t_in - r.t_begin) / 60000.0;
+    printf("  model, READ? %3u ms: %.1f min (outputs %.1f, inputs %.1f), %d READ?\n",
+           unsigned(ms), r.Minutes(), outs_min, r.Minutes() - outs_min, r.meter.reads);
+    if (ms == 60) CHECK(r.Minutes() < 8.0);
+  }
+}
+
+// The 4-byte Cal Routine marker (EEPROM [4140,4144)).
+static void test_marker() {
+  uint8_t b[4];
+  CalRoutineMarkerEncode(kCalRoutineMarkerStored, b);
+  CHECK(b[0] == 'C' && b[1] == 'R' && b[2] == kCalRoutineMarkerVersion && b[3] == 1);
+  CHECK(CalRoutineMarkerStored(b));
+  CalRoutineMarkerEncode(0, b);
+  CHECK(!CalRoutineMarkerStored(b));
+  const uint8_t erased[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+  const uint8_t zero[4] = {0, 0, 0, 0};
+  const uint8_t newer[4] = {'C', 'R', 2, 1};
+  const uint8_t other[4] = {'A', 'M', 1, 1};
+  CHECK(!CalRoutineMarkerStored(erased));
+  CHECK(!CalRoutineMarkerStored(zero));
+  CHECK(!CalRoutineMarkerStored(newer));
+  CHECK(!CalRoutineMarkerStored(other));
+  CHECK(CalRoutineMarkerStart == 4140 && CalRoutineMarkerSize == 4);
+}
+
 // ---- save ----------------------------------------------------------------------
 
 struct FakeSave : SavePort {
@@ -634,8 +712,10 @@ struct FakeSave : SavePort {
     memcpy(src, s, 8);
     return Step("curves");
   }
-  bool SaveLines(const CM::Fit[8], uint8_t m, const uint8_t[8]) override {
+  float verify[8] = {};
+  bool SaveLines(const CM::Fit[8], uint8_t m, const uint8_t[8], const float v[8]) override {
     line_mask = m;
+    memcpy(verify, v, sizeof(verify));
     return Step("lines");
   }
   void WriteMarker() override { Step("marker"); }
@@ -669,6 +749,7 @@ static void test_save_sequence_order() {
   CHECK(rig.flow.Save(fs));
   CHECK(fs.calls == want);
   CHECK(fs.curve_mask == 0xFF);
+  for (int i = 0; i < 8; ++i) CHECK(fs.verify[i] == rig.flow.results().in_line_dev_mv[i]);
   CHECK(rig.flow.stage() == Stage::Idle);
   CHECK(count_prefix("CALR,SAVE,OK") == 1);
 }
@@ -716,6 +797,87 @@ static void test_save_stops_on_failure() {
   CHECK(!rig.flow.Save(fs));
   CHECK(rig.flow.stage() == Stage::Results);  // still there, to try again or discard
   CHECK(count_prefix("CALR,SAVE,FAIL") == 1);
+}
+
+// Results: a failed output is measured again, alone, and the run comes back
+// to Results; output A again also redoes the inputs (their curves hang on it).
+static void test_retry_output() {
+  Rig r;
+  bool noisy = true;
+  r.meter.extra = [&](int n) { return noisy && r.outs.held == 2 ? ((n & 1) ? 1.0 : -1.0) : 0.0; };
+  r.Begin();
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Results);
+  CHECK(!r.flow.results().out_pass[2]);
+  CHECK(r.flow.results().out_reason[2] == CalRoutineFlow::OUT_NOISY);
+  CHECK(!r.flow.CanSave());
+  CalRoutineFlow::Results before = r.flow.results();
+  CHECK(!r.flow.RetryOutput(8) && !r.flow.RetryOutput(-1));
+  CHECK(r.flow.stage() == Stage::Results);
+
+  noisy = false;  // the lead was reseated
+  const size_t sent0 = r.meter.sent.size();
+  CHECK(r.flow.RetryOutput(2));
+  CHECK(r.flow.retry_output() == 2);
+  CHECK(r.flow.stage() == Stage::ConfigMeter);  // set up again first
+  CHECK(count_prefix("CALR,REDO,3") == 1);
+  CHECK(r.Run([&] { return r.flow.stage() == Stage::PromptOutput; }));
+  CHECK(r.flow.current_output() == 2);
+  for (int i = 0; i < 5 && r.meter.sent.size() > sent0 + 5; ++i)
+    CHECK(r.meter.sent[sent0 + i] == kMeterSetup[i]);
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Results);
+  CHECK(r.flow.retry_output() == -1);
+  CHECK(!r.hold_rule_broken && r.outs.held == -1);
+  const auto &res = r.flow.results();
+  CHECK(res.out_pass[2]);
+  CHECK(r.flow.CanSave());
+  CHECK(count_prefix("CALR,OUT,3") == 2);
+  CHECK(count_prefix("CALR,IN,") == 8);  // C is not the source: inputs kept
+  for (int o = 0; o < 8; ++o) {
+    if (o == 2) continue;
+    CHECK(res.out_pass[o] == before.out_pass[o]);
+    for (int k = 0; k < CR::kNodes; ++k) CHECK(res.table[o][k] == before.table[o][k]);
+  }
+  for (int i = 0; i < 8; ++i) CHECK(res.in_pass[i] == before.in_pass[i]);
+  CHECK(count_prefix("CALR,RESULT,1,FF,") == 1);
+
+  // Output A again: the inputs are measured again on its new table.
+  CHECK(r.flow.RetryOutput(0));
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Results);
+  CHECK(count_prefix("CALR,OUT,1") == 2);
+  CHECK(count_prefix("CALR,IN,") == 16);
+  CHECK(r.flow.CanSave());
+  FakeSave fs;
+  CHECK(r.flow.Save(fs));
+
+  // Refused outside Results; a cancel mid-retry releases everything.
+  Rig c;
+  c.Begin();
+  CHECK(!c.flow.RetryOutput(0));  // ConfigMeter
+  CHECK(c.Run([&] { return c.flow.stage() == Stage::PromptInput; }));
+  CHECK(!c.flow.RetryOutput(1));
+  CHECK(c.Run());
+  CHECK(c.flow.RetryOutput(5));
+  CHECK(c.Run([&] { return c.flow.stage() == Stage::SweepOutput && c.outs.held == 5; }));
+  c.flow.Cancel();
+  CHECK(c.flow.stage() == Stage::Idle && c.outs.held == -1 && !c.flow.CanSave());
+  CHECK(c.flow.retry_output() == -1);
+
+  // The meter gone when the retry is asked for: NoMeter, then on with it.
+  Rig g;
+  g.Begin();
+  CHECK(g.Run());
+  g.meter.connected = false;
+  CHECK(g.flow.RetryOutput(4));
+  CHECK(g.flow.stage() == Stage::NoMeter);
+  for (int i = 0; i < 100; ++i) g.Step();
+  CHECK(g.flow.stage() == Stage::NoMeter);
+  g.meter.connected = true;
+  CHECK(g.Run());
+  CHECK(g.flow.stage() == Stage::Results && g.flow.CanSave());
+  CHECK(count_prefix("CALR,OUT,5") == 2);
 }
 
 // ---- Q -------------------------------------------------------------------------
@@ -883,6 +1045,7 @@ static void test_calr_lines_golden() {
   Retry(b, sizeof(b), "READ?", 2); is("RETRY");
   Lost(b, sizeof(b), 3); is("LOST");
   Back(b, sizeof(b), 3); is("BACK");
+  Redo(b, sizeof(b), 2); is("REDO");
   Result(b, sizeof(b), true, 0xFF, 0xF7); is("RESULT");
   Save(b, sizeof(b), true); is("SAVE");
   Discard(b, sizeof(b)); is("DISCARD");
@@ -950,6 +1113,10 @@ int main() {
   test_reconnect_restarts_current_output();
   test_input_span_capped_below_source_rail();
   test_rebegin_releases();
+  test_meter_lines_allowed();
+  test_run_time_model();
+  test_retry_output();
+  test_marker();
   test_save_sequence_order();
   test_save_refused_unless_can_save();
   test_save_stops_on_failure();

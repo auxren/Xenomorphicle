@@ -78,8 +78,9 @@ struct SavePort {
   virtual bool SaveDacTable(const uint16_t table[8][CalRoutineMath::kNodes]) = 0;
   virtual bool SaveCurves(const int16_t curves[8][CalRoutineMath::kCurvePoints],
                           uint8_t valid_mask, const uint8_t source[8]) = 0;
+  // verify_mv[n]: input n's worst curve-vs-line deviation (ICA1's verify field).
   virtual bool SaveLines(const CvMeterMath::Fit lines[8], uint8_t valid_mask,
-                         const uint8_t source[8]) = 0;
+                         const uint8_t source[8], const float verify_mv[8]) = 0;
   virtual void WriteMarker() = 0;
   virtual void ResetAutotune() = 0;
   virtual void ReloadInputs() = 0;
@@ -91,7 +92,10 @@ typedef void (*LogFn)(const char *line);  // one line, no line ending
 
 constexpr uint32_t kOutSettleMs = 150;     // after every DAC code change
 constexpr int kReadings = 5;               // READ? per measurement -> Summarize
-constexpr uint32_t kReadTimeoutMs = 3000;  // one READ? (NPLC 10 + autozero: ~0.4 s)
+// One READ?: NPLC 1 with autozero off takes ~20 ms of integration plus the
+// meter's trigger and USB turnaround (modelled at 60 ms); 3 s is only the
+// give-up point.
+constexpr uint32_t kReadTimeoutMs = 3000;
 constexpr uint32_t kConfigTimeoutMs = 1000;
 constexpr uint32_t kWatchdogMs = 500;      // past the timeout a busy Poll counts as failed
 constexpr int kQueryRetries = 3;           // a failed query is retried this often
@@ -107,8 +111,19 @@ constexpr float kInTopGuardCounts = 32.f;  // a point this close to raw 0 ends t
 constexpr int kSourceOutput = 0;           // output A is every input's source
 constexpr int kSweepPoints = 40;
 
-// The meter setup, in order (all on UsbTmc::ScpiAllowed's list).
+// The meter setup, in order (all on UsbTmc::ScpiAllowed's list): DC volts on
+// the fixed 20 V range, NPLC 1, one autozero now and none between readings,
+// immediate trigger. Sent at Begin and again after every reconnect.
+//
+// Run time (Task 7): NPLC 10 with autozero ON measured ~20 min a run on the
+// bench; NPLC 1 with the autozero refreshed once per output (kOutputZero)
+// cuts the meter's share by about 7x. The 5 readings per point (median and
+// spread) and the 150 ms settle stay: the median absorbs the extra noise of
+// the shorter integration, and the spread check still catches a loose lead.
 extern const char *const kMeterSetup[5];
+// Sent at the start of every output, before its first reading: one fresh
+// autozero, so the zero the output's readings share is never minutes old.
+extern const char *const kOutputZero;
 
 // Settles one CV output at a code, then averages one input: the measuring
 // step of both the routine's input part and the console's Q.
@@ -167,6 +182,11 @@ class CalRoutineFlow {
     float in_holdout_mv[8];
     uint8_t out_reason[8];      // OutReason
     uint8_t in_points[8];       // sweep points the input's curve was built from
+    // The source voltages the input's curve was built from: CALR,IN's span,
+    // narrowed to the points actually used (0, 0 when none were).
+    int32_t in_lo_mv[8];
+    int32_t in_hi_mv[8];
+    float in_line_dev_mv[8];    // worst curve-vs-line deviation (ICA1's verify)
 
     bool CanSave() const;       // all 8 outputs passed
   };
@@ -182,6 +202,14 @@ class CalRoutineFlow {
   void Skip();
   // Any stage: releases every hold, forgets the run's results, goes to Idle.
   void Cancel();
+  // Results stage only: measure output o (panel label) again -- after a
+  // NOISY lead or a failed check. Sets the meter up again, prompts for the
+  // output (PromptOutput), runs it, and comes back to Results. Every other
+  // output keeps what it measured. When o is the inputs' source (output A)
+  // all 8 inputs are measured again afterwards, since their curves were
+  // built on its table. False (nothing changes) outside Results or for an
+  // o out of range.
+  bool RetryOutput(int o);
 
   // Results stage: CalRoutineSave(), logged. True on success (then Idle).
   bool Save(SavePort &port);
@@ -191,9 +219,26 @@ class CalRoutineFlow {
   Stage stage() const { return stage_; }
   int current_output() const { return cur_out_; }  // -1 when none
   int current_input() const { return cur_in_; }    // -1 when none
+  // Progress, for the screen. CalOutput: the table entry being set (0..10);
+  // SweepOutput: the verify point and how many there are; CalInput: the
+  // source voltage and the points taken so far.
+  int node_index() const { return node_k_; }
+  int sweep_index() const { return sweep_i_; }
+  int sweep_points() const { return n_sweep_; }
+  int32_t input_mv() const { return ip_mv_; }
+  int input_points() const { return n_ipts_; }
+  // NoMeter after the meter went away mid-run, and for how long (Failed
+  // after kReconnectMs).
+  bool meter_lost() const { return lost_; }
+  uint32_t lost_for_ms() const { return lost_ ? now_ - lost_ms_ : 0; }
+  // RetryOutput's output while it runs, else -1.
+  int retry_output() const { return retry_out_; }
+  // Failed stage: the reason logged with CALR,FAIL ("" otherwise).
+  const char *fail_reason() const { return fail_reason_; }
   const Results &results() const { return results_; }
-  // Results stage and every output passed.
-  bool CanSave() const { return stage_ == Stage::Results && results_.CanSave(); }
+  // Results stage and every output passed. Out of line: an inline copy the
+  // app does not inline would land in ITCM.
+  bool CanSave() const;
 
   static const char *StageName(Stage s);
   static const char *OutReasonName(uint8_t r);
@@ -269,8 +314,11 @@ class CalRoutineFlow {
   bool lost_ = false;
   uint32_t lost_ms_ = 0;
   int resume_out_ = -1;
+  int retry_out_ = -1;       // RetryOutput's output, -1 for a full run
+  const char *fail_reason_ = "";
 
   // output in progress
+  bool zeroing_ = false;     // kOutputZero is in flight, before node 0
   int node_k_ = 0;
   uint16_t code_ = 0;
   int iters_ = 0;
@@ -383,6 +431,7 @@ int InResult(char *buf, size_t n, int in, const char *outcome, CvMeterMath::Verd
 int Retry(char *buf, size_t n, const char *scpi, int attempt);
 int Lost(char *buf, size_t n, int out);
 int Back(char *buf, size_t n, int out);
+int Redo(char *buf, size_t n, int out);
 int Result(char *buf, size_t n, bool can_save, uint8_t out_pass_mask, uint8_t in_pass_mask);
 int Save(char *buf, size_t n, bool ok);
 int Discard(char *buf, size_t n);

@@ -4,7 +4,8 @@
 // T41 images are close to their next 32 KB ITCM step (each step is taken out
 // of DTCM). A bare section attribute rather than FLASHMEM, so this file keeps
 // no Arduino dependency and the host suite builds it unchanged.
-#if defined(__IMXRT1062__)
+// (The host simulator defines __IMXRT1062__ too, but links for the host.)
+#if defined(__IMXRT1062__) && !defined(XENO_SIM)
 #define USBTMC_CODE __attribute__((section(".flashmem")))
 #else
 #define USBTMC_CODE

@@ -108,6 +108,7 @@ static const DefaultEntry kDefaults[] = {
   { TWOCCS("MI"), FOLDER_SYSTEM },   // Captain MIDI
   { TWOCCS("2E"), FOLDER_SYSTEM },   // 200e Modules
   { TWOCCS("RF"), FOLDER_SYSTEM },   // References, voltages
+  { TWOCCS("CR"), FOLDER_SYSTEM },   // Cal Routine
 
   // Starts out of the way, one turn from being brought back.
 };

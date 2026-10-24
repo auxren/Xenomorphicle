@@ -82,7 +82,13 @@ FW_SRCS = \
   Bus200eMaster.cpp \
   CvMeterMath.cpp \
   CalRoutineMath.cpp \
+  CalRoutineFlow.cpp \
+  apps/CalRoutinePorts.cpp \
+  UsbTmc.cpp \
   InputCal.cpp \
+  InputCurveStore.cpp \
+  InputCurveFiles.cpp \
+  Buchla200eFwVersions.cpp \
   PresetBus200e.cpp \
   src/drivers/display.cpp \
   src/drivers/SH1106_128x64_driver.cpp \

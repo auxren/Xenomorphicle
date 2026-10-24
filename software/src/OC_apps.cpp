@@ -799,6 +799,10 @@ bool AppSwitcher::Init(bool reset_settings) {
 #ifdef EEPROM_INPUTCAL_START
         if (a >= EEPROM_INPUTCAL_START && a < EEPROM_INPUTCAL_END) continue;
 #endif
+#ifdef EEPROM_CALROUTINE_MARKER_START
+        // ...and so does the marker saying where that calibration came from.
+        if (a >= EEPROM_CALROUTINE_MARKER_START && a < EEPROM_CALROUTINE_MARKER_END) continue;
+#endif
         EEPtr d = (int)a;
         *d = 0;
       }

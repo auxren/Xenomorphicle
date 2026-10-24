@@ -90,6 +90,7 @@ static const char *const kHeaders[] = {
   "CALR#,RETRY,scpi,attempt",
   "CALR#,LOST,out",
   "CALR#,BACK,out",
+  "CALR#,REDO,out",
   "CALR#,RESULT,can_save,out_pass,in_pass",
   "CALR#,SAVE,result",
   "CALR#,DISCARD",
@@ -262,6 +263,14 @@ CALR_CODE int Back(char *buf, size_t n, int out) {
   return l.Done();
 }
 
+CALR_CODE int Redo(char *buf, size_t n, int out) {
+  Builder l;
+  l.Init(buf, n);
+  l.Str("CALR,REDO");
+  l.Int(Label(out));
+  return l.Done();
+}
+
 CALR_CODE int Result(char *buf, size_t n, bool can_save, uint8_t out_pass_mask,
                      uint8_t in_pass_mask) {
   Builder l;
@@ -358,8 +367,9 @@ namespace L = CalRoutineLines;
 namespace CalRoutine {
 
 const char *const kMeterSetup[5] = {
-  "*CLS", "CONF:VOLT:DC 20", "VOLT:DC:NPLC 10", "VOLT:DC:AZ ON", "TRIG:SOUR IMM",
+  "*CLS", "CONF:VOLT:DC 20", "VOLT:DC:NPLC 1", "VOLT:DC:AZ ONCE", "TRIG:SOUR IMM",
 };
+const char *const kOutputZero = "VOLT:DC:AZ ONCE";
 
 CALR_CODE void InputPoint::Start(OutputPort &out, InputPort &in, Clock &clock, int out_label,
                                  uint16_t code, int in_label) {
@@ -407,6 +417,10 @@ CALR_CODE bool CalRoutineFlow::Results::CanSave() const {
   for (int o = 0; o < 8; ++o)
     if (!out_pass[o]) return false;
   return true;
+}
+
+CALR_CODE bool CalRoutineFlow::CanSave() const {
+  return stage_ == Stage::Results && results_.CanSave();
 }
 
 CALR_CODE const char *CalRoutineFlow::StageName(Stage s) {
@@ -470,6 +484,9 @@ CALR_CODE void CalRoutineFlow::Begin(MeterPort &meter, OutputPort &out, InputPor
   ipoint_.Stop();
   lost_ = false;
   resume_out_ = -1;
+  retry_out_ = -1;
+  zeroing_ = false;
+  fail_reason_ = "";
   cur_out_ = -1;
   cur_in_ = -1;
   for (int i = 0; i < L::HeaderCount(); ++i) Log(L::Header(i));
@@ -529,6 +546,8 @@ CALR_CODE void CalRoutineFlow::Skip() {
   results_.in_verdict[i] = CM::VERDICT_NO_SAMPLES;
   results_.in_points[i] = 0;
   results_.in_holdout_mv[i] = 0.f;
+  results_.in_line_dev_mv[i] = 0.f;
+  results_.in_lo_mv[i] = results_.in_hi_mv[i] = 0;
   results_.line[i].gain = results_.line[i].offset_mv = 0.f;
   memset(results_.curve_mv_x2[i], 0, sizeof(results_.curve_mv_x2[i]));
   CALR_LOG(InResult, i, "SKIP", CM::VERDICT_NO_SAMPLES, results_.line[i], 0.f, 0.f, 0);
@@ -543,10 +562,28 @@ CALR_CODE void CalRoutineFlow::Cancel() {
   q_phase_ = Q_NONE;
   m_phase_ = M_NONE;
   lost_ = false;
+  zeroing_ = false;
+  retry_out_ = -1;
   for (int o = 0; o < 8; ++o) results_.out_pass[o] = results_.in_pass[o] = false;
   CALR_LOG(Cancel, StageName(stage_));
   cur_out_ = cur_in_ = -1;
   SetStage(Stage::Idle);
+}
+
+CALR_CODE bool CalRoutineFlow::RetryOutput(int o) {
+  if (!meter_ || stage_ != Stage::Results || o < 0 || o > 7) return false;
+  now_ = clock_->Ms();
+  out_->ReleaseAll();
+  retry_out_ = o;
+  cur_out_ = -1;
+  cur_in_ = -1;
+  lost_ = false;
+  resume_out_ = -1;
+  CALR_LOG(Redo, o);
+  // The meter may have been replugged or reset while the results were up.
+  if (meter_->Connected()) StartConfig();
+  else SetStage(Stage::NoMeter);
+  return true;
 }
 
 CALR_CODE void CalRoutineFlow::Fail(const char *reason) {
@@ -555,6 +592,9 @@ CALR_CODE void CalRoutineFlow::Fail(const char *reason) {
   q_phase_ = Q_NONE;
   m_phase_ = M_NONE;
   lost_ = false;
+  zeroing_ = false;
+  retry_out_ = -1;
+  fail_reason_ = reason;
   for (int o = 0; o < 8; ++o) results_.out_pass[o] = results_.in_pass[o] = false;
   CALR_LOG(Fail, reason);
   SetStage(Stage::Failed);
@@ -567,6 +607,7 @@ CALR_CODE void CalRoutineFlow::Lost() {
   out_->ReleaseAll();
   q_phase_ = Q_NONE;
   m_phase_ = M_NONE;
+  zeroing_ = false;
   resume_out_ = cur_out_;
   lost_ = true;
   lost_ms_ = now_;
@@ -597,7 +638,7 @@ CALR_CODE void CalRoutineFlow::TickConfig() {
   if (resume) {
     StartOutput(resume_out_);
   } else {
-    cur_out_ = 0;
+    cur_out_ = retry_out_ >= 0 ? retry_out_ : 0;
     SetStage(Stage::PromptOutput);
   }
 }
@@ -740,7 +781,11 @@ CALR_CODE void CalRoutineFlow::StartOutput(int o) {
   CALR_LOG(Out, o);
   node_k_ = 0;
   SetStage(Stage::CalOutput);
-  StartNode();
+  // A fresh autozero first, with nothing held: every reading of this output
+  // then shares a zero taken seconds ago (kMeterSetup turns autozero off
+  // between readings).
+  zeroing_ = true;
+  QStart(kOutputZero, kConfigTimeoutMs);
 }
 
 CALR_CODE void CalRoutineFlow::StartNode() {
@@ -759,6 +804,15 @@ CALR_CODE void CalRoutineFlow::StartNode() {
 // overshoots past a rail is corrected on the next pass; only a measured
 // shortfall at the rail flags the entry at_rail.
 CALR_CODE void CalRoutineFlow::TickNode() {
+  if (zeroing_) {
+    const QResult q = QStep();
+    if (q == QR_BUSY) return;
+    zeroing_ = false;
+    if (q == QR_LOST) { Lost(); return; }
+    if (q == QR_FAIL) { Fail("METER_CONFIG"); return; }
+    StartNode();
+    return;
+  }
   const MResult r = MStep();
   if (r == MR_BUSY) return;
   if (r == MR_LOST) { Lost(); return; }
@@ -847,6 +901,7 @@ CALR_CODE void CalRoutineFlow::TickSweep() {
 
 CALR_CODE void CalRoutineFlow::FinishOutput(OutReason reason) {
   out_->ReleaseAll();
+  zeroing_ = false;
   m_phase_ = M_NONE;
   q_phase_ = Q_NONE;
   const int o = cur_out_;
@@ -866,6 +921,18 @@ CALR_CODE void CalRoutineFlow::FinishOutput(OutReason reason) {
 }
 
 CALR_CODE void CalRoutineFlow::NextAfterOutput() {
+  if (retry_out_ >= 0) {  // a RetryOutput: back to Results, through the inputs if it was A
+    const int o = retry_out_;
+    retry_out_ = -1;
+    if (o == kSourceOutput) {
+      cur_out_ = -1;
+      cur_in_ = 0;
+      SetStage(Stage::PromptInput);
+    } else {
+      FinishRun();
+    }
+    return;
+  }
   if (cur_out_ < 7) {
     ++cur_out_;
     SetStage(Stage::PromptOutput);
@@ -944,6 +1011,14 @@ CALR_CODE void CalRoutineFlow::FinishInput() {
   results_.line[i] = line;
   results_.in_holdout_mv[i] = holdout;
   results_.in_points[i] = uint8_t(n_ipts_);
+  results_.in_line_dev_mv[i] = dev;
+  int32_t lo = 0, hi = 0;
+  for (int k = 0; k < n_ipts_; ++k) {
+    if (k == 0 || ipts_[k].mv < lo) lo = ipts_[k].mv;
+    if (k == 0 || ipts_[k].mv > hi) hi = ipts_[k].mv;
+  }
+  results_.in_lo_mv[i] = lo;
+  results_.in_hi_mv[i] = hi;
   memcpy(results_.curve_mv_x2[i], curve, sizeof(curve));
   CALR_LOG(InResult, i, pass ? "PASS" : "FAIL", v, line, holdout, dev, n_ipts_);
   NextAfterInput();
@@ -1001,7 +1076,7 @@ CALR_CODE bool CalRoutineSave(const CalRoutineFlow::Results &r, CalRoutine::Save
   }
   if (!port.SaveDacTable(r.table)) return false;
   if (!port.SaveCurves(r.curve_mv_x2, mask, source)) return false;
-  if (!port.SaveLines(r.line, mask, source)) return false;
+  if (!port.SaveLines(r.line, mask, source, r.in_line_dev_mv)) return false;
   port.WriteMarker();
   port.ResetAutotune();
   port.ReloadInputs();

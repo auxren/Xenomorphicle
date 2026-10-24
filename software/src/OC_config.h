@@ -96,6 +96,13 @@ static constexpr unsigned long SETTINGS_SAVE_TIMEOUT_MS = 1000;
 #define EEPROM_INPUTCAL_SIZE 112
 #define EEPROM_INPUTCAL_START (EEPROM_PRESETBUS_START - EEPROM_INPUTCAL_SIZE)
 #define EEPROM_INPUTCAL_END EEPROM_PRESETBUS_START
+// The Cal Routine marker (CalRoutineMarker.h): 4 bytes in the gap between
+// the end of the app-data page (4140, one page: OC_storage.h) and ICA1
+// (4164). No page store reads or writes the gap: the app-data store has one
+// page, at its base, and loads only that; ICA1 starts at 4164. Bytes
+// [4144,4164) stay free.
+#define EEPROM_CALROUTINE_MARKER_START 4140
+#define EEPROM_CALROUTINE_MARKER_END 4144
 #define EEPROM_APPDATA_END EEPROM_INPUTCAL_START
 #define EEPROM_APPDATA_BINARY_SIZE (EEPROM_APPDATA_END - EEPROM_APPDATA_START - 40)
 #else

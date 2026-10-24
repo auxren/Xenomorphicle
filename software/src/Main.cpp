@@ -43,6 +43,7 @@
 #include "OC_options.h"
 #include "src/drivers/display.h"
 #include "src/drivers/USBTMCDevice.h"
+#include "apps/CalRoutinePorts.h"
 #include "src/drivers/ADC/OC_util_ADC.h"
 #include "util/util_debugpins.h"
 #include "HSMIDI.h"
@@ -1051,6 +1052,9 @@ FLASHMEM static void MeterConsolePrint(USBTMCDevice::QueryState st) {
 }
 
 FLASHMEM static void MeterConsoleSubmit(const char *line) {
+  // The Cal Routine owns the meter while it runs: a console line between its
+  // queries would change the meter's setup under it.
+  if (CalRoutinePorts::MeterOwned()) { Serial.println("METER,ERR,BUSY_CAL"); return; }
   if (meter_console_wait) { Serial.println("METER,ERR,BUSY"); return; }
   // Optional "@<ms> " prefix: a per-query timeout (1-60000 ms), so a bench
   // can force a timeout and watch the resync. Console syntax only; it never

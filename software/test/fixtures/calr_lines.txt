@@ -23,6 +23,7 @@ CALR#,IRES,in,result,verdict,gain_uv,offset_mv,holdout_mv,line_dev_mv,points
 CALR#,RETRY,scpi,attempt
 CALR#,LOST,out
 CALR#,BACK,out
+CALR#,REDO,out
 CALR#,RESULT,can_save,out_pass,in_pass
 CALR#,SAVE,result
 CALR#,DISCARD
@@ -41,6 +42,7 @@ CALR,IRES,4,PASS,OK,-2930.5,12000.41,1.23,4.57,19
 CALR,RETRY,READ?,2
 CALR,LOST,4
 CALR,BACK,4
+CALR,REDO,3
 CALR,RESULT,1,FF,F7
 CALR,SAVE,OK
 CALR,DISCARD
