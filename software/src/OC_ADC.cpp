@@ -13,6 +13,7 @@ ADC_CHANNEL ADC_CHANNEL_5=4, ADC_CHANNEL_6=5, ADC_CHANNEL_7=6, ADC_CHANNEL_8=7;
 namespace OC {
 
 /*static*/ ADC::CalibrationData *ADC::calibration_data_;
+/*static*/ volatile ADC::ScopeFrameHook ADC::scope_frame_hook_ = nullptr;
 /*static*/ uint32_t ADC::raw_[ADC_CHANNEL_COUNT];
 /*static*/ uint32_t ADC::smoothed_[ADC_CHANNEL_COUNT];
 #ifdef OC_ADC_ENABLE_DMA_INTERRUPT
@@ -532,6 +533,7 @@ FLASHMEM void ADC33131D_Start() {
       for (size_t i=0; i < count; i++) {
         const adc33131_frame_t *data = (adc33131_frame_t *)((uint32_t)adc_buffer +
           (poffset + i * sizeof(adc33131_frame_t)) % sizeof(adc_buffer));
+        if (scope_frame_hook_) scope_frame_hook_(data->in);
         sum[0] += data->in[0];
         sum[1] += data->in[1];
         sum[2] += data->in[2];
