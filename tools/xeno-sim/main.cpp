@@ -41,6 +41,7 @@ namespace weegfx { extern uint32_t weegfx_sim_clipped_last_frame; }
 #include "sim_host.h"
 #include "sim_input.h"
 #include "sim_runtime.h"
+#include "sim_appswitch.h"
 #include "sim_selftest.h"
 #include "sim_session.h"
 #include "sim_storage.h"
@@ -536,6 +537,8 @@ void Usage() {
       "  --dump-fb            print the framebuffer in the console's own\n"
       "                       capture format (2048 uppercase hex digits) and\n"
       "                       nothing else -- compare with fbdiff.py\n"
+      "  --test-app-switch S  one scenario of the app-switch check (needs the\n"
+      "                       build-switch/ binary; see selfcheck.sh)\n"
       "  --test-phzconfig     run the PhzConfig codec checks (serialize,\n"
       "                       load/save, damage) against the RAM volume and\n"
       "                       exit -- no boot; used by selfcheck.sh\n"
@@ -690,6 +693,7 @@ int main(int argc, char **argv) {
   bool write_fault_once = false;
   bool sim_259e = false;
   long replay_at = -1;
+  std::string appswitch_test;
   int write_fault = SIM_WRITE_FAITHFUL;
   float id_voltage = 0.10f;
   std::vector<std::string> opts;   // what a replay needs to reproduce this run
@@ -699,6 +703,7 @@ int main(int argc, char **argv) {
     const bool has_next = (i + 1 < argc);
     if (a == "--help" || a == "-h") { Usage(); return 0; }
     else if (a == "--test-phzconfig") return SimPhzConfigSelfTest();
+    else if (a == "--test-app-switch" && has_next) appswitch_test = argv[++i];
     else if (a == "--keys" && has_next) { keys = argv[++i]; scripted = true; }
     else if (a == "--dump-frames") dump_frames = true;
     else if (a == "--dump-fb") { dump_fb = true; show_log = false; }
@@ -792,6 +797,7 @@ int main(int argc, char **argv) {
            "runs the virtual clock flat out.");
   if (!cfg.bus_enabled) SimLog("--bus-off: PresetBus::Enabled() reports false.");
 
+  if (!appswitch_test.empty()) SimAppSwitchPreBoot(appswitch_test);
   SimRuntimeBoot(reset_settings, reset_cancel);
   if (sim_259e) SimEnable259e();
 
@@ -867,6 +873,8 @@ int main(int argc, char **argv) {
     if (dump_fs) SimStorageList(stdout);
     else if (dump_fb) PrintFrameBufferHex();
     else if (!dump_frames) PrintScreen(show_log);
+  } else if (!appswitch_test.empty()) {
+    rc = SimAppSwitchTest(appswitch_test);
   } else if (stdio_mode) {
     rc = RunStdio();
   } else if (scripted) {

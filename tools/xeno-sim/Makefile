@@ -109,6 +109,13 @@ FW_SRCS = \
   TweightyTransport.cpp \
   extern/f32/AudioStream_F32.cpp
 
+# The app-switch check (selfcheck.sh builds it into build-switch/) also carries
+# the Scope, whose capture code is not in the default build.
+ifneq (,$(findstring XENO_SIM_APPSWITCH,$(EXTRA_FWFLAGS)))
+FW_SRCS += ScopeCapture.cpp ScopeFft.cpp ScopeRange.cpp ScopeSettings.cpp \
+           ScopeSources.cpp ScopeTrigger.cpp
+endif
+
 # The mirror has to exist before make can match its pattern rules against it,
 # so it is built while the Makefile is read rather than as a target. It is only
 # symlinks: make stats through them to the real sources, so rebuilding it every
@@ -118,7 +125,7 @@ $(shell mkdir -p $(BUILD) && ./mkshadow.sh $(SRC) $(SHIM) $(SHADOW) && ln -sfn .
 # weegfx.cpp is the real renderer too, but it needs one host adjustment inside
 # its own translation unit -- see the header comment in shim/weegfx_host.cpp.
 SIM_SRCS = main.cpp sim_bus.cpp sim_capture.cpp sim_host.cpp sim_input.cpp \
-           sim_cal259.cpp sim_runtime.cpp sim_selftest.cpp sim_session.cpp sim_storage.cpp \
+           sim_appswitch.cpp sim_cal259.cpp sim_runtime.cpp sim_selftest.cpp sim_session.cpp sim_storage.cpp \
            sim_stubs.cpp sim_term.cpp \
            shim/weegfx_host.cpp
 
@@ -163,6 +170,7 @@ gui: all
 # screens and controls are checked against a second build with it on (build-write/).
 check: all
 	@$(MAKE) --no-print-directory BUILD=build-write EXTRA_FWFLAGS=-DCAL259E_ALLOW_WRITE=1 all
+	@$(MAKE) --no-print-directory BUILD=build-switch EXTRA_FWFLAGS=-DXENO_SIM_APPSWITCH all
 	@./selfcheck.sh
 
 clean:

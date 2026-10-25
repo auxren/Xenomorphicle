@@ -32,6 +32,11 @@
 // exactly as it was" is a property nothing else in the simulator can ask.
 void SimRuntimeBoot(bool reset_settings, bool answer_cancel = false);
 
+// Hold `control` (an OC::UiControl mask) through the splash screen of the next
+// SimRuntimeBoot, the way a person holds the right encoder at power-up to open
+// the app menu. 0 = nothing.
+void SimRuntimeBootHold(uint16_t control);
+
 // One simulated millisecond: 17 core ISR passes (16.6 kHz), one UI poll
 // (1 kHz), then TWO passes of loop() -- hardware runs loop() hundreds of times
 // per millisecond, and a timer stamped in one pass and re-checked in the same

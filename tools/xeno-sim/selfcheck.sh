@@ -1896,5 +1896,75 @@ has '259e cancel: WRITTEN' < "$TMP/c259s" \
   && ok "... and the Cal Routine menu shows the cancelled run's verdict" \
   || bad "no cancelled-verdict banner on the menu: $(head -8 "$TMP/c259s")"
 
+# ---------------------------------------------------------------------------
+# App switching and the Scope's arena. The Scope takes a 62 KB arena from the
+# heap when it is resumed and frees it when it is suspended, so every way of
+# leaving it has to suspend it and nothing may resume it while it is away. Run
+# from build-switch/, which adds the Scope and stand-ins for Quadrants and
+# Captain (sim_appswitch.cpp). One process per scenario; the boot ones start
+# from the image a prep run leaves behind.
+# ---------------------------------------------------------------------------
+echo "app switching: the Scope's arena, the shared config map"
+SWSIM="deadline 120 ./build-switch/xeno-sim"
+sw_run() {  # label, then the xeno-sim arguments
+  _label=$1; shift
+  if $SWSIM "$@" --no-log > "$TMP/sw" 2>&1; then
+    ok "$_label ($(tail -1 "$TMP/sw" | sed 's/^app-switch [^:]*: //'))"
+  else
+    bad "$_label:"; grep FAIL "$TMP/sw" || tail -3 "$TMP/sw"
+  fi
+}
+sw_run "a background save under the open menu does not resume the Scope" \
+  --test-app-switch menu-handback
+sw_run "a recall into the Scope under the open menu: leaving it frees the arena" \
+  --test-app-switch recall-in-menu
+sw_run "a refused recall under the open menu does not resume the Scope" \
+  --test-app-switch refused-recall
+sw_run "Scope -> other -> Scope, by the menu and by the console" \
+  --test-app-switch switch-back
+sw_run "a recall under the menu is refused for its schema: the Scope stays suspended" \
+  --test-app-switch old-preset
+sw_run "the clock-routing save's hand-back reloads a suspended app, it does not resume it" \
+  --test-app-switch clock-handback
+sw_run "the preset overlay's assignment save reloads a suspended app" \
+  --test-app-switch busui-handback
+sw_run "a recall with Quadrants current keeps its bank file and its unsaved edits" \
+  --test-app-switch quad-recall
+sw_run "a recall with the bank dial moved, not confirmed, saves into the loaded bank" \
+  --test-app-switch quad-dial
+sw_run "a recall whose second look at the slot fails leaves a suspended app suspended" \
+  --test-app-switch restage-fail
+sw_run "the 200e app's scan-set save under the menu does not reopen it" \
+  --test-app-switch scan-handback
+sw_run "Quadrants' bank survives a writer under the menu" \
+  --test-app-switch quad-bank
+sw_run "Captain's map and setup survive a writer under the menu" \
+  --test-app-switch captain-config
+# The real Quadrants and Captain cannot be built here, so their reload handlers
+# are only checked at the source level: the case's block, comments dropped, must
+# hold the one statement that takes the map back, on a line of its own, and no
+# conditional, no SetBank and no LoadGlobals (which would put the bank's older
+# globals over the live ones). Not a behavioural test; the stand-ins above test
+# the plumbing.
+QH=../../software/src/apps/Quadrants.h
+CH=../../software/src/apps/CaptainMIDI.h
+qblk=$(awk '/case OC::APP_EVENT_CONFIG_RELOAD:/{f=1;next} f&&/break;/{exit} f{print}' "$QH" | grep -v '^[[:space:]]*//')
+cblk=$(awk '/event == OC::APP_EVENT_CONFIG_RELOAD\)/{f=1;next} f&&/^  }/{exit} f{print}' "$CH" | grep -v '^[[:space:]]*//')
+if printf '%s\n' "$qblk" | grep -qx '[[:space:]]*LoadBankMap(loaded_bank_);' \
+   && ! printf '%s\n' "$qblk" | grep -qE '\bif\b|\belse\b|SetBank|LoadGlobals|\?'; then
+  ok "source check: Quadrants answers CONFIG_RELOAD with LoadBankMap(loaded_bank_) alone"
+else bad "source check: Quadrants.h CONFIG_RELOAD is not an unconditional LoadBankMap(loaded_bank_)"; fi
+if printf '%s\n' "$cblk" | grep -qx '[[:space:]]*PhzConfig::load_config("CAPTAIN.DAT");' \
+   && ! printf '%s\n' "$cblk" | grep -qE '\bif\b|\belse\b|\?'; then
+  ok "source check: Captain answers CONFIG_RELOAD with load_config(CAPTAIN.DAT) alone"
+else bad "source check: CaptainMIDI.h CONFIG_RELOAD is not an unconditional load_config(CAPTAIN.DAT)"; fi
+$SWSIM --state "$TMP/sw.img" --test-app-switch prep-scope --no-log > /dev/null 2>&1
+sw_run "power-up into the app menu on the Scope: picking another app frees the arena" \
+  --state "$TMP/sw.img" --test-app-switch boot-menu
+rm -f "$TMP/sw.img"
+$SWSIM --state "$TMP/sw.img" --test-app-switch prep-scope-slot --no-log > /dev/null 2>&1
+sw_run "power-up into the app menu with a boot recall into the Scope" \
+  --state "$TMP/sw.img" --test-app-switch boot-menu-recall
+
 [ $fail -eq 0 ] && echo "all checks passed" || echo "SOME CHECKS FAILED"
 exit $fail

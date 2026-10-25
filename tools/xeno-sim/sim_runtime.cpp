@@ -138,6 +138,9 @@ void LoopPass() {
 
 void SimRuntimePoke() { MENU_REDRAW = 1; }
 
+namespace { uint16_t g_boot_hold = 0; }
+void SimRuntimeBootHold(uint16_t control) { g_boot_hold = control; }
+
 // Main.cpp:411-620, setup(), in order, minus everything with no host meaning.
 void SimRuntimeBoot(bool reset_settings, bool answer_cancel) {
   g_background_ready = false;
@@ -199,6 +202,10 @@ void SimRuntimeBoot(bool reset_settings, bool answer_cancel) {
     SimInputSetButton(OC::CONTROL_BUTTON_UP, true);
     SimInputSetButton(OC::CONTROL_BUTTON_DOWN, true);
     SimLog("--reset-settings: holding A+B through the splash, as the gesture is");
+  }
+  if (g_boot_hold) {
+    SimInputSetButton(g_boot_hold, true);
+    SimLog("holding %s through the splash", SimInputTokenForControl(g_boot_hold));
   }
   g_ui_mode = OC::ui.Splashscreen(reset_settings, 0);
   SimInputReleaseAll();

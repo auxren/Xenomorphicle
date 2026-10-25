@@ -311,6 +311,24 @@ test moves an app into it first.
 * Everything else in `apps/` — simply not in this build's manifest. Adding one
   is a line in `shim/src/apps/_config.h` plus its `-DENABLE_APP_*`.
 
+### The app-switch check
+
+`make check` also builds `build-switch/xeno-sim` (`-DXENO_SIM_APPSWITCH`),
+whose roster adds the real **Scope** and stand-ins for **Quadrants** and
+**Captain MIDI** (`sim_probe_apps.h`). The stand-ins are not those apps: they
+keep only each one's contract with the shared `PhzConfig` map (same app ids,
+same event cases, one stored value each), because the real two cannot be built
+in a `NO_HEMISPHERE` simulator (their reload handlers are only checked at the
+source level, in `selfcheck.sh`). `--test-app-switch SCENARIO` then checks, with
+the allocator's own numbers, that the Scope's 62 KB arena is freed when the app
+menu, a recall, the console or a power-up-into-the-menu moves the instrument
+away from it, and that a background writer's hand-back (a preset save, a
+refused recall, the clock-routing save, the preset overlay) does not reopen a
+suspended app. A recall that lands in the Scope under the open menu does resume
+it, on purpose; what is checked there is that picking another app frees it
+again. The stand-ins' map and bank file are checked across writers and a
+recall. The scenarios are listed in `sim_appswitch.cpp`.
+
 ---
 
 ## How the firmware gets compiled

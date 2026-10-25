@@ -19,4 +19,5 @@ compile_commands.json
 __pycache__/
 tools/xeno-sim/build
 tools/xeno-sim/build-write
+tools/xeno-sim/build-switch
 software/src/src.ino.cpp

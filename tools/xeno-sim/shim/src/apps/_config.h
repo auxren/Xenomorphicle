@@ -30,6 +30,13 @@ extern uint_fast8_t MENU_REDRAW;
 #include "Backup.h"
 #include "SETTINGS.h"
 #include "CalRoutine.h"
+#ifdef XENO_SIM_APPSWITCH
+// The app-switch check's roster: the real Scope (its arena is what is being
+// watched) and stand-ins for the two apps that keep a file in the shared
+// config map. See sim_probe_apps.h.
+#include "ScopeApp.h"
+#include "sim_probe_apps.h"
+#endif
 
 namespace OC {
 
@@ -43,6 +50,11 @@ static AppContainer<void
 #endif
   , AppBackup
   , AppCalRoutine
+#ifdef XENO_SIM_APPSWITCH
+  , AppScope
+  , AppProbeQuad
+  , AppProbeCaptain
+#endif
 > app_container;
 
 // The firmware boots into Captain MIDI on T41; Captain is not in this build
@@ -68,5 +80,17 @@ static_assert(DEFAULT_APP_ID == AppBus200e::kAppId,
 size_t SimAppCount() { return app_container.num_apps(); }
 const char *SimAppNameAt(size_t i) { return app_container[i].name(); }
 uint16_t SimAppIdAt(size_t i) { return app_container[i].id(); }
+
+#ifdef XENO_SIM_APPSWITCH
+// The Scope's arena lives in this TU (static in ScopeApp.h), and so do the
+// stand-ins' instances; the check reaches them through these.
+bool SimScopeArenaLive() { return ScopeAppNS::g_arena != nullptr; }
+AppProbeQuad *SimProbeQuad() {
+  return static_cast<AppProbeQuad *>(app_container.FindAppByID(AppProbeQuad::kAppId));
+}
+AppProbeCaptain *SimProbeCaptain() {
+  return static_cast<AppProbeCaptain *>(app_container.FindAppByID(AppProbeCaptain::kAppId));
+}
+#endif
 
 }
