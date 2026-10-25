@@ -58,7 +58,7 @@ static void line_enc(const std::vector<std::string> &t) {
   uint8_t out[CalRec::kRecLen259e];
   CalRec::Encode259e(r, out);
   CHECK(want.size() == (size_t)CalRec::kRecLen259e);
-  CHECK(memcmp(out, want.data(), want.size()) == 0);
+  CHECK(want.empty() || memcmp(out, want.data(), want.size()) == 0);
   CalRec::Record d;
   CHECK(CalRec::Decode259e(want.data(), want.size(), &d));
   CHECK(memcmp(d.unit_id, r.unit_id, 8) == 0 && d.seq == r.seq && d.date == r.date);
@@ -115,7 +115,7 @@ static void line_reply(const std::vector<std::string> &t) {
   if (!ok) return;
   std::vector<uint8_t> data = Hex(t[5]);
   CHECK(r.src == atoi(t[2].c_str()) && r.what == atoi(t[3].c_str()) && r.arg == atoi(t[4].c_str()));
-  CHECK(r.len == data.size() && memcmp(r.data, data.data(), data.size()) == 0);
+  CHECK(r.len == data.size() && (data.empty() || memcmp(r.data, data.data(), data.size()) == 0));
   n_reply++;
 }
 
