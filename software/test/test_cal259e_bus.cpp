@@ -274,6 +274,25 @@ static void stale_ok_bit_is_not_a_verdict() {
   CHECK(g.clk.t >= 1000 + Cal259eBus::kCommitWaitMs + Cal259eBus::kCommitVerdictMs);
 }
 
+// L5 (S2's bit0 term): bit2 ok + the right seq are not enough, the module must also say it
+// holds a valid record (bit0). Without that term this ends 1.
+static void ok_bit_without_a_valid_record_is_not_a_verdict() {
+  Rig g;
+  uint8_t rec[30];
+  MakeRecord(rec, 7);
+  g.bus.PutRecord(rec); g.Run();
+  g.sim.status_hides_valid = true;
+  g.bus.Commit(RecCrc(rec), 0);
+  CHECK(g.Run() == E_COMMIT_UNKNOWN);
+  CHECK(g.sim.ok_bit && g.sim.seq == 7);     // bit2 and the seq were both right
+  CHECK((g.bus.status().flags & 0x05) == 0x04);
+  CHECK(g.sim.count[CalRec::kCmdCommit] == 1);
+  Rig h;                                       // and with bit0 shown it is a verdict
+  h.bus.PutRecord(rec); h.Run();
+  h.bus.Commit(RecCrc(rec), 0);
+  CHECK(h.Run() == 1);
+}
+
 // S2: the same rig with the frame delivered reports OK at the new seq.
 static void second_commit_ok_needs_the_new_seq() {
   Rig g;
@@ -545,6 +564,7 @@ int main() {
   busy_bus_retries_then_fails();
   send_error_is_bus_error();
   stale_ok_bit_is_not_a_verdict();
+  ok_bit_without_a_valid_record_is_not_a_verdict();
   second_commit_ok_needs_the_new_seq();
   commit_wire_error_latched_is_polled();
   commit_wire_error_not_latched_is_unknown();

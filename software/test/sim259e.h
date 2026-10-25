@@ -187,6 +187,7 @@ struct Sim259e : BusPort {
   // 8 data bytes therefore arrives with data[5] = 0x00 and data[7] = 0x0C. (Status and
   // ADC replies are too short to reach them.) Set false to model a fixed module.
   bool stock_scratch_overlap = true;
+  bool status_hides_valid = false;   // test knob: the status shows bit0 (record valid) clear
 
   void Reply(uint8_t src, uint8_t what, uint8_t arg, const uint8_t *d0, uint8_t dn) {
     if (drop_replies) return;
@@ -233,7 +234,7 @@ struct Sim259e : BusPort {
         Reply(addr, 1, arg, d, 3);
         return;
       case 2:
-        d[0] = (uint8_t)((has_active ? 1 : 0) | (ok_bit ? 4 : 0) | (refused_bit ? 8 : 0) |
+        d[0] = (uint8_t)((has_active && !status_hides_valid ? 1 : 0) | (ok_bit ? 4 : 0) | (refused_bit ? 8 : 0) |
                          (noslot_bit ? 16 : 0));
         d[1] = 1; d[2] = (uint8_t)(seq >> 8); d[3] = (uint8_t)seq;
         Reply(addr, 2, arg, d, 4);
