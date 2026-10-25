@@ -142,7 +142,7 @@ All of these, before B is held on the write screen (only in a build with the wri
 
 ### X3/X4 and the first calibration
 
-- [ ] Cal Routine, 259e: warm-up confirmed, principal pitch then mod pitch patched when prompted; Results show each input: worst check error <= 3 cents, nonlinearity <= 5 cents (**the 5 cent limit `kMaxNonlinearityCents` is provisional: confirm it from the real figures**), gain within 10 % of stock; the age on the Results is under 10 minutes.
+- [ ] Cal Routine, 259e: warm-up confirmed, principal pitch then mod pitch patched when prompted; Results show each input: worst check error <= 3 cents, nonlinearity <= 5 cents (**the 5 cent limit `kMaxNonlinearityCents` is provisional: confirm it from the real figures**), the ADC span / offset / channel check passes (gain within ±1.5 % of T × 65536 / 7864.32, offset −50 to 150, the two gains within 1 %; it cannot detect a wrong counts-per-octave constant, so a pass says nothing about T); the age on the Results is under 10 minutes.
 - [ ] On the write screen: a B tap does nothing and the screen says "Hold B to write"; **hold B 2 s** (not a chord; the bar fills, release early empties it). Expect `CALR,259BK,<addr>,990,<crc>,OK`, then `CALR,259REC,...`, then `CALR,259END,OK`; the Done screen. Keep the `CALR,259REC` line.
 - [ ] If the run ends "COMMIT unknown", "Written: UNKNOWN" or "module refused": do nothing else; read `=28s` and `=28r` by hand. Never retry the write blindly (COMMIT is not idempotent).
 - [ ] Afterwards: the 259e power-cycled, `=28s` bit0 (record valid) set, seq one more than before; a re-run gives seq + 1; a reload of the 31.2C4 card keeps the record.

@@ -9,7 +9,9 @@
 # spaces, fixed decimals. ch is the 259e channel, 0 = principal pitch, 1 =
 # modulation pitch. addr and gain_hex are upper-case hex (addr 2 digits, gain
 # 4); rec60hex is the 30-byte record as 60 upper-case hex digits; n is the
-# number of fresh ADC samples in raw_median. result is OK, a fail name, or
+# number of fresh ADC samples in raw_median. result is OK, a fail name (SCALE is
+# always SCALE_<check>: SCALE_GAIN_LOW, SCALE_GAIN_HIGH, SCALE_OFFSET_RANGE or
+# SCALE_CH_MISMATCH, the ADC span / offset / channel check that failed), or
 # CANCELLED_<commit result> when a cancel came after the COMMIT went out.
 # 259BK is one preset-backup attempt: addr, the bytes the bus master moved (990
 # for a good bank), the CRC-32 of the stored bank (8 hex digits) and OK or why not.

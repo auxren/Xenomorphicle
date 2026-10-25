@@ -374,7 +374,7 @@ static void scale_off_fails() {
   CHECK(r.a.count[CalRec::kCmdPut] == 0 && r.a.count[CalRec::kCmdCommit] == 0);
   CHECK(r.backup.begins == 0);
   CHECK(count_prefix("CALR,259FIT,0,") == 1);  // the failing gain is logged
-  CHECK(logged("CALR,259END,SCALE"));
+  CHECK(logged("CALR,259END,SCALE_GAIN_HIGH") && r.flow.sanity() == CalRec::SANITY_GAIN_HIGH);
   CHECK(r.outs.mask == 0);
 }
 
@@ -804,9 +804,10 @@ static void meter_lost_fails() {
 static void verify_fails() {
   Rig r;
   good_adc(r.a);
-  // The bend below pulls the fitted offset down by ~98 counts; start higher so the sanity
-  // window (offset 0..100) does not stop the run before the verify check.
-  for (int c = 0; c < 2; ++c) r.a.adc_err_mv[c] = -40.0;
+  // The bend below pulls the fitted offset down by ~98 counts; a zero error of -20 mV
+  // (offset ~ +68 before the bend, ~ -30 after) keeps it inside the offset window -50..150, so
+  // the run reaches the verify check.
+  for (int c = 0; c < 2; ++c) r.a.adc_err_mv[c] = -20.0;
   // The 259e input bends: +-25 mV over the range, which no line absorbs.
   r.a.input_mv = [&r](int ch) {
     const double v = r.InputMv(&r.a, ch);
@@ -1422,7 +1423,7 @@ static void bad_record_replay() {
   CHECK(r.Run());
   CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_SCALE);
   CHECK(r.flow.sanity() == CalRec::SANITY_GAIN_LOW);
-  CHECK(logged("CALR,259END,SCALE"));
+  CHECK(logged("CALR,259END,SCALE_GAIN_LOW"));
   const CalRec::Channel c = r.flow.result().ch[0];
   CHECK(std::fabs(double(c.gain) - 34140.0) < 40.0);   // the stored record's gain
   CHECK(c.offset >= 30 && c.offset <= 45);              // ~ 38
@@ -1503,7 +1504,7 @@ static void channel_mismatch_fails() {
 
 // A raw offset the fit turns into a negative (or huge) correction offset.
 static void offset_out_of_range_fails() {
-  for (double err : {20.0, -45.0}) {   // offset ~ -68 / ~ +154
+  for (double err : {25.0, -50.0}) {   // offset ~ -85 / ~ +170 (window -50..150)
     Rig r;
     good_adc(r.a);
     for (int c = 0; c < 2; ++c) r.a.adc_err_mv[c] = err;
@@ -1511,6 +1512,7 @@ static void offset_out_of_range_fails() {
     CHECK(r.Run());
     CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_SCALE);
     CHECK(r.flow.sanity() == CalRec::SANITY_OFFSET_RANGE);
+    CHECK(logged("CALR,259END,SCALE_OFFSET_RANGE"));
     no_bus_write(r);
   }
 }
@@ -1559,6 +1561,25 @@ static void identity_threshold_follows_t() {
     else CHECK(r.flow.fail() == F::F_IDENTITY);
     no_bus_write(r);
   }
+}
+
+// sanity() is SANITY_OK unless the run ended F_SCALE: Begin clears the last run's verdict.
+static void sanity_is_reset_by_begin() {
+  Rig r;
+  bench_adc(r.a);
+  r.flow.SetCountsPerOctForTest(4096.0, 4431.48);
+  r.Begin();
+  CHECK(r.Run());
+  CHECK(r.flow.fail() == F::F_SCALE && r.flow.sanity() == CalRec::SANITY_GAIN_LOW);
+  CHECK(logged("CALR,259END,SCALE_GAIN_LOW"));
+  r.flow.Cancel();
+  r.flow.Cancel();
+  CHECK(r.flow.stage() == Stage::Idle);
+  r.wrong_jack = true;
+  r.Begin();
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_IDENTITY);
+  CHECK(r.flow.sanity() == CalRec::SANITY_OK);
 }
 
 // The write is disabled in the firmware (Cal259eFlow::kAllowWrite): the default build of this
@@ -1623,6 +1644,7 @@ int main() {
   whole_run_with_another_t();
   identity_threshold_follows_t();
   offset_out_of_range_fails();
+  sanity_is_reset_by_begin();
   write_stays_disabled_by_default();
   names();
   printf("test_cal259e_flow: %d checks, %d failures\n", checks, fails);

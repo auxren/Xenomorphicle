@@ -70,7 +70,7 @@ uint16_t Apply259e(uint16_t x, uint16_t gain, int16_t offset);
 // record stored by the first bench run is right, the stock gain 0x9041 is ~8 % sharp); H2
 // says it is ~4431.5 (stock tracks, that record is ~90 cents flat per octave). Only a
 // frequency measurement settles it (bench gates G1/G2). Change this value ONLY after those
-// measurements, and change its mirror in the private tools at the same time.
+// measurements, and keep every other implementation of this record format in step with it.
 constexpr double kCountsPerOct = 4096.0;
 // The T of the 3-argument Fit259e / 1-argument TargetCounts and ResidualCents: pinned, so the
 // golden vectors (fixtures/calrec_vectors.txt) never move when kCountsPerOct does.
@@ -86,17 +86,22 @@ FitError Fit259e(const FitPoint *p, int n, Channel *out);
 double TargetCounts(double mv, double counts_per_oct);
 double TargetCounts(double mv);
 
-// ---- sanity of a fitted channel (host-side check; no bus, no writing) ----------------
+// ---- ADC span / offset / channel check of a fitted channel (host-side; no bus, no writing) ----
 // The 259e's input ADC spans 10 V over 65536 raw counts (nominal; one bench unit measured
 // -0.01 % from it), so one 1.2 V octave is 7864.32 raw counts and a correct gain is
 // T * 65536 / 7864.32 whatever the meter says. A gain far from that is a wrong raw span,
 // a wrong channel or a wrong T. NOTE: the fit's gain is ~8.3333 * T by construction, so a
-// check against the SAME T cannot tell a wrong T; it needs the believed truth passed in.
+// check against the SAME T cannot tell a wrong T (it cannot detect a wrong counts-per-octave
+// constant); that needs the believed truth passed in, or the octave-ratio proof below.
 constexpr double kRawPerOct = 65536.0 * 1.2 / 10.0;  // 7864.32
 constexpr double kGainTol = 0.015;                   // |gain / g_exp - 1| <= 1.5 %
 constexpr double kChannelGainTol = 0.01;             // the two channels agree within 1 % of g_exp
-constexpr int kOffsetMax = 100;                      // offset in [0, 100] ...
-constexpr int kOffsetHardCap = 150;                  // ... and never beyond +-150 (-(raw at 0 V) * slope)
+// The fitted offset is -(raw at 0 V) * slope: the input's zero error times ~3.4 counts/mV
+// (about 3.7 at T 4431). The bench unit read +38/+42 (zero about -11 mV); the window allows
+// a zero from about -44 mV to +15 mV, so a unit with a zero at or above 0 V is not rejected,
+// and a bent input that drags the fitted offset down by ~90 counts still fits.
+constexpr int kOffsetMin = -50;
+constexpr int kOffsetMax = 150;
 enum Sanity { SANITY_OK, SANITY_GAIN_LOW, SANITY_GAIN_HIGH, SANITY_OFFSET_RANGE, SANITY_CH_MISMATCH };
 double ExpectedGain(double counts_per_oct);
 Sanity Sanity259e(const Channel &c, double counts_per_oct);
@@ -118,7 +123,6 @@ double ResidualCents(uint16_t raw, double mv, const Channel &c);
 // The same without the 0..0x7FFF clamp. The 259e clamps its corrected code at
 // 0x7FFF = 32767, one count under the 9600 mV target (32768), so the clamped
 // residual at 9600 mV hides a positive error there; this one shows it.
-double ResidualCentsUnclamped(uint16_t raw, double mv, const Channel &c, double counts_per_oct);
 double ResidualCentsUnclamped(uint16_t raw, double mv, const Channel &c, double counts_per_oct);
 double ResidualCentsUnclamped(uint16_t raw, double mv, const Channel &c);
 

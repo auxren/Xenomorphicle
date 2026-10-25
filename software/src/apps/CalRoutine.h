@@ -1338,7 +1338,10 @@ FLASHMEM void AppCalRoutine::Draw259Results() const {
     snprintf(b, sizeof(b), "%-9s worst %sc", c ? "MOD PITCH" : "PITCH", w);
     Row(2 * c, b);
     Centi(n, sizeof(n), res.nonlin_cents[c]);
-    const float pct = (float(res.ch[c].gain) / float(Cal259eFlow::kNominalGain) - 1.f) * 100.f;
+    // Against the gain the ADC span predicts for the target scale T (not against the stock
+    // 0x9041, which would read about -7.5 % on every good run); T itself is unproven.
+    const float pct =
+        (float(res.ch[c].gain) / float(CalRec::ExpectedGain(CalRec::kCountsPerOct)) - 1.f) * 100.f;
     snprintf(b, sizeof(b), " nl %sc gain %+.1f%%", n, double(pct));
     Row(2 * c + 1, b);
   }
@@ -1365,7 +1368,7 @@ FLASHMEM void AppCalRoutine::Draw259Failed() const {
   using F = Cal259eFlow;
   const F &f = CalRoutinePorts::Flow259e();
   Cal259eFailRows rows;
-  Cal259eFailText(f.fail(), f.commit_result(), f.backup_why(), f.target(), &rows);
+  Cal259eFailText(f.fail(), f.commit_result(), f.backup_why(), f.target(), &rows, f.sanity());
   Title(f.fail() == F::F_CANCELLED ? "Run cancelled" : "Run stopped");
   for (int r = 0; r < 5; ++r) Row(r, rows.row[r]);
   Footer("L:back");

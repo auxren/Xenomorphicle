@@ -174,7 +174,7 @@ Sanity Sanity259e(const Channel &c, double counts_per_oct) {
   if (g < g_exp * (1.0 - kGainTol)) return SANITY_GAIN_LOW;
   if (g > g_exp * (1.0 + kGainTol)) return SANITY_GAIN_HIGH;
   const int o = (int)c.offset;
-  if (o < 0 || o > kOffsetMax || o > kOffsetHardCap || o < -kOffsetHardCap) return SANITY_OFFSET_RANGE;
+  if (o < kOffsetMin || o > kOffsetMax) return SANITY_OFFSET_RANGE;
   return SANITY_OK;
 }
 

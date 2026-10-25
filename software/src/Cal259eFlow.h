@@ -33,7 +33,7 @@
 //               table's code (OutputPort::CodeForMv), MeterMeasure (the Self
 //               rule, kReadings), the meter median within kPatchTolMv of the
 //               requested mV, then the ADC median. Fit (CalRec::Fit259e on the
-//               meter mV), CalRec::Sanity259e on the gain/offset (T * 65536 / 7864.32 +-1.5 %), verify residuals
+//               meter mV), the ADC span / offset / channel check CalRec::Sanity259e (gain T * 65536 / 7864.32 +-1.5 %), verify residuals
 //               within +-3 cents. Output A is released after each channel.
 //   Results     Continue -> Confirm; ConfirmWrite -> Backup (both only with
 //               kAllowWrite, which is false in the firmware: Results is then the
@@ -140,9 +140,10 @@ class Cal259eFlow {
   // raw counts (the stock correction's step, ~29076 counts at T = 4096). T defaults to
   // CalRec::kCountsPerOct, the one (unproven) target scale.
   static double IdentityThreshold(double counts_per_oct = CalRec::kCountsPerOct);
-  // The pre-write scale check is CalRec::Sanity259e (gain +-1.5 % of T * 65536 / 7864.32,
-  // offset 0..100, channels within 1 %); a failure ends the run with F_SCALE. The old
-  // +-10 % window around 0x9041 could not fail on a wrong T and is gone.
+  // The pre-write check is CalRec::Sanity259e, an ADC span / offset / channel agreement
+  // check (gain +-1.5 % of T * 65536 / 7864.32, offset -50..150, channels within 1 %); a
+  // failure ends the run with F_SCALE. It cannot detect a wrong counts-per-octave constant T.
+  // The old +-10 % window around 0x9041 is gone.
   static constexpr double kPatchTolMv = 50.0;     // meter median vs requested mV
   static constexpr double kVerifyCents = 3.0;
   // PROVISIONAL, for the operator to confirm from real bench data: the largest fit-point

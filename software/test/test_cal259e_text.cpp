@@ -99,7 +99,20 @@ static void every_failure_fits_the_screen() {
       }
 }
 
+// F_SCALE names the ADC span / offset / channel check that failed.
+static void scale_names_the_check() {
+  for (CalRec::Sanity k : {CalRec::SANITY_GAIN_LOW, CalRec::SANITY_GAIN_HIGH,
+                           CalRec::SANITY_OFFSET_RANGE, CalRec::SANITY_CH_MISMATCH}) {
+    Cal259eFailRows r;
+    Cal259eFailText(F::F_SCALE, 0, BK_NONE, 0x28, &r, k);
+    CHECK(Has(r, CalRec::SanityName(k)));
+    CHECK(Has(r, "Nothing was written") || Has(r, "Output A released"));
+    for (int i = 0; i < 5; ++i) CHECK(strlen(r.row[i]) <= 21);
+  }
+}
+
 int main() {
+  scale_names_the_check();
   busy_text_says_what_to_do();
   refused_is_not_nothing_written();
   readback_is_unknown_not_committed();

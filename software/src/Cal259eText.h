@@ -23,7 +23,9 @@ struct Cal259eFailRows {
   char row[5][24];
 };
 
+// sanity: with F_SCALE, which ADC span / offset / channel check failed (the screen names it).
 void Cal259eFailText(Cal259eFlow::FailCode code, int commit_result, BackupWhy why,
-                     uint8_t target, Cal259eFailRows *out);
+                     uint8_t target, Cal259eFailRows *out,
+                     CalRec::Sanity sanity = CalRec::SANITY_OK);
 
 #endif  // CAL259ETEXT_H_

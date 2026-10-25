@@ -13,7 +13,7 @@
 #include "Cal259eBackup.h"
 
 C259T_CODE void Cal259eFailText(Cal259eFlow::FailCode code, int cr, BackupWhy why, uint8_t target,
-                                Cal259eFailRows *out) {
+                                Cal259eFailRows *out, CalRec::Sanity sanity) {
   using F = Cal259eFlow;
   const char *l1 = "", *l2 = "";
   char r3[24], r4[24], l2b[24];
@@ -26,7 +26,11 @@ C259T_CODE void Cal259eFailText(Cal259eFlow::FailCode code, int cr, BackupWhy wh
     case F::F_IDENTITY: l1 = "No 259e saw A rise."; l2 = "Wrong jack patched?"; break;
     case F::F_PATCH: l1 = "Meter and held volts"; l2 = "differ by > 50 mV."; break;
     case F::F_NOISY: l1 = "Meter reading noisy"; l2 = "(loose lead?)"; break;
-    case F::F_SCALE: l1 = "Gain/offset not as"; l2 = "expected: no write."; break;
+    case F::F_SCALE:
+      snprintf(l2b, sizeof(l2b), "%s", CalRec::SanityName(sanity));
+      l1 = "ADC span check:"; l2 = l2b;
+      snprintf(r3, sizeof(r3), "Scale T is unproven.");
+      break;
     case F::F_FIT: l1 = "The fit failed (an"; l2 = "offset out of range)."; break;
     case F::F_VERIFY: l1 = "Verify residual"; l2 = "is over 3 cents."; break;
     case F::F_NONLIN: l1 = "Fit-point nonlinear-"; l2 = "ity is over 5 cents."; break;

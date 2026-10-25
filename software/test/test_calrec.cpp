@@ -318,7 +318,7 @@ static void test_scale_constants() {
   CHECK(fabs(CalRec::ExpectedGain(4096.0) - 34133.3333) < 1e-3);
   CHECK(fabs(CalRec::ExpectedGain(4431.48) - 36929.0) < 0.5);  // ~ the stock gain 0x9041
   CHECK(CalRec::kGainTol == 0.015 && CalRec::kChannelGainTol == 0.01);
-  CHECK(CalRec::kOffsetMax == 100 && CalRec::kOffsetHardCap == 150);
+  CHECK(CalRec::kOffsetMin == -50 && CalRec::kOffsetMax == 150);
   CHECK(CalRec::kOctaveRatioTol == 0.0015);
 }
 
@@ -412,18 +412,18 @@ static void test_sanity_boundaries() {
 
 static void test_sanity_offset() {
   const double g = CalRec::ExpectedGain(4096.0);
+  CHECK(CalRec::Sanity259e(Ch(g, 38), 4096.0) == CalRec::SANITY_OK);   // the bench unit
   CHECK(CalRec::Sanity259e(Ch(g, 0), 4096.0) == CalRec::SANITY_OK);
-  CHECK(CalRec::Sanity259e(Ch(g, 100), 4096.0) == CalRec::SANITY_OK);
-  CHECK(CalRec::Sanity259e(Ch(g, -1), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
-  CHECK(CalRec::Sanity259e(Ch(g, 101), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
-  CHECK(CalRec::Sanity259e(Ch(g, 150), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
+  CHECK(CalRec::Sanity259e(Ch(g, -50), 4096.0) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(Ch(g, 150), 4096.0) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(Ch(g, -51), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
   CHECK(CalRec::Sanity259e(Ch(g, 151), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
-  CHECK(CalRec::Sanity259e(Ch(g, -151), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
   CHECK(CalRec::Sanity259e(Ch(g, 32767), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
   CHECK(CalRec::Sanity259e(Ch(g, -32768), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
   // the pair carries the offset verdict of whichever channel is bad
   CHECK(CalRec::Sanity259e(Ch(g, 40), Ch(g, 151), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
-  CHECK(CalRec::Sanity259e(Ch(g, -1), Ch(g, 40), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
+  CHECK(CalRec::Sanity259e(Ch(g, -51), Ch(g, 40), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
+  CHECK(CalRec::Sanity259e(Ch(g, -50), Ch(g, 150), 4096.0) == CalRec::SANITY_OK);
 }
 
 static void test_sanity_channel_mismatch() {
@@ -468,6 +468,14 @@ static void test_octave_ratio() {
   CHECK(!CalRec::OctaveRatioOk(0.0, 200.0, 1.0));
   CHECK(!CalRec::OctaveRatioOk(100.0, -200.0, 1.0));
   CHECK(!CalRec::OctaveRatioOk(100.0, 200.0, 0.0));
+  CHECK(!CalRec::OctaveRatioOk(200.0, 100.0, -1.0));   // a negative n_oct would flip the sign
+  CHECK(!CalRec::OctaveRatioOk(100.0, 200.0, -1.0));
+  CHECK(!CalRec::OctaveRatioOk(100.0, 200.0, NAN));
+  CHECK(!CalRec::OctaveRatioOk(100.0, INFINITY, 1.0));
+  CHECK(!CalRec::OctaveRatioOk(INFINITY, 200.0, 1.0));
+  CHECK(!CalRec::OctaveRatioOk(100.0, 200.0, INFINITY));
+  CHECK(!CalRec::OctaveRatioOk(100.0, 200.0, 1.0, -0.1));
+  CHECK(!CalRec::OctaveRatioOk(100.0, 200.0, 1.0, NAN));
   CHECK(!CalRec::OctaveRatioOk(100.0, NAN, 1.0));
 }
 

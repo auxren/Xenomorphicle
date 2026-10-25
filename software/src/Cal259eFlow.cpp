@@ -272,7 +272,13 @@ C259_CODE void Cal259eFlow::Fail(FailCode f) {
   BusTarget(target_ ? target_ : kFirstAddr);
   sub_ = S_NONE;
   fail_ = f;
-  C259_LOG(End, FailName(f));
+  if (f == F_SCALE) {  // the end line names the ADC span/offset/channel check that failed
+    char name[28];
+    snprintf(name, sizeof(name), "SCALE_%s", CalRec::SanityName(sanity_));
+    C259_LOG(End, name);
+  } else {
+    C259_LOG(End, FailName(f));
+  }
   SetStage(Stage::Failed);
 }
 
@@ -315,6 +321,7 @@ C259_CODE bool Cal259eFlow::Begin(MeterPort &meter, OutputPort &out, Clock &cloc
   for (int k = 0; k < CalRoutineMath::kNodes; ++k) table_[k] = out.TableCode(kSourceOutput, k);
   sub_ = S_NONE;
   fail_ = F_NONE;
+  sanity_ = CalRec::SANITY_OK;
   n_cand_ = 0;
   ch_ = -1;
   pt_ = -1;
@@ -689,9 +696,9 @@ C259_CODE void Cal259eFlow::FinishChannel() {
   result_.nonlin_cents[ch_] = float(nonlin);
   // Logged from result(), so the line and what the app shows are the same numbers.
   C259_LOG(Fit, ch_, c, double(result_.worst_verify_cents[ch_]), double(result_.nonlin_cents[ch_]));
-  // Sanity (replaces the old +-10 % window around 0x9041, which could not fail on a wrong
-  // T: the fit's gain is ~8.3333 * T whatever the meter reads). The second channel is
-  // also checked against the first.
+  // ADC span / offset / channel check (replaces the old +-10 % window around 0x9041). It
+  // cannot detect a wrong T: the fit's gain is ~8.3333 * T whatever the meter reads. The
+  // second channel is also checked against the first.
   sanity_ = (ch_ == 1 && (result_.valid_mask & 1u))
                 ? CalRec::Sanity259e(result_.ch[0], c, sanity_t())
                 : CalRec::Sanity259e(c, sanity_t());
