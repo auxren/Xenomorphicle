@@ -109,7 +109,7 @@ Every letter of the console is taken, so this is `=`. It reads a 259e running th
 | keys | action |
 |---|---|
 | `=28s` | status: `CALR,259E,28,STATUS,<flags hex>,<fmt>,<seq>` (flags: bit0 record valid, bit2 last commit ok, bit3 refused, bit4 no free slot) |
-| `=28r` | the stored record: `CALR,259E,28,REC,<60 hex digits>` (30 bytes), or `REC,NONE` when the module has none |
+| `=28r` | the stored record: `CALR,259E,28,REC,<58 hex digits>,inferred_crc_lo=<2 hex digits>` (bytes 0 to 28 as read; byte 29, the CRC low byte, is inferred from the CRC of the first 28 and shown apart), or `REC,NONE` when the module has none |
 | `=28a0` / `=28a1` | eight ADC words of channel 0 / 1: `CALR,259E,28,ADC,<ch>,<i>,<word>,<n>,FRESH\|SAME` (`n` is the module's sample counter; `SAME` means no new sample since the previous word) |
 
 A failed request logs `CALR,259E,<aa>,ERR,<why>`: `BUS_BUSY` (the bus stayed busy for 1 s), `NO_REPLY` (a READ unanswered after 3 retries of 60 ms), `BAD_REPLY`, `BUS_ERROR` (the module did not ACK), `ADDRESS` (not a calibratable address), `START`. While the Cal Routine owns the meter, or a request is already running, it refuses with `CALR,259E,ERR,BUSY_CAL` or `CALR,259E,ERR,BUSY`. Any other byte after `=` cancels with `CALR,259E,ERR,cancelled`.

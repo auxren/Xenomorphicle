@@ -864,10 +864,14 @@ FLASHMEM void Cal259Task() {
       if (!cbus.has_record()) {
         Serial.printf("CALR,259E,%02X,REC,NONE\r\n", caddr);
       } else {
+        // Bytes 0..28 were read from the module; byte 29 (the CRC low byte) cannot be
+        // read from a 31.2C4 module and is inferred from the CRC of the first 28, so it
+        // is a separate field and never part of the read hex.
         char hex[2 * CalRec::kRecLen259e + 1];
-        for (int i = 0; i < CalRec::kRecLen259e; ++i)
+        for (int i = 0; i < CalRec::kRecLen259e - 1; ++i)
           snprintf(hex + 2 * i, 3, "%02X", cbus.record()[i]);
-        Serial.printf("CALR,259E,%02X,REC,%s\r\n", caddr, hex);
+        Serial.printf("CALR,259E,%02X,REC,%s,inferred_crc_lo=%02X\r\n", caddr, hex,
+                      cbus.record()[CalRec::kRecLen259e - 1]);
       }
       cjob = J_NONE;
       break;

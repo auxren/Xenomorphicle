@@ -417,7 +417,8 @@ static void test_get_dump_master_refuses() {
 }
 
 // L1: the core refuses a BACKUP while the firmware card is served: the browser gets the
-// firmware-card NAK (10), not the generic "master busy" (5).
+// firmware-card NAK (10), not the generic "master busy" (5). (Bus Buccaneer shows
+// only "error 10" for it, not a distinct reason.)
 static void test_get_dump_refused_while_firmware_card_served() {
   printf("test_get_dump_refused_while_firmware_card_served\n");
   reset_all();

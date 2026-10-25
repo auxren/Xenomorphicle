@@ -156,7 +156,8 @@ class Cal259eFlow {
   // undoable: each 259e takes only 8 commits for its whole life); (2) the target scale
   // (4096 counts per octave) is not proven by the bench octave-ratio check (gate X3);
   // (3) the read-back of a stored record was wrong on the real module (31.2C4 corrupts
-  // two bytes of every 8-byte reply: see Cal259eBus.cpp kRecordArgs). Re-enable only by
+  // two bytes of every 8-byte reply: see Cal259eBus.cpp kRecordArgs; fixed in 31.2C5,
+  // host-tested only, and the Xeno-side workaround is not proven on hardware either). Re-enable only by
   // building with -DCAL259E_ALLOW_WRITE=1 after those are closed. The write code and its
   // tests are kept alive: the host suite and the simulator run with the constant on.
   // The macros count only when non-zero: -DCAL259E_ALLOW_WRITE=0 stays read-only.
