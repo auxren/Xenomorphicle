@@ -77,6 +77,9 @@ suite test_scope_range              ../src/ScopeRange.cpp
 suite test_scope_trigger            ../src/ScopeTrigger.cpp
 suite test_scope_fft                ../src/ScopeFft.cpp
 suite test_scope_freq
+suite test_scope_freq_line          ../src/ScopeFreqLine.cpp
+suite test_scope_freq_service       -pthread ../src/ScopeFreqService.cpp ../src/ScopeFreqLine.cpp ../src/ScopeSources.cpp
+suite test_scope_freq_console       ../src/ScopeFreqConsole.cpp
 suite test_sampler_math             ../src/SamplerMath.cpp
 suite test_sample_convert
 suite test_preset_op_queue
