@@ -2131,6 +2131,13 @@ void AppCaptainMIDI::HandleAppEvent(OC::AppEvent event) {
   if (event == OC::APP_EVENT_RESUME) {
     Resume();
   }
+#ifdef __IMXRT1062__
+  if (event == OC::APP_EVENT_CONFIG_RELOAD) {
+    // Suspended and the map was rewritten: own CAPTAIN.DAT again so a later
+    // save does not merge into someone else's map. Live setups[] untouched.
+    PhzConfig::load_config("CAPTAIN.DAT");
+  }
+#endif
   if (event == OC::APP_EVENT_FLUSH) {
     PackSetup(active_setup);
 #ifdef __IMXRT1062__

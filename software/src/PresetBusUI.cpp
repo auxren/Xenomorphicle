@@ -105,7 +105,7 @@ FLASHMEM static void persist_assignments() {
   PhzConfig::setValue(kLastTrigKey, last_trig);
   PhzConfig::save_config();
   // hand the shared map back to the active app (see persist_cur_slot)
-  app_switcher.current_app()->DispatchAppEvent(OC::APP_EVENT_RESUME);
+  app_switcher.current_app()->DispatchConfigHandback();
 }
 
 FLASHMEM void Enter() {

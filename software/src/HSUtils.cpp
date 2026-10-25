@@ -99,7 +99,7 @@ namespace HS {
     // background writer that skips this corrupts the active app's next
     // save (the exact bug class PresetEngine's persist_cur_slot hit).
     if (OC::app_switcher.current_app())
-      OC::app_switcher.current_app()->DispatchAppEvent(OC::APP_EVENT_RESUME);
+      OC::app_switcher.current_app()->DispatchConfigHandback();
   }
 
   FLASHMEM void ClockRoutingPump() {

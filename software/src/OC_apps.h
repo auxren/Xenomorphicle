@@ -84,7 +84,12 @@ enum AppEvent {
   // Flush volatile state to backing storage (bank files / config maps)
   // regardless of auto-save settings. Sent before a bus preset capture;
   // apps that don't care simply ignore it.
-  APP_EVENT_FLUSH
+  APP_EVENT_FLUSH,
+  // The shared config map was rewritten behind a SUSPENDED app: re-own it
+  // (reload the app's own file) without reopening. A bare RESUME here would
+  // wake the app up -- the Scope would take its arena back with nothing left
+  // to free it. Only the apps that keep a file in the map act on it.
+  APP_EVENT_CONFIG_RELOAD
 };
 
 // The original "app" interface was built around structs filled with function
@@ -122,6 +127,11 @@ public:
   void Draw(UiMode ui_mode) const;
   UiMode DispatchEvent(const UI::Event &);
   void DispatchAppEvent(AppEvent);
+  // A background writer handing the shared config map back to the active app.
+  // RESUME if the app is open, CONFIG_RELOAD if it is suspended.
+  void DispatchConfigHandback();
+  // Resumed and not suspended since. False until the first RESUME.
+  bool is_open() const { return open_; }
   void EditIOSettings();
   void DispatchLoop();
 
@@ -146,6 +156,7 @@ private:
 
 protected:
   IOSettings io_settings_;
+  bool open_ = false;
 
   AppBase(uint16_t appid, const char *const appname, const char *const boring_name)
   : id_(appid), name_(appname), boring_name_(boring_name) { }

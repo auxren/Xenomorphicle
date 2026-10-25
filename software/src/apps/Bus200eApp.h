@@ -2559,7 +2559,7 @@ FLASHMEM void AppBus200e::ConsumeScanDirty() {
   // Hand the shared map back. PhzConfig has ONE in-RAM map and every writer
   // is expected to leave it belonging to the active app; the next app to save
   // a file would otherwise inherit GLOBALS.
-  OC::app_switcher.current_app()->DispatchAppEvent(OC::APP_EVENT_RESUME);
+  OC::app_switcher.current_app()->DispatchConfigHandback();
   serial_printf("200e: scan set persisted (%d modules, %d versions)\n",
                 found_count_, versions);
 #endif
@@ -2576,8 +2576,9 @@ FLASHMEM void AppBus200e::LoadScanSet() {
   // from at least five places that each mean something different by it. Switch
   // in from Quadrants and the resident map is Quadrants' BANK file; arrive via
   // a preset recall and it is that slot's G section; persist_cur_slot,
-  // PresetBusUI::persist_assignments and the clock pump all dispatch it after
-  // re-owning GLOBALS for their own writes. Reading blind was worse than
+  // PresetBusUI::persist_assignments and the clock pump all hand it back after
+  // re-owning GLOBALS for their own writes (as a RESUME to an app that is
+  // open; a suspended one gets CONFIG_RELOAD instead). Reading blind was worse than
   // useless: keys 0x820/0x821 decode as ordinary bank keys, so getValue can
   // SUCCEED on Quadrants data and hand back a garbage address.
   PhzConfig::load_config();

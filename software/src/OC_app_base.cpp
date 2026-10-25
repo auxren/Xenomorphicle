@@ -567,11 +567,21 @@ UiMode AppBase::DispatchEvent(const UI::Event &event)
   return mode;
 }
 
+void AppBase::DispatchConfigHandback()
+{
+  DispatchAppEvent(open_ ? APP_EVENT_RESUME : APP_EVENT_CONFIG_RELOAD);
+}
+
 void AppBase::DispatchAppEvent(AppEvent app_event)
 {
   switch(app_event) {
     case APP_EVENT_RESUME:
+    open_ = true;
     io_settings_menu.Close();
+    break;
+    case APP_EVENT_SUSPEND:
+    open_ = false;
+    break;
     default:
     break;
   }

@@ -96,7 +96,10 @@ public:
             //OnSendSysEx();
         }
     }
-    void SetBank(uint8_t id) {
+    // SetBank without LoadGlobals: the file into the shared map, migrated.
+    // For handing the map back to an app whose live state must stay as it is.
+    void LoadBankMap(uint8_t id) {
+      loaded_bank_ = id;
       bank_filename[5] = '0' + char(id / 100);
       bank_filename[6] = '0' + char(id / 10 % 10);
       bank_filename[7] = '0' + char(id % 10);
@@ -107,8 +110,6 @@ public:
 
       if (!success) // fallback load from LFS
         PhzConfig::load_config(bank_filename);
-
-      LoadGlobals();
 
       // Version flag - for future reconfigurations...
       //  - This can be used to migrate old data after breaking changes to the schema
@@ -134,6 +135,10 @@ public:
 
       // update version key after all data migrations
       PhzConfig::setValue(VERSION_KEY, PRESET_FILE_REVISION);
+    }
+    void SetBank(uint8_t id) {
+      LoadBankMap(id);
+      LoadGlobals();
     }
 
     // lower 11 bits of PhzConfig KEY
@@ -825,7 +830,8 @@ protected:
 
 private:
     char bank_filename[16] = "BANK_000.DAT";
-    uint8_t bank_num = 0;
+    uint8_t bank_num = 0;         // the bank dial: moves while the knob turns
+    uint8_t loaded_bank_ = 0;     // the bank bank_filename and the map hold
     int queued_preset = -1;
     int preset_cursor = 0;
     HemisphereApplet *active_applet[4]; // Pointers to actual applets
@@ -1579,6 +1585,19 @@ FLASHMEM void AppQuadrants::HandleAppEvent(OC::AppEvent event) {
     switch (event) {
     case OC::APP_EVENT_RESUME:
         Resume();
+        break;
+
+    case OC::APP_EVENT_CONFIG_RELOAD:
+        // Something else rewrote the shared map: take our bank back, or the
+        // next Suspend's auto-save would write the preset into whatever the
+        // map holds now and replace the bank file with it. Map only -- no
+        // LoadGlobals: the live globals (quantizers, MIDI maps, patterns...)
+        // may hold edits that only store_to_preset persists, and loading the
+        // file's older ones would be stored straight back over them. The bank
+        // that is loaded, not the dial: bank_num moves while the knob turns and
+        // only a confirm loads it, so following it would make the Suspend that
+        // comes next save this bank's preset into another bank's file.
+        LoadBankMap(loaded_bank_);
         break;
 
     case OC::APP_EVENT_SCREENSAVER_ON:

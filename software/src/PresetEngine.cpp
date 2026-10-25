@@ -1103,7 +1103,7 @@ FLASHMEM bool SaveSlot(uint8_t slot) {
   // 7. hand the config map back to the active app (Resume reloads its file).
   // Same hazard as step 2 -- Captain's Resume() also touches PhzConfig's
   // cfg_store and setups[] -- so app_isr stays off until this returns too.
-  app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
+  app_switcher.current_app()->DispatchConfigHandback();
   CORE::app_isr_enabled = true;
   watchdog_feed();
   ph[8] = wall.lap_ms();
@@ -1343,7 +1343,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
     // map may now be cleared/partial: restore base-map ownership, then let
     // the app reload its own file so no later writer inherits slot content
     PhzConfig::load_config();
-    app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
+    app_switcher.current_app()->DispatchConfigHandback();
     HS::PokePopup(HS::MESSAGE_POPUP, "Bad preset");
     return recall_refused(slot, "BAD PRESET");
   }
@@ -1354,7 +1354,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   const uint16_t slot_app_id = meta & 0xFFFF;
   if (schema != kSchemaVersion) {
     PhzConfig::load_config();  // drop slot content, re-own the base map
-    app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
+    app_switcher.current_app()->DispatchConfigHandback();
     HS::PokePopup(HS::MESSAGE_POPUP, "Bad preset ver");
     return recall_refused(slot, "OLD PRESET");
   }
@@ -1380,6 +1380,15 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   recall_replacing = (uint8_t)(flags & (CONTENT_BANK | CONTENT_SCENERY | CONTENT_CAPTAIN));
   if (boot_recall) recall_replacing &= (uint8_t)~CONTENT_CAPTAIN;
   recall_replacing |= RECALL_SUSPEND;
+  // Step 1 left the slot's G section in the shared map (deserialize clears
+  // it), and the Suspend below stores through that map: Quadrants would save
+  // its preset into the slot's globals and replace its bank file with them.
+  // Give the outgoing app its own file back first: the map only. Not a RESUME
+  // (that would reload Captain's live setup from disk just before it is
+  // suspended), and nothing that reapplies stored state to the live one: the
+  // Suspend writes the live state out, edits included.
+  app_switcher.current_app()->DispatchAppEvent(APP_EVENT_CONFIG_RELOAD);
+  const bool was_open = app_switcher.current_app()->is_open();
   app_switcher.current_app()->DispatchAppEvent(APP_EVENT_SUSPEND);
   recall_replacing = 0;
   // Those handlers persist through the shared PhzConfig map (bank file,
@@ -1387,7 +1396,9 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   // be gone by now. Stage it again: RAM plus one container open, ~1 ms.
   if (recall_stage_head(slot, from_container) != STAGE_OK) {
     PhzConfig::load_config();
-    app_switcher.current_app()->DispatchAppEvent(APP_EVENT_RESUME);
+    // Back to how it was: reopened only if the recall found it open.
+    app_switcher.current_app()->DispatchAppEvent(was_open ? APP_EVENT_RESUME
+                                                          : APP_EVENT_CONFIG_RELOAD);
     HS::PokePopup(HS::MESSAGE_POPUP, "Bad preset");
     return recall_refused(slot, "BAD PRESET");
   }

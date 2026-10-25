@@ -78,7 +78,8 @@ uint32_t StampMs();
 int ConsumeQuadrantsRecallHint();
 
 // What the recall in progress is about to overwrite. Non-zero only while
-// RecallSlot has the outgoing app in APP_EVENT_SUSPEND, and only for the
+// RecallSlot has the outgoing app in APP_EVENT_CONFIG_RELOAD and then
+// APP_EVENT_SUSPEND, and only for the
 // stores the slot actually carries (a slot saved on a module that never ran
 // Scenery has no 'S' section, and SCENERY.DAT then survives the recall).
 // A Suspend handler's auto-save to one of these files is replaced by the

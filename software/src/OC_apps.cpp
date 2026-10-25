@@ -633,6 +633,15 @@ size_t ResolveAppIndexByID(uint16_t app_id) {
 FLASHMEM
 void AppSwitcher::set_current_app(size_t index)
 {
+  // Whoever leaves an app suspends it first; this catches the ones that did
+  // not (booting into the app menu, a recall while it is open), so an app that
+  // holds memory only while open lets go of it.
+  // Runs with app_isr_enabled already false on the menu exit, and from the
+  // loop with it still on in a recall's set_current_app: a Suspend handler
+  // must not assume either.
+  AppBase *old_app = current_app();
+  if (old_app && old_app->is_open())
+    old_app->DispatchAppEvent(APP_EVENT_SUSPEND);
   current_app_ = app_container[index];
   global_settings.current_app_id = current_app_.id();
 }
