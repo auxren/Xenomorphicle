@@ -62,8 +62,8 @@ void BuildFilename(int file_num, char *buf, size_t buflen) {
 // Controller()/audio-ISR-hot surface at all (see apps/SamplerApp.h's class
 // comment) -- UpdateGate() and ComputeRateMultiplier() below are called
 // from Loop(), the main non-ISR loop, at most 8x per pass, the same cold
-// cadence as every other function here. This matches ScopeMath.cpp's own
-// choice to FLASHMEM everything uniformly, for the same reason (ScopeApp is
+// cadence as every other function here. This matches the Scope modules' own
+// choice (ScopeSources.cpp etc.) to FLASHMEM everything uniformly (ScopeApp is
 // also Controller()-less).
 SAMPLER_MATH_CODE
 GateEdge UpdateGate(int32_t raw, bool &prev_high) {

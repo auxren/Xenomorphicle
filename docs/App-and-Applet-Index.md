@@ -32,6 +32,7 @@ Not everything can fit at once on Teensy 3.2 hardware, but you can use the [defa
  * [Passencore](Passencore) - Generate a chord progression from LFOs (from sixolet)
  * [Piqued](Piqued) - Quad envelope generator
  * [Scale Editor](Scale-Editor) - Edit and save microtonal scales
+ * [Scope](Scope-App) - Triggered, auto-ranging oscilloscope and spectrum view of the audio, CV and TR jacks
  * [Sequins](Sequins) - Basic dual-channel sequancer
  * [Viznutcracker, sweet!](Viznutcracker-sweet) - Quad Bytebeat generator
  * [Backup / Restore](Backup-and-Restore) - Transfer app and calibration data as SysEx

@@ -13,6 +13,7 @@ ADC_CHANNEL ADC_CHANNEL_5=4, ADC_CHANNEL_6=5, ADC_CHANNEL_7=6, ADC_CHANNEL_8=7;
 namespace OC {
 
 /*static*/ ADC::CalibrationData *ADC::calibration_data_;
+/*static*/ volatile ADC::ScopeFrameHook ADC::scope_frame_hook_ = nullptr;
 /*static*/ uint32_t ADC::raw_[ADC_CHANNEL_COUNT];
 /*static*/ uint32_t ADC::smoothed_[ADC_CHANNEL_COUNT];
 #ifdef OC_ADC_ENABLE_DMA_INTERRUPT
@@ -527,6 +528,15 @@ FLASHMEM void ADC33131D_Start() {
     uint32_t poffset = ((uint32_t)p - (uint32_t)adc_buffer) & 0xFFF0;
     size_t count = ((poffset - old_poffset) % sizeof(adc_buffer)) / sizeof(adc33131_frame_t);
     if (count > 0) {
+      // The Scope's hook sees every new frame once, oldest first: they run
+      // from old_poffset (the read cursor) up to the DMA's current frame.
+      if (scope_frame_hook_) {
+        for (size_t i = 0; i < count; i++) {
+          const adc33131_frame_t *f = (adc33131_frame_t *)((uint32_t)adc_buffer +
+            (old_poffset + i * sizeof(adc33131_frame_t)) % sizeof(adc_buffer));
+          scope_frame_hook_(f->in);
+        }
+      }
       // if we got any full ADC33131D frames, average them together and update
       int32_t sum[8] = {0, 0, 0, 0, 0, 0, 0, 0};
       for (size_t i=0; i < count; i++) {

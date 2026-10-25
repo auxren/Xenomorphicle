@@ -8,7 +8,7 @@
 // Pure logic for the Sampler app (apps/SamplerApp.h): filename-from-number
 // generation, parameter clamping, and the per-slot gate/trigger edge
 // detector. No Arduino/Audio.h dependency -- host-tested by
-// test/test_sampler_math.cpp, same split as ScopeMath.h/.cpp and
+// test/test_sampler_math.cpp, same split as ScopeSources.h/.cpp and
 // TweightyTapPhase.h/.cpp.
 //
 // FILE CONVENTION: mirrors audio_applets/WAVPlayerApplet.h exactly -- SD
@@ -46,8 +46,8 @@ inline constexpr int kMinRatePercent = 25;    // 0.25x
 inline constexpr int kMaxRatePercent = 400;   // 4.0x
 inline constexpr int kDefaultRatePercent = 100;
 
-// OC::ADC::value() full-scale for a CV input (see ScopeMath.h's own
-// kCvInFullScale comment: a 12-bit-resolution, calibrated, zero-centered
+// OC::ADC::value() full-scale for a CV input (as the pre-2026-10 Scope.s
+// ScopeMath kCvInFullScale had it: a 12-bit-resolution, calibrated, zero-centered
 // reading, roughly +/-2048 at full +/-5V swing).
 inline constexpr int32_t kCvFullScale = 2048;
 

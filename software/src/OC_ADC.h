@@ -136,6 +136,20 @@ public:
     return ::InputCal::DirectValue(channel);
   }
 
+  // The calibrated reading for one raw12 code, as calibrated_value() gives
+  // for the live one: the Scope (ScopeCapture.cpp) captures raw codes at
+  // frame rate in the ISR and converts them here, in loop context.
+  static int32_t calibrated_from_raw12(ADC_CHANNEL channel, uint32_t raw12) {
+    const int32_t uncal = (int32_t)calibration_data_->offset[channel] - (int32_t)raw12;
+    return ::InputCal::Value(channel, raw12, uncal);
+  }
+
+  // Called with every un-averaged ADC33131D frame (in[0..3] = CV5-8,
+  // in[4..7] = CV1-4) from Scan_DMA(), core-ISR context. One writer at a
+  // time; nullptr (the default) costs one load per frame.
+  typedef void (*ScopeFrameHook)(const int16_t in[8]);
+  static void set_scope_frame_hook(ScopeFrameHook h) { scope_frame_hook_ = h; }
+
   // Pitch units (1536 per octave) for the same reading: the nominal scale on
   // true volts when calibrated, else value_to_pitch(value(channel)).
   static int32_t calibrated_pitch(ADC_CHANNEL channel) {
@@ -171,6 +185,7 @@ private:
   }
 
   static ::ADC adc_;
+  static volatile ScopeFrameHook scope_frame_hook_;
   static CalibrationData *calibration_data_;
 
   static uint32_t raw_[ADC_CHANNEL_COUNT];
