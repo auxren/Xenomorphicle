@@ -369,17 +369,39 @@ static void bad_reply_length() {
 }
 
 static void record_read_uses_args_the_module_answers() {
-  Rig g;
-  uint8_t rec[30];
-  MakeRecord(rec, 5);
-  g.sim.Install(rec);
-  g.bus.ReadRecord();
-  CHECK(g.Run() == 1);
-  CHECK(g.bus.has_record() && memcmp(g.bus.record(), rec, 30) == 0);
-  int k = 0;
-  const int args[4] = {0, 8, 16, 22};   // arg > 22 gets no data from the module
-  for (auto &f : g.sim.log) { CHECK(f[7] == args[k]); ++k; }
-  CHECK(k == 4);
+  // The module (31.2C4) corrupts data bytes 5 and 7 of every 8-byte reply (sim259e.h), so
+  // the record is assembled from bytes 0..4 and 6 of overlapping reads, and the unreadable
+  // last byte (record offset 29) is the low CRC byte, inferred. Args stay <= 22.
+  for (int fixed = 0; fixed < 2; ++fixed) {
+    Rig g;
+    g.sim.stock_scratch_overlap = !fixed;
+    uint8_t rec[30];
+    MakeRecord(rec, 5);
+    g.sim.Install(rec);
+    g.bus.ReadRecord();
+    CHECK(g.Run() == 1);
+    CHECK(g.bus.has_record() && memcmp(g.bus.record(), rec, 30) == 0);
+    int k = 0;
+    const int args[7] = {0, 5, 10, 15, 20, 21, 22};
+    for (auto &f : g.sim.log) { CHECK(k < 7 && f[7] == args[k]); ++k; }
+    CHECK(k == 7);
+  }
+}
+
+// A record whose bytes sit exactly at the positions the module corrupts (5, 7, 13, 15, ...)
+// must read back exactly; a stored byte that differs must show.
+static void record_read_back_detects_a_wrong_stored_byte() {
+  for (int pos = 0; pos < 29; ++pos) {
+    Rig g;
+    uint8_t rec[30], bad[30];
+    MakeRecord(rec, 9);
+    memcpy(bad, rec, 30);
+    bad[pos] ^= 0x55;                      // a record the module holds that is not rec
+    g.sim.Install(bad);
+    g.bus.ReadRecord();
+    CHECK(g.Run() == 1);
+    CHECK(memcmp(g.bus.record(), rec, 30) != 0);
+  }
 }
 
 static void every_sent_frame_allowed() {
@@ -530,6 +552,7 @@ int main() {
   read_timeout_retries_then_fails();
   bad_reply_length();
   record_read_uses_args_the_module_answers();
+  record_read_back_detects_a_wrong_stored_byte();
   every_sent_frame_allowed();
   stale_replies_are_dropped();
   printf("%d checks, %d failures\n", checks, fails);

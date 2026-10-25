@@ -153,7 +153,7 @@ class Cal259eBus {
   int retries_ = 0;
   int sends_ = 0;
   int last_send_rc_ = 0;     // Send's code for the frame that ended in E_BUS_ERROR
-  uint8_t chunk_ = 0;        // RECORD: 0..3; PUT: next frame 0..3
+  uint8_t chunk_ = 0;        // RECORD: 0..6 (kRecordArgs); PUT: next frame 0..3
 
   uint8_t put_rec_[30] = {};
   uint16_t put_seq_ = 0;       // the seq of put_rec_ (valid when it decoded)

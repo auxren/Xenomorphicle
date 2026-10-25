@@ -180,8 +180,23 @@ struct Sim259e : BusPort {
     ok_bit = true;
   }
 
-  void Reply(uint8_t src, uint8_t what, uint8_t arg, const uint8_t *d, uint8_t dn) {
+  // Firmware 31.2C4 (as built by make_259e_rc4.py): the reply frame buffer REPLY=0x067A
+  // overlaps the stock send routine's scratch. 0x8D22 clears XDATA 0x0684 (= reply byte
+  // 10 = data[5]) before it sends, and 0x8815 uses 0x0686 (= reply byte 12 = data[7])
+  // as its byte-index counter, so while byte 12 goes out it holds 12. Any reply with
+  // 8 data bytes therefore arrives with data[5] = 0x00 and data[7] = 0x0C. (Status and
+  // ADC replies are too short to reach them.) Set false to model a fixed module.
+  bool stock_scratch_overlap = true;
+
+  void Reply(uint8_t src, uint8_t what, uint8_t arg, const uint8_t *d0, uint8_t dn) {
     if (drop_replies) return;
+    uint8_t dm[16];
+    memcpy(dm, d0, dn);
+    if (stock_scratch_overlap && src == addr) {
+      if (dn > 5) dm[5] = 0x00;
+      if (dn > 7) dm[7] = 0x0C;
+    }
+    const uint8_t *d = dm;
     std::vector<uint8_t> fr;
     fr.push_back(0);
     fr.push_back(CalRec::kMaster);

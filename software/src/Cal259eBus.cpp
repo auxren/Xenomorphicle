@@ -15,7 +15,16 @@ constexpr uint8_t Cal259eBus::kStatusValid, Cal259eBus::kStatusOk, Cal259eBus::k
 // READs of the record: the last starts at 22, not 24. The module sends no data
 // for arg > 22 (CONTRACT, 259e behaviour), so bytes 22..29 are fetched as the
 // final 8 and only the 6 new ones (24..29) are kept.
-static const uint8_t kRecordArgs[4] = {0, 8, 16, 22};
+// READ what 0 args. Firmware 31.2C4 corrupts data bytes 5 and 7 of every 8-byte reply
+// (its reply buffer overlaps the stock send routine's scratch: XDATA 0x0684 is cleared
+// before the send, 0x0686 is the send loop's byte counter, so it reads 12 while that
+// byte goes out). So only bytes 0..4 and 6 of a reply are used, and the 7 reads overlap
+// to cover record offsets 0..28. Offset 29 (the low CRC byte) can only ever be data[7] of
+// the arg-22 read (arg <= 22), so it is not read: it is the CRC16 of bytes 0..27, which
+// the module itself has already checked (it sends no data without a valid record).
+static const uint8_t kRecordArgs[7] = {0, 5, 10, 15, 20, 21, 22};
+static const uint8_t kRecordLastChunk = 6;
+static const int kGoodData[6] = {0, 1, 2, 3, 4, 6};
 
 void Cal259eBus::Begin(BusPort &bus, CalRoutine::Clock &clock, uint8_t target) {
   bus_ = &bus;
@@ -186,13 +195,14 @@ int Cal259eBus::TickRead() {
         has_record_ = false;  // no record: a result, not an error
         break;
       }
-      if (chunk_ < 3) memcpy(record_ + kRecordArgs[chunk_], last_data_, 8);
-      else memcpy(record_ + 24, last_data_ + 2, 6);  // bytes 22..29 -> keep 24..29
-      if (chunk_ < 3) {
+      for (int i : kGoodData)
+        if (kRecordArgs[chunk_] + i <= 28) record_[kRecordArgs[chunk_] + i] = last_data_[i];
+      if (chunk_ < kRecordLastChunk) {
         ++chunk_;
         BeginRead(0, kRecordArgs[chunk_]);
         return 0;
       }
+      record_[29] = (uint8_t) CalRec::Crc16(record_, 28);  // inferred, see kRecordArgs
       has_record_ = true;
       break;
     default:
