@@ -45,6 +45,15 @@ static void refused_is_not_nothing_written() {
   CHECK(Has(Rows(F::F_CANCELLED, E_NO_SLOT), "Nothing was written"));
 }
 
+// A foreign DONE/FAILED result (left by console 'm' or the 200e app) is never cleared by
+// retrying, so the BUSY text must tell the operator what to do, within 21 columns a row.
+static void busy_text_says_what_to_do() {
+  const Cal259eFailRows b = Rows(F::F_BACKUP, 0, BK_BUSY);
+  CHECK(Has(b, "Close the 200e app") && Has(b, "reboot the Xeno"));
+  CHECK(!Has(b, "Try again"));
+  for (int i = 0; i < 5; ++i) CHECK(strlen(b.row[i]) <= 21);
+}
+
 // S2: after a read-back mismatch the record is not known to be what was put.
 static void readback_is_unknown_not_committed() {
   const Cal259eFailRows rb = Rows(F::F_READBACK, 1);
@@ -91,6 +100,7 @@ static void every_failure_fits_the_screen() {
 }
 
 int main() {
+  busy_text_says_what_to_do();
   refused_is_not_nothing_written();
   readback_is_unknown_not_committed();
   commit_that_never_went_out_is_not_unknown();

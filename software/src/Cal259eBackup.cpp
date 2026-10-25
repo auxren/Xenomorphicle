@@ -69,7 +69,7 @@ C259B_CODE const char *Cal259eBackupText(BackupWhy w, int line) {
   static const char *const k[][3] = {
     /* BK_NONE */          {"Preset backup failed", "or was refused.", kNone},
     /* BK_FW_CARD */       {"Firmware card served.", "Reboot the Xeno with", "the card disarmed."},
-    /* BK_BUSY */          {"Another bus job is", "running. Try again.", kNone},
+    /* BK_BUSY */          {"A bus job is open.", "Close the 200e app or", "reboot the Xeno."},
     /* BK_START */         {"The bus refused the", "backup command.", kNone},
     /* BK_MASTER_FAILED */ {"The 259e did not", "answer the backup.", kNone},
     /* BK_LOST */          {"The backup job was", "reset by something.", kNone},
