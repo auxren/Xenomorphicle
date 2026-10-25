@@ -269,7 +269,7 @@ static void check_run_lines_by_value(Rig &r) {
       const int c = std::stoi(f[2]);
       CHECK(c == fits);
       ++fits;
-      char g[8];
+      char g[16];
       snprintf(g, sizeof(g), "%04X", unsigned(res.ch[c].gain));
       CHECK(f[3] == g);
       CHECK(f[4] == std::to_string(res.ch[c].offset));
@@ -282,7 +282,7 @@ static void check_run_lines_by_value(Rig &r) {
       ++recs;
       CHECK(f.size() == 4 && f[2] == "28");
       std::string hex;
-      char h[3];
+      char h[16];
       for (int i = 0; i < 30; ++i) { snprintf(h, sizeof(h), "%02X", r.flow.record()[i]); hex += h; }
       CHECK(f[3] == hex);
       CHECK(memcmp(r.flow.record(), r.a.active, 30) == 0);

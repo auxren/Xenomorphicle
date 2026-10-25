@@ -966,7 +966,7 @@ static std::vector<std::string> fixture_lines(const char *file, const char *pref
 // (CvMeter.cpp FlowPrepare / FlowTask / FlowFinish) to prove the new
 // formatters print the same bytes.
 static std::string legacy_point(int in, int k, int32_t mv, const CM::PointStats &s) {
-  char a[64], b[64], out[200];
+  char a[64], b[64], out[256];
   CM::FormatFixed(a, sizeof(a), CM::ScaleRound(s.mean_raw, 2), 2);
   CM::FormatFixed(b, sizeof(b), CM::ScaleRound(s.max_raw - s.min_raw, 2), 2);
   snprintf(out, sizeof(out), "INCAL,POINT,in=%d,%d,%ld,%s,%s,%lu", in + 1, k + 1, (long)mv, a, b,
@@ -975,7 +975,7 @@ static std::string legacy_point(int in, int k, int32_t mv, const CM::PointStats 
 }
 static std::string legacy_result(int in, int out, const CM::Fit &fit, float resid, float noise,
                                  CM::Verdict v) {
-  char g[64], o[64], r[64], n[64], line[256];
+  char g[64], o[64], r[64], n[64], line[384];  // 4 x 63-char fields + the fixed text is ~285
   CM::FormatFixed(g, sizeof(g), CM::ScaleRound(fit.gain * 1000.f, 1), 1);
   CM::FormatFixed(o, sizeof(o), CM::ScaleRound(fit.offset_mv, 2), 2);
   CM::FormatFixed(r, sizeof(r), CM::ScaleRound(resid, 2), 2);

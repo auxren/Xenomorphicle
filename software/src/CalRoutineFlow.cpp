@@ -53,12 +53,12 @@ CALR_CODE void Builder::Init(char *buf, size_t cap) {
 CALR_CODE void Builder::Str(const char *s) { if (n) CM::Append(b, n, &pos, s); }
 CALR_CODE void Builder::Field(const char *s) { Str(","); Str(s); }
 CALR_CODE void Builder::Int(long v) {
-  char t[16];
+  char t[24];
   snprintf(t, sizeof(t), ",%ld", v);
   Str(t);
 }
 CALR_CODE void Builder::Uns(unsigned long v) {
-  char t[16];
+  char t[24];
   snprintf(t, sizeof(t), ",%lu", v);
   Str(t);
 }
@@ -360,7 +360,7 @@ CALR_CODE int IncalPatch(char *buf, size_t n, int in, int out, const int32_t mv[
 CALR_CODE int IncalPoint(char *buf, size_t n, int in, int k, int32_t mv, const CM::PointStats &s) {
   Builder l;
   l.Init(buf, n);
-  char t[48];
+  char t[64];
   snprintf(t, sizeof(t), "INCAL,POINT,in=%d,%d,%ld", in + 1, k + 1, (long)mv);
   l.Str(t);
   l.Fix(s.mean_raw, 2);
@@ -373,7 +373,7 @@ CALR_CODE int IncalResult(char *buf, size_t n, int in, int out, const CM::Fit &f
                           float residual_mv, float noise_pp, CM::Verdict v) {
   Builder l;
   l.Init(buf, n);
-  char t[48];
+  char t[64];
   snprintf(t, sizeof(t), "INCAL,RESULT,in=%d,out=%d,gain_uv=", in + 1, out + 1);
   l.Str(t);
   char f[32];

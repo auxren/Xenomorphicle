@@ -406,7 +406,7 @@ static void existing_record_is_logged() {
   CHECK(r.flow.fail() == F::F_NONE);
   CHECK(r.flow.had_record() && r.flow.record_seq() == 5);
   std::string hex;
-  char h[3];
+  char h[16];
   for (int i = 0; i < 38; ++i) { snprintf(h, sizeof h, "%02X", r.m.active[i]); hex += h; }
   if (!F::kAllowWrite) CHECK(has_line("CALR,251OLD," + hex));
   Rig b;
@@ -903,7 +903,7 @@ static void check_run_lines_by_value(Rig &r) {
       const int c = std::stoi(f[2]);
       CHECK(c == fits);
       ++fits;
-      char g[8];
+      char g[16];
       snprintf(g, sizeof g, "%04X", unsigned(res.ch[c].gain));
       CHECK(f[3] == g);
       CHECK(f[4] == std::to_string(res.ch[c].offset));
@@ -1068,7 +1068,7 @@ static void write_path() {
   CHECK(commits_in(r.m) == 2);
   CHECK(has_line("CALR,251COMMIT,2,2") && r.flow.commits_since_power_up() == 2);   // not reset by Begin
   std::string hex;
-  char h[3];
+  char h[16];
   for (int i = 0; i < 38; ++i) { snprintf(h, sizeof h, "%02X", before[i]); hex += h; }
   CHECK(has_line("CALR,251OLD," + hex));
 }

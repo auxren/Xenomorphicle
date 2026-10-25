@@ -546,7 +546,7 @@ static void record(const char *name, const uint8_t *msg, int len) {
   CHECK(len >= 5 && len <= 64 && g_nvecs < 32);
   if (len < 5 || len > 64 || g_nvecs >= 32) return;
   Vec &v = g_vecs[g_nvecs++];
-  snprintf(v.name, sizeof(v.name), "%s", name);
+  snprintf(v.name, sizeof(v.name), "%.39s", name);
   v.cmd = msg[4];
   memcpy(v.bytes, msg, (size_t) len);
   v.len = (uint32_t) len;
@@ -845,7 +845,7 @@ static void test_vectors_written(void) {
   snprintf(path, sizeof(path), "%s", __FILE__);
   char *slash = strrchr(path, '/');
   if (slash) *(slash + 1) = 0; else path[0] = 0;
-  strncat(path, "fixtures/bus200e_sysex_vectors.json", sizeof(path) - strlen(path) - 1);
+  { const size_t pl = strlen(path); snprintf(path + pl, sizeof(path) - pl, "%s", "fixtures/bus200e_sysex_vectors.json"); }  // GCC: strncat bound may not depend on dest length
   FILE *f = fopen(path, "r");
   if (!f) f = fopen("fixtures/bus200e_sysex_vectors.json", "r");  // cwd fallback
   const bool writing = getenv("BUS200E_WRITE_VECTORS") != nullptr;
@@ -882,7 +882,7 @@ static void test_vectors_written(void) {
   CHECK(entries == g_nvecs);
   for (int i = 0; i < g_nvecs; ++i) {
     char key[128], want[160];
-    snprintf(key, sizeof(key), "{\"name\": \"%s\", \"cmd\": %d, \"hex\": \"", g_vecs[i].name, g_vecs[i].cmd);
+    snprintf(key, sizeof(key), "{\"name\": \"%.39s\", \"cmd\": %d, \"hex\": \"", g_vecs[i].name, g_vecs[i].cmd);
     const char *e = strstr(buf, key);
     CHECK(e != nullptr);
     if (!e) continue;
@@ -910,7 +910,7 @@ static void test_vectors_from_rust(void) {
   snprintf(path, sizeof(path), "%s", __FILE__);
   char *slash = strrchr(path, '/');
   if (slash) *(slash + 1) = 0; else path[0] = 0;
-  strncat(path, "fixtures/bus200e_sysex_rust_vectors.json", sizeof(path) - strlen(path) - 1);
+  { const size_t pl = strlen(path); snprintf(path + pl, sizeof(path) - pl, "%s", "fixtures/bus200e_sysex_rust_vectors.json"); }  // GCC: strncat bound may not depend on dest length
   FILE *f = fopen(path, "r");
   if (!f) f = fopen("fixtures/bus200e_sysex_rust_vectors.json", "r");  // cwd fallback
   CHECK(f != nullptr);

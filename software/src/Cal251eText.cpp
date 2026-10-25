@@ -14,7 +14,7 @@ C251T_CODE void Cal251eFailText(Cal251eFlow::FailCode code, int cr, int id_ch, i
                                 Cal251eFailRows *out) {
   using F = Cal251eFlow;
   const char *l1 = "", *l2 = "";
-  char l1b[24], l2b[24], r3[24], r4[24];
+  char l1b[32], l2b[32], r3[24], r4[24];  // l1b/l2b: "%d" of an int is up to 11 chars
   snprintf(r3, sizeof(r3), "Nothing was written.");
   snprintf(r4, sizeof(r4), "Outputs released.");
   switch (code) {

@@ -251,7 +251,13 @@ void NoteName(int midi, char *out) {
   int pc = midi % 12;
   if (pc < 0) pc += 12;
   const int octave = (midi - pc) / 12 - 1;
-  snprintf(out, 5, "%s%d", kNames[pc], octave);
+  // At most 4 characters + NUL reach `out`; format into a roomy local first so the
+  // int octave is provably bounded (GCC -Wformat-truncation), then cut.
+  char tmp[16];
+  snprintf(tmp, sizeof(tmp), "%s%d", kNames[pc], octave);
+  size_t i = 0;
+  for (; i < 4 && tmp[i]; ++i) out[i] = tmp[i];
+  out[i] = '\0';
 }
 
 CVMETER_MATH_CODE
@@ -312,7 +318,7 @@ int FormatCvLine(char *buf, size_t n, uint32_t ms, uint32_t seq, uint32_t droppe
   if (!n) return 0;
   buf[0] = '\0';
   size_t pos = 0;
-  char f[32];
+  char f[40];  // "CV," + three uint32 + two commas = 35 worst case
   snprintf(f, sizeof(f), "CV,%lu,%lu,%lu", (unsigned long)ms, (unsigned long)seq,
            (unsigned long)dropped);
   Append(buf, n, &pos, f);
