@@ -1348,6 +1348,8 @@ FLASHMEM __attribute__((noinline)) void loop() {
           if (unlock_shift == 0x70657721) {  // "pew!"
             console_unlocked = true;
             Serial.println("-=[ console unlocked ]=-");
+            Serial.println("NEVER send pew! again: p toggles the overlay, e starts a bench-DMM "
+                           "SCPI line that swallows the next input, w patches a card byte");
           }
           continue;
         }

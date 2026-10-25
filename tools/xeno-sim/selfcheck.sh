@@ -1782,21 +1782,70 @@ c259 "$R259" > "$TMP/c259r"
 has '259e results' < "$TMP/c259r" && has 'worst' < "$TMP/c259r" && has 'gain' < "$TMP/c259r" \
   && ok "the results screen shows worst cents, nonlinearity and gain" \
   || bad "no 259e results screen: $(head -5 "$TMP/c259r")"
-c259 "$R259,$PR,step600" > "$TMP/c259c"
-has 'WRITE 259e @28?' < "$TMP/c259c" \
-  && ok "the write is asked on a confirm screen of its own" \
-  || bad "no write confirm screen"
-has 'B:WRITE' < "$TMP/c259c" \
-  && ok "the confirm screen names B as the write" || bad "confirm screen without B:WRITE"
+has '259e results [0-9]* min' < "$TMP/c259r" \
+  && ok "the results screen shows how old the measurement is (it expires after 10 minutes)" \
+  || bad "the 259e results do not show their age: $(head -5 "$TMP/c259r")"
+
+# ---- the shipped firmware: the 259e write is DISABLED (Cal259eFlow::kAllowWrite) ----------
+has 'Write disabled: scale' < "$TMP/c259r" && has 'unproven. L L:discard' < "$TMP/c259r" \
+  && ok "disabled build: Results says 'Write disabled: scale unproven' and names the discard (L L)" \
+  || bad "no write-disabled notice on the results: $(cat "$TMP/c259r")"
+c259 "$R259,$PR,step600,$PR,step600" > "$TMP/c259n"
+has '259e results' < "$TMP/c259n" && ! has 'WRITE TO 259e' < "$TMP/c259n" \
+  && grep -q 'commits=0,puts=0' "$TMP/c259.err" && grep -q 'out_mv=0.0' "$TMP/c259.err" \
+  && ok "disabled build: encR on Results opens no confirm and sends nothing" \
+  || bad "the disabled build reached a confirm or wrote: $(cat "$TMP/c259n") $(cat "$TMP/c259.err")"
+c259 "$R259,$BP,$BP,step3000" > "$TMP/c259n"
+has '259e results' < "$TMP/c259n" && grep -q 'commits=0,puts=0' "$TMP/c259.err" \
+  && ok "disabled build: B on Results does nothing" || bad "B on the disabled Results: $(cat "$TMP/c259.err")"
+c259 "$R259,$LP" | has 'Press again: discard' \
+  && ok "the first encL on results only asks" || bad "results discard did not ask first"
+c259 "$R259,$LP,step500,$LP,step300" | has 'Cal Routine' \
+  && grep -q 'commits=0,puts=0' "$TMP/c259.err" && grep -q 'out_mv=0.0' "$TMP/c259.err" \
+  && ok "a measuring-only session is discarded at Results (L L): nothing written, output released" \
+  || bad "results discard did not return to the menu: $(cat "$TMP/c259.err")"
+
+# ---- the write path, against a build with CAL259E_ALLOW_WRITE=1 (build-write/) -------------
+# B must be HELD for 2 s on the write confirm (Cal259eHold.h); an early release, another
+# key, an encoder turn or an app switch ends the hold and writes nothing.
+SIMW="deadline 60 ./build-write/xeno-sim"
+[ -x ./build-write/xeno-sim ] || { bad "build-write/xeno-sim is missing (make check builds it)"; }
+c259w() {  # keys -> screen text on stdout, the plant's report on $TMP/c259.err
+  $SIMW --sim-259e --app "Cal Routine" --keys "$1" --dump-fb 2>"$TMP/c259.err" \
+    | python3 fbtext.py - | grep -v '{{'
+}
+HOLD='b-down,step2500,b-up,step60'   # 2.5 s: the write fires at 2.0 s
+CF="$R259,$PR,step600"               # the write confirm, past its dead time
+c259w "$R259" > "$TMP/c259r"
+has 'R:write' < "$TMP/c259r" && has 'L L:discard' < "$TMP/c259r" && ! has 'Write disabled' < "$TMP/c259r" \
+  && ok "write build: Results offers R:write and spells out L L:discard" \
+  || bad "write-build results footer: $(cat "$TMP/c259r")"
+c259w "$CF" > "$TMP/c259c"
+has 'WRITE TO 259e @28' < "$TMP/c259c" && has 'This uses 1 of 8' < "$TMP/c259c" \
+  && has 'slots, forever' < "$TMP/c259c" \
+  && ok "the confirm is its own screen: 'WRITE TO 259e' and 'this uses 1 of 8 slots forever'" \
+  || bad "no distinct write confirm screen: $(cat "$TMP/c259c")"
+has 'hold B:WRITE' < "$TMP/c259c" && has 'HOLD B for 2 s' < "$TMP/c259c" \
+  && ok "the confirm screen asks for B to be held" || bad "confirm screen without the hold text"
 # A B press inside kConfirmDeadMs (350 ms) after the confirm appears is not a yes.
-c259 "$R259,$PR,step100,$BP,step6000" | has 'WRITE 259e @28?' \
-  && ok "an early B press (inside the dead time) does not write" \
+c259w "$R259,$PR,step100,b-down,step2600,b-up,step60,step3000" | has 'WRITE TO 259e @28' \
+  && ok "a B hold that BEGINS inside the dead time does not write" \
   || bad "a B press 100 ms after the confirm screen wrote"
-grep -q 'commits=0' "$TMP/c259.err" \
-  && ok "... and sent no COMMIT" || bad "early B sent a COMMIT: $(cat "$TMP/c259.err")"
-c259 "$R259,$PR,step600,$BP,step6000" > "$TMP/c259d"
+grep -q 'commits=0,puts=0' "$TMP/c259.err" \
+  && ok "... and sent nothing" || bad "early B sent frames: $(cat "$TMP/c259.err")"
+c259w "$CF,$BP,step3000" > "$TMP/c259t"
+has 'Hold B to write' < "$TMP/c259t" && grep -q 'commits=0,puts=0' "$TMP/c259.err" \
+  && ok "a B tap writes nothing and the screen says 'Hold B to write'" \
+  || bad "a B tap wrote or showed no hint: $(cat "$TMP/c259t") $(cat "$TMP/c259.err")"
+c259w "$CF,b-down,step1900,b-up,step60,step3000" | has 'WRITE TO 259e @28' \
+  && grep -q 'commits=0,puts=0' "$TMP/c259.err" \
+  && ok "releasing B at 1.9 s writes nothing" || bad "a 1.9 s hold wrote: $(cat "$TMP/c259.err")"
+c259w "$CF,b-down,step1000" > "$TMP/c259t"
+has 'Keep holding' < "$TMP/c259t" \
+  && ok "while B is held the screen counts the hold" || bad "no hold progress on screen: $(cat "$TMP/c259t")"
+c259w "$CF,$HOLD,step6000" > "$TMP/c259d"
 has '259e calibrated' < "$TMP/c259d" && has 'byte-exact' < "$TMP/c259d" \
-  && ok "B on the confirm screen writes, reads back and shows Done" \
+  && ok "holding B for 2 s on the confirm screen writes, reads back and shows Done" \
   || bad "the 259e write did not reach Done: $(head -4 "$TMP/c259d")"
 grep -q 'commits=1,puts=[1-9]' "$TMP/c259.err" && grep -q 'bad_frames=0' "$TMP/c259.err" \
   && grep -q 'out_mv=0.0' "$TMP/c259.err" \
@@ -1804,31 +1853,42 @@ grep -q 'commits=1,puts=[1-9]' "$TMP/c259.err" && grep -q 'bad_frames=0' "$TMP/c
   || bad "plant report after a full run: $(cat "$TMP/c259.err")"
 grep -q 'seq=1,slots=1' "$TMP/c259.err" \
   && ok "a first record: seq 1 in slot 1" || bad "record state: $(cat "$TMP/c259.err")"
-c259 "$R259,$PR,step600,$LP,step100" | has 'encL again: discard' \
+c259w "$CF,b-down,step9000,b-up,step60,step3000" > /dev/null
+grep -q 'commits=1,puts=4' "$TMP/c259.err" \
+  && ok "a 9 s hold still writes exactly once (one COMMIT, 4 PUT frames)" \
+  || bad "a long hold wrote more than once: $(cat "$TMP/c259.err")"
+c259w "$CF,b-down,step1000,encl+,step1500,b-up,step60,step3000" | has 'WRITE TO 259e @28' \
+  && grep -q 'commits=0,puts=0' "$TMP/c259.err" \
+  && ok "a hold interrupted by an encoder turn writes nothing" \
+  || bad "an encoder turn did not end the hold: $(cat "$TMP/c259.err")"
+c259w "$CF,b-down,step1000,r-down,step40,r-up,step1500,b-up,step60,step3000" | has 'WRITE TO 259e @28' \
+  && grep -q 'commits=0,puts=0' "$TMP/c259.err" \
+  && ok "a hold interrupted by another key writes nothing" \
+  || bad "another key did not end the hold: $(cat "$TMP/c259.err")"
+c259w "$CF,r-down,step40,b-down,step2500,b-up,r-up,step3000" | has 'WRITE TO 259e @28' \
+  && grep -q 'commits=0,puts=0' "$TMP/c259.err" \
+  && ok "B pressed as a chord (another key down) never starts the hold" \
+  || bad "a B chord wrote: $(cat "$TMP/c259.err")"
+c259w "$CF,b-down,step800,$MENU,step2500,b-up,step500" > /dev/null
+grep -q 'commits=0,puts=0' "$TMP/c259.err" && grep -q 'out_mv=0.0' "$TMP/c259.err" \
+  && ok "an app switch during the hold writes nothing and releases output A" \
+  || bad "an app switch during the hold: $(cat "$TMP/c259.err")"
+c259w "$CF,$LP" | has 'encL again: discard' \
   && ok "the first encL on the write confirm only asks" \
   || bad "the write confirm discarded on one encL"
-c259 "$R259,$PR,step600,$LP,step500,$LP,step300" | has 'Cal Routine' \
+c259w "$CF,$LP,step500,$LP,step300" | has 'Cal Routine' \
   && grep -q 'commits=0' "$TMP/c259.err" && grep -q 'out_mv=0.0' "$TMP/c259.err" \
   && ok "the second encL on the confirm screen cancels: nothing written, output released" \
   || bad "cancel at the confirm wrote or held: $(cat "$TMP/c259.err")"
-c259 "$W259,$PR,step700,$LP,step300" | has 'Cal Routine' \
+c259w "$W259,$PR,step700,$LP,step300" | has 'Cal Routine' \
   && grep -q 'commits=0,puts=0' "$TMP/c259.err" && grep -q 'out_mv=0.0' "$TMP/c259.err" \
   && ok "encL mid-measurement cancels: no frame written, output released" \
   || bad "cancel while measuring wrote or held: $(cat "$TMP/c259.err")"
-c259 "$R259,$LP" | has 'Press again: discard' \
-  && ok "the first encL on results only asks" || bad "results discard did not ask first"
-c259 "$R259,$LP,step500,$LP,step300" | has 'Cal Routine' \
-  && grep -q 'commits=0' "$TMP/c259.err" \
-  && ok "the second encL on results discards" || bad "results discard did not return to the menu"
-
-has 'min old' < "$TMP/c259r" \
-  && ok "the results screen shows how old the measurement is (it expires after 10 minutes)" \
-  || bad "the 259e results do not show their age: $(head -5 "$TMP/c259r")"
 # A SUSPEND (the app switcher) after the COMMIT was ACKed: the Xeno still reads the
 # module's verdict with the app gone (CalRoutinePorts::CalTask), sends no second
 # COMMIT, and the menu shows the cancelled verdict. Before the CalTask fix a T41 /
 # T41_audio build never collected it and CalRunActive() stayed true for good.
-c259 "$R259,$PR,step600,$BP,step1000,$MENU,encr+,step100,r,step8000" > "$TMP/c259s"
+c259w "$CF,b-down,step2100,b-up,step900,$MENU,encr+,step100,r,step8000" > "$TMP/c259s"
 grep -q 'commits=1,' "$TMP/c259.err" && grep -q 'run_active=0,verdict=1' "$TMP/c259.err" \
   && ok "SUSPEND after the COMMIT ACK: one COMMIT, the verdict collected, no run left open" \
   || bad "suspend in Write: $(cat "$TMP/c259.err")"

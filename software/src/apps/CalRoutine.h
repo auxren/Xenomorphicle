@@ -27,12 +27,17 @@
 // below: later rows (bus modules) append there. The "259e pitch inputs" row
 // runs Cal259eFlow (host-tested): the Xeno's output A and the USB meter
 // calibrate a 259e's two pitch inputs over the 200e bus. Its screens are
-// Draw259 (stage by stage), Draw259Confirm (the write, a B press on a screen of
-// its own; the slot reset screen exists but is unreachable while
+// Draw259 (stage by stage), Draw259Confirm (the write: B HELD for 2 s on a screen of
+// its own, Cal259eHold.h; the slot reset screen exists but is unreachable while
 // Cal259eFlow::kAllowCompaction is false) and Draw259Failed (text in
 // Cal259eText.cpp, host-tested). The step machine is
 // CalRoutineFlow (host-tested); this file is its screens and controls,
 // CalRoutinePorts.cpp its hardware.
+//
+// THE 259e WRITE IS DISABLED in the firmware (Cal259eFlow::kAllowWrite is false): the
+// 259e row measures and shows Results ("Write disabled: scale unproven"), and the only
+// way out is the discard. The confirm screen and its code stay for builds with
+// -DCAL259E_ALLOW_WRITE=1 (the host tests and the simulator).
 //
 // Controls, on every screen: encL press = back / cancel (never destructive:
 // a cancel releases every output and writes nothing; on Results, where it
@@ -61,6 +66,7 @@
 // Every member is defined out of class and FLASHMEM: none of it is ISR code,
 // and every byte of ITCM comes out of DTCM in 32 KB steps.
 #include "CalRoutinePorts.h"
+#include "../Cal259eHold.h"
 #include "../Cal259eText.h"
 #include "../CalRoutineFlow.h"
 
@@ -119,6 +125,7 @@ private:
   // bounce or a double-tap is not a yes) discards the finished run.
   uint32_t discard_armed_ms_ = 0;
   bool b_down_solo_ = false;  // B went down alone, after that screen appeared
+  Cal259eHold hold_;          // the 259e write confirm: B must be HELD (Cal259eHold.h)
 
   void StartRun();
   void OpenMenuEntry();
@@ -128,6 +135,8 @@ private:
   const char *ModeName() const;
   void ArmSave();
   void HandleConfirm(const UI::Event &event);
+  void HandleConfirm259(const UI::Event &event);
+  void Fire259Write();
   void HandlePress(const UI::Event &event);
   void HandlePress259(const UI::Event &event);
   void Abort259();
@@ -274,6 +283,7 @@ FLASHMEM void AppCalRoutine::EndRun(Screen next) {
   CalRoutinePorts::Close();
   OC::ui.preempt_screensaver(false);
   save_pending_ = false;
+  hold_.Reset();
   screen_ = next;
 }
 
@@ -303,6 +313,7 @@ FLASHMEM void AppCalRoutine::ArmSave() {
   armed_ms_ = millis();
   // Only a B press that BEGINS on this screen can commit.
   b_down_solo_ = false;
+  hold_.Arm(armed_ms_);
 }
 
 FLASHMEM bool AppCalRoutine::DiscardArmed() const {
@@ -334,8 +345,16 @@ FLASHMEM void AppCalRoutine::Loop() {
       CalRoutinePorts::Service();
       CalRoutinePorts::Flow259e().Tick();
       const Cal259eFlow::Stage s = CalRoutinePorts::Flow259e().stage();
+      // The write confirm needs B HELD (Cal259eHold.h): this is where the 2 s run out.
+      if (screen_ == SCR_CONFIRM && s == last259_) {
+        if (hold_.Tick(millis(), OC::ui.read_immediate(OC::CONTROL_BUTTON_B))) Fire259Write();
+        else OC::ui.Poke();  // the bar moves: keep the panel lit and redrawn
+      } else {
+        hold_.Reset();
+      }
       if (s != last259_) {
         last259_ = s;
+        hold_.Reset();
         discard_armed_ms_ = 0;
         OC::ui.Poke();
         // The two writes each get a confirm screen of their own.
@@ -392,20 +411,45 @@ FLASHMEM void AppCalRoutine::HandleAppEvent(OC::AppEvent event) {
   }
 }
 
-FLASHMEM void AppCalRoutine::HandleConfirm(const UI::Event &event) {
-  if (event.control == OC::CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_PRESS) {
-    if (is259_) {
-      // The measurements are minutes of work and cannot be got back to
-      // Results: the first encL on the write confirm only asks (ConfirmCompact
-      // is past the write: its encL cancels at once).
-      if (CalRoutinePorts::Flow259e().stage() == Cal259eFlow::Stage::Confirm) {
-        if (!DiscardArmed()) { discard_armed_ms_ = millis() | 1; return; }
-        if (millis() - discard_armed_ms_ < kConfirmDeadMs) return;
-      }
-      Abort259();  // no: nothing more is written
-    } else {
-      screen_ = SCR_RUN;  // no: back to Results, nothing written
+// The 259e write confirm. B must be HELD for Cal259eHold::kHoldMs (the first real run
+// wrote on a B press made by mistake): the gate counts only a solo B DOWN after its dead
+// time, and ends on an early release, any other key or encoder, or an app switch. The
+// 2 s run out in Loop() (Fire259Write). encL is the two-press discard (the first press
+// only asks), as before.
+FLASHMEM void AppCalRoutine::HandleConfirm259(const UI::Event &event) {
+  if (event.control == OC::CONTROL_BUTTON_B) {
+    if (event.type == UI::EVENT_BUTTON_DOWN) {
+      discard_armed_ms_ = 0;  // any B press is a no to the discard
+      hold_.BDown(millis(), event.mask == OC::CONTROL_BUTTON_B);
+    } else if (event.type == UI::EVENT_BUTTON_PRESS || event.type == UI::EVENT_BUTTON_LONG_RELEASE) {
+      hold_.BUp();
     }
+    return;
+  }
+  hold_.Other();  // a second key or an encoder turn ends a hold in progress
+  if (event.control == OC::CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_PRESS) {
+    // The measurements are minutes of work and cannot be got back to Results: the
+    // first encL on the write confirm only asks (ConfirmCompact is past the write:
+    // its encL cancels at once).
+    if (CalRoutinePorts::Flow259e().stage() == Cal259eFlow::Stage::Confirm) {
+      if (!DiscardArmed()) { discard_armed_ms_ = millis() | 1; return; }
+      if (millis() - discard_armed_ms_ < kConfirmDeadMs) return;
+    }
+    Abort259();  // no: nothing more is written
+  }
+}
+
+FLASHMEM void AppCalRoutine::Fire259Write() {
+  Cal259eFlow &f = CalRoutinePorts::Flow259e();
+  if (f.stage() == Cal259eFlow::Stage::Confirm) f.ConfirmWrite();
+  else if (f.stage() == Cal259eFlow::Stage::ConfirmCompact) f.ConfirmCompact();
+  screen_ = SCR_RUN;
+}
+
+FLASHMEM void AppCalRoutine::HandleConfirm(const UI::Event &event) {
+  if (is259_) { HandleConfirm259(event); return; }
+  if (event.control == OC::CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_PRESS) {
+    screen_ = SCR_RUN;  // no: back to Results, nothing written
     return;
   }
   if (event.control != OC::CONTROL_BUTTON_B) return;
@@ -420,13 +464,6 @@ FLASHMEM void AppCalRoutine::HandleConfirm(const UI::Event &event) {
   b_down_solo_ = false;
   if (!solo || event.mask) return;
   if (millis() - armed_ms_ < kConfirmDeadMs) return;
-  if (is259_) {
-    Cal259eFlow &f = CalRoutinePorts::Flow259e();
-    if (f.stage() == Cal259eFlow::Stage::Confirm) f.ConfirmWrite();
-    else if (f.stage() == Cal259eFlow::Stage::ConfirmCompact) f.ConfirmCompact();
-    screen_ = SCR_RUN;
-    return;
-  }
   if (!CalRoutinePorts::Flow().CanSave()) { screen_ = SCR_RUN; return; }
   save_pending_ = true;
 }
@@ -522,6 +559,7 @@ FLASHMEM void AppCalRoutine::HandleButtonEvent(const UI::Event &event) {
 }
 
 FLASHMEM void AppCalRoutine::HandleEncoderEvent(const UI::Event &event) {
+  if (screen_ == SCR_CONFIRM) hold_.Other();  // an encoder turn ends a hold in progress
   if (screen_ == SCR_MENU) {
     int sel = menu_sel_ + event.value;
     if (sel < 0) sel = 0;
@@ -1147,7 +1185,13 @@ FLASHMEM void AppCalRoutine::Draw259Results() const {
   const Cal259eFlow &f = CalRoutinePorts::Flow259e();
   const Cal259eFlow::Result &res = f.result();
   char b[24], w[12], n[12];
-  Title("259e results");
+  const bool wr = Cal259eFlow::kAllowWrite;
+  if (wr) {
+    Title("259e results");
+  } else {
+    snprintf(b, sizeof(b), "259e results %lu min", (unsigned long)(f.results_age_ms() / 60000u));
+    Title(b);
+  }
   for (int c = 0; c < 2; ++c) {
     Centi(w, sizeof(w), fabsf(res.worst_verify_cents[c]));
     snprintf(b, sizeof(b), "%-9s worst %sc", c ? "MOD PITCH" : "PITCH", w);
@@ -1160,6 +1204,10 @@ FLASHMEM void AppCalRoutine::Draw259Results() const {
   if (DiscardArmed()) {
     Row(4, "Press again: discard");
     graphics.invertRect(0, 46, 128, 9);  // the banner the next encL acts on
+  } else if (!wr) {
+    // The firmware does not write (Cal259eFlow::kAllowWrite): this is the end of a
+    // read-only run, and the only way out is the discard.
+    Row(4, "Write disabled: scale");
   } else {
     // The age is shown because the results expire (Cal259eFlow::kResultsMaxAgeMs):
     // the modules may have drifted or been re-patched since they were measured.
@@ -1168,7 +1216,8 @@ FLASHMEM void AppCalRoutine::Draw259Results() const {
     Row(4, b);
   }
   graphics.drawLine(0, 46, 127, 46);
-  Footer("L:discard   R:write...");
+  // The discard path first and spelled out: two encL presses throw the run away.
+  Footer(wr ? "L L:discard R:write.." : "unproven. L L:discard");
 }
 
 FLASHMEM void AppCalRoutine::Draw259Failed() const {
@@ -1195,27 +1244,32 @@ FLASHMEM void AppCalRoutine::Draw259Confirm() const {
     Row(4, "reinit. Backup taken.");
     graphics.setPrintPos(0, 56);
     graphics.print("encL:no");
-    graphics.setPrintPos(78, 56);
-    graphics.print("B:RESET");
+    graphics.setPrintPos(54, 56);
+    graphics.print("hold B:RESET");
     return;
   }
-  snprintf(b, sizeof(b), "WRITE 259e @%02X?", f.target());
+  // Not the Results screen: an inverted banner, the cost, and a bar that fills while B
+  // is held. Releasing early, or any other key, empties it.
+  snprintf(b, sizeof(b), "WRITE TO 259e @%02X", f.target());
   graphics.print(b);
   graphics.invertRect(0, 0, 128, 11);  // inversion is the only emphasis
-  Row(0, "Write calibration to");
-  Row(1, "both pitch inputs.");
-  Row(2, "Presets are backed");
-  Row(3, "up first, then the");
+  Row(0, "This uses 1 of 8");
+  Row(1, "slots, forever.");
+  Row(2, "Backup, write, check.");
   if (DiscardArmed()) {
-    Row(4, "encL again: discard");
-    graphics.invertRect(0, 46, 128, 9);
+    Row(3, "encL again: discard");
+    graphics.invertRect(0, 38, 128, 9);
+  } else if (hold_.holding()) {
+    snprintf(b, sizeof(b), "Keep holding... %d%%", int(hold_.permille(millis()) / 10));
+    Row(3, b);
+  } else if (hold_.hint()) {
+    Row(3, "Hold B to write");
   } else {
-    Row(4, "record is read back.");
+    Row(3, "HOLD B for 2 s");
   }
+  Bar(4, int(hold_.permille(millis())), 1000);
   graphics.setPrintPos(0, 56);
-  graphics.print("encL:no");
-  graphics.setPrintPos(84, 56);
-  graphics.print("B:WRITE");
+  graphics.print("encL:no  hold B:WRITE");
 }
 
 FLASHMEM void AppCalRoutine::DrawMenu() const {

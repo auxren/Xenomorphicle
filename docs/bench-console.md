@@ -11,6 +11,14 @@ The console ignores **all** input until the literal 4-character sequence
 byte soup has hit real commands (`D` froze the display, `C`/`F` are far
 worse). You get `-=[ console unlocked ]=-` back when it lands.
 
+> **Never send `pew!` to a console that may already be unlocked.** Once unlocked the
+> four bytes are commands: `p` toggles the preset-bus overlay, `e` starts a bench-DMM
+> SCPI line that swallows everything after it and sends it to the meter, `w` arms the
+> card-patch prompt (a byte of the resident card image, which may be a backup, is
+> patched by the digits that follow), and `!` is an unmapped key. Probe with a
+> harmless command (`t`) first and unlock only if it draws no answer. While a Cal
+> Routine run is open, `w` and `k` are refused (`CALR,BUSY_CAL`) as `m` and `x` are.
+
 After unlocking, `z` prints the live key map (with current toggle states).
 **Any key not listed below triggers a framebuffer screen capture** — so
 stray typing is harmless but will spew capture bytes.

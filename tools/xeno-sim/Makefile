@@ -3,7 +3,8 @@
 #   make            build build/xeno-sim
 #   make run        build and run it interactively, in this terminal
 #   make gui        build and serve the browser front end on 127.0.0.1:8731
-#   make check      the self-checks (determinism, gestures, the 200e write path)
+#   make check      the self-checks (determinism, gestures, the 200e write path); also builds
+#                   build-write/xeno-sim (-DCAL259E_ALLOW_WRITE=1) for the 259e write checks
 #   make clean
 #
 # Nothing here is part of the firmware build: no platformio.ini env references
@@ -21,7 +22,7 @@
 
 SRC    = ../../software/src
 SHIM   = shim/src
-BUILD  = build
+BUILD  ?= build
 SHADOW = $(BUILD)/shadow
 
 CXX      ?= g++
@@ -40,7 +41,7 @@ INCLUDES  = -I. -Ishim/arduino -I$(BUILD) -I$(SHADOW) -I$(SHADOW)/src/extern \
 # firmware supports (T41_MTP builds with it): see README.md for what it costs.
 FWFLAGS = -DARDUINO_TEENSY41 -D__IMXRT1062__ -DPRESET_BUS -DNO_HEMISPHERE \
           -DENABLE_APP_BUS200E \
-          -DENABLE_APP_TWEIGHTY -DXENO_SIM
+          -DENABLE_APP_TWEIGHTY -DXENO_SIM $(EXTRA_FWFLAGS)
 
 # Compiled from the mirror, so each of these is the real file unless shim/src/
 # replaces it (OC_ADC.cpp, OC_core.cpp, the SH1106 driver, OC_FreqMeasure.cpp).
@@ -158,7 +159,10 @@ run: all
 gui: all
 	@python3 xeno_gui.py
 
+# The firmware ships with the 259e write DISABLED (Cal259eFlow::kAllowWrite); the write path's
+# screens and controls are checked against a second build with it on (build-write/).
 check: all
+	@$(MAKE) --no-print-directory BUILD=build-write EXTRA_FWFLAGS=-DCAL259E_ALLOW_WRITE=1 all
 	@./selfcheck.sh
 
 clean:
