@@ -108,6 +108,7 @@ BRIDGE_CODE static uint8_t nak_for_master(Bus200eMasterError e) {
     case BUS200E_MASTER_ERR_NO_FREE_CARD:  return BUS200E_SYSEX_NAK_NO_FREE_CARD;
     case BUS200E_MASTER_ERR_SEND_TIMEOUT:  return BUS200E_SYSEX_NAK_SEND_TIMEOUT;
     case BUS200E_MASTER_ERR_NO_RESPONSE:   return BUS200E_SYSEX_NAK_NO_RESPONSE;
+    case BUS200E_MASTER_ERR_FW_CARD:       return BUS200E_SYSEX_NAK_FW_BUSY;  // firmware card served
     case BUS200E_MASTER_ERR_BAD_ARGS:
     case BUS200E_MASTER_ERR_NONE:
     default:                               return BUS200E_SYSEX_NAK_UNKNOWN_CMD;

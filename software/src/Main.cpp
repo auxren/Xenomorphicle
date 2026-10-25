@@ -1420,6 +1420,9 @@ FLASHMEM __attribute__((noinline)) void loop() {
           const int rc = OC::PresetBus::MasterBackup(master_addr_value);
           Serial.printf("  MasterBackup() returned %d (0=accepted; "
                         "watch 'b' for progress)\n", rc);
+          if (rc == -(int)BUS200E_MASTER_ERR_FW_CARD)
+            Serial.println("  refused: the firmware card is being served (reboot with it "
+                           "disarmed, or 'k', or wait for a complete read + 30 s quiet)");
 #endif
           continue;
         }
@@ -1568,6 +1571,10 @@ FLASHMEM __attribute__((noinline)) void loop() {
           }
           if (++patch_digits < 6) continue;  // 4 offset digits + 2 value digits
           patch_pending = false;
+          if (CalRoutinePorts::CalRunActive()) {
+            Serial.println("patch: refused, a Cal Routine run is open (CALR,BUSY_CAL)");
+            continue;
+          }
 #if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
           uint8_t *img = OC::PresetBus::MasterCardImage();
           if (!img) {
@@ -1926,6 +1933,10 @@ FLASHMEM __attribute__((noinline)) void loop() {
             OC::PresetBus::FwCardArm(!OC::PresetBus::FwCardArmed());
             break;
           case 'k':  // toggle 0x50 card serving (WPM-less bus only; hard-gated)
+            if (CalRoutinePorts::CalRunActive() && CalRec::ConsoleCommandBlockedDuringRun('k')) {
+              Serial.println("card serving: refused, a Cal Routine run is open (CALR,BUSY_CAL)");
+              break;
+            }
             OC::PresetBus::CardServeEnable(!OC::PresetBus::CardServing());
             break;
           case 'B':
@@ -1953,6 +1964,10 @@ FLASHMEM __attribute__((noinline)) void loop() {
           case 'c': OC::PresetBus::DumpCard(); break;  // hex-dump the last capture
           case 'w':  // patch one byte in the resident card image: 4 hex
                      // digits offset + 2 hex digits value, no bus traffic
+            if (CalRoutinePorts::CalRunActive() && CalRec::ConsoleCommandBlockedDuringRun('w')) {
+              Serial.println("patch: refused, a Cal Routine run is open (CALR,BUSY_CAL)");
+              break;
+            }
             Serial.println("patch: type 4 hex digits for the offset, then "
                            "2 hex digits for the new byte value");
             patch_pending = true;

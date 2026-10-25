@@ -416,6 +416,17 @@ static void test_get_dump_master_refuses() {
   CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
 }
 
+// L1: the core refuses a BACKUP while the firmware card is served: the browser gets the
+// firmware-card NAK (10), not the generic "master busy" (5).
+static void test_get_dump_refused_while_firmware_card_served() {
+  printf("test_get_dump_refused_while_firmware_card_served\n");
+  reset_all();
+  fake_backup_result = -BUS200E_MASTER_ERR_FW_CARD;
+  feed(BUS200E_SYSEX_CMD_GET_DUMP, { 0x28 });
+  CHECK(nak_code(last_sent()) == BUS200E_SYSEX_NAK_FW_BUSY);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+}
+
 static void test_get_dump_master_fails_mid_job() {
   printf("test_get_dump_master_fails_mid_job\n");
   reset_all();
@@ -1779,6 +1790,7 @@ int main() {
   test_cal_run_refuses_put_dump();
   test_cal_run_stops_a_staged_restore();
   test_cal_run_stops_dump_data_into_the_image();
+  test_get_dump_refused_while_firmware_card_served();
   test_get_dump_round_trip();
   test_get_dump_needs_an_address();
   test_get_dump_busy();

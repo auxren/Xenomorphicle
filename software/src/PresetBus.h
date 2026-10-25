@@ -174,7 +174,9 @@ bool FwCardMode();                                    // serving the firmware ca
 // Both refuse (-BUS200E_MASTER_ERR_BUSY) while CalRoutinePorts::CalRunActive():
 // the Cal Routine owns the master FSM and the card image for a 259e run, and
 // its pending COMMIT verdict. MasterBackup also refuses while FwCardMode() (the
-// card image would be the served firmware). MasterBackupForCal is the Cal
+// card image would be the served firmware) with -BUS200E_MASTER_ERR_FW_CARD, not BUSY.
+// FwCardMode() lasts until a reboot, a `k`, or a complete read of the card followed
+// by 30 s of bus quiet (fw_card_task: it then disarms and leaves the mode itself). MasterBackupForCal is the Cal
 // Routine's own backup: the same, without the Cal Routine gate.
 int MasterBackup(uint8_t mod_addr);
 int MasterBackupForCal(uint8_t mod_addr);

@@ -85,6 +85,7 @@ typedef enum {
   BUS200E_MASTER_ERR_NO_FREE_CARD,  // every candidate card address is claimed
   BUS200E_MASTER_ERR_SEND_TIMEOUT,  // bus never went quiet / send kept failing
   BUS200E_MASTER_ERR_NO_RESPONSE,   // command sent, target never touched the card
+  BUS200E_MASTER_ERR_FW_CARD,       // refused: the firmware card is being served (the card image is that firmware)
 } Bus200eMasterError;
 
 typedef struct {

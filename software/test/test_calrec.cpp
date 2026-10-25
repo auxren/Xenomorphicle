@@ -277,6 +277,14 @@ static void test_console_gate_during_run() {
   CHECK(!CalRec::ConsoleFrameAllowedDuringRun(rd, 3));
 }
 
+// L8: console commands that change the card image or card serving are refused during a run:
+// 'w' patches a byte of the resident image (which may be the run's backup), 'k' toggles card
+// serving; 'm' and 'x' already were. Read-only ones are not.
+static void test_console_commands_blocked_during_run() {
+  for (char c : {'w', 'k', 'm', 'x'}) CHECK(CalRec::ConsoleCommandBlockedDuringRun(c));
+  for (char c : {'b', 's', 'q', 'h', 'y', '?'}) CHECK(!CalRec::ConsoleCommandBlockedDuringRun(c));
+}
+
 // The 259e clamps its corrected code at 0x7FFF, one count under the 9600 mV target
 // (32768): the clamped residual there hides a positive error, the unclamped shows it.
 static void test_unclamped_residual() {
@@ -291,6 +299,7 @@ static void test_unclamped_residual() {
 
 int main() {
   test_console_gate_during_run();
+  test_console_commands_blocked_during_run();
   test_unclamped_residual();
   test_fixture();
   test_frame_allowlist_rejects();

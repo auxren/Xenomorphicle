@@ -50,7 +50,7 @@ C259B_CODE int Cal259eBackup::Poll() {
   // From here the DONE is ours: whatever the verdict, retire it so nothing else
   // finds a stale result (and a re-run is not refused by it). The image stays.
   struct Retire { BackupMaster &m; ~Retire() { m.Reset(); } } retire{m_};
-  // fw_mode can only turn on at boot, but the check is cheap and the cost of
+  // fw_mode normally turns on only at boot (or by a firmware-card load), but the check is cheap and the cost of
   // being wrong is a corrupted firmware image.
   if (m_.FwCardMode()) { why_ = BK_FW_CARD; return -1; }
   bytes_ = m_.Bytes();

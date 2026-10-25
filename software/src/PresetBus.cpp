@@ -1153,7 +1153,7 @@ static const uint8_t kMasterCardCandidates[] = { 0x00, 0x01 };
 // then the served firmware, and the module would write its bank over bytes
 // 0..N of it.
 FLASHMEM static int master_backup_impl(uint8_t mod_addr) {
-  if (fw_mode) return -BUS200E_MASTER_ERR_BUSY;
+  if (fw_mode) return -BUS200E_MASTER_ERR_FW_CARD;
   uint8_t card_lo = card_addr_lo;
   if (!card_serving) {
     if (!Bus200eMasterFindFreeCard(kMasterCardCandidates,

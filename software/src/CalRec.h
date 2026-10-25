@@ -51,6 +51,12 @@ bool FrameAllowed(const uint8_t *f, uint8_t n);
 // does not accept. Outside a run 'W' is unrestricted, as before.
 bool ConsoleFrameAllowedDuringRun(const uint8_t *f, uint8_t n);
 
+// Single-letter console commands that must not run while a run is open (or a cancelled
+// run's COMMIT verdict is pending): the ones that change the resident card image or card
+// serving, 'w' (patch a byte of the image: it could alter the run's backup), 'k' (toggle
+// card serving), 'm' (master backup) and 'x' (master restore).
+bool ConsoleCommandBlockedDuringRun(char c);
+
 // [n][0x22][src][0x19][what][arg][data...]; n is the array length.
 struct Reply { uint8_t src, what, arg, len; uint8_t data[kMaxReplyData]; };
 bool ParseReply(const uint8_t *f, uint8_t n, Reply *r);

@@ -106,6 +106,10 @@ uint16_t Apply259e(uint16_t x, uint16_t gain, int16_t offset) {
   return (uint16_t)v;
 }
 
+bool ConsoleCommandBlockedDuringRun(char c) {
+  return c == 'w' || c == 'k' || c == 'm' || c == 'x';
+}
+
 bool ConsoleFrameAllowedDuringRun(const uint8_t *f, uint8_t n) {
   if (!f || n < 4) return false;
   if (f[3] == kCmdPut || f[3] == kCmdCommit) return false;  // whatever the address or magic

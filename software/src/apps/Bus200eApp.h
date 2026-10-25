@@ -1773,6 +1773,8 @@ void AppBus200e::DrawReadState() const {
           graphics.print("READ FAIL: bus busy"); break;
         case BUS200E_MASTER_ERR_NO_RESPONSE:
           graphics.print("READ FAIL: no answer"); break;
+        case BUS200E_MASTER_ERR_FW_CARD:
+          graphics.print("READ FAIL: fw card"); break;  // firmware card is served
         default:
           graphics.printf("READ FAIL (err %d)", (int)read_err_); break;
       }

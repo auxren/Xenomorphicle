@@ -15,7 +15,8 @@
 //
 // What it refuses, and why it matters:
 //   * FwCardMode() true. While the firmware card is served (fw_mode stays true
-//     until a reboot, even after the card was disarmed with 'M'), the card
+//     after the card was disarmed with 'M'; it ends at a reboot, a 'k', or a complete
+//     read of the card followed by 30 s of bus quiet), the card
 //     image IS the served firmware; a BACKUP writes the 259e's 990 bytes over
 //     bytes 0..989 of it, in RAM, while the 259e itself may be reading it.
 //     Refused at Begin, and again when the job completes.
