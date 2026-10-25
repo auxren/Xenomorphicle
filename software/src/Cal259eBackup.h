@@ -28,6 +28,7 @@
 
 struct BackupMaster {
   virtual bool FwCardMode() = 0;                 // PresetBus::FwCardMode
+  virtual bool BridgeIdle() = 0;                 // Bus200eBridgeGetState() == IDLE (no browser dump session)
   virtual Bus200eMasterState State() = 0;
   virtual void Reset() = 0;                      // retire a DONE/FAILED result
   virtual int Backup(uint8_t addr) = 0;          // MasterBackup: 0 accepted

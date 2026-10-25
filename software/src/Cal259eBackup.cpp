@@ -9,14 +9,23 @@
 #include "Cal259eBackup.h"
 
 C259B_CODE bool Cal259eBackup::Begin(uint8_t addr) {
+  const bool abandoned = mine_;  // a job of ours the flow gave up on without polling it out
   mine_ = false;
   why_ = BK_NONE;
   bytes_ = crc_ = 0;
   // The served firmware image must never be the target of a BACKUP.
   if (m_.FwCardMode()) { why_ = BK_FW_CARD; return false; }
+  // A browser PUT_DUMP / GET_DUMP session owns the card image (it stages bytes into
+  // it between its own packets, with the master IDLE): not while one is open.
+  if (!m_.BridgeIdle()) { why_ = BK_BUSY; return false; }
   const Bus200eMasterState st = m_.State();
-  if (st == BUS200E_MASTER_DONE || st == BUS200E_MASTER_FAILED) m_.Reset();
-  else if (st != BUS200E_MASTER_IDLE) { why_ = BK_BUSY; return false; }  // a job runs
+  if (st == BUS200E_MASTER_DONE || st == BUS200E_MASTER_FAILED) {
+    // A finished result belongs to whoever started that job (the 200e app's
+    // write-verify, the bridge's capture) and is about to be read by them: only
+    // our own abandoned one is retired here.
+    if (!abandoned) { why_ = BK_BUSY; return false; }
+    m_.Reset();
+  } else if (st != BUS200E_MASTER_IDLE) { why_ = BK_BUSY; return false; }  // a job runs
   if (m_.Backup(addr) != 0) { why_ = BK_START; return false; }
   mine_ = true;
   addr_ = addr;
@@ -37,7 +46,10 @@ C259B_CODE int Cal259eBackup::Poll() {
   mine_ = false;
   // The DONE must be this job's: the console 'm' / 'x' or the bridge share the
   // master FSM and could have retired ours and run their own.
-  if (m_.ModAddr() != addr_ || m_.IsRestore()) { why_ = BK_OTHER_JOB; return -1; }
+  if (m_.ModAddr() != addr_ || m_.IsRestore()) { why_ = BK_OTHER_JOB; return -1; }  // not ours: left for its owner
+  // From here the DONE is ours: whatever the verdict, retire it so nothing else
+  // finds a stale result (and a re-run is not refused by it). The image stays.
+  struct Retire { BackupMaster &m; ~Retire() { m.Reset(); } } retire{m_};
   // fw_mode can only turn on at boot, but the check is cheap and the cost of
   // being wrong is a corrupted firmware image.
   if (m_.FwCardMode()) { why_ = BK_FW_CARD; return -1; }

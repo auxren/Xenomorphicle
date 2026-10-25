@@ -615,6 +615,29 @@ static void test_cal_run_stops_a_staged_restore() {
   CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
 }
 
+// M1: a run that opens while a PUT_DUMP session is receiving: the next DUMP_DATA is
+// NAKed 17 and must NOT land in the card image (the run's backup/served image), and
+// the session is dropped.
+static void test_cal_run_stops_dump_data_into_the_image() {
+  printf("test_cal_run_stops_dump_data_into_the_image\n");
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x28 });
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_RECEIVING);
+  uint8_t before[64];
+  memcpy(before, fake_card, sizeof before);
+  uint8_t chunk[32];
+  for (unsigned i = 0; i < sizeof chunk; ++i) chunk[i] = (uint8_t) (0xA5 ^ i);
+  fake_cal_run = 1;                     // the run opens mid-transfer
+  feed_dump_data(0, 4, chunk, sizeof chunk);
+  CHECK(nak_code(last_sent()) == BUS200E_SYSEX_NAK_CAL_RUN);
+  CHECK(memcmp(before, fake_card, sizeof before) == 0);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  fake_cal_run = 0;
+  feed_dump_data(1, 4, chunk, sizeof chunk);   // the dropped session stays dropped
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  CHECK(memcmp(before, fake_card, sizeof before) == 0);
+}
+
 static void test_put_dump_round_trip() {
   printf("test_put_dump_round_trip\n");
   reset_all();
@@ -1755,6 +1778,7 @@ int main() {
   test_cal_run_refuses_get_dump();
   test_cal_run_refuses_put_dump();
   test_cal_run_stops_a_staged_restore();
+  test_cal_run_stops_dump_data_into_the_image();
   test_get_dump_round_trip();
   test_get_dump_needs_an_address();
   test_get_dump_busy();

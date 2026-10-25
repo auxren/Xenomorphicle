@@ -28,6 +28,7 @@
 #include "../PresetEngine.h"
 #include "../Buchla200eWriteGuard.h"
 #include "../Buchla259eSlotCodec.h"
+#include "../Bus200eBridge.h"
 #include "../Cal259eBackup.h"
 #if defined(ARDUINO_TEENSY41) && !defined(XENO_SIM)
 #include "../src/drivers/USBTMCDevice.h"
@@ -639,6 +640,7 @@ FLASHMEM BusPort &Bus() { return bus_port; }
 // is stored in CAL259BK.BIN and read back.
 struct RealMaster : BackupMaster {
   bool FwCardMode() override;
+  bool BridgeIdle() override;
   Bus200eMasterState State() override;
   void Reset() override;
   int Backup(uint8_t a) override;
@@ -651,6 +653,7 @@ struct RealMaster : BackupMaster {
   bool Verify(uint8_t a, uint32_t n, uint32_t crc) override;
 };
 FLASHMEM bool RealMaster::FwCardMode() { return OC::PresetBus::FwCardMode(); }
+FLASHMEM bool RealMaster::BridgeIdle() { return Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE; }
 FLASHMEM Bus200eMasterState RealMaster::State() { return OC::PresetBus::MasterState(); }
 FLASHMEM void RealMaster::Reset() { OC::PresetBus::MasterReset(); }
 FLASHMEM int RealMaster::Backup(uint8_t a) { return OC::PresetBus::MasterBackupForCal(a); }

@@ -297,6 +297,13 @@ BRIDGE_CODE static void handle_dump_data(uint16_t seq, uint16_t total,
     send_nak(BUS200E_SYSEX_CMD_DUMP_DATA, BUS200E_SYSEX_NAK_UNKNOWN_CMD);
     return;
   }
+  // A Cal Routine run opened after PUT_DUMP: the card image is the run's (its
+  // preset backup lands there), so no more bytes may be staged into it.
+  if (cal_run()) {
+    send_nak(BUS200E_SYSEX_CMD_DUMP_DATA, BUS200E_SYSEX_NAK_CAL_RUN);
+    session_reset();
+    return;
+  }
   // seq is what indexes g_rx_seen, so the ceiling check is what keeps a
   // hostile/garbled 14-bit seq out of the bitmap -- load-bearing, not tidy.
   if (seq >= BUS200E_BRIDGE_MAX_PACKETS || total == 0 || seq >= total ||

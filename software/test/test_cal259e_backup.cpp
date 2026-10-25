@@ -16,6 +16,7 @@ static int checks = 0, fails = 0;
 
 struct FakeMaster : BackupMaster {
   bool fw = false;
+  bool bridge_idle = true;
   Bus200eMasterState st = BUS200E_MASTER_IDLE;
   uint8_t mod = 0;
   bool restore = false;
@@ -32,6 +33,7 @@ struct FakeMaster : BackupMaster {
   FakeMaster() { for (size_t i = 0; i < sizeof image; ++i) image[i] = uint8_t(0xF0 ^ i); }
 
   bool FwCardMode() override { return fw; }
+  bool BridgeIdle() override { return bridge_idle; }
   Bus200eMasterState State() override { return st; }
   void Reset() override { ++resets; st = BUS200E_MASTER_IDLE; }
   int Backup(uint8_t a) override {
@@ -180,9 +182,13 @@ static void master_states() {
   }
   {
     FakeMaster m;
-    m.st = BUS200E_MASTER_DONE;                 // a leftover result is retired, then ours starts
+    m.st = BUS200E_MASTER_DONE;                 // L4: a result that is not ours is NOT retired
     Cal259eBackup b(m);
-    CHECK(b.Begin(0x28) && m.resets == 1 && m.backups == 1);
+    CHECK(!b.Begin(0x28) && b.Why() == BK_BUSY && m.resets == 0 && m.backups == 0);
+    CHECK(m.st == BUS200E_MASTER_DONE);
+    m.st = BUS200E_MASTER_FAILED;
+    CHECK(!b.Begin(0x28) && b.Why() == BK_BUSY && m.resets == 0 && m.backups == 0);
+    CHECK(m.st == BUS200E_MASTER_FAILED);
   }
   {
     FakeMaster m;
@@ -211,6 +217,45 @@ static void master_states() {
   }
 }
 
+
+// M1: the 200e bridge (a browser PUT_DUMP stages bytes into the same card image) must be
+// idle at Begin; nothing is started and nothing is retired.
+static void bridge_session_refuses() {
+  FakeMaster m;
+  m.bridge_idle = false;
+  Cal259eBackup b(m);
+  CHECK(!b.Begin(0x28));
+  CHECK(b.Why() == BK_BUSY);
+  CHECK(m.backups == 0 && m.resets == 0);
+  CHECK(b.Poll() < 0);
+  m.bridge_idle = true;                         // and once it is idle, it runs
+  CHECK(b.Begin(0x28) && m.backups == 1);
+}
+
+// L4: our own finished result is retired (so a re-run is not blocked by it), and an
+// abandoned job of ours that finished later is retired by the next Begin.
+static void own_results_are_retired() {
+  FakeMaster m;
+  Cal259eBackup b(m);
+  CHECK(b.Begin(0x28));
+  m.Finish(990);
+  CHECK(b.Poll() == 1 && m.resets == 1 && m.st == BUS200E_MASTER_IDLE);
+  CHECK(b.Begin(0x28) && m.backups == 2);       // a re-run starts
+  m.Finish(989);                                // size failure: still ours, still retired
+  CHECK(b.Poll() < 0 && b.Why() == BK_SIZE && m.resets == 2);
+  // abandoned: Begin, the flow gives up and never polls, the job finishes
+  CHECK(b.Begin(0x28));
+  m.Finish(990);
+  CHECK(b.Begin(0x28) && m.resets == 3 && m.backups == 4);
+  // another user's DONE (the console's, a restore) is left alone by Poll
+  FakeMaster o;
+  Cal259eBackup c(o);
+  CHECK(c.Begin(0x28));
+  o.restore = true;
+  o.Finish(990);
+  CHECK(c.Poll() < 0 && c.Why() == BK_OTHER_JOB && o.resets == 0 && o.st == BUS200E_MASTER_DONE);
+}
+
 // Every reason has three rows of at most 21 columns.
 static void texts_fit() {
   for (int w = BK_NONE; w <= BK_TIMEOUT; ++w)
@@ -230,6 +275,8 @@ int main() {
   no_image();
   save_and_readback_failures();
   master_states();
+  bridge_session_refuses();
+  own_results_are_retired();
   texts_fit();
   printf("test_cal259e_backup: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
