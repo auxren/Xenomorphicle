@@ -1149,8 +1149,10 @@ static void results_expire_and_confirm_rechecks() {
     r.hold_confirm = true;
     r.Begin();
     CHECK(r.Run([&] { return r.flow.stage() == Stage::Confirm; }));
-    CHECK(r.flow.results_age_ms() < 100);
-    r.Idle(F::kResultsMaxAgeMs - 2000);
+    // the age runs from channel 0's first point: the measurement time is in it
+    const uint32_t age0 = r.flow.results_age_ms();
+    CHECK(age0 > 1000 && age0 < F::kResultsMaxAgeMs - 10000);
+    r.Idle(F::kResultsMaxAgeMs - 2000 - age0);
     CHECK(r.flow.stage() == Stage::Confirm);
     CHECK(r.flow.results_age_ms() >= F::kResultsMaxAgeMs - 2100);
     r.Idle(3000);
@@ -1207,6 +1209,64 @@ static void results_expire_and_confirm_rechecks() {
     r.hold_confirm = false;
     CHECK(r.Run());
     CHECK(r.flow.stage() == Stage::Done);
+  }
+}
+
+// M2: the age limit runs from channel 0's FIRST measured point (not from the last channel's
+// fit), so a prompt left open before channel 1 expires, and a slow channel 1 expires the
+// results even though channel 1 itself was quick. After expiry the run starts over.
+static void expiry_counts_from_the_first_point() {
+  {
+    Rig r;  // an operator leaves the channel-1 patch prompt open for hours
+    good_adc(r.a);
+    r.auto_ui = false;
+    r.Begin();
+    for (int i = 0; i < 2000000 && count_prefix("CALR,259PT,0,") < 1; ++i) {
+      r.Step();
+      if (r.flow.stage() == Stage::Warmup || r.flow.stage() == Stage::PromptPatch) r.Ui();
+    }
+    const uint32_t t1 = r.clk.t;
+    for (int i = 0; i < 2000000 && !(r.flow.stage() == Stage::PromptPatch && r.flow.channel() == 1); ++i) {
+      r.Step();
+      if (r.flow.stage() == Stage::Warmup || (r.flow.stage() == Stage::PromptPatch && r.flow.channel() == 0)) r.Ui();
+    }
+    CHECK(r.flow.stage() == Stage::PromptPatch && r.flow.channel() == 1);
+    CHECK(r.clk.t - t1 < F::kResultsMaxAgeMs - 10000);          // the first channel is quick
+    r.Idle(F::kResultsMaxAgeMs - 5000 - (r.clk.t - t1));
+    CHECK(r.flow.stage() == Stage::PromptPatch);                 // still inside the limit
+    r.Idle(10000);
+    CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_EXPIRED);
+    CHECK(logged("CALR,259END,EXPIRED"));
+    r.flow.Cancel();                                              // dismissed: Idle, start over
+    CHECK(r.flow.stage() == Stage::Idle);
+    g_log.clear();
+    r.Begin();                                                    // a fresh run measures again
+    CHECK(r.flow.stage() != Stage::Failed && r.flow.result().valid_mask == 0);
+    r.auto_ui = true;
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Confirm || r.flow.stage() == Stage::Done);
+    CHECK(count_prefix("CALR,259PT,0,") == F::kPoints);
+  }
+  {
+    Rig r;  // a slow channel 1 (prompt answered at 9m55 after the first point) expires the run
+    good_adc(r.a);
+    r.auto_ui = false;
+    r.hold_confirm = true;
+    r.Begin();
+    for (int i = 0; i < 2000000 && count_prefix("CALR,259PT,0,") < 1; ++i) {
+      r.Step();
+      if (r.flow.stage() == Stage::Warmup || r.flow.stage() == Stage::PromptPatch) r.Ui();
+    }
+    const uint32_t t1 = r.clk.t;
+    for (int i = 0; i < 2000000 && !(r.flow.stage() == Stage::PromptPatch && r.flow.channel() == 1); ++i) {
+      r.Step();
+      if (r.flow.stage() == Stage::Warmup || (r.flow.stage() == Stage::PromptPatch && r.flow.channel() == 0)) r.Ui();
+    }
+    r.Idle(F::kResultsMaxAgeMs - 5000 - (r.clk.t - t1));
+    r.Ui();                                                       // answer the prompt
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_EXPIRED);
+    CHECK(r.backup.begins == 0 && r.a.count[CalRec::kCmdPut] == 0);
   }
 }
 
@@ -1313,6 +1373,7 @@ int main() {
   top_of_range_is_verified();
   nonlinearity_sees_past_the_clamp();
   results_expire_and_confirm_rechecks();
+  expiry_counts_from_the_first_point();
   wrong_jack_on_channel_one();
   golden_lines();
   names();

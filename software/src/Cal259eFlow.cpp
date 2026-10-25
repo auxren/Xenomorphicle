@@ -359,17 +359,25 @@ C259_CODE void Cal259eFlow::Tick() {
       break;
     case Stage::Warmup:
     case Stage::PromptPatch:
-      MeterGone();
+      // Channel 1's patch prompt may be left open for hours: the age runs from
+      // channel 0's first point (zero until then).
+      if (!MeterGone() && Expired()) Fail(F_EXPIRED);
       break;
     case Stage::Identify:
-      if (!MeterGone()) TickIdentify();
+      if (!MeterGone()) {
+        if (Expired()) Fail(F_EXPIRED);
+        else TickIdentify();
+      }
       break;
     case Stage::Measure:
-      if (!MeterGone()) TickMeasure();
+      if (!MeterGone()) {
+        if (Expired()) Fail(F_EXPIRED);
+        else TickMeasure();
+      }
       break;
     case Stage::Results:
     case Stage::Confirm:
-      if (now_ - results_ms_ >= kResultsMaxAgeMs) Fail(F_EXPIRED);
+      if (Expired()) Fail(F_EXPIRED);
       break;
     case Stage::Backup:
       TickBackup();
@@ -402,6 +410,10 @@ C259_CODE void Cal259eFlow::Continue() {
     default:
       break;
   }
+}
+
+C259_CODE bool Cal259eFlow::Expired() const {
+  return results_ms_ && now_ - results_ms_ >= kResultsMaxAgeMs;
 }
 
 C259_CODE uint32_t Cal259eFlow::results_age_ms() const {
@@ -615,6 +627,9 @@ C259_CODE void Cal259eFlow::TickIdentify() {
 C259_CODE void Cal259eFlow::StartPoint() {
   SetStage(Stage::Measure);
   const int32_t mv = kPointMv[pt_];
+  // The measurements age from the very first one: the oldest point is what the
+  // limit protects (the 259e / patch / meter drift), whatever the stage.
+  if (ch_ == 0 && pt_ == 0) results_ms_ = now_ ? now_ : 1;
   meas_.Start(kSourceOutput, out_->CodeForMv(kSourceOutput, table_, mv), mv, now_);
   sub_ = S_METER;
 }
@@ -688,7 +703,6 @@ C259_CODE void Cal259eFlow::FinishChannel() {
     ch_ = 1;
     SetStage(Stage::PromptPatch);
   } else {
-    results_ms_ = now_ ? now_ : 1;
     SetStage(Stage::Results);
   }
 }

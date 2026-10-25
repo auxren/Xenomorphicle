@@ -36,8 +36,10 @@
 //               meter mV), gain within +-10 % of 0x9041, verify residuals
 //               within +-3 cents. Output A is released after each channel.
 //   Results     Continue -> Confirm; ConfirmWrite -> Backup. The results expire
-//               kResultsMaxAgeMs after the last channel was fitted (Results and
-//               Confirm end Failed/F_EXPIRED: measure again). A channel passes
+//               kResultsMaxAgeMs after channel 0's FIRST measured point (the
+//               oldest data), and so does a wait at channel 1's patch prompt
+//               (any stage from then to Confirm ends Failed/F_EXPIRED: measure
+//               again from the start). A channel passes
 //               only if its worst verify residual is within kVerifyCents AND its
 //               fit-point nonlinearity within kMaxNonlinearityCents.
 //   Backup      a fresh preset backup of the target (BackupPort); fails: nothing
@@ -242,6 +244,7 @@ class Cal259eFlow {
   void TickBackup();
   void BackupDone(bool ok);
   void FailBackup(BackupWhy why);
+  bool Expired() const;  // older than kResultsMaxAgeMs since channel 0's first point
   void StartWrite();
   void TickWrite();
   void StartPut();
@@ -269,7 +272,7 @@ class Cal259eFlow {
   uint32_t now_ = 0;
   uint32_t t0_ = 0;
 
-  uint32_t results_ms_ = 0;                      // when Results was entered
+  uint32_t results_ms_ = 0;                      // when channel 0's first point began (0: none yet)
   uint16_t table_[CalRoutineMath::kNodes] = {};  // output A's stored table, read at Begin
 
   // scan
