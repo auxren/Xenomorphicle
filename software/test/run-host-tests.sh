@@ -49,6 +49,7 @@ suite test_midi_types
 suite test_miditxring
 suite test_rtstats
 suite test_defer_ring
+suite test_heap_walk
 suite test_preset_stage
 suite test_card_sectors
 suite test_audio_graph_order

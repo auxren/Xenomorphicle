@@ -36,3 +36,9 @@ void OC::CORE::FlushTasks() { defer_ring.run_all(); }
 // A fixed, plausible number. A host process has no RAM1/RAM2 split, and the
 // simulator says nothing about the firmware's memory pressure.
 int OC::CORE::FreeRam() { return 128 * 1024; }
+
+// No malloc free list to walk on the host: report one clean 128 KB top.
+void OC::CORE::HeapStats(HeapInfo *out) {
+  *out = HeapInfo();
+  out->top_gap = out->largest_run = 128 * 1024;
+}

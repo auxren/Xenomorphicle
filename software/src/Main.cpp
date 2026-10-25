@@ -949,8 +949,14 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
     delay(5);
     Serial.printf("core delta5ms=%lu (expect ~83)\n", OC::CORE::ticks - t0);
   }
-  Serial.printf("heap free: %lu bytes (RAM2)\n",
-                (unsigned long)(_heap_end - __brkval));
+  {
+    HeapInfo hi;  // loop context, which `t` is
+    OC::CORE::HeapStats(&hi);
+    Serial.printf("heap free: %lu bytes (RAM2)  holes=%u hole_free=%lu largest_run=%lu\n",
+                  (unsigned long)(_heap_end - __brkval), (unsigned)hi.holes,
+                  (unsigned long)hi.hole_free, (unsigned long)hi.largest_run);
+    if (hi.truncated) Serial.print("heap walk truncated=1\n");
+  }
 #ifdef XENO_CODEC_AUDIO
   // integer tenths: %f would drag the float-printf tables into DTCM
   Serial.printf("audio i16 pool: %u now / %u max   cpu: %lu.%lu%% now / %lu.%lu%% max\n",

@@ -210,7 +210,7 @@ rtc: 1788285220 s = 17:53:40 on day 20697 since 1970-01-01
 watchdog: armed (128s, fed from loop)
 loop rate ~4200 Hz
 core delta5ms=83 (expect ~83)
-heap free: 380000 bytes (RAM2)
+heap free: 380000 bytes (RAM2)  holes=0 hole_free=0 largest_run=380000
 audio i16 pool: 4 now / 9 max   cpu: 8.4% now / 12.1% max
 audio f32 pool: 6 now / 11 max
 littlefs: 132KB/4096KB used
@@ -240,7 +240,14 @@ captain: poll_gap_max=1180us echoes=0
 - **core delta5ms** — core ISR ticks counted across a 5 ms delay.
   The core timer runs at 16.67 kHz, so **~83 = healthy**. Much lower
   means the app ISR is disabled (`I`) or the core timer is being starved.
-- **heap free** — RAM2/OCRAM heap headroom.
+- **heap free** — RAM2/OCRAM heap headroom: the untouched top of the pool
+  only. `holes` / `hole_free` count memory that was malloc'd and freed
+  again (below the break); `largest_run` is the biggest single block malloc
+  could return now. `hole_free` large with `largest_run` small is
+  fragmentation; everything small is true exhaustion. `largest_run` is a
+  chunk size: the biggest `malloc(n)` that can succeed is `largest_run - 8`.
+  If the walk met an invalid node (the list changed under it) a separate
+  `heap walk truncated=1` line follows and the figures are partial.
 - **audio pools / cpu** — i16 and F32 block pools, current/high-water,
   plus audio CPU now/peak. A pool `max` at the pool ceiling means
   allocation failures have likely occurred.

@@ -1,9 +1,11 @@
 #include "OC_core.h"
 #include "DeferRing.h"
 #include "RtStats.h"
+#include "HeapWalk.h"
 #include <malloc.h>
 
-extern "C" char _heap_end[], *__brkval;
+extern "C" char _heap_start[], _heap_end[], *__brkval;
+extern "C" HeapChunk *__malloc_free_list;  // newlib-nano, see HeapWalk.h
 
 // ISR producer (CORE timer), loop consumer. This used to be a
 // std::queue<std::function<void()>> with the lock commented out: every
@@ -29,4 +31,15 @@ void OC::CORE::FlushTasks() {
 
 int OC::CORE::FreeRam() {
   return _heap_end - __brkval;
+}
+
+// Thin wrapper: the walk itself is HeapWalk.h. The list is only stable while
+// nothing mallocs or frees, which loop() guarantees for its own calls and an
+// ISR does not, hence loop context only (the walk validates every node, so a
+// race yields `truncated`, not a fault).
+FLASHMEM void OC::CORE::HeapStats(HeapInfo *out) {
+  static_assert(sizeof(HeapChunk) == 8 && offsetof(HeapChunk, next) == 4,
+                "newlib-nano free-list node is {size, next} on 32-bit ARM");
+  HeapWalk(__malloc_free_list, (uintptr_t)_heap_start, (uintptr_t)__brkval,
+           (uintptr_t)_heap_end, out);
 }

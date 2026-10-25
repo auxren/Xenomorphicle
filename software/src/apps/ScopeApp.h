@@ -598,6 +598,11 @@ FLASHMEM void AppScope::Render() const {
       graphics.print("not enough memory");
       graphics.setPrintPos(1, 36);
       graphics.printf("need %d KB free", (int)((sizeof(Arena) + 1023) / 1024));
+      // total free vs. the biggest run tells fragmentation from exhaustion
+      HeapInfo hi;
+      OC::CORE::HeapStats(&hi);
+      graphics.setPrintPos(1, 46);
+      graphics.printf("largest %d KB", (int)(hi.largest_run / 1024));
     }
     return;
   }

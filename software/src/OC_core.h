@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <stdint.h>
 #include "OC_config.h"
+#include "HeapWalk.h"
 #include "OC_strings.h"
 #include "OC_ui.h"
 #include "OC_menus.h"
@@ -27,6 +28,10 @@ namespace OC {
     void DeferTask(void (*fn)(void *), void *ctx);
     void FlushTasks();
     int FreeRam();
+    // Free-list walk, see HeapWalk.h. Loop context only: it reads malloc's
+    // list without taking its lock, so an ISR (or anything that can preempt
+    // a malloc/free) must not call it.
+    void HeapStats(HeapInfo *out);
   }; // namespace CORE
 
   struct TickCount {
