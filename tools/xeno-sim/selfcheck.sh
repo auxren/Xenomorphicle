@@ -2101,6 +2101,17 @@ sw_run "Quadrants' bank survives a writer under the menu" \
   --test-app-switch quad-bank
 sw_run "Captain's map and setup survive a writer under the menu" \
   --test-app-switch captain-config
+# The real Sampler against a model of the vendored player (needs the card).
+sw_run "the Sampler under the open menu: its voices stay released, the Scope gets its arena" \
+  --sd-card --test-app-switch sampler-menu-held
+sw_run "the Sampler left by the console switch: voices handed back without a card read" \
+  --sd-card --test-app-switch sampler-switch
+sw_run "a recall over the Sampler loads on resume and not under the menu" \
+  --sd-card --test-app-switch sampler-recall
+sw_run "the Sampler: no queued event during a close, button A cannot load when suspended, Init releases" \
+  --sd-card --test-app-switch sampler-callers
+sw_run "the Sampler re-initialised at runtime does not leak its audio connections" \
+  --sd-card --test-app-switch sampler-reinit
 # The real Quadrants and Captain cannot be built here, so their reload handlers
 # are only checked at the source level: the case's block, comments dropped, must
 # hold the one statement that takes the map back, on a line of its own, and no
@@ -2122,6 +2133,10 @@ else bad "source check: CaptainMIDI.h CONFIG_RELOAD is not an unconditional load
 $SWSIM --state "$TMP/sw.img" --test-app-switch prep-scope --no-log > /dev/null 2>&1
 sw_run "power-up into the app menu on the Scope: picking another app frees the arena" \
   --state "$TMP/sw.img" --test-app-switch boot-menu
+rm -f "$TMP/sw.img"
+$SWSIM --sd-card --state "$TMP/sw.img" --test-app-switch prep-sampler --no-log > /dev/null 2>&1
+sw_run "power-up into the app menu on the Sampler: picking another app releases its voices" \
+  --sd-card --state "$TMP/sw.img" --test-app-switch boot-menu-sampler
 rm -f "$TMP/sw.img"
 $SWSIM --state "$TMP/sw.img" --test-app-switch prep-scope-slot --no-log > /dev/null 2>&1
 sw_run "power-up into the app menu with a boot recall into the Scope" \

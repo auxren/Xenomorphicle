@@ -117,7 +117,8 @@ FW_SRCS = \
 # the Scope, whose capture code is not in the default build.
 ifneq (,$(findstring XENO_SIM_APPSWITCH,$(EXTRA_FWFLAGS)))
 FW_SRCS += ScopeCapture.cpp ScopeFft.cpp ScopeRange.cpp ScopeSettings.cpp \
-           ScopeSources.cpp ScopeTrigger.cpp
+           ScopeSources.cpp ScopeTrigger.cpp SamplerMath.cpp
+FWFLAGS += -DXENO_CODEC_AUDIO
 endif
 
 # The mirror has to exist before make can match its pattern rules against it,

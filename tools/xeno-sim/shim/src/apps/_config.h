@@ -35,6 +35,7 @@ extern uint_fast8_t MENU_REDRAW;
 // watched) and stand-ins for the two apps that keep a file in the shared
 // config map. See sim_probe_apps.h.
 #include "ScopeApp.h"
+#include "SamplerApp.h"
 #include "sim_probe_apps.h"
 #endif
 
@@ -52,6 +53,7 @@ static AppContainer<void
   , AppCalRoutine
 #ifdef XENO_SIM_APPSWITCH
   , AppScope
+  , AppSampler
   , AppProbeQuad
   , AppProbeCaptain
 #endif

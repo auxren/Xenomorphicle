@@ -30,6 +30,12 @@
 //   scan-handback    the 200e app's scan-set save while it is suspended
 //   captain-config   Captain's map and live state across a writer
 //   prep-scope[-slot]  writes the image the boot scenarios start from
+//   sampler-menu-held  Sampler, then the app menu held open for thousands of loop
+//                    passes, then the Scope: the Sampler's ~230 KB must stay released
+//   sampler-switch   the same by the console switch (no re-read of the card)
+//   sampler-recall   recalls into / under the menu over a Sampler
+//   sampler-reinit   AppSampler::Init run again at runtime
+//   boot-menu-sampler  power-up with the menu held, Sampler current
 //   boot-menu        power-up with the app menu held, into the Scope
 //   boot-menu-recall the same, with a preset recalled at boot
 // ---------------------------------------------------------------------------
@@ -62,6 +68,29 @@
 #include "sim_input.h"
 #include "sim_probe_apps.h"
 #include "sim_runtime.h"
+
+#include <Audio.h>
+#include <TeensyVariablePlayback.h>
+
+// The player stand-in's counters (shim/arduino/TeensyVariablePlayback.h).
+long sim_sd_block_reads = 0;
+long sim_open_files = 0;
+long sim_reentrant_events = 0;
+namespace simtvp { int g_response_disable = 0; }
+
+// The codec graph's two ends: a stream apiece, so the apps that wire to them
+// (Sampler, Tweighty) have something to connect to.
+namespace {
+class SimEndStream : public AudioStream {
+ public:
+  SimEndStream() : AudioStream(0, nullptr) {}
+  void update() override {}
+};
+}  // namespace
+namespace OC { namespace AudioIO {
+AudioStream &InputStream(int) { static SimEndStream s; return s; }
+AudioStream &OutputStream() { static SimEndStream s; return s; }
+}}
 
 namespace OC {
 bool SimScopeArenaLive();
@@ -575,6 +604,175 @@ void CaptainConfig() {
   CHECK(PhzConfig::getValue(probe::kLiveKey, v) && v == 43, "CAPTAIN.DAT keeps it");
 }
 
+// ---- Sampler --------------------------------------------------------------
+//
+// The real AppSampler runs here against a model of the vendored player (see
+// shim/arduino/TeensyVariablePlayback.h): each loaded voice holds seven 4 KB
+// read-ahead blocks, eight voices about 230 KB, which is what the hardware
+// held after a visit. These need the SD card (--sd-card).
+constexpr long kSamplerHeld = 200 * 1000;   // eight voices loaded
+constexpr int kVoices = 8;
+
+// Warm every app but the Sampler, then take the base; Sampler visits add to it.
+long SamplerBase() { return WarmBase(); }
+
+bool SamplerHolds(long base) {
+  return sim_open_files == kVoices && HeapInUse() - base >= kSamplerHeld;
+}
+bool SamplerReleased(long base) {
+  return sim_open_files == 0 && HeapInUse() - base < kArenaGone;
+}
+
+// Scope -> Sampler -> the app menu held open on it for a long time -> Scope.
+// The menu draws over the Sampler and its Loop() keeps running; SUSPEND has
+// released the voices and nothing may take them back. This is the hardware
+// finding: ~232 KB stayed held, and the Scope then had no room for its arena.
+void SamplerMenuHeld() {
+  const long base = SamplerBase();
+  Go("Sampler");
+  Run(300);
+  CHECK(On("Sampler") && SamplerHolds(base), "the Sampler loads its eight voices (about 230 KB)");
+  OpenMenu();
+  CHECK(InMenu() && On("Sampler"), "the app menu is open on the Sampler");
+  CHECK(sim_open_files == 0, "opening the menu suspends the Sampler: no voice is held");
+  const long reads = sim_sd_block_reads;
+  Run(3000);   // well over a thousand loop passes under the open menu
+  CHECK(SamplerReleased(base), "...and nothing reloads them while the menu stays open");
+  CHECK(sim_sd_block_reads == reads, "...and no SD block was read for them");
+  CHECK(PickOther("Sampler"), "the menu picks another app");
+  Run(500);
+  CHECK(sim_open_files == 0 && HeapInUse() - base < kSamplerHeld / 2,
+        "the heap is back near its base after leaving the Sampler (the app picked may hold its own)");
+  Go("Scope");
+  CHECK(OC::SimScopeArenaLive(), "the Scope gets its arena afterwards");
+  CHECK(HeapInUse() - base >= kArenaTaken && HeapInUse() - base < kSamplerHeld / 2,
+        "...and holds only that, not the Sampler's voices");
+  Go("Sampler");
+  Run(300);
+  CHECK(SamplerHolds(base) && !OC::SimScopeArenaLive(),
+        "coming back to the Sampler reloads the voices (and the Scope let go)");
+}
+
+// The same by the console switch, which never lets the Sampler run a Loop pass
+// between SUSPEND and the switch, and the release must not re-read the card.
+void SamplerSwitch() {
+  const long base = SamplerBase();
+  for (int round = 0; round < 3; ++round) {
+    Go("Sampler");
+    Run(300);
+    CHECK(SamplerHolds(base), "the Sampler holds its voices while open");
+    const long reads = sim_sd_block_reads;
+    Go("Scope");
+    CHECK(SamplerReleased(base) || (sim_open_files == 0 && OC::SimScopeArenaLive()),
+          "leaving by the console switch hands the voices back");
+    CHECK(sim_sd_block_reads == reads, "...without reading them from the card first");
+    Go("Tweighty");
+    CHECK(SamplerReleased(base), "...and the heap returns to its base");
+  }
+}
+
+// A recall that lands in a Sampler that is suspended under the open menu must
+// leave it suspended (nothing loads), and a recall into the Sampler from
+// elsewhere loads on its RESUME.
+void SamplerRecall() {
+  const long base = SamplerBase();
+  Go("Sampler");
+  Run(300);
+  CHECK(Save(3), "a preset is saved with the Sampler on screen");
+  Go("Tweighty");
+  CHECK(SamplerReleased(base), "the Sampler is released in the background");
+  CHECK(Recall(3), "a recall runs");
+  Run(300);
+  CHECK(On("Sampler") && SamplerHolds(base), "the recall resumes the Sampler, which loads its voices");
+  OpenMenu();
+  CHECK(InMenu() && sim_open_files == 0, "the menu suspends it again");
+  CHECK(Recall(3), "a recall runs under the open menu");
+  Run(600);
+  // A recall always resumes the app it lands in, menu or not (PresetEngine
+  // step 6), so the Sampler is open again and loads; picking another app from
+  // the still-open menu must then suspend it and keep it released.
+  CHECK(InMenu() && On("Sampler") && sim_open_files == kVoices,
+        "the recall resumes the Sampler under the menu, which loads its voices");
+  CHECK(PickOther("Sampler"), "the menu picks another app");
+  Run(2000);
+  CHECK(sim_open_files == 0 && HeapInUse() - base < kSamplerHeld / 2,
+        "...and leaving it releases the voices and nothing reloads them");
+}
+
+UI::Event ButtonA() {
+  return UI::Event(UI::EVENT_BUTTON_PRESS, OC::CONTROL_BUTTON_UP, 0, 0);
+}
+
+// What the Loop() gate does not cover, and the release itself.
+//  - A: a playing voice has an event queued; closing its file must not let it
+//    run while the file is being closed (the old stop() masked and dropped it).
+//  - B: button A reaches LoadSlotFile() through StartSlot(), not through the
+//    Loop() gate. With the Sampler suspended it must load nothing: the guard
+//    in LoadSlotFile is the REQUIRED one. The gate in Loop() is only an
+//    optimisation, so removing it alone stays green here by design.
+//  - C: Init() run on a loaded Sampler hands its files back first.
+void SamplerCallers() {
+  const long base = SamplerBase();
+  Go("Sampler");
+  Run(300);
+  CHECK(SamplerHolds(base), "the Sampler holds its voices");
+  OC::app_switcher.current_app()->DispatchEvent(ButtonA());   // preview slot 0
+  Run(50);
+  CHECK(sim_open_files == kVoices, "...a voice is playing");
+  OpenMenu();
+  CHECK(InMenu() && sim_open_files == 0, "the menu suspends it and the voices close");
+  CHECK(sim_reentrant_events == 0, "...with no queued player event run during a close");
+  OC::app_switcher.current_app()->DispatchEvent(ButtonA());   // suspended: nothing may load
+  Run(500);
+  CHECK(sim_open_files == 0, "button A on a suspended Sampler loads nothing (LoadSlotFile's guard)");
+  CHECK(PickOther("Sampler"), "the menu picks another app");
+  Go("Sampler");
+  Run(300);
+  CHECK(sim_open_files == kVoices, "back in the Sampler the voices load again");
+  OC::app_switcher.current_app()->Init();
+  CHECK(sim_open_files == 0, "Init() on a loaded Sampler hands its files back");
+}
+
+// The power-up menu: encR held through the splash opens it over the Sampler,
+// which setup() has resumed; picking another app must release its voices.
+void PrepSampler() {
+  Go("Sampler");
+  Run(5000);
+}
+void BootMenuSampler() {
+  CHECK(On("Sampler"), "the module powers up in the Sampler");
+  CHECK(InMenu(), "...with the app menu open (encR held through the splash)");
+  Run(3000);
+  // setup() resumes the app after the splash, and nothing suspends it for a
+  // menu that was already open: it is the open app, so it holds its voices
+  // until the pick (set_current_app suspends it then).
+  CHECK(PickOther("Sampler"), "the menu picks another app");
+  Run(2000);
+  CHECK(sim_open_files == 0, "...and the Sampler's voices are released and stay so");
+  Go("Sampler");
+  Run(300);
+  CHECK(sim_open_files == kVoices, "coming back to it loads the voices");
+}
+
+// AppSampler::Init runs again at runtime (ReinitApps): it must not stack 18
+// more AudioConnections on the same streams each time, nor leave a voice open.
+void SamplerReinit() {
+  const long base = SamplerBase();
+  Go("Sampler");
+  Run(300);
+  OC::ReinitApps(false);
+  Run(300);
+  const long after_first = HeapInUse();
+  for (int i = 0; i < 10; ++i) {
+    OC::ReinitApps(false);
+    Run(300);
+  }
+  CHECK(HeapInUse() - after_first < 4000, "ten more app re-inits do not grow the heap");
+  CHECK(sim_open_files == 0 || sim_open_files == kVoices, "no voice is left open twice");
+  Go("Tweighty");
+  CHECK(SamplerReleased(base), "leaving the Sampler after re-inits still frees every voice");
+}
+
 // ---- boot -----------------------------------------------------------------
 
 void PrepScope(bool with_slot) {
@@ -603,7 +801,7 @@ void BootMenu(bool recall) {
 }  // namespace
 
 void SimAppSwitchPreBoot(const std::string &scenario) {
-  if (scenario == "boot-menu" || scenario == "boot-menu-recall")
+  if (scenario == "boot-menu" || scenario == "boot-menu-recall" || scenario == "boot-menu-sampler")
     SimRuntimeBootHold(OC::CONTROL_BUTTON_R);
 }
 
@@ -622,6 +820,13 @@ int SimAppSwitchTest(const std::string &s) {
   else if (s == "switch-back") SwitchBack();
   else if (s == "quad-bank") QuadBank();
   else if (s == "captain-config") CaptainConfig();
+  else if (s == "sampler-menu-held") SamplerMenuHeld();
+  else if (s == "sampler-switch") SamplerSwitch();
+  else if (s == "sampler-recall") SamplerRecall();
+  else if (s == "sampler-reinit") SamplerReinit();
+  else if (s == "sampler-callers") SamplerCallers();
+  else if (s == "prep-sampler") PrepSampler();
+  else if (s == "boot-menu-sampler") BootMenuSampler();
   else if (s == "prep-scope") PrepScope(false);
   else if (s == "prep-scope-slot") PrepScope(true);
   else if (s == "boot-menu") BootMenu(false);

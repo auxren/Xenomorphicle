@@ -46,4 +46,16 @@ static inline void arm_mult_f32(const float32_t *pSrcA, const float32_t *pSrcB,
   for (uint32_t i = 0; i < blockSize; i++) pDst[i] = pSrcA[i] * pSrcB[i];
 }
 
+static inline void arm_fill_f32(float32_t v, float32_t *d, uint32_t n) {
+  for (uint32_t i = 0; i < n; i++) d[i] = v;
+}
+static inline void arm_q15_to_float(const q15_t *s, float32_t *d, uint32_t n) {
+  for (uint32_t i = 0; i < n; i++) d[i] = s[i] / 32768.0f;
+}
+static inline void arm_float_to_q15(const float32_t *s, q15_t *d, uint32_t n) {
+  for (uint32_t i = 0; i < n; i++) {
+    float v = s[i] * 32768.0f;
+    d[i] = (q15_t)(v > 32767.f ? 32767.f : (v < -32768.f ? -32768.f : v));
+  }
+}
 #endif
