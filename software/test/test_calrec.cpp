@@ -297,6 +297,180 @@ static void test_unclamped_residual() {
   CHECK(CalRec::ResidualCentsUnclamped(1000, 1200.0, c) == CalRec::ResidualCents(1000, 1200.0, c));
 }
 
+// ---- the target scale T, the sanity check and the octave-ratio proof -----------------
+
+static const char kStoredRecordHex[] =
+    "434C01590200D1714348BA09267A00016ADCE50E855C00268597002A1012";
+
+static CalRec::Channel Ch(double gain, int off) {
+  return CalRec::Channel{(uint16_t)gain, (int16_t)off};
+}
+
+// The pre-sanity check: gain within +-10 % of the stock 0x9041 (removed from the flow).
+static bool OldWindowPasses(uint16_t gain) {
+  return fabs(double(gain) - 0x9041) <= 0.10 * 0x9041;
+}
+
+static void test_scale_constants() {
+  CHECK(CalRec::kCountsPerOct == 4096.0);        // the live default is unchanged (unproven)
+  CHECK(CalRec::kCountsPerOctGolden == 4096.0);  // the golden vectors' T never moves
+  CHECK(fabs(CalRec::kRawPerOct - 7864.32) < 1e-9);
+  CHECK(fabs(CalRec::ExpectedGain(4096.0) - 34133.3333) < 1e-3);
+  CHECK(fabs(CalRec::ExpectedGain(4431.48) - 36929.0) < 0.5);  // ~ the stock gain 0x9041
+  CHECK(CalRec::kGainTol == 0.015 && CalRec::kChannelGainTol == 0.01);
+  CHECK(CalRec::kOffsetMax == 100 && CalRec::kOffsetHardCap == 150);
+  CHECK(CalRec::kOctaveRatioTol == 0.0015);
+}
+
+// Fit259e with T: the 3-argument form is T = 4096; the gain scales with T.
+static void test_fit_with_t() {
+  CalRec::FitPoint pts[8];
+  for (int i = 0; i < 8; ++i) {
+    pts[i].mv = 1200.0 * (i + 1);
+    pts[i].raw = (uint16_t)(pts[i].mv * 6.5536 - 72.0 + 0.5);
+  }
+  CalRec::Channel a, b, c, d;
+  CHECK(CalRec::Fit259e(pts, 8, &a) == CalRec::FIT_OK);
+  CHECK(CalRec::Fit259e(pts, 8, 4096.0, &b) == CalRec::FIT_OK);
+  CHECK(a.gain == b.gain && a.offset == b.offset);
+  CHECK(CalRec::Fit259e(pts, 8, 4431.48, &c) == CalRec::FIT_OK);
+  CHECK(fabs(double(b.gain) - CalRec::ExpectedGain(4096.0)) < 15.0);
+  CHECK(fabs(double(c.gain) - CalRec::ExpectedGain(4431.48)) < 15.0);
+  CHECK(fabs(double(c.gain) / double(b.gain) - 4431.48 / 4096.0) < 2e-4);
+  CHECK(CalRec::Sanity259e(b, 4096.0) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(c, 4431.48) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(c, 4096.0) == CalRec::SANITY_GAIN_HIGH);
+  CHECK(CalRec::Sanity259e(b, 4431.48) == CalRec::SANITY_GAIN_LOW);
+  // TargetCounts and the residuals follow T; the 1-argument forms stay at 4096.
+  CHECK(CalRec::TargetCounts(1200.0) == 4096.0);
+  CHECK(CalRec::TargetCounts(1200.0, 4096.0) == 4096.0);
+  CHECK(fabs(CalRec::TargetCounts(1200.0, 4431.48) - 4431.48) < 1e-9);
+  CHECK(CalRec::ResidualCents(7000, 1200.0, c) == CalRec::ResidualCents(7000, 1200.0, c, 4096.0));
+  CHECK(fabs(CalRec::ResidualCents(7792, 1200.0, c, 4431.48)) < 2.0);       // c fits T 4431.48
+  CHECK(fabs(CalRec::ResidualCents(7792, 1200.0, c, 4096.0)) > 80.0);       // ...not 4096
+  CHECK(fabs(CalRec::ResidualCentsUnclamped(7792, 1200.0, c, 4431.48)) < 2.0);
+  CHECK(fabs(CalRec::ResidualCentsUnclamped(7792, 1200.0, c, 4096.0)) > 80.0);
+  (void)d;
+}
+
+// The record the first bench run stored: fitted with T = 4096 on an engine the stock path
+// says is ~4431.5 counts per octave. The check is T-dependent, and honest about it: it
+// passes under the T it was fitted with (H1) and fails under the other (H2).
+static void test_bad_record_replay() {
+  const std::vector<uint8_t> raw = Hex(kStoredRecordHex);
+  CHECK(raw.size() == 30);
+  CalRec::Record r;
+  CHECK(CalRec::Decode259e(raw.data(), raw.size(), &r));  // CRC 0x1012 ok
+  CHECK(CalRec::Crc16(raw.data(), 28) == 0x1012);
+  CHECK(r.ch[0].gain == 34140 && r.ch[1].gain == 34199);
+  CHECK(r.ch[0].offset == 38 && r.ch[1].offset == 42);
+  // H2 (T = 4431.48): low on both channels, -7.55 % and -7.39 %.
+  const double g_exp = CalRec::ExpectedGain(4431.48);
+  CHECK(fabs((r.ch[0].gain / g_exp - 1.0) * 100.0 + 7.55) < 0.02);
+  CHECK(fabs((r.ch[1].gain / g_exp - 1.0) * 100.0 + 7.39) < 0.02);
+  CHECK(CalRec::Sanity259e(r.ch[0], 4431.48) == CalRec::SANITY_GAIN_LOW);
+  CHECK(CalRec::Sanity259e(r.ch[1], 4431.48) == CalRec::SANITY_GAIN_LOW);
+  CHECK(CalRec::Sanity259e(r.ch[0], r.ch[1], 4431.48) == CalRec::SANITY_GAIN_LOW);
+  // H1 (T = 4096): the same record passes. The check does not prove either hypothesis.
+  CHECK(CalRec::Sanity259e(r.ch[0], 4096.0) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(r.ch[1], 4096.0) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(r.ch[0], r.ch[1], 4096.0) == CalRec::SANITY_OK);
+  // The old +-10 % window around 0x9041 passed it: it could not have failed.
+  CHECK(OldWindowPasses(r.ch[0].gain) && OldWindowPasses(r.ch[1].gain));
+  // The old window passes a fit made with ANY T from 4000 to 4800 (a 17 % span), because
+  // the fit's gain is ~8.3333 * T whatever the meter reads: it could not tell them apart.
+  for (double t = 4000.0; t <= 4800.0; t += 50.0)
+    CHECK(OldWindowPasses((uint16_t)CalRec::ExpectedGain(t)));
+}
+
+// A record fitted with T = 4431.48 (gains about 36933 / 36998).
+static void test_good_record_accepted() {
+  CHECK(CalRec::Sanity259e(Ch(36933, 42), 4431.48) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(Ch(36998, 44), 4431.48) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(Ch(36933, 42), Ch(36998, 44), 4431.48) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(Ch(36933, 42), 4096.0) == CalRec::SANITY_GAIN_HIGH);
+  CHECK(CalRec::Sanity259e(Ch(36998, 44), 4096.0) == CalRec::SANITY_GAIN_HIGH);
+}
+
+static void test_sanity_boundaries() {
+  for (double t : {4096.0, 4431.48}) {
+    const double g = CalRec::ExpectedGain(t);
+    const double lo = g * 0.985, hi = g * 1.015;
+    const double ilo = ceil(lo), ihi = floor(hi);
+    CHECK(CalRec::Sanity259e(Ch(ilo, 40), t) == CalRec::SANITY_OK);
+    CHECK(CalRec::Sanity259e(Ch(ilo - 1, 40), t) == CalRec::SANITY_GAIN_LOW);
+    CHECK(CalRec::Sanity259e(Ch(ihi, 40), t) == CalRec::SANITY_OK);
+    CHECK(CalRec::Sanity259e(Ch(ihi + 1, 40), t) == CalRec::SANITY_GAIN_HIGH);
+    CHECK(CalRec::Sanity259e(Ch(ceil(g * 0.984), 40), t) == CalRec::SANITY_GAIN_LOW);   // -1.6 %
+    CHECK(CalRec::Sanity259e(Ch(floor(g * 1.016), 40), t) == CalRec::SANITY_GAIN_HIGH); // +1.6 %
+    CHECK(CalRec::Sanity259e(Ch(g, 40), t) == CalRec::SANITY_OK);
+  }
+  // gain is checked before offset
+  CHECK(CalRec::Sanity259e(Ch(30000, 500), 4096.0) == CalRec::SANITY_GAIN_LOW);
+  CHECK(CalRec::Sanity259e(Ch(40000, -500), 4096.0) == CalRec::SANITY_GAIN_HIGH);
+}
+
+static void test_sanity_offset() {
+  const double g = CalRec::ExpectedGain(4096.0);
+  CHECK(CalRec::Sanity259e(Ch(g, 0), 4096.0) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(Ch(g, 100), 4096.0) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(Ch(g, -1), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
+  CHECK(CalRec::Sanity259e(Ch(g, 101), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
+  CHECK(CalRec::Sanity259e(Ch(g, 150), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
+  CHECK(CalRec::Sanity259e(Ch(g, 151), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
+  CHECK(CalRec::Sanity259e(Ch(g, -151), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
+  CHECK(CalRec::Sanity259e(Ch(g, 32767), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
+  CHECK(CalRec::Sanity259e(Ch(g, -32768), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
+  // the pair carries the offset verdict of whichever channel is bad
+  CHECK(CalRec::Sanity259e(Ch(g, 40), Ch(g, 151), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
+  CHECK(CalRec::Sanity259e(Ch(g, -1), Ch(g, 40), 4096.0) == CalRec::SANITY_OFFSET_RANGE);
+}
+
+static void test_sanity_channel_mismatch() {
+  const double t = 4096.0, g = CalRec::ExpectedGain(t);
+  // each channel inside +-1.5 %, but 2.4 % apart
+  CHECK(CalRec::Sanity259e(Ch(g * 0.988, 40), t) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(Ch(g * 1.012, 40), t) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(Ch(g * 0.988, 40), Ch(g * 1.012, 40), t) == CalRec::SANITY_CH_MISMATCH);
+  CHECK(CalRec::Sanity259e(Ch(g * 1.012, 40), Ch(g * 0.988, 40), t) == CalRec::SANITY_CH_MISMATCH);
+  // within 1 % of g_exp apart: fine; just over: mismatch
+  CHECK(CalRec::Sanity259e(Ch(g, 40), Ch(g + 0.009 * g, 40), t) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(Ch(g, 40), Ch(g + 0.011 * g, 40), t) == CalRec::SANITY_CH_MISMATCH);
+  // a single-channel failure is that channel's verdict, not a mismatch
+  CHECK(CalRec::Sanity259e(Ch(g, 40), Ch(g * 0.9, 40), t) == CalRec::SANITY_GAIN_LOW);
+  CHECK(CalRec::Sanity259e(Ch(g * 1.1, 40), Ch(g, 40), t) == CalRec::SANITY_GAIN_HIGH);
+  CHECK(strcmp(CalRec::SanityName(CalRec::SANITY_CH_MISMATCH), "CH_MISMATCH") == 0);
+  CHECK(strcmp(CalRec::SanityName(CalRec::SANITY_GAIN_LOW), "GAIN_LOW") == 0);
+  CHECK(strcmp(CalRec::SanityName(CalRec::SANITY_GAIN_HIGH), "GAIN_HIGH") == 0);
+  CHECK(strcmp(CalRec::SanityName(CalRec::SANITY_OFFSET_RANGE), "OFFSET_RANGE") == 0);
+  CHECK(strcmp(CalRec::SanityName(CalRec::SANITY_OK), "OK") == 0);
+}
+
+static void test_octave_ratio() {
+  CHECK(CalRec::OctaveRatioOk(261.63, 523.26, 1.0));                  // 2.000
+  CHECK(CalRec::OctaveRatioOk(100.0, 400.0, 2.0));                    // n = 2, ratio 4.000
+  CHECK(!CalRec::OctaveRatioOk(100.0, 200.0, 2.0));                   // one octave, asked for two
+  CHECK(!CalRec::OctaveRatioOk(100.0, 189.8, 1.0));                   // 1.898 ~ 2^0.9245: T 4096 on 4431.5
+  CHECK(!CalRec::OctaveRatioOk(100.0, 100.0 * pow(2.0, 0.9245), 1.0));
+  CHECK(!CalRec::OctaveRatioOk(100.0, 211.7, 1.0));                   // 2.117 ~ 2^(4431.5/4096)
+  CHECK(!CalRec::OctaveRatioOk(100.0, 100.0 * pow(2.0, 4431.5 / 4096.0), 1.0));
+  CHECK(!CalRec::OctaveRatioOk(100.0, 400.0 * 0.9, 2.0));
+  // the default tolerance is 0.15 % of an octave = 1.8 cents per octave
+  CHECK(CalRec::OctaveRatioOk(100.0, 200.0 * pow(2.0, 0.0014), 1.0));
+  CHECK(!CalRec::OctaveRatioOk(100.0, 200.0 * pow(2.0, 0.0016), 1.0));
+  CHECK(CalRec::OctaveRatioOk(100.0, 200.0 * pow(2.0, -0.0014), 1.0));
+  CHECK(!CalRec::OctaveRatioOk(100.0, 200.0 * pow(2.0, -0.0016), 1.0));
+  // an explicit tolerance, and per octave (n = 4: 4 * 0.0014 octaves total is fine)
+  CHECK(CalRec::OctaveRatioOk(100.0, 1600.0 * pow(2.0, 4 * 0.0014), 4.0));
+  CHECK(!CalRec::OctaveRatioOk(100.0, 200.0 * pow(2.0, 0.01), 1.0, 0.005));
+  CHECK(CalRec::OctaveRatioOk(100.0, 200.0 * pow(2.0, 0.01), 1.0, 0.02));
+  // garbage in: never ok
+  CHECK(!CalRec::OctaveRatioOk(0.0, 200.0, 1.0));
+  CHECK(!CalRec::OctaveRatioOk(100.0, -200.0, 1.0));
+  CHECK(!CalRec::OctaveRatioOk(100.0, 200.0, 0.0));
+  CHECK(!CalRec::OctaveRatioOk(100.0, NAN, 1.0));
+}
+
 int main() {
   test_console_gate_during_run();
   test_console_commands_blocked_during_run();
@@ -307,6 +481,14 @@ int main() {
   test_decode_rejects();
   test_fit_errors();
   test_target_residual();
+  test_scale_constants();
+  test_fit_with_t();
+  test_bad_record_replay();
+  test_good_record_accepted();
+  test_sanity_boundaries();
+  test_sanity_offset();
+  test_sanity_channel_mismatch();
+  test_octave_ratio();
   printf("%d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
 }

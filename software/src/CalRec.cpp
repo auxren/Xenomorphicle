@@ -116,9 +116,10 @@ bool ConsoleFrameAllowedDuringRun(const uint8_t *f, uint8_t n) {
   return FrameAllowed(f, n);
 }
 
-double TargetCounts(double mv) { return mv * 4096.0 / 1200.0; }
+double TargetCounts(double mv, double counts_per_oct) { return mv * counts_per_oct / 1200.0; }
+double TargetCounts(double mv) { return TargetCounts(mv, kCountsPerOctGolden); }
 
-FitError Fit259e(const FitPoint *p, int n, Channel *out) {
+FitError Fit259e(const FitPoint *p, int n, double counts_per_oct, Channel *out) {
   if (!p || !out || n < 2) return FIT_TOO_FEW;
   bool distinct = false;
   for (int i = 1; i < n; i++)
@@ -128,7 +129,7 @@ FitError Fit259e(const FitPoint *p, int n, Channel *out) {
   double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
   for (int i = 0; i < n; i++) {
     const double x = (double)p[i].raw;
-    const double y = p[i].mv * 4096.0 / 1200.0;
+    const double y = p[i].mv * counts_per_oct / 1200.0;
     sx += x;
     sy += y;
     sxx += x * x;
@@ -145,13 +146,62 @@ FitError Fit259e(const FitPoint *p, int n, Channel *out) {
   return FIT_OK;
 }
 
-double ResidualCents(uint16_t raw, double mv, const Channel &c) {
-  return ((double)Apply259e(raw, c.gain, c.offset) - TargetCounts(mv)) * 1200.0 / 4096.0;
+FitError Fit259e(const FitPoint *p, int n, Channel *out) {
+  return Fit259e(p, n, kCountsPerOctGolden, out);
 }
 
-double ResidualCentsUnclamped(uint16_t raw, double mv, const Channel &c) {
+double ResidualCents(uint16_t raw, double mv, const Channel &c, double counts_per_oct) {
+  return ((double)Apply259e(raw, c.gain, c.offset) - TargetCounts(mv, counts_per_oct)) * 1200.0 /
+         counts_per_oct;
+}
+double ResidualCents(uint16_t raw, double mv, const Channel &c) {
+  return ResidualCents(raw, mv, c, kCountsPerOctGolden);
+}
+
+double ResidualCentsUnclamped(uint16_t raw, double mv, const Channel &c, double counts_per_oct) {
   const double v = (double)(int32_t)(((uint32_t)raw * c.gain) >> 16) + (double)c.offset;
-  return (v - TargetCounts(mv)) * 1200.0 / 4096.0;
+  return (v - TargetCounts(mv, counts_per_oct)) * 1200.0 / counts_per_oct;
+}
+double ResidualCentsUnclamped(uint16_t raw, double mv, const Channel &c) {
+  return ResidualCentsUnclamped(raw, mv, c, kCountsPerOctGolden);
+}
+
+double ExpectedGain(double counts_per_oct) { return counts_per_oct * 65536.0 / kRawPerOct; }
+
+Sanity Sanity259e(const Channel &c, double counts_per_oct) {
+  const double g_exp = ExpectedGain(counts_per_oct);
+  const double g = (double)c.gain;
+  if (g < g_exp * (1.0 - kGainTol)) return SANITY_GAIN_LOW;
+  if (g > g_exp * (1.0 + kGainTol)) return SANITY_GAIN_HIGH;
+  const int o = (int)c.offset;
+  if (o < 0 || o > kOffsetMax || o > kOffsetHardCap || o < -kOffsetHardCap) return SANITY_OFFSET_RANGE;
+  return SANITY_OK;
+}
+
+Sanity Sanity259e(const Channel &c0, const Channel &c1, double counts_per_oct) {
+  Sanity s = Sanity259e(c0, counts_per_oct);
+  if (s != SANITY_OK) return s;
+  s = Sanity259e(c1, counts_per_oct);
+  if (s != SANITY_OK) return s;
+  if (fabs((double)c0.gain - (double)c1.gain) > kChannelGainTol * ExpectedGain(counts_per_oct))
+    return SANITY_CH_MISMATCH;
+  return SANITY_OK;
+}
+
+const char *SanityName(Sanity s) {
+  switch (s) {
+    case SANITY_OK: return "OK";
+    case SANITY_GAIN_LOW: return "GAIN_LOW";
+    case SANITY_GAIN_HIGH: return "GAIN_HIGH";
+    case SANITY_OFFSET_RANGE: return "OFFSET_RANGE";
+    case SANITY_CH_MISMATCH: return "CH_MISMATCH";
+  }
+  return "?";
+}
+
+bool OctaveRatioOk(double f_lo, double f_hi, double n_oct, double tol) {
+  if (!(f_lo > 0.0) || !(f_hi > 0.0) || !(n_oct > 0.0) || !(tol >= 0.0)) return false;
+  return fabs(log2(f_hi / f_lo) / n_oct - 1.0) <= tol;
 }
 
 }  // namespace CalRec
