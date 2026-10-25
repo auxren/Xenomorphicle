@@ -29,13 +29,15 @@
 //   Identify    hold kIdLowMv then kIdHighMv; every candidate's ADC word for the
 //               channel (kAdcSamples fresh samples, median) must rise by
 //               >= half the nominal step on exactly one candidate.
-//   Measure     the 8 fit points then the 4 verify points: hold the stored
+//   Measure     the kFitPoints (8) fit points then the kVerifyPoints (5) verify points: hold the stored
 //               table's code (OutputPort::CodeForMv), MeterMeasure (the Self
 //               rule, kReadings), the meter median within kPatchTolMv of the
 //               requested mV, then the ADC median. Fit (CalRec::Fit259e on the
 //               meter mV), gain within +-10 % of 0x9041, verify residuals
 //               within +-3 cents. Output A is released after each channel.
-//   Results     Continue -> Confirm; ConfirmWrite -> Backup. The results expire
+//   Results     Continue -> Confirm; ConfirmWrite -> Backup (both only with
+//               kAllowWrite, which is false in the firmware: Results is then the
+//               end of a read-only run, discarded with Cancel). The results expire
 //               kResultsMaxAgeMs after channel 0's FIRST measured point (the
 //               oldest data), and so does a wait at channel 1's patch prompt
 //               (any stage from then to Confirm ends Failed/F_EXPIRED: measure
@@ -147,6 +149,24 @@ class Cal259eFlow {
   // Results older than this are not written: the owner measured them with the
   // modules in some other state. Measure again.
   static constexpr uint32_t kResultsMaxAgeMs = 10u * 60u * 1000u;
+  // THE WRITE IS DISABLED in the firmware. The 259e row does everything up to Results
+  // (warm-up, scan, identify, measure, fit) read-only; Continue() at Results does not
+  // reach Confirm, ConfirmWrite() does nothing, and no backup, PUT or COMMIT is reachable.
+  // Why: (1) no real write to a 259e has been proven on hardware yet (and one is not
+  // undoable: each 259e takes only 8 commits for its whole life); (2) the target scale
+  // (4096 counts per octave) is not proven by the bench octave-ratio check (gate X3);
+  // (3) the read-back of a stored record was wrong on the real module (31.2C4 corrupts
+  // two bytes of every 8-byte reply: see Cal259eBus.cpp kRecordArgs). Re-enable only by
+  // building with -DCAL259E_ALLOW_WRITE=1 after those are closed. The write code and its
+  // tests are kept alive: the host suite and the simulator run with the constant on.
+#if defined(CAL259E_ALLOW_COMPACTION) && !defined(CAL259E_ALLOW_WRITE)
+#define CAL259E_ALLOW_WRITE 1   // compaction is a kind of write
+#endif
+#ifdef CAL259E_ALLOW_WRITE
+  static constexpr bool kAllowWrite = true;
+#else
+  static constexpr bool kAllowWrite = false;
+#endif
   // Compaction (ConfirmCompact: reset the 8 slots to the new record alone, COMMIT
   // flags 1) stays OFF until a tested restore path for CAL259BK.BIN exists: a
   // power cut during the 259e's rewrite re-inits its presets, and a backup that

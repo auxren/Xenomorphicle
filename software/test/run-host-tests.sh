@@ -96,19 +96,26 @@ suite test_cal259e_flow             ../src/Cal259eFlow.cpp ../src/Cal259eBus.cpp
 suite test_cal259e_backup           ../src/Cal259eBackup.cpp ../src/Cal259eFlow.cpp ../src/Cal259eBus.cpp \
                                     ../src/CalRec.cpp ../src/CalRoutineMeasure.cpp \
                                     ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
+suite test_cal259e_hold
 suite test_cal259e_text             ../src/Cal259eText.cpp ../src/Cal259eBackup.cpp ../src/Cal259eFlow.cpp \
                                     ../src/Cal259eBus.cpp ../src/CalRec.cpp ../src/CalRoutineMeasure.cpp \
                                     ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
-# The 259e flow's compaction path is unreachable in the firmware (kAllowCompaction
-# is false until a tested restore path for CAL259BK.BIN exists); its code and
-# tests are kept alive by building the same suite with the constant on.
-suite_count=$((suite_count + 1))
-printf '\n--- %stest_cal259e_flow (CAL259E_ALLOW_COMPACTION=1) ---\n' "$TAG"
-# shellcheck disable=SC2086
-$CXX $WARN $OPT -DCAL259E_ALLOW_COMPACTION=1 -o "build/${TAG}test_cal259e_flow_compaction" \
-  test_cal259e_flow.cpp ../src/Cal259eFlow.cpp ../src/Cal259eBus.cpp ../src/CalRec.cpp \
-  ../src/CalRoutineMeasure.cpp ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
-"./build/${TAG}test_cal259e_flow_compaction"
+# The 259e write path is unreachable in the firmware (Cal259eFlow::kAllowWrite is
+# false until a real write is proven on a bench 259e and the target scale is proven;
+# kAllowCompaction is false until a tested restore path for CAL259BK.BIN exists). Their
+# code and tests are kept alive by building the same suite with the constants on. The
+# plain build above runs the read-only half and the write-disabled checks.
+flow_variant() {  # <label> <define>
+  suite_count=$((suite_count + 1))
+  printf '\n--- %stest_cal259e_flow (%s) ---\n' "$TAG" "$1"
+  # shellcheck disable=SC2086
+  $CXX $WARN $OPT "$2" -o "build/${TAG}test_cal259e_flow_$3" \
+    test_cal259e_flow.cpp ../src/Cal259eFlow.cpp ../src/Cal259eBus.cpp ../src/CalRec.cpp \
+    ../src/CalRoutineMeasure.cpp ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
+  "./build/${TAG}test_cal259e_flow_$3"
+}
+flow_variant "CAL259E_ALLOW_WRITE=1" -DCAL259E_ALLOW_WRITE=1 write
+flow_variant "CAL259E_ALLOW_COMPACTION=1" -DCAL259E_ALLOW_COMPACTION=1 compaction
 suite test_calroutine_flow          ../src/CalRoutineFlow.cpp ../src/CalRoutineMeasure.cpp \
                                     ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
 

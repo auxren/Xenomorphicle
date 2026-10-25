@@ -142,6 +142,7 @@ constexpr double Cal259eFlow::kGainTolerance, Cal259eFlow::kPatchTolMv, Cal259eF
     Cal259eFlow::kMaxNonlinearityCents;
 constexpr uint32_t Cal259eFlow::kResultsMaxAgeMs;
 constexpr bool Cal259eFlow::kAllowCompaction;
+constexpr bool Cal259eFlow::kAllowWrite;
 constexpr uint32_t Cal259eFlow::kAdcTimeoutMs, Cal259eFlow::kBackupTimeoutMs,
     Cal259eFlow::kBackupBankBytes;
 
@@ -405,7 +406,7 @@ C259_CODE void Cal259eFlow::Continue() {
       if (!MeterGone()) StartIdentify();
       break;
     case Stage::Results:
-      SetStage(Stage::Confirm);
+      if (kAllowWrite) SetStage(Stage::Confirm);  // else: read-only, discard at Results
       break;
     default:
       break;
@@ -421,7 +422,7 @@ C259_CODE uint32_t Cal259eFlow::results_age_ms() const {
 }
 
 C259_CODE void Cal259eFlow::ConfirmWrite() {
-  if (!meter_ || stage_ != Stage::Confirm) return;
+  if (!kAllowWrite || !meter_ || stage_ != Stage::Confirm) return;
   now_ = clock_->Ms();
   // Defence in depth: only a run whose two channels both passed, and are still
   // fresh, may write. (The stage machine already guarantees the first.)
@@ -434,7 +435,7 @@ C259_CODE void Cal259eFlow::ConfirmWrite() {
 }
 
 C259_CODE void Cal259eFlow::ConfirmCompact() {
-  if (!kAllowCompaction || !meter_ || stage_ != Stage::ConfirmCompact) return;
+  if (!kAllowWrite || !kAllowCompaction || !meter_ || stage_ != Stage::ConfirmCompact) return;
   now_ = clock_->Ms();
   compact_ = true;  // a fresh backup first, then the record again and COMMIT flags 1
   SetStage(Stage::Backup);

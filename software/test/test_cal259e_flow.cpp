@@ -1346,36 +1346,76 @@ static void backup_reason_size_and_line() {
   }
 }
 
+// (E) With kAllowWrite false (the firmware): a full read-only run ends at Results; Continue,
+// ConfirmWrite and ConfirmCompact reach nothing; no backup, PUT, COMMIT or READ-record is
+// sent; the only way out is a discard (Cancel). Skipped in the write-enabled build.
+static void write_disabled_is_read_only() {
+  if (F::kAllowWrite) return;
+  Rig r;
+  good_adc(r.a);
+  r.Begin();
+  bool saw_confirm = false;
+  CHECK(r.Run([&] {
+    const Stage s = r.flow.stage();
+    if (s == Stage::Confirm || s == Stage::ConfirmCompact || s == Stage::Backup ||
+        s == Stage::Write || s == Stage::Verify) saw_confirm = true;
+    return s == Stage::Results;
+  }));
+  CHECK(r.flow.stage() == Stage::Results && r.flow.result().valid_mask == 3);
+  for (int i = 0; i < 20; ++i) { r.flow.Continue(); r.flow.ConfirmWrite(); r.flow.ConfirmCompact(); }
+  CHECK(r.flow.stage() == Stage::Results);
+  r.Idle(5000);
+  const Stage s = r.flow.stage();
+  CHECK(s == Stage::Results);
+  CHECK(!saw_confirm);
+  CHECK(r.backup.begins == 0);
+  CHECK(r.a.count[CalRec::kCmdPut] == 0 && r.a.count[CalRec::kCmdCommit] == 0);
+  CHECK(r.a.commits_received == 0);
+  CHECK(!logged("CALR,259BK") && !logged("CALR,259REC"));
+  CHECK(r.outs.mask == 0);                     // output A released
+  r.flow.Cancel();                             // the discard: Failed/CANCELLED, then dismissed
+  CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_CANCELLED);
+  r.flow.Cancel();
+  CHECK(r.flow.stage() == Stage::Idle);
+  CHECK(r.a.count[CalRec::kCmdPut] == 0 && r.a.count[CalRec::kCmdCommit] == 0);
+}
+
+// The write is disabled in the firmware (Cal259eFlow::kAllowWrite): the default build of this
+// suite runs the read-only half and write_disabled_*; the full suite runs with
+// -DCAL259E_ALLOW_WRITE=1 (and, for the compaction path, -DCAL259E_ALLOW_COMPACTION=1).
+#define W(fn) do { if (F::kAllowWrite) fn(); else (void)&fn; } while (0)
+
 int main() {
-  good_unit_passes();
+  write_disabled_is_read_only();
+  W(good_unit_passes);
   scale_off_fails();
   wrong_jack_fails_identity();
-  several_259es_one_moves();
+  W(several_259es_one_moves);
   several_259es_both_move();
   meter_disagrees_fails_patch();
   noisy_meter_fails();
-  backup_fails_no_write();
-  unit_id_kept();
-  slots_full_is_a_failed_screen();
-  slots_full_needs_second_confirm();
-  cancel_every_stage();
-  backup_times_out();
-  preconditions();
+  W(backup_fails_no_write);
+  W(unit_id_kept);
+  W(slots_full_is_a_failed_screen);
+  W(slots_full_needs_second_confirm);
+  W(cancel_every_stage);
+  W(backup_times_out);
+  W(preconditions);
   meter_lost_fails();
-  verify_fails();
-  adc_fresh_samples();
-  commit_outcomes();
-  backup_reason_size_and_line();
-  commit_wire_error();
-  suspend_in_write_after_ack();
-  begin_refused_while_cancel_pending();
+  W(verify_fails);
+  W(adc_fresh_samples);
+  W(commit_outcomes);
+  W(backup_reason_size_and_line);
+  W(commit_wire_error);
+  W(suspend_in_write_after_ack);
+  W(begin_refused_while_cancel_pending);
   nonlinearity_is_a_pass_criterion();
   top_of_range_is_verified();
   nonlinearity_sees_past_the_clamp();
-  results_expire_and_confirm_rechecks();
-  expiry_counts_from_the_first_point();
+  W(results_expire_and_confirm_rechecks);
+  W(expiry_counts_from_the_first_point);
   wrong_jack_on_channel_one();
-  golden_lines();
+  W(golden_lines);
   names();
   printf("test_cal259e_flow: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
