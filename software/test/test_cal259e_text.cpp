@@ -57,6 +57,20 @@ static void readback_is_unknown_not_committed() {
   CHECK(Has(Rows(F::F_BUS, 0), "Nothing was written"));
 }
 
+// L2: a COMMIT that never went on the wire (tx gate closed: E_BUS_BUSY; allowlist: E_INTERNAL)
+// left the module alone: "Nothing was written", not "UNKNOWN". A Wire error (E_BUS_ERROR) may
+// have latched the frame: still UNKNOWN. A refusal says a slot may be used, not "AFTER writing"
+// (31.2C4 also refuses before programming).
+static void commit_that_never_went_out_is_not_unknown() {
+  for (int cr : {int(E_BUS_BUSY), int(E_INTERNAL)}) {
+    const Cal259eFailRows r = Rows(F::F_BUS, cr);
+    CHECK(Has(r, "Nothing was written") && !Has(r, "UNKNOWN"));
+  }
+  CHECK(Has(Rows(F::F_BUS, E_BUS_ERROR), "Written: UNKNOWN"));
+  const Cal259eFailRows no = Rows(F::F_COMMIT_REFUSED, E_COMMIT_REFUSED, BK_NONE, 0x28);
+  CHECK(!Has(no, "AFTER") && Has(no, "A slot may be used") && Has(no, "Read =28s and =28r"));
+}
+
 static void backup_reasons_reach_the_screen() {
   const Cal259eFailRows fw = Rows(F::F_BACKUP, 0, BK_FW_CARD);
   CHECK(Has(fw, "Firmware card served") && Has(fw, "Reboot the Xeno") && Has(fw, "card disarmed"));
@@ -79,6 +93,7 @@ static void every_failure_fits_the_screen() {
 int main() {
   refused_is_not_nothing_written();
   readback_is_unknown_not_committed();
+  commit_that_never_went_out_is_not_unknown();
   backup_reasons_reach_the_screen();
   every_failure_fits_the_screen();
   printf("test_cal259e_text: %d checks, %d failures\n", checks, fails);

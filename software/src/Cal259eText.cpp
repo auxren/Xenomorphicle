@@ -30,7 +30,7 @@ C259T_CODE void Cal259eFailText(Cal259eFlow::FailCode code, int cr, BackupWhy wh
     case F::F_FIT: l1 = "The fit failed (an"; l2 = "offset out of range)."; break;
     case F::F_VERIFY: l1 = "Verify residual"; l2 = "is over 3 cents."; break;
     case F::F_NONLIN: l1 = "Fit-point nonlinear-"; l2 = "ity is over 5 cents."; break;
-    case F::F_EXPIRED: l1 = "Results over 10 min"; l2 = "old: measure again."; break;
+    case F::F_EXPIRED: l1 = "Readings over 10 min"; l2 = "old: measure again."; break;
     case F::F_INTERNAL: l1 = "Internal check failed"; l2 = "(nothing was sent)."; break;
     case F::F_BACKUP:
       // Why the preset backup did not happen: three rows, the last "Nothing was
@@ -46,7 +46,7 @@ C259T_CODE void Cal259eFailText(Cal259eFlow::FailCode code, int cr, BackupWhy wh
       snprintf(r4, sizeof(r4), "Nothing was written.");
       break;
     case F::F_COMMIT_REFUSED:
-      l1 = "The 259e refused the"; l2 = "record AFTER writing.";
+      l1 = "The 259e refused the"; l2 = "COMMIT (see below).";
       snprintf(r3, sizeof(r3), "A slot may be used.");
       snprintf(r4, sizeof(r4), "Read =%02Xs and =%02Xr.", t, t);
       break;
@@ -72,7 +72,8 @@ C259T_CODE void Cal259eFailText(Cal259eFlow::FailCode code, int cr, BackupWhy wh
     } else if (cr == E_COMMIT_REFUSED) {
       snprintf(r3, sizeof(r3), "A slot may be used.");
       snprintf(r4, sizeof(r4), "Read =%02Xs and =%02Xr.", t, t);
-    } else if (cr != 0 && cr != E_NO_SLOT) {
+    } else if (cr != 0 && cr != E_NO_SLOT && cr != E_BUS_BUSY && cr != E_INTERNAL) {
+      // (E_BUS_BUSY, E_INTERNAL: the COMMIT frame never went out, nothing was sent.)
       snprintf(r3, sizeof(r3), "Written: UNKNOWN.");
     }
     // F_READBACK: the COMMIT reported OK but the record read back is not the one

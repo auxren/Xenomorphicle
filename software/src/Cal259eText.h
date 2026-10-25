@@ -12,11 +12,12 @@
 // commit_result is Cal259eFlow::commit_result() (0 no COMMIT verdict, 1 the module's
 // status shows this record, else a Cal259eBus Error). What each means for the
 // record:
-//   0 or E_NO_SLOT  nothing was programmed: "Nothing was written."
+//   0, E_NO_SLOT, E_BUS_BUSY, E_INTERNAL  nothing was programmed (the last two:
+//                   the COMMIT frame never went on the wire): "Nothing was written."
 //   1               "Record committed." (the status named the record put); but
 //                   not on F_READBACK, where the record read back differs
-//   E_COMMIT_REFUSED the module refused AFTER programming (31.2C4 checks the
-//                   read-back last): a slot was consumed and may be torn
+//   E_COMMIT_REFUSED the module refused, before or after programming (31.2C4
+//                   checks the read-back last): a slot may have been used, maybe torn
 //   anything else   "Written: UNKNOWN."
 struct Cal259eFailRows {
   char row[5][24];
