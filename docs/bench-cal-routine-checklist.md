@@ -98,7 +98,13 @@ Steps: start a run, unplug the meter during an output. Pass: the screen says the
 
 - [ ] The folder layout reseeds when the app is appended to the app list. Check on a unit with a custom arrangement: after the update, the arrangement and the new app's place are as described, and say so in the release notes.
 
-## 259e target (experimental)
+## 259e target (experimental; the write is DISABLED in the firmware)
+
+**State of the evidence.** The measurement half has been bench-run on a real 259e (600, 1200 and 3000 mV points within 0.4 mV of the meter; second input fit worst 1.83 cents, nonlinearity 1.08 cents; gain 0x8597 against stock 0x9041). The **write path is EXPERIMENTAL and not yet bench-proven**: the first real write reached the write step on a pre-fix image, the module reported the record valid (status `05`, fmt 1, seq 1), but the read-back differed, and that was traced to the 31.2C4 reply quirk below, not to a bad write. The write is **DISABLED** in the shipped firmware (`Cal259eFlow::kAllowWrite`): a 259e session is measuring-only and **ends with a discard at Results (L L)**. It is re-enabled (a build with `-DCAL259E_ALLOW_WRITE=1`) only after (1) the read-back is proven correct and (2) the target scale is proven by gate X3 below.
+
+**Slots.** Each 259e accepts only **8 commits for its whole life** (compaction is disabled). Do not spend slots on checklist tests. The "8 slots full" case below is run in the **8051 emulator, never on the bench 259e**.
+
+**The read-back quirk (found on the first run).** 31.2C4 sends every 8-byte record reply with data byte 5 as 00 and data byte 7 as 0C: its reply buffer (XDATA 0x067A..) overlaps the stock send routine's scratch (0x8D22 clears 0x0684 before it sends; 0x8815 keeps its byte index in 0x0686, so it reads 12 while that byte goes out). Pre-fix, a stored record read back wrong at record offsets 7, 13, 15, 21, 23, 27, 29 exactly as seen. The Xenomorpher now reads the record with seven overlapping READs (args 0, 5, 10, 15, 20, 21, 22) using only data bytes 0 to 4 and 6; the last byte (CRC low) is inferred from the CRC of the first 28. **Not yet confirmed on hardware**: that the fixed read returns the record the module holds (check `=28r` against a logged `CALR,259REC`).
 
 The "259e pitch inputs" row of the app (`Cal259eFlow`, host-tested) and the console `=` command (`=28s`, `=28r`, `=28a0`, `=28a1`, read-only). Design: Buchla_FW `docs/superpowers/specs/2026-10-24-cv-calibration-xeno-coordinator.md`; frames and record: Buchla_FW `docs/cv-calibration/CONTRACT.md`. The gates X2, X3 and X4 are the CV-calibration plan's. Nothing in this section has been run on the bench yet.
 
@@ -111,7 +117,8 @@ Rig: the T41_console build (check its RAM2 "free for malloc" against an armed FW
 - [ ] `=28s` answers.
 - [ ] `=28a0` rises with output A, `n` advances (principal pitch).
 - [ ] `=28a1` rises with output A, `n` advances (mod pitch).
-- [ ] `=28r` shows the record state (record or `REC,NONE`).
+- [ ] `=28r` shows the record state (record or `REC,NONE`); with a record, its 30 bytes are CRC-valid and equal the last `CALR,259REC` line (this is the check that the overlapping read works on a real module).
+- [ ] A measuring-only run (Cal Routine, 259e): Results shows "Write disabled: scale unproven", encR and B do nothing, `L L` discards, and `=28s` seq is unchanged.
 
 ### Before the first write: the octave-ratio proof (gate X3)
 
@@ -122,12 +129,13 @@ The record's scale (4096 counts per octave at the corrected code) is inferred, n
 
 ### Write session (a CAL-WRITE grant, and Oren present)
 
-All of these, before B is pressed on the write screen:
+All of these, before B is held on the write screen (only in a build with the write enabled; the shipped firmware stops at Results):
 
-- [ ] The `T41_console` build is on the Xenomorpher (it has `=` and the `CALR` lines), flashed with `Qp` and the image hash recorded before and after.
-- [ ] The Xenomorpher was **rebooted with the firmware card DISARMED and not serving** (`M` toggles the arming for the *next* boot; the Xeno keeps serving until a reboot; the app refuses the backup while it serves: "Firmware card served"). The 259e's own firmware (31.2C4) is already loaded.
-- [ ] No console `W`, `m`, `x` or `=` used during the session (the app and the console gate each other while a run is open, but a typed `x` before the run is not undone).
+- [ ] The `T41_console` build **built with the write enabled** (`PLATFORMIO_BUILD_FLAGS=-DCAL259E_ALLOW_WRITE=1 pio run -e T41_console`) is on the Xenomorpher (it has `=` and the `CALR` lines), flashed with `Qp` and the image hash recorded before and after.
+- [ ] The Xenomorpher was **rebooted with the firmware card DISARMED and not serving** (`M` toggles the arming for the *next* boot; the Xeno keeps serving until a reboot, a console `k`, or a complete card read plus 30 s of bus quiet; the app refuses the backup while it serves: "Firmware card served"). The 259e's own firmware (31.2C4) is already loaded.
+- [ ] No console `W`, `m`, `x`, `=`, `w`, `k`, `e` or `p` used during the session, and **never `pew!` sent to a console that may be unlocked** (`p` toggles the overlay, `e` starts a bench-DMM SCPI line that swallows following input and sends it to the meter, `w` patches a card byte); probe with `t` first (the app and the console gate each other while a run is open, but a typed `x` before the run is not undone).
 - [ ] Bus Buccaneer is closed, and the 200e app is not in use on the Xenomorpher (it shares the master state machine and the card image).
+- [ ] The octave-ratio proof (X3, above) was done first.
 - [ ] The 259e was **power-cycled just before the run** (its status bits 2 and 3 describe the last commit since power-up; a fresh start makes them mean something) and has run for 30 minutes.
 - [ ] A fresh dated backup of the Xenomorpher's calibration exists in `~/Documents/Xenomorpher-calibration-backups/` (`backing-up-xenomorpher-calibration`), and the 259e's presets are what the run backs up to `CAL259BK.BIN` itself.
 - [ ] The Siglent alone on the host jack, set up by the app (NPLC 10, autozero on).
@@ -135,9 +143,9 @@ All of these, before B is pressed on the write screen:
 ### X3/X4 and the first calibration
 
 - [ ] Cal Routine, 259e: warm-up confirmed, principal pitch then mod pitch patched when prompted; Results show each input: worst check error <= 3 cents, nonlinearity <= 5 cents (**the 5 cent limit `kMaxNonlinearityCents` is provisional: confirm it from the real figures**), gain within 10 % of stock; the age on the Results is under 10 minutes.
-- [ ] B on the write screen (not a chord). Expect `CALR,259BK,<addr>,990,<crc>,OK`, then `CALR,259REC,...`, then `CALR,259END,OK`; the Done screen. Keep the `CALR,259REC` line.
+- [ ] On the write screen: a B tap does nothing and the screen says "Hold B to write"; **hold B 2 s** (not a chord; the bar fills, release early empties it). Expect `CALR,259BK,<addr>,990,<crc>,OK`, then `CALR,259REC,...`, then `CALR,259END,OK`; the Done screen. Keep the `CALR,259REC` line.
 - [ ] If the run ends "COMMIT unknown", "Written: UNKNOWN" or "module refused": do nothing else; read `=28s` and `=28r` by hand. Never retry the write blindly (COMMIT is not idempotent).
 - [ ] Afterwards: the 259e power-cycled, `=28s` bit0 (record valid) set, seq one more than before; a re-run gives seq + 1; a reload of the 31.2C4 card keeps the record.
-- [ ] 8 slots full: the run ends "all 8 calibration slots are used; compaction is disabled" and writes nothing (compaction is switched off).
+- [ ] 8 slots full: the run ends "all 8 calibration slots are used; compaction is disabled" and writes nothing (compaction is switched off). **Run this in the 8051 emulator, never on the bench 259e** (each 259e takes only 8 commits for its whole life; this test would need them all).
 - [ ] X4: a full-case soak with the calibration READs on the bus, banks byte-identical before and after.
 - [ ] Cancel after the COMMIT went out (left encoder, or switch app): the Xenomorpher still logs `CALR,259END,CANCELLED_<result>` and the Cal Routine menu shows "259e cancel: ...".
