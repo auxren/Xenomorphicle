@@ -20,7 +20,7 @@ The channel field steps through ready-made groups: IN L, IN R, IN L+R, each CV, 
 
 ### The screen
 
-One line of text at the top; everything below is the trace.
+One line of text at the top; the trace below it (rows 11 to 54); the frequency line at the bottom.
 
 ```
 IN L 1msA 2VA AUTO
@@ -40,6 +40,16 @@ Auto mode locks to the **whole repeat** of a complex wave, not to whichever wigg
 With several traces, **Y** switches between **overlaid** (one shared volt scale, each trace in its own line style with its number at the right end) and **stacked** (one lane each, each scaled on its own, the jack number at the left and the live voltage at the right; TR jacks draw as on/off lanes).
 
 **X** switches to the **spectrum**: frequency runs left to right on a log scale from 20 Hz to 20 kHz, with faint lines at 100 Hz, 1 kHz and 10 kHz, and the top line shows the strongest peak (`pk 550Hz`). A ring modulator's sum and difference tones show up as pairs either side of the carrier. The spectrum analyses the trigger trace; a TR jack has none.
+
+### The frequency line
+
+The bottom line of the screen counts the frequency of the **trigger trace** when it is an audio or CV input (the other jacks show `freq: --`). It updates ten times a second:
+
+```
+440.012Hz A4 +0.05c
+```
+
+The number of decimals follows what the counter can actually tell, so a low tone prints fewer digits than a high one. A mark in front says how far to trust it: **`?`** the last two readings have not agreed yet, **`#`** the reading is steady but the sample rate of CV inputs has not yet been confirmed on the hardware (CV readings only), **`*`** the reading is steady but the module's crystal has not been calibrated (the absolute value can be off by up to 0.05 cent), **`!`** the signal is moving and the number is an average. Instead of a number you may see NO SIGNAL, TOO QUIET (the tone is too small to count), SIGNAL LOST, TOO LOW or TOO HIGH (the range is 10 Hz to 8 kHz, specified 20 Hz to 5 kHz). Below 16 Hz it shows plain Hz, no note: an LFO on a CV input is counted down to 0.5 Hz (the reading then takes a few seconds). It keeps counting when the trace is frozen. The console commands that read it and set the crystal correction are in [the bench console](bench-console).
 
 ### Controls
 
@@ -62,4 +72,4 @@ They are damped on purpose. The timebase moves one step at a time and only after
 
 ### Settings
 
-The channel group, the Custom picks, the view and every manual setting are saved with the rest of the module's state. Settings saved by the older Scope (before October 2026) are not carried over; it starts on IN L, all automatic.
+The channel group, the Custom picks, the view, every manual setting and the crystal correction of the frequency counter are saved with the rest of the module's state. Settings saved by older Scopes (the first one and the one before the frequency line) are restored; the correction starts uncalibrated.

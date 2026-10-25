@@ -103,6 +103,18 @@ all of it from a host and logs CSV.
 | `Q` | **per-input calibration** against a DAC output: `Q<i><o>` one input, `Qa<o>` inputs 1-8 in turn; the module prompts for the patch, sets three voltages itself, fits, verifies, and stores only on `y` with the residual under 10 mV. `Qp` prints it, `Qc` twice within 3 s clears it. While the dialog is open **every byte belongs to it**; any key but `y` aborts |
 | `n` | toggle the **frequency counter** on TR1: `FREQ,<ms>,<hz>,<periods>,<note>,<cents>` every 250 ms (or `FREQ,<ms>,NOSIG`). Refuses while an app owns the counter; TR1 is not a trigger input while it runs |
 
+### Scope frequency counter (`%`)
+The Scope counts the frequency of its trigger trace when that is an audio or CV input, and shows it on its bottom line (see the [Scope](Scope-App) page). These commands read and set it. The prefix is `%`, a character no other command uses; there is **no Enter**: a command ends with its last character. A byte that does not belong cancels the command and is swallowed (so a stray `%` can never turn the next byte into `p`, `w` or `x`), a pending `%` expires after 3 s, and the bytes that follow a cancel within 50 ms (the rest of what was typed) are swallowed too. A clock value needs its sign. The replies begin with `SFREQ,` (the `n` counter above prints `FREQ,`).
+
+| keys | action |
+|---|---|
+| `%r` | one line: `SFREQ,<src>,<hz>,<sigma_cents>,<status>,<gate_ms>,<flags>,<seq>,<cal>`. `<src>` is the Scope's source (`INL`, `INR`, `OUTL`, `OUTR`, `CV1`-`CV8`); with the Scope closed or on a source that cannot be counted: `SFREQ,-,0.00000,0.00000,CLOSED,0,0,0,<cal>`. `<status>` is `OK`, `SETTLING` (an OK gate that the next one has not confirmed), `UNSTABLE`, `NO_SIGNAL`, `TOO_QUIET`, `LOST`, `TOO_LOW`, `TOO_HIGH` or `WAIT`; `<hz>` and `<sigma_cents>` are 0 unless OK, SETTLING or UNSTABLE; `<flags>` bit 0 = clipped; `<seq>` counts readings; `<cal>` is 1 once a crystal correction is set; `<rate>` is 0 while the source's sample rate is not confirmed on hardware (every CV input for now), 1 otherwise. **A script must require `status` `OK` on two consecutive reads with different `seq` and compare them**: a dropped audio block, lost ADC frames or a save in progress leave a gap the counter cannot see, and it may still print a number |
+| `%c+0012.3` | set the crystal correction, ppm of the sample rate above nominal: a sign, **four digits**, a point, **one digit**, nothing after it (`%c-0003.5`, `%c+1000.0`). Answers `SFREQ,CLOCK,+12.3,SET,unsaved`. Past +-1000.0 ppm: `SFREQ,ERR,RANGE` and nothing changes; any other shape: `SFREQ,ERR,cancelled`. It is kept in RAM until a save (`g`, or any app-data save) writes it with the Scope's settings; a preset recall never changes it, a factory reset clears it |
+| `%cx` | forget the correction (the Scope's line gets its `*` back) |
+| `%gf` / `%gs` | fast (0.1 s, what the screen uses) or slow (1 s, for calibration) gate. The reading starts over |
+
+The audio inputs are AC-coupled (1.6 Hz); put the Scope on a CV input for anything slower. The counter runs only while the Scope is open and not on the app menu.
+
 ### 259e calibration module, read-only (`=`)
 Every letter of the console is taken, so this is `=`. It reads a 259e running the calibration firmware (31.2C4) over the 200e bus; it never writes: **there is no PUT and no COMMIT in `=`** (the raw-frame sender `W` above can send both; only the Cal Routine app is meant to). The bus address is two hex digits (259e `28`-`2B`, the 251e `5C`: **`=5Cs` only**; `=5Cr` and `=5Ca0` are 259e readers, wrong for a 251e's 38-byte record), then one command; no Enter.
 
