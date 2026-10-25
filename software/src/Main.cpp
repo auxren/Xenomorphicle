@@ -58,6 +58,10 @@
 #include "Bus200eBridgeUsb.h"
 #include "HSUtils.h"
 #include "CvMeter.h"
+#include "ScopeFreqConsole.h"
+#include "ScopeFreqLine.h"
+#include "ScopeFreqService.h"
+#include "ScopeSources.h"
 
 void CaptainDumpProfiles();  // CaptainMIDI.h (global scope)
 void CaptainMidiHealth();    // CaptainMIDI.h (global scope)
@@ -417,6 +421,55 @@ FLASHMEM static void ConsolePress(char which) {
     OC::ui.Inject(UI::EVENT_BUTTON_PRESS, button, 0);
   }
   Serial.printf("press: %c %s\n", which, hold ? "held" : "tapped");
+}
+#endif
+
+#if defined(__IMXRT1062__) && defined(PRINT_DEBUG)
+// Console '%': the frequency counter (ScopeFreqConsole.h, docs/bench-console.md).
+// Fed every console byte before the command switch; true when the byte was part
+// of a '%' command. The prefix is a character no other command uses, and any
+// byte that does not belong cancels the command and is swallowed, so a stray
+// '%' cannot turn the next byte into a command. Reads what the Scope's counter
+// reports; it answers CLOSED when the Scope is not open on a countable source.
+FLASHMEM __attribute__((optimize("no-jump-tables"))) static bool FreqConsoleByte(int cmd) {
+  static ScopeFreqConsole::Parser parser;
+  using ScopeFreqConsole::Kind;
+  const ScopeFreqConsole::Action a = parser.Feed(cmd, millis());
+  char line[112];
+  switch (a.kind) {
+    case Kind::NONE: return false;
+    case Kind::PENDING: return true;
+    case Kind::READ: {
+      const int src = ScopeFreqSvc::ActiveSource();
+      char lab[8] = "-";
+      if (src >= 0) ScopeSources::Label((ScopeSources::Source)src, lab, sizeof(lab));
+      const bool rate_ok = src < 0 || ScopeFreqSvc::kCvRateVerified ||
+                           ScopeSources::KindOf((ScopeSources::Source)src) != ScopeSources::KIND_CV_IN;
+      ScopeFreqLine::FormatSfreq(line, sizeof(line), lab, src >= 0 ? &ScopeFreqSvc::CurrentReading() : nullptr,
+                                 ScopeFreqSvc::ClockCalibrated(), rate_ok);
+      Serial.println(line);
+      break;
+    }
+    case Kind::CLOCK_SET:
+      ScopeFreqSvc::SetClock(true, a.ppm10);
+      ScopeFreqConsole::FormatClockReply(line, sizeof(line), ScopeFreqSvc::ClockPpm10(), true);
+      Serial.println(line);
+      break;
+    case Kind::CLOCK_CLEAR:
+      ScopeFreqSvc::SetClock(false, 0);
+      ScopeFreqConsole::FormatClockReply(line, sizeof(line), 0, false);
+      Serial.println(line);
+      break;
+    case Kind::GATE_FAST:
+    case Kind::GATE_SLOW:
+      ScopeFreqSvc::SetGate(a.kind == Kind::GATE_FAST ? ScopeFreqSvc::Gate::FAST : ScopeFreqSvc::Gate::SLOW);
+      ScopeFreqConsole::FormatGateReply(line, sizeof(line), a.kind == Kind::GATE_FAST);
+      Serial.println(line);
+      break;
+    case Kind::RANGE: Serial.println(ScopeFreqConsole::RangeLine()); break;
+    default: Serial.println(ScopeFreqConsole::CancelLine()); break;
+  }
+  return true;
 }
 #endif
 
@@ -1768,6 +1821,12 @@ FLASHMEM __attribute__((noinline)) void loop() {
         // owns every byte while it is open (CvMeter.h).
         if (OC::CvMeter::Consume(cmd)) continue;
 #endif
+#if defined(__IMXRT1062__) && defined(PRINT_DEBUG)
+        // '%' (frequency counter): %r read, %c+0012.3 clock ppm, %cx clear, %gf/%gs gate.
+        // After every consumer above: a dialog that owns the console (the CV
+        // meter's d/Q prompts, the 259e arguments) must see every byte, '%' included.
+        if (FreqConsoleByte(cmd)) continue;
+#endif
         switch (cmd) {
 #ifdef PRINT_DEBUG
           case 'z':
@@ -1777,6 +1836,7 @@ FLASHMEM __attribute__((noinline)) void loop() {
             Serial.println("t selftest   a activate Captain MIDI   A switch app by index (lists them)");
             Serial.println("X force 16 ADC capture re-aligns at varied trigger phases (ADC,REALIGN,count=n)");
             Serial.println("j<key> press the panel: l r a b z x y tap, capitals hold, [ ] encL, - + encR");
+            Serial.println("%r frequency counter reading (SFREQ,...)  %c+0012.3 clock ppm  %cx clear  %gf/%gs gate");
 #endif
             Serial.printf("I app ISR [%s]   D display [%s]   L app loop [%s]\n",
                           OC::CORE::app_isr_enabled ? "on" : "OFF",

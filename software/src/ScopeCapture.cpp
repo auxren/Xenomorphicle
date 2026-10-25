@@ -50,6 +50,12 @@ void Unmap() {
   for (auto &v : g_tr_slot) v = -1;
 }
 
+// The one ADC frame hook serves the CV rings and the counter's CV input.
+void UpdateCvHook() {
+  const bool want = slot_count > 0 || ScopeFreqSvc::detail::g_cv_index1 != 0;
+  OC::ADC::set_scope_frame_hook(want ? OnCvFrame : nullptr);
+}
+
 void DetachEdge() {
   if (edge_tr >= 0) {
     detachInterrupt(TrPin(edge_tr));
@@ -90,7 +96,7 @@ FLASHMEM void Arm(const Source *list, int n, int time_idx, int fft_slot, int ext
   }
   slot_count = n;
   __enable_irq();
-  OC::ADC::set_scope_frame_hook(n ? OnCvFrame : nullptr);
+  UpdateCvHook();
   if (ext_tr >= 0 && ext_tr < 4) {
     g_edges[ext_tr].Reset();
     attachInterrupt(TrPin(ext_tr), kEdgeIsr[ext_tr], ADC33131D_Uses_FlexIO ? RISING : FALLING);
@@ -100,19 +106,25 @@ FLASHMEM void Arm(const Source *list, int n, int time_idx, int fft_slot, int ext
 
 FLASHMEM void Disarm() {
   DetachEdge();
-  OC::ADC::set_scope_frame_hook(nullptr);
   __disable_irq();
   Unmap();
   slot_count = 0;
   __enable_irq();
+  UpdateCvHook();  // stays installed while the counter is on a CV input
 }
 
 int SlotCount() { return slot_count; }
+
+FLASHMEM void SelectFreq(int src) {
+  ScopeFreqSvc::Select(src);
+  UpdateCvHook();
+}
 
 // Core ISR, once per FlexIO frame. Slot order as Scan_DMA's own:
 // in[0..3] = CV5-8, in[4..7] = CV1-4. Stores the raw12 code Scan_DMA would
 // hand update<>(); calibration is applied when the frame is analysed.
 void OnCvFrame(const int16_t in[8]) {
+  ScopeFreqSvc::OnCvFrame(in);  // one load and a compare when no CV input is counted
   const uint32_t now = ARM_DWT_CYCCNT;
   for (int j = 0; j < 8; ++j) {
     const int cv = j < 4 ? j + 4 : j - 4;

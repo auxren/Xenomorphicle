@@ -31,6 +31,7 @@
 #include "OC_storage.h"
 #include "OC_app_switcher.h"
 #include "OC_global_settings.h"
+#include "ScopeSettings.h"
 #include "util/util_misc.h"
 #include "util/util_settings.h"
 #include "util/util_integer_sequences.h"
@@ -411,6 +412,19 @@ FLASHMEM void SaveAppData() {
   APPS_SERIAL_PRINTLN("Saved app settings in page_index %d", app_data_storage.page_index());
 }
 
+// An app-data length other than the app's current one that the app can still
+// read (an older layout of its own): ApplyAppData restores such a chunk instead
+// of dropping it. n is the app-data bytes stored, up to one more than written
+// (chunks are rounded up to even). Only the Scope has older layouts so far; a
+// switch here rather than a virtual on AppBase keeps every app's vtable as it was.
+static bool OlderAppDataLayoutReadable(uint16_t app_id, size_t n) {
+  if (app_id == TWOCCS("SP")) return ScopeSettingsPayloadLength(n) != 0;
+  return false;
+}
+
+static bool s_apply_is_preset = false;
+bool AppDataIsPresetRecall() { return s_apply_is_preset; }
+
 // Apply a serialized chunk stream to the live apps (per-chunk validated).
 FLASHMEM void ApplyAppData(const AppData &in) {
   APPS_SERIAL_PRINTLN("Restoring app data, used=%u", in.used);
@@ -441,9 +455,15 @@ FLASHMEM void ApplyAppData(const AppData &in) {
     size_t expected_length = app->storage_size() + sizeof(AppChunkHeader);
     if (expected_length & 0x1) ++expected_length;
     if (chunk->length != expected_length) {
-      APPS_SERIAL_PRINTLN("* %s (%02x): chunk length %u != %u (storage_size=%u), skipping...", app->name(), chunk->id, chunk->length, expected_length, app->storage_size());
-      data += chunk->length;
-      continue;
+      // An older layout the app can still read is restored, not dropped: the
+      // app's RestoreAppData reads what is there (see ScopeSettings.h).
+      const size_t fixed = sizeof(AppChunkHeader) + IOSettings::storageSize();
+      if (chunk->length < fixed || !OlderAppDataLayoutReadable(chunk->id, chunk->length - fixed)) {
+        APPS_SERIAL_PRINTLN("* %s (%02x): chunk length %u != %u (storage_size=%u), skipping...", app->name(), chunk->id, chunk->length, expected_length, app->storage_size());
+        data += chunk->length;
+        continue;
+      }
+      APPS_SERIAL_PRINTLN("* %s (%02x): older chunk layout (%u bytes), restoring...", app->name(), chunk->id, chunk->length);
     }
 
     util::StreamBufferReader stream_buffer{chunk + 1, chunk->length - sizeof(AppChunkHeader)};
@@ -463,6 +483,12 @@ FLASHMEM void ApplyAppData(const AppData &in) {
   }
 
   APPS_SERIAL_PRINTLN("App data restored: %u, expected %u", restored_bytes, in.used);
+}
+
+FLASHMEM void ApplyAppDataFromPreset(const AppData &in) {
+  s_apply_is_preset = true;
+  ApplyAppData(in);
+  s_apply_is_preset = false;
 }
 
 #ifdef ENABLE_APP_TWEIGHTY

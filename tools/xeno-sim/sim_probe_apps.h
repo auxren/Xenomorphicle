@@ -25,7 +25,7 @@ constexpr uint16_t kQuadLivePresetKey = 253;  // what Quadrants leaves for the e
 
 // The call counts are what the check reads to see which event arrived.
 struct Counts {
-  int resume = 0, suspend = 0, reload = 0;
+  int resume = 0, suspend = 0, reload = 0, restore = 0;
 };
 
 // APP_EVENT_CONFIG_RELOAD by value, or -1 where the firmware does not have it
@@ -94,7 +94,7 @@ public:
 #define PROBE_APP_COMMON(clazz) \
   inline void clazz::Init() {} \
   inline size_t clazz::SaveAppData(util::StreamBufferWriter &) const { return 0; } \
-  inline size_t clazz::RestoreAppData(util::StreamBufferReader &) { return 0; } \
+  inline size_t clazz::RestoreAppData(util::StreamBufferReader &) { ++n.restore; return 0; } \
   inline void clazz::Loop() {} \
   inline void clazz::DrawMenu() const {} \
   inline void clazz::DrawScreensaver() const {} \

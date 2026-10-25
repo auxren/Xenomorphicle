@@ -39,6 +39,8 @@ SCOPE_CODE void ScopeSettingsDefaults(ScopeSettings *s) {
   s->volt_idx = ScopeRange::kDefaultVoltIdx;
   s->volt_auto = 1;
   s->screensaver_trace = 0;
+  s->clock_cal = 0;
+  s->clock_ppm10 = 0;
 }
 
 SCOPE_CODE size_t ScopeSettingsPack(const ScopeSettings &s, uint8_t out[kScopeSettingsBytes]) {
@@ -58,7 +60,17 @@ SCOPE_CODE size_t ScopeSettingsPack(const ScopeSettings &s, uint8_t out[kScopeSe
   out[13] = s.volt_idx;
   out[14] = s.volt_auto;
   out[15] = s.screensaver_trace;
+  const bool cal = s.clock_cal != 0;
+  out[16] = kScopeSettingsVersion;
+  out[17] = cal ? 1 : 0;
+  out[18] = (uint8_t)((uint16_t)(cal ? s.clock_ppm10 : 0));
+  out[19] = (uint8_t)((uint16_t)(cal ? s.clock_ppm10 : 0) >> 8);
   return kScopeSettingsBytes;
+}
+
+SCOPE_CODE bool ScopeSettingsAcceptsLength(size_t n) {
+  return n == kScopeSettingsBytes || n == kScopeSettingsBytesV1 || n == kScopeSettingsBytesLegacy ||
+         n == kScopeSettingsBytesLegacy + 1;
 }
 
 SCOPE_CODE bool ScopeSettingsUnpack(const uint8_t *in, size_t n, ScopeSettings *out) {
@@ -66,7 +78,7 @@ SCOPE_CODE bool ScopeSettingsUnpack(const uint8_t *in, size_t n, ScopeSettings *
   ScopeSettingsDefaults(out);
   if (!in) return false;
 
-  if (n == 3) {
+  if (n == kScopeSettingsBytesLegacy || n == kScopeSettingsBytesLegacy + 1) {
     if (in[0] >= kLegacyChannels) return false;
     const Mask want = (Mask)1u << LegacySource(in[0]);
     int idx = QuickCount() - 1;  // Custom unless a quick entry is exactly it
@@ -78,7 +90,8 @@ SCOPE_CODE bool ScopeSettingsUnpack(const uint8_t *in, size_t n, ScopeSettings *
     return true;
   }
 
-  if (n != kScopeSettingsBytes) return false;
+  if (n != kScopeSettingsBytes && n != kScopeSettingsBytesV1) return false;
+  if (n == kScopeSettingsBytes && in[16] != kScopeSettingsVersion) return false;
   if (in[0] >= QuickCount()) return false;
   ScopeSettings s;
   s.quick_idx = in[0];
@@ -94,6 +107,15 @@ SCOPE_CODE bool ScopeSettingsUnpack(const uint8_t *in, size_t n, ScopeSettings *
   s.volt_idx = (uint8_t)ScopeRange::ClampVolt(in[13]);
   s.volt_auto = in[14] ? 1 : 0;
   s.screensaver_trace = in[15] ? 1 : 0;
+  s.clock_cal = 0;
+  s.clock_ppm10 = 0;
+  if (n == kScopeSettingsBytes && in[17] == 1) {  // version 1 never calibrated; 0 or 1 only
+    const int v = (int16_t)((uint16_t)in[18] | ((uint16_t)in[19] << 8));
+    if (v >= -kScopeClockMaxPpm10 && v <= kScopeClockMaxPpm10) {
+      s.clock_cal = 1;
+      s.clock_ppm10 = (int16_t)v;
+    }
+  }
   *out = s;
   return true;
 }

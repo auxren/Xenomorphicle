@@ -116,8 +116,8 @@ FW_SRCS = \
 # The app-switch check (selfcheck.sh builds it into build-switch/) also carries
 # the Scope, whose capture code is not in the default build.
 ifneq (,$(findstring XENO_SIM_APPSWITCH,$(EXTRA_FWFLAGS)))
-FW_SRCS += ScopeCapture.cpp ScopeFft.cpp ScopeRange.cpp ScopeSettings.cpp \
-           ScopeSources.cpp ScopeTrigger.cpp SamplerMath.cpp
+FW_SRCS += ScopeCapture.cpp ScopeFft.cpp ScopeFreqLine.cpp ScopeFreqService.cpp ScopeRange.cpp \
+           ScopeSettings.cpp ScopeSources.cpp ScopeTrigger.cpp SamplerMath.cpp
 FWFLAGS += -DXENO_CODEC_AUDIO
 endif
 

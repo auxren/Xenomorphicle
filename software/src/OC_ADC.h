@@ -149,6 +149,7 @@ public:
   // time; nullptr (the default) costs one load per frame.
   typedef void (*ScopeFrameHook)(const int16_t in[8]);
   static void set_scope_frame_hook(ScopeFrameHook h) { scope_frame_hook_ = h; }
+  static ScopeFrameHook scope_frame_hook() { return scope_frame_hook_; }  // the simulator's capture check feeds frames through it
 
   // Pitch units (1536 per octave) for the same reading: the nominal scale on
   // true volts when calibrated, else value_to_pitch(value(channel)).

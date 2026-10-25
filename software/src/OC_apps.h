@@ -57,6 +57,12 @@ bool AppDataOverflowed();
 struct AppData;
 void BuildAppData(AppData &data);
 void ApplyAppData(const AppData &data);
+// The preset engine's recall. Same as ApplyAppData, but apps can ask
+// AppDataIsPresetRecall() during RestoreAppData: state that belongs to the
+// module rather than to a patch (the Scope's crystal correction) is not taken
+// from a preset, so a recall can neither overwrite nor undo it.
+void ApplyAppDataFromPreset(const AppData &data);
+bool AppDataIsPresetRecall();
 void BuildGlobalSettingsValues();
 void RestoreGlobalSettingsFromConfig(uint8_t scala_loaded_mask = 0);
 // app-container index for an app id; falls back to the current app

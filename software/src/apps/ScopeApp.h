@@ -16,8 +16,11 @@
 // SCREEN: one 21-column line at the top, `channel time volts trigger`, the
 // focused field inverted (the only use of inversion besides the jack-number
 // chips in a stacked view); an auto time or volts field ends in "A". Below
-// it is plot: one trace, overlaid traces on a shared scale, stacked lanes
-// each on its own scale, or the spectrum.
+// it is plot (rows 11-54): one trace, overlaid traces on a shared scale,
+// stacked lanes each on its own scale, or the spectrum. The bottom line
+// (rows 56-63) is the frequency counter's reading of the trigger trace, when
+// that is an audio or CV input (ScopeFreqService.h, ScopeFreqLine.h): it keeps
+// counting while the view is frozen, and with the arena missing.
 //
 // CONTROLS (encL = where you are, encR = what it is):
 //   encL turn  focus along the top line      encR turn  change the field
@@ -37,6 +40,8 @@
 #include "../OC_DAC.h"
 #include "../ScopeCapture.h"
 #include "../ScopeFft.h"
+#include "../ScopeFreqLine.h"
+#include "../ScopeFreqService.h"
 #include "../ScopeRange.h"
 #include "../ScopeSettings.h"
 #include "../ScopeSources.h"
@@ -59,7 +64,9 @@ static constexpr bool kCodec = false;
 #endif
 
 constexpr int kTop = 11;                 // first plot row
-constexpr int kPlotH = 64 - kTop;        // 53 rows
+constexpr int kFreqY = 56;               // the measurement line: rows 56-63, under the plot
+constexpr int kPlotH = kFreqY - 1 - kTop; // 44 rows (11-54); row 55 is the gap
+constexpr int kPlotBottom = kTop + kPlotH; // first row below the plot
 constexpr int kCols = 128;
 constexpr int kMaxWindow = kCols;        // buckets on screen at most
 constexpr int kAnalyse = 4 * kMaxWindow; // buckets the trigger looks at
@@ -141,9 +148,15 @@ struct Arena {
 };
 static Arena *g_arena = nullptr;
 static bool g_open = false;  // between RESUME and SUSPEND
+#ifdef XENO_SIM_APPSWITCH
+static bool g_sim_alloc_fails = false;  // the simulator's seam: an arena allocation that fails
+#endif
 
 FLASHMEM static bool AllocArena() {
   if (g_arena) return true;
+#ifdef XENO_SIM_APPSWITCH
+  if (g_sim_alloc_fails) return false;
+#endif
   void *p = malloc(sizeof(Arena));
   if (!p) return false;  // checked: no exceptions, a null here is the error state
   g_arena = new (p) Arena();
@@ -216,6 +229,9 @@ private:
     float bucket_s;
   };
   void Render() const;
+  void RenderBody() const;
+  void DrawFreqLine() const;
+  int FreqSource() const;
   void RenderPicker() const;
   void RenderSpectrum() const;
   void DrawHeader(const char *trig_text, const char *time_text, const char *volt_text) const;
@@ -251,6 +267,15 @@ FLASHMEM int AppScope::TrigSlot() const {
   return set_.trig_src < n_ ? set_.trig_src : 0;
 }
 
+// The source the counter listens to: the trigger trace, when the Scope is open
+// and that trace is an audio or CV input; -1 otherwise.
+FLASHMEM int AppScope::FreqSource() const {
+  if (!ScopeAppNS::g_open) return -1;
+  const int s = TrigSlot();
+  if (s < 0 || s >= n_) return -1;
+  return ScopeFreqSvc::Countable(list_[s]) ? (int)list_[s] : -1;
+}
+
 FLASHMEM bool AppScope::TrigIsTr() const {
   const int s = TrigSlot();
   return s >= 0 && ScopeSources::KindOf(list_[s]) == ScopeSources::KIND_TR;
@@ -278,6 +303,9 @@ FLASHMEM void AppScope::Rearm(bool keep_frozen) {
   }
   atrig_.Reset();
   locked_ = false;
+  // The counter is separate from the arena and the rings: it follows the view
+  // even when the allocation failed or the capture is frozen.
+  ScopeCapture::SelectFreq(FreqSource());
 }
 
 // std::nothrow on every connection allocated here, deliberately: with
@@ -316,6 +344,7 @@ FLASHMEM void AppScope::AllAuto() {
 
 FLASHMEM void AppScope::Init() {
   ScopeSettingsDefaults(&set_);
+  ScopeFreqSvc::SetClock(false, 0);   // a factory reset (InitDefaults) forgets the calibration; the boot restore re-applies a saved one
   atime_.Reset(ScopeRange::kDefaultTimeIdx);
   for (auto &v : avolt_) v.Reset(ScopeRange::kDefaultVoltIdx);
   focus_ = ScopeAppNS::F_CH;
@@ -328,7 +357,10 @@ FLASHMEM void AppScope::Init() {
 
 FLASHMEM size_t AppScope::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
   uint8_t buf[kScopeSettingsBytes];
-  ScopeSettingsPack(set_, buf);
+  ScopeSettings out = set_;
+  out.clock_cal = ScopeFreqSvc::ClockCalibrated() ? 1 : 0;   // the service owns the live value
+  out.clock_ppm10 = (int16_t)ScopeFreqSvc::ClockPpm10();
+  ScopeSettingsPack(out, buf);
   for (uint8_t b : buf) stream_buffer.Write<uint8_t>(b);
   return stream_buffer.overflow() ? 0 : stream_buffer.written();
 }
@@ -337,7 +369,14 @@ FLASHMEM size_t AppScope::RestoreAppData(util::StreamBufferReader &stream_buffer
   uint8_t buf[kScopeSettingsBytes];
   size_t n = 0;
   while (n < sizeof(buf) && stream_buffer.available()) buf[n++] = stream_buffer.Read<uint8_t>();
-  ScopeSettingsUnpack(buf, n, &set_);  // defaults on anything it can't read
+  // A chunk is padded to even length: an older layout can arrive one byte long.
+  const size_t layout = ScopeSettingsPayloadLength(n);
+  ScopeSettingsUnpack(buf, layout ? layout : n, &set_);  // defaults on anything it can't read
+  // The crystal correction belongs to the module, not to a patch: a preset
+  // recall never touches it (neither overwrites nor undoes it). Only the settings
+  // load applies it, and only a calibrated save speaks for the crystal: a save
+  // from before the calibration must not wipe the live value.
+  if (set_.clock_cal && !OC::AppDataIsPresetRecall()) ScopeFreqSvc::SetClock(true, set_.clock_ppm10);
   atime_.Reset(set_.time_idx);
   for (auto &v : avolt_) v.Reset(set_.volt_idx);
   n_ = ScopeSources::MaskToList(ViewMask(), list_);
@@ -353,6 +392,7 @@ FLASHMEM void AppScope::HandleAppEvent(OC::AppEvent event) {
     case OC::APP_EVENT_SUSPEND:
       ScopeAppNS::g_open = false;
       ScopeCapture::Disarm();
+      ScopeCapture::SelectFreq(-1);
       ScopeAppNS::FreeArena();
       break;
     default: break;
@@ -363,6 +403,7 @@ FLASHMEM void AppScope::HandleAppEvent(OC::AppEvent event) {
 void AppScope::Process(OC::IOFrame *) { ScopeCapture::OnCoreTick(); }
 
 FLASHMEM void AppScope::Loop() {
+  if (ScopeAppNS::g_open) ScopeFreqSvc::Poll();
   // Auto timebase moved while drawing: re-arm here, out of the const draw.
   if (pending_time_idx_ >= 0) {
     pending_time_idx_ = -1;
@@ -574,7 +615,7 @@ FLASHMEM void AppScope::RenderSpectrum() const {
       uint8_t rows[kCols];
       ScopeFft::Columns(ar.fft_db, rate, kPlotH, rows);
       for (int x = 0; x < kCols; ++x)
-        if (rows[x]) graphics.drawVLine(x, 64 - rows[x], rows[x]);
+        if (rows[x]) graphics.drawVLine(x, kPlotBottom - rows[x], rows[x]);
       const float grid[3] = {100.f, 1000.f, 10000.f};
       for (float g : grid) {
         if (g >= rate / 2) continue;
@@ -588,9 +629,29 @@ FLASHMEM void AppScope::RenderSpectrum() const {
   DrawHeader(none, pk, "FFT");
 }
 
-FLASHMEM void AppScope::Render() const {
+FLASHMEM void AppScope::DrawFreqLine() const {
   using namespace ScopeAppNS;
+  char text[ScopeFreqLine::kLineChars + 8];
+  if (!g_open || ScopeFreqSvc::ActiveSource() < 0) {
+    ScopeFreqLine::FormatNa(text, sizeof(text));
+  } else {
+    const int src = ScopeFreqSvc::ActiveSource();
+    const bool unverified = !ScopeFreqSvc::kCvRateVerified && KindOf((Source)src) == KIND_CV_IN;
+    ScopeFreqLine::FormatLine(ScopeFreqSvc::CurrentReading(), ScopeFreqSvc::ClockCalibrated(), text,
+                              sizeof(text), unverified);
+  }
+  graphics.setPrintPos(1, kFreqY);
+  graphics.print(text);
+}
+
+FLASHMEM void AppScope::Render() const {
   if (picker_) { RenderPicker(); return; }
+  RenderBody();
+  DrawFreqLine();
+}
+
+FLASHMEM void AppScope::RenderBody() const {
+  using namespace ScopeAppNS;
   if (!g_arena) {
     if (g_open) {  // a failed allocation, not a closed Scope (the screensaver draws too)
       DrawHeader("", "", "");
@@ -792,8 +853,8 @@ FLASHMEM void AppScope::Render() const {
     auto row = [&](float mv) {
       int y;
       if (is_tr) {  // a 1-bit lane: low at the bottom, high a few rows up
-        const int top = stacked ? ytop + 1 : 64 - 6;
-        y = mv > 0.5f ? top : (stacked ? ytop + yh - 1 : 63);
+        const int top = stacked ? ytop + 1 : kPlotBottom - 6;
+        y = mv > 0.5f ? top : (stacked ? ytop + yh - 1 : kPlotBottom - 1);
       } else {
         y = ytop + yh / 2 - (int)lroundf((mv - center) * vscale);
       }
@@ -825,7 +886,7 @@ FLASHMEM void AppScope::Render() const {
       }
     } else if (n_ > 1 && prev_y >= 0) {  // overlaid: the trace number at its right end
       int y = prev_y - 4;
-      y = y < kTop ? kTop : y > 56 ? 56 : y;
+      y = y < kTop ? kTop : y > kPlotBottom - 8 ? kPlotBottom - 8 : y;
       graphics.setPrintPos(122, y);
       graphics.print((char)('1' + t));
     }
@@ -835,11 +896,11 @@ FLASHMEM void AppScope::Render() const {
     const float lvl = set_.trig_mode == TM_LEVEL ? LevelMv() : 0.5f * (lo + hi);
     const float vdiv = ScopeRange::kVoltDivMv[VoltIdx(0)];
     int y = kTop + kPlotH / 2 - (int)lroundf((lvl - avolt_[0].CenterMv()) * kPlotH / (ScopeRange::kDivsY * vdiv));
-    y = y < kTop ? kTop : y > 63 ? 63 : y;
+    y = y < kTop ? kTop : y > kPlotBottom - 1 ? kPlotBottom - 1 : y;
     graphics.drawHLine(0, y, 3);
   }
   if (ScopeSources::IsAc(tsrc) && !stacked) {
-    graphics.setPrintPos(1, 56);
+    graphics.setPrintPos(1, kPlotBottom - 8);
     graphics.print("AC");
   }
 }

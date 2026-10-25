@@ -25,8 +25,10 @@
 uint16_t *SimCvRaw();
 float SimIdVoltage();
 
-// The Scope's per-frame hook (ScopeCapture::Arm sets it). Nothing here calls
-// it: no frames are scanned, so a Scope under the simulator draws no CV trace.
+// The Scope's per-frame hook (ScopeCapture::Arm sets it, and the frequency
+// counter on a CV input). Nothing here calls it: no frames are scanned, so a
+// Scope under the simulator draws no CV trace -- except in the app-switch check,
+// which feeds frames through OC::ADC::scope_frame_hook() itself.
 /*static*/ volatile OC::ADC::ScopeFrameHook OC::ADC::scope_frame_hook_ = nullptr;
 
 // Channel index globals, verbatim from the real driver: OC_gpio.cpp's

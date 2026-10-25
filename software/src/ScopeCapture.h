@@ -19,6 +19,7 @@
 
 #include <Arduino.h>
 
+#include "ScopeFreqService.h"
 #include "ScopeRing.h"
 #include "ScopeSources.h"
 
@@ -52,8 +53,14 @@ void Bind(ScopeRing *rings);
 void Arm(const ScopeSources::Source *list, int n, int time_idx, int fft_slot, int ext_tr);
 void Disarm();
 int SlotCount();
+// Loop context. Starts, moves or stops the frequency counter (ScopeFreqService.h)
+// on a ScopeSources::Source, -1 to stop; independent of Bind/Arm, so the counter
+// runs with the arena missing or the Scope frozen. Takes care of the CV frame
+// hook, which both the rings and the counter share.
+void SelectFreq(int src);
 
 inline void OnAudio(int tap, const int16_t *data, int n) {
+  ScopeFreqSvc::OnAudio(tap, data, n);  // one load and a compare when nothing is counted
   const int s = g_audio_slot[tap];
   if (s < 0) return;
   ScopeRing &r = g_rings[s];

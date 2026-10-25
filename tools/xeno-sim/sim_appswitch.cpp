@@ -38,6 +38,24 @@
 //   boot-menu-sampler  power-up with the menu held, Sampler current
 //   boot-menu        power-up with the app menu held, into the Scope
 //   boot-menu-recall the same, with a preset recalled at boot
+//
+// The frequency counter on the Scope (ScopeFreqService.h): a synthetic tone
+// goes in through the CV frame hook the firmware installs
+// (OC::ADC::scope_frame_hook(), what Scan_DMA calls), and the screen is read
+// back from the framebuffer.
+//   freq-cv-tone     a 1 kHz tone on CV1: the reading, the measurement line,
+//                    the calibrated / unconfirmed marks, the clock correction
+//   freq-fast        the 0.1 s update rate, and the 1 s gate
+//   freq-status      NO SIGNAL, TOO QUIET, OK, UNSTABLE and SIGNAL LOST on screen
+//   freq-lfo         a 1 Hz CV LFO: the low range takes over, the line says Hz
+//   freq-no-arena    the arena allocation fails: the counter and its line stay
+//   freq-switch      leaving the Scope stops the counter, coming back restarts
+//                    it, and the clock correction survives both
+//   freq-layout      the line never touches the plot: single, overlaid, stacked,
+//                    CV+TR lanes and the spectrum
+//   freq-settings    a saved Scope from the 16-byte and 3-byte layouts is
+//                    restored, the new layout carries the clock, and a save
+//                    from before the calibration does not wipe a live one
 // ---------------------------------------------------------------------------
 
 #include "sim_appswitch.h"
@@ -55,6 +73,11 @@
 
 #include <Arduino.h>
 
+#include <math.h>
+
+#include <string>
+
+#include "OC_ADC.h"
 #include "OC_apps.h"
 #include "OC_app_switcher.h"
 #include "OC_ui.h"
@@ -64,6 +87,10 @@
 #include "PhzConfig.h"
 #include "PresetBusUI.h"
 #include "PresetEngine.h"
+#include "ScopeFreqLine.h"
+#include "ScopeFreqService.h"
+#include "ScopeSettings.h"
+#include "ScopeSources.h"
 #include "sim_host.h"
 #include "sim_input.h"
 #include "sim_probe_apps.h"
@@ -92,8 +119,18 @@ AudioStream &InputStream(int) { static SimEndStream s; return s; }
 AudioStream &OutputStream() { static SimEndStream s; return s; }
 }}
 
+#include "src/extern/gfx_font_6x8.h"
+
+namespace OC {
+void BuildAppData(AppData &data);
+void ApplyAppData(const AppData &data);
+void ApplyAppDataFromPreset(const AppData &data);
+void ReinitApps(bool reset_settings);
+}  // namespace OC
+
 namespace OC {
 bool SimScopeArenaLive();
+void SimScopeAllocFails(bool fails);
 AppProbeQuad *SimProbeQuad();
 AppProbeCaptain *SimProbeCaptain();
 }
@@ -773,6 +810,524 @@ void SamplerReinit() {
   CHECK(SamplerReleased(base), "leaving the Sampler after re-inits still frees every voice");
 }
 
+
+// ---- the frequency counter ----------------------------------------------------
+
+const double kCvFs = ScopeFreqSvc::kCvFsHz;   // 37,350.6 Hz, derived in ScopeFreqService.h
+
+// What the framebuffer says on the measurement line (rows 56-63, one page).
+// Cells are matched against the firmware's own font; a cell that is not a
+// glyph comes back as '\x01'. Trailing spaces trimmed.
+std::string BottomLine() {
+  uint8_t fb[1024];
+  SimPanelVisible(fb);
+  std::string out;
+  for (int cell = 0; cell < 21; ++cell) {
+    const int x = 1 + cell * 6;
+    char found = '\x01';
+    bool blank = true;
+    for (int c = 0; c < 6; ++c) if (fb[7 * 128 + x + c]) blank = false;
+    if (blank) { out += ' '; continue; }
+    for (int g = 0; g < 92; ++g) {
+      bool same = true;
+      for (int c = 0; c < 6 && same; ++c) same = fb[7 * 128 + x + c] == ssd1306xled_font6x8[g * 6 + c];
+      if (same) { found = (char)(' ' + g); break; }
+    }
+    out += found;
+  }
+  while (!out.empty() && out.back() == ' ') out.pop_back();
+  return out;
+}
+
+// Ink outside the text on the bottom page, or on row 55 (the gap): the plot
+// reaching into the measurement line.
+int InkOutsideLine(size_t text_len) {
+  uint8_t fb[1024];
+  SimPanelVisible(fb);
+  int n = 0;
+  for (int x = 0; x < 128; ++x) {
+    if (fb[6 * 128 + x] & 0x80) ++n;                                  // y = 55
+    if (x >= 1 + (int)text_len * 6 && fb[7 * 128 + x]) ++n;           // y 56-63, right of the text
+    if (x < 1 && fb[7 * 128 + x]) ++n;                                // and left of it
+  }
+  return n;
+}
+
+int PlotInk() {
+  uint8_t fb[1024];
+  SimPanelVisible(fb);
+  int n = 0;
+  for (int y = 11; y < 55; ++y)
+    for (int x = 0; x < 128; ++x) n += (fb[(y >> 3) * 128 + x] >> (y & 7)) & 1;
+  return n;
+}
+
+// Advances `ms` simulated milliseconds while CV input `cv` (0-based) carries
+// word(n) on frame n, the others parked. Frames come at kCvFsHz of SIMULATED
+// time (a simulated millisecond is 17 core passes of 60 us, so not exactly
+// 1 ms of SimNowUs), delivered the way Scan_DMA delivers them: through the
+// hook the firmware installs.
+template <typename F>
+void RunCv(int cv, uint32_t ms, F word) {
+  static uint64_t n = 0;
+  static uint32_t base_us = 0;
+  static bool started = false;
+  if (!started) { base_us = SimNowUs(); started = true; }
+  const int j = cv < 4 ? cv + 4 : cv - 4;
+  for (uint32_t t = 0; t < ms; ++t) {
+    Run(1);
+    const uint64_t due = (uint64_t)((double)(uint32_t)(SimNowUs() - base_us) * kCvFs * 1e-6);
+    OC::ADC::ScopeFrameHook hook = OC::ADC::scope_frame_hook();
+    for (; n < due; ++n) {
+      int16_t f[8];
+      for (int k = 0; k < 8; ++k) f[k] = (int16_t)(3000 + 1000 * k);
+      f[j] = (int16_t)word(n);
+      if (hook) hook(f);
+    }
+  }
+}
+
+auto Sine(double hz, double amp, double mid = 16000.0) {
+  return [=](uint64_t n) { return mid + amp * sin(2 * M_PI * (0.1 + hz * n / kCvFs)); };
+}
+
+double CentsOff(double hz, double ref) { return 1200.0 * log2(hz / ref); }
+
+// The Scope on CV1, counting. Default settings: the quick list starts at IN L,
+// which a build without the codec masks, and CV1 is the third entry on.
+// One detent at a time, far enough apart that the encoder's acceleration does
+// not turn them into several.
+void TurnN(int detents) {
+  for (int i = 0; i < detents; ++i) { Turn(1); Run(250); }
+}
+
+void ScopeOnCv1() {
+  Go("Scope");
+  TurnN(3);
+  Run(50);
+}
+
+bool StartsWith(const std::string &s, const char *p) { return s.compare(0, strlen(p), p) == 0; }
+bool Has(const std::string &s, const char *p) { return s.find(p) != std::string::npos; }
+
+void FreqCvTone() {
+  CHECK(ScopeFreqSvc::ActiveSource() == -1, "nothing is counted before the Scope is opened");
+  CHECK(OC::ADC::scope_frame_hook() == nullptr, "...and no ADC frame hook is installed");
+  ScopeOnCv1();
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN1, "the Scope on CV1 counts CV1");
+  CHECK(ScopeFreqSvc::ActiveProfile() == ScopeFreqSvc::Profile::CV, "...in the CV profile");
+  CHECK(OC::ADC::scope_frame_hook() != nullptr, "...through the ADC frame hook");
+  CHECK(ScopeFreqSvc::GetGate() == ScopeFreqSvc::Gate::FAST, "the screen uses the fast gate");
+  RunCv(0, 400, Sine(1000.0, 6000.0));
+  const ScopeFreqLine::Reading &r = ScopeFreqSvc::CurrentReading();
+  CHECK(r.have && r.status == ScopeFreq::Status::OK, "a 1 kHz tone reads OK after 0.4 s");
+  CHECK(fabs(CentsOff(r.hz, 1000.0)) < 0.05, "...within 0.05 cent");
+  CHECK(r.sigma_cents > 0 && r.sigma_cents < 0.05, "...with a sigma of the same order");
+  CHECK(r.gate_s >= 0.1 && r.gate_s < 0.12, "...from a 0.1 s gate");
+  RunCv(0, 300, Sine(1000.0, 6000.0));
+  CHECK(r.confirmed, "two gates that agree confirm it");
+  std::string line = BottomLine();
+  printf("  line: \"%s\"\n", line.c_str());
+  CHECK(StartsWith(line, "#1000.0"), "a CV rate not yet confirmed on hardware: the line starts with the # mark");
+  CHECK(Has(line, "Hz B5 +21.3"), "...then the note and the cents against it");
+  CHECK(line.size() <= 21, "...and fits the 21 columns");
+  CHECK(InkOutsideLine(line.size()) == 0, "...and nothing else is drawn on that page");
+
+  // the clock correction: +20.0 ppm raises the reading by 20 ppm; the mark goes
+  ScopeFreqSvc::SetClock(true, 200);
+  CHECK(!ScopeFreqSvc::CurrentReading().have, "a clock change starts the reading over");
+  RunCv(0, 240, Sine(1000.0, 6000.0));
+  line = BottomLine();
+  CHECK(StartsWith(line, "?1000.0"), "the first gate after it is unconfirmed: ? mark");
+  RunCv(0, 300, Sine(1000.0, 6000.0));
+  line = BottomLine();
+  printf("  line: \"%s\"\n", line.c_str());
+  CHECK(StartsWith(line, "#1000.0"), "confirmed and calibrated, the CV rate still unconfirmed: # (the * is gone)");
+  CHECK(Has(line, "Hz B5 +21."), "...");
+  const double hz_cal = ScopeFreqSvc::CurrentReading().hz;
+  ScopeFreqSvc::SetClock(false, 0);
+  RunCv(0, 450, Sine(1000.0, 6000.0));
+  const double hz_raw = ScopeFreqSvc::CurrentReading().hz;
+  CHECK(fabs(hz_cal / hz_raw - 1.00002) < 5e-6, "the +20.0 ppm correction moved the reading by 20 ppm");
+}
+
+void FreqFast() {
+  ScopeOnCv1();
+  uint32_t last_seq = 0;
+  int updates = 0;
+  uint32_t first_ms = 0, prev_ms = 0, worst_gap = 0, best_gap = 100000;
+  const uint32_t t0 = SimNowMs();
+  for (int ms = 0; ms < 1500; ++ms) {
+    RunCv(0, 1, Sine(440.0, 6000.0));
+    const ScopeFreqLine::Reading &r = ScopeFreqSvc::CurrentReading();
+    if (r.have && r.seq != last_seq) {
+      last_seq = r.seq;
+      const uint32_t now = SimNowMs() - t0;
+      if (updates == 0) first_ms = now;
+      else {
+        const uint32_t gap = now - prev_ms;
+        if (gap > worst_gap) worst_gap = gap;
+        if (gap < best_gap) best_gap = gap;
+      }
+      prev_ms = now;
+      ++updates;
+    }
+  }
+  printf("  %d updates in 1.5 s, first at %u ms, gaps %u..%u ms\n", updates, first_ms, best_gap, worst_gap);
+  CHECK(first_ms > 150 && first_ms < 300, "the first reading arrives within 0.3 s (0.1 s learning + 0.1 s gate)");
+  CHECK(updates >= 11, "then one reading every ~0.1 s");
+  CHECK(best_gap >= 95 && worst_gap <= 115, "...each between 95 and 115 ms apart");
+
+  // the slow (calibration) gate: ten times coarser in time
+  ScopeFreqSvc::SetGate(ScopeFreqSvc::Gate::SLOW);
+  last_seq = 0; updates = 0; worst_gap = 0; best_gap = 100000;
+  const uint32_t t1 = SimNowMs();
+  for (int ms = 0; ms < 3400; ++ms) {
+    RunCv(0, 1, Sine(440.0, 6000.0));
+    const ScopeFreqLine::Reading &r = ScopeFreqSvc::CurrentReading();
+    if (r.have && r.seq != last_seq) {
+      last_seq = r.seq;
+      const uint32_t now = SimNowMs() - t1;
+      if (updates > 0) { const uint32_t gap = now - prev_ms; if (gap > worst_gap) worst_gap = gap; if (gap < best_gap) best_gap = gap; }
+      prev_ms = now;
+      ++updates;
+    }
+  }
+  printf("  slow gate: %d updates in 3.4 s, gaps %u..%u ms\n", updates, best_gap, worst_gap);
+  CHECK(updates >= 2 && updates <= 3, "the 1 s gate gives a reading about every second");
+  CHECK(best_gap >= 995 && worst_gap <= 1015, "...a second apart");
+  CHECK(ScopeFreqSvc::CurrentReading().gate_s >= 1.0, "...and the reading says so");
+  ScopeFreqSvc::SetGate(ScopeFreqSvc::Gate::FAST);
+}
+
+void FreqStatus() {
+  ScopeOnCv1();
+  RunCv(0, 250, [](uint64_t) { return 16000.0; });
+  CHECK(BottomLine() == "NO SIGNAL", "a flat input says NO SIGNAL");
+  RunCv(0, 300, Sine(440.0, 30.0));
+  CHECK(BottomLine() == "TOO QUIET", "a tone under the threshold says TOO QUIET");
+  CHECK(ScopeFreqSvc::ActiveProfile() == ScopeFreqSvc::Profile::CV, "(a flat or tiny input does not leave the CV range)");
+  RunCv(0, 450, Sine(440.0, 6000.0));
+  std::string line = BottomLine();
+  printf("  line: \"%s\"\n", line.c_str());
+  CHECK(Has(line, "Hz A4 "), "a tone of 6000 counts reads as A4");
+  CHECK(line[0] == '#' || line[0] == '?', "...marked, the CV rate being unconfirmed");
+  // heavy noise on the same tone: counted wrong, so refused
+  uint32_t seed = 12345;
+  auto noisy = [&](uint64_t n) {
+    seed = seed * 1664525u + 1013904223u;
+    return 16000.0 + 3000.0 * sin(2 * M_PI * (0.1 + 440.0 * n / kCvFs)) + ((seed >> 8) % 6000) - 3000.0;
+  };
+  RunCv(0, 700, noisy);
+  line = BottomLine();
+  printf("  line: \"%s\"\n", line.c_str());
+  CHECK(!(line[0] >= '0' && line[0] <= '9') && line[0] != '#',
+        "noise as big as the signal is never shown as a good reading");
+  // the tone stops
+  RunCv(0, 350, [](uint64_t) { return 16000.0; });
+  line = BottomLine();
+  CHECK(line == "SIGNAL LOST" || line == "NO SIGNAL", "a tone that stops says SIGNAL LOST or NO SIGNAL");
+  // and comes back, at another pitch
+  RunCv(0, 800, Sine(523.25, 6000.0));
+  line = BottomLine();
+  CHECK(Has(line, "Hz C5 "), "...and the next tone is read at its own pitch");
+}
+
+void FreqLfo() {
+  ScopeOnCv1();
+  auto tri = [](uint64_t n) {
+    const double ph = 0.1 + 1.0 * n / kCvFs;
+    return 16000.0 + 5000.0 * (4.0 * fabs(ph - floor(ph + 0.5)) - 1.0);
+  };
+  int ms = 0;
+  while (ms < 12000 && !(ScopeFreqSvc::ActiveProfile() == ScopeFreqSvc::Profile::CV_LOW &&
+                         ScopeFreqSvc::CurrentReading().status == ScopeFreq::Status::OK)) {
+    RunCv(0, 100, tri);
+    ms += 100;
+  }
+  printf("  1 Hz LFO read after %d ms\n", ms);
+  CHECK(ScopeFreqSvc::ActiveProfile() == ScopeFreqSvc::Profile::CV_LOW, "a 1 Hz LFO moves the counter to the low range");
+  const ScopeFreqLine::Reading &r = ScopeFreqSvc::CurrentReading();
+  CHECK(r.status == ScopeFreq::Status::OK && fabs(r.hz - 1.0) < 0.002, "...and reads 1.000 Hz");
+  CHECK(r.gate_s >= 2.0, "...from a 2 s gate");
+  const std::string line = BottomLine();
+  printf("  line: \"%s\"\n", line.c_str());
+  CHECK(Has(line, "1.0") && Has(line, "Hz") && !Has(line, "A") && !Has(line, "B"), "an LFO is shown in Hz, with no note name");
+}
+
+void FreqNoArena() {
+  OC::SimScopeAllocFails(true);
+  Go("Scope");
+  TurnN(3);
+  Run(50);
+  CHECK(!OC::SimScopeArenaLive(), "the arena allocation fails");
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN1, "...and the counter still follows the view");
+  CHECK(OC::ADC::scope_frame_hook() != nullptr, "...with the frame hook installed for it alone");
+  RunCv(0, 700, Sine(1000.0, 6000.0));
+  const ScopeFreqLine::Reading &r = ScopeFreqSvc::CurrentReading();
+  CHECK(r.have && r.status == ScopeFreq::Status::OK && r.confirmed, "it reads the tone");
+  const std::string line = BottomLine();
+  printf("  line: \"%s\"\n", line.c_str());
+  CHECK(Has(line, "Hz B5 "), "and the line is on screen beside \"not enough memory\"");
+  // a freeze keeps counting
+  OC::SimScopeAllocFails(false);
+  Tap(OC::CONTROL_BUTTON_A);
+  const uint32_t seq = ScopeFreqSvc::CurrentReading().seq;
+  RunCv(0, 300, Sine(1000.0, 6000.0));
+  CHECK(ScopeFreqSvc::CurrentReading().seq != seq, "a frozen trace does not freeze the counter");
+  Tap(OC::CONTROL_BUTTON_A);
+  Run(100);
+  CHECK(OC::SimScopeArenaLive(), "unfreezing re-arms and the arena comes back (the failure was transient)");
+  RunCv(0, 300, Sine(1000.0, 6000.0));
+  CHECK(Has(BottomLine(), "Hz B5 "), "...and the counter did not notice");
+  OC::SimScopeAllocFails(false);
+}
+
+void FreqSwitch() {
+  ScopeOnCv1();
+  ScopeFreqSvc::SetClock(true, 150);
+  RunCv(0, 300, Sine(1000.0, 6000.0));
+  CHECK(ScopeFreqSvc::CurrentReading().have, "counting on CV1");
+  Go("Tweighty");
+  CHECK(ScopeFreqSvc::ActiveSource() == -1, "leaving the Scope stops the counter");
+  CHECK(OC::ADC::scope_frame_hook() == nullptr, "...and takes the frame hook off");
+  CHECK(!OC::SimScopeArenaLive(), "...and frees the arena");
+  CHECK(ScopeFreqSvc::ClockCalibrated() && ScopeFreqSvc::ClockPpm10() == 150,
+        "the clock correction is still there (the counter is not in the arena)");
+  RunCv(0, 200, Sine(1000.0, 6000.0));
+  CHECK(!ScopeFreqSvc::CurrentReading().have, "frames that arrive meanwhile are ignored");
+  Go("Scope");
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN1, "coming back, the counter listens to CV1 again");
+  CHECK(OC::ADC::scope_frame_hook() != nullptr, "...with the hook");
+  RunCv(0, 600, Sine(1000.0, 6000.0));
+  CHECK(ScopeFreqSvc::CurrentReading().status == ScopeFreq::Status::OK, "...and reads");
+  CHECK(ScopeFreqSvc::ClockPpm10() == 150, "the correction survived the round trip");
+  // the app menu suspends the Scope too
+  OpenMenu();
+  CHECK(InMenu() && ScopeFreqSvc::ActiveSource() == -1 && OC::ADC::scope_frame_hook() == nullptr,
+        "opening the app menu stops it as well");
+  CHECK(PickOther("Scope"), "the menu picks another app");
+  for (int i = 0; i < 4; ++i) {
+    Go("Scope");
+    CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN1, "switch-back: counting");
+    Go("Backup");
+    CHECK(ScopeFreqSvc::ActiveSource() == -1 && OC::ADC::scope_frame_hook() == nullptr, "switch-away: stopped");
+  }
+  CHECK(ScopeFreqSvc::ClockPpm10() == 150, "the correction is still 15.0 ppm after all of it");
+}
+
+void FreqLayout() {
+  ScopeOnCv1();
+  auto check_view = [&](const char *what) {
+    RunCv(0, 350, Sine(1000.0, 6000.0));
+    printf("  (%s: source %d)\n", what, ScopeFreqSvc::ActiveSource());
+    const std::string line = BottomLine();
+    char msg[160];
+    snprintf(msg, sizeof(msg), "%s: the measurement line reads (\"%s\")", what, line.c_str());
+    CHECK(Has(line, "Hz B5 "), msg);
+    snprintf(msg, sizeof(msg), "%s: nothing but the line on rows 55-63", what);
+    CHECK(InkOutsideLine(line.size()) == 0, msg);
+  };
+  check_view("one trace");
+  CHECK(PlotInk() > 0, "...the trace itself is drawn above it");
+  TurnN(8);   // CV1-4, overlaid
+  Run(50);
+  check_view("overlaid CV1-4");
+  CHECK(PlotInk() > 0, "...with ink in the plot");
+  Tap(OC::CONTROL_BUTTON_Y);
+  check_view("stacked CV1-4");
+  Tap(OC::CONTROL_BUTTON_Y);
+  TurnN(2);   // CV+TR, with its 1-bit lanes at the bottom of the plot
+  Run(50);
+  check_view("CV1-4 + TR lanes");
+  Tap(OC::CONTROL_BUTTON_X);
+  Run(100);
+  check_view("spectrum");
+  CHECK(PlotInk() > 0, "...with ink in the plot");
+  Tap(OC::CONTROL_BUTTON_X);
+}
+
+// ---- saved settings -----------------------------------------------------------
+
+constexpr uint16_t kScopeId = TWOCCS("SP");
+
+// Rewrites the Scope's chunk in `src` to hold `payload` (n bytes) as its app
+// data, other chunks untouched, the way an older firmware would have written it.
+void RewriteScopeChunk(const OC::AppData &src, OC::AppData *dst, size_t io, const uint8_t *payload, size_t n) {
+  memset(dst, 0, sizeof(*dst));
+  size_t in = 0, out = 0;
+  while (in < src.used) {
+    const OC::AppChunkHeader *h = reinterpret_cast<const OC::AppChunkHeader *>(src.data + in);
+    if (h->id != kScopeId) {
+      memcpy(dst->data + out, src.data + in, h->length);
+      out += h->length;
+    } else {
+      size_t len = sizeof(OC::AppChunkHeader) + io + n;
+      if (len & 1) ++len;
+      memcpy(dst->data + out, src.data + in, sizeof(OC::AppChunkHeader) + io);
+      memcpy(dst->data + out + sizeof(OC::AppChunkHeader) + io, payload, n);
+      reinterpret_cast<OC::AppChunkHeader *>(dst->data + out)->length = (uint16_t)len;
+      out += len;
+    }
+    in += h->length;
+  }
+  dst->used = (uint32_t)out;
+}
+
+// Rewrites the chunk of app `id` so its payload is `extra` bytes longer than
+// the app declares (zero filled), other chunks untouched.
+void LengthenChunk(const OC::AppData &src, OC::AppData *dst, uint16_t id, size_t extra) {
+  memset(dst, 0, sizeof(*dst));
+  size_t in = 0, out = 0;
+  while (in < src.used) {
+    const OC::AppChunkHeader *h = reinterpret_cast<const OC::AppChunkHeader *>(src.data + in);
+    memcpy(dst->data + out, src.data + in, h->length);
+    if (h->id == id) {
+      memset(dst->data + out + h->length, 0, extra);
+      reinterpret_cast<OC::AppChunkHeader *>(dst->data + out)->length = (uint16_t)(h->length + extra);
+      out += h->length + extra;
+    } else {
+      out += h->length;
+    }
+    in += h->length;
+  }
+  dst->used = (uint32_t)out;
+}
+
+void FreqSettings() {
+  static OC::AppData cur, old;
+  Go("Scope");
+  TurnN(5);                             // quick entry 5 = CV3
+  ScopeFreqSvc::SetClock(true, 321);
+  OC::BuildAppData(cur);
+  // find the Scope's saved bytes
+  const uint8_t *payload = nullptr;
+  size_t plen = 0;
+  const size_t io = OC::app_switcher.current_app()->storage_size() - kScopeSettingsBytes;
+  for (size_t at = 0; at < cur.used;) {
+    const OC::AppChunkHeader *h = reinterpret_cast<const OC::AppChunkHeader *>(cur.data + at);
+    if (h->id == kScopeId) {
+      payload = cur.data + at + sizeof(OC::AppChunkHeader) + io;
+      plen = h->length - sizeof(OC::AppChunkHeader) - io;
+    }
+    at += h->length;
+  }
+  CHECK(payload && plen >= kScopeSettingsBytes, "the save holds a Scope chunk of the new size");
+  if (!payload) return;
+  uint8_t cur_bytes[kScopeSettingsBytes];
+  memcpy(cur_bytes, payload, kScopeSettingsBytes);
+  printf("  (saved: quick %d, bytes 16-19: %02X %02X %02X %02X, io %zu, plen %zu)\n", cur_bytes[0], cur_bytes[16], cur_bytes[17], cur_bytes[18], cur_bytes[19], io, plen);
+  CHECK(cur_bytes[0] == 5 && cur_bytes[16] == kScopeSettingsVersion && cur_bytes[17] == 1, "...quick entry 5, version 2, calibrated");
+  CHECK(cur_bytes[18] == (321 & 0xFF) && cur_bytes[19] == (321 >> 8), "...and the clock, 32.1 ppm");
+
+  // 1. the new layout restores the clock
+  Go("Tweighty");
+  ScopeFreqSvc::SetClock(false, 0);
+  OC::ApplyAppData(cur);
+  CHECK(ScopeFreqSvc::ClockCalibrated() && ScopeFreqSvc::ClockPpm10() == 321, "a version-2 save restores the clock correction");
+  Go("Scope");
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN3, "...and the view (CV3)");
+
+  // 2. the 16-byte layout of the shipped firmware: restored, not dropped
+  TurnN(2);                               // CV5 now
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN5, "(the view moved off CV3)");
+  Go("Tweighty");
+  RewriteScopeChunk(cur, &old, io, cur_bytes, kScopeSettingsBytesV1);
+  CHECK(old.used < cur.used, "(the old-layout save is shorter)");
+  ScopeFreqSvc::SetClock(false, 0);
+  OC::ApplyAppData(old);
+  Go("Scope");
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN3, "a 16-byte save is restored: CV3 is back");
+  CHECK(!ScopeFreqSvc::ClockCalibrated() && ScopeFreqSvc::ClockPpm10() == 0, "...with the clock uncalibrated");
+
+  // 3. an old save must not wipe a calibration made since
+  Go("Tweighty");
+  ScopeFreqSvc::SetClock(true, 999);
+  OC::ApplyAppData(old);
+  CHECK(ScopeFreqSvc::ClockCalibrated() && ScopeFreqSvc::ClockPpm10() == 999, "an older save does not wipe a live calibration");
+
+  // 4. the 3-byte layout of the first Scope: channel 3 = CV IN 4
+  const uint8_t legacy[3] = {3, 3, 1};
+  OC::AppData leg;
+  RewriteScopeChunk(cur, &leg, io, legacy, 3);
+  Go("Scope");
+  TurnN(2);
+  Go("Tweighty");
+  OC::ApplyAppData(leg);
+  Go("Scope");
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN4, "a 3-byte save is restored: CV4");
+
+  // 5. any other length is still dropped
+  uint8_t odd[18];
+  memcpy(odd, cur_bytes, 16);
+  odd[16] = odd[17] = 0;
+  OC::AppData bad;
+  RewriteScopeChunk(cur, &bad, io, odd, 18);
+  TurnN(1);
+  const int before = ScopeFreqSvc::ActiveSource();
+  Go("Tweighty");
+  OC::ApplyAppData(bad);
+  Go("Scope");
+  CHECK(ScopeFreqSvc::ActiveSource() == before, "a chunk of any other length is still dropped");
+
+  // 6. only the Scope accepts an older layout: another app's chunk of the wrong
+  //    length is dropped as before (the stand-in counts the restores it is given)
+  AppProbeQuad *quad = OC::SimProbeQuad();
+  static OC::AppData longer;
+  const int r0 = quad->n.restore;
+  OC::ApplyAppData(cur);
+  CHECK(quad->n.restore == r0 + 1, "(a chunk of the right length reaches the other app's restore)");
+  LengthenChunk(cur, &longer, quad->id(), 2);
+  OC::ApplyAppData(longer);
+  CHECK(quad->n.restore == r0 + 1, "another app's chunk of the wrong length is still dropped");
+  LengthenChunk(cur, &longer, quad->id(), 1);
+  OC::ApplyAppData(longer);
+  CHECK(quad->n.restore == r0 + 1, "...by one byte too");
+
+  // 7. the correction belongs to the module: a preset recall neither overwrites nor undoes it
+  Go("Scope");
+  ScopeFreqSvc::SetClock(true, 888);
+  OC::BuildAppData(cur);                            // a save that carries 88.8 ppm
+  ScopeFreqSvc::SetClock(true, 500);
+  OC::ApplyAppDataFromPreset(cur);
+  CHECK(ScopeFreqSvc::ClockCalibrated() && ScopeFreqSvc::ClockPpm10() == 500,
+        "a preset recall does not overwrite a live correction with its own");
+  ScopeFreqSvc::SetClock(false, 0);
+  OC::ApplyAppDataFromPreset(cur);
+  CHECK(!ScopeFreqSvc::ClockCalibrated(), "...nor bring back one that was cleared (%cx)");
+  OC::ApplyAppData(cur);
+  CHECK(ScopeFreqSvc::ClockCalibrated() && ScopeFreqSvc::ClockPpm10() == 888,
+        "while the settings load path still applies it");
+  CHECK(!OC::AppDataIsPresetRecall(), "(the recall flag is down again)");
+
+  // 7b. through the real recall: save a preset slot, change the correction, recall
+  //     the slot with PresetEngine's own RecallSlot path -- the live value stays
+  Go("Scope");
+  ScopeFreqSvc::SetClock(true, 100);
+  CHECK(Save(5), "(a preset is saved with a 10.0 ppm correction in it)");
+  ScopeFreqSvc::SetClock(true, 200);
+  CHECK(Recall(5), "(the slot is recalled)");
+  CHECK(ScopeFreqSvc::ClockCalibrated() && ScopeFreqSvc::ClockPpm10() == 200,
+        "a recall through the preset engine leaves the live correction alone");
+  ScopeFreqSvc::SetClock(false, 0);
+  CHECK(Recall(5), "(and again)");
+  CHECK(!ScopeFreqSvc::ClockCalibrated(), "...and does not bring back one that was cleared");
+
+  // 8. a factory reset forgets the calibration, and the next save does not write it back
+  ScopeFreqSvc::SetClock(true, 777);
+  OC::ReinitApps(true);
+  Run(100);
+  CHECK(!ScopeFreqSvc::ClockCalibrated() && ScopeFreqSvc::ClockPpm10() == 0, "a factory reset clears the correction");
+  OC::BuildAppData(cur);
+  bool saved_zero = false;
+  for (size_t at = 0; at < cur.used;) {
+    const OC::AppChunkHeader *h = reinterpret_cast<const OC::AppChunkHeader *>(cur.data + at);
+    if (h->id == kScopeId) saved_zero = cur.data[at + sizeof(OC::AppChunkHeader) + io + 17] == 0;
+    at += h->length;
+  }
+  CHECK(saved_zero, "...and the next save writes none");
+}
+
 // ---- boot -----------------------------------------------------------------
 
 void PrepScope(bool with_slot) {
@@ -827,6 +1382,14 @@ int SimAppSwitchTest(const std::string &s) {
   else if (s == "sampler-callers") SamplerCallers();
   else if (s == "prep-sampler") PrepSampler();
   else if (s == "boot-menu-sampler") BootMenuSampler();
+  else if (s == "freq-cv-tone") FreqCvTone();
+  else if (s == "freq-fast") FreqFast();
+  else if (s == "freq-status") FreqStatus();
+  else if (s == "freq-lfo") FreqLfo();
+  else if (s == "freq-no-arena") FreqNoArena();
+  else if (s == "freq-switch") FreqSwitch();
+  else if (s == "freq-layout") FreqLayout();
+  else if (s == "freq-settings") FreqSettings();
   else if (s == "prep-scope") PrepScope(false);
   else if (s == "prep-scope-slot") PrepScope(true);
   else if (s == "boot-menu") BootMenu(false);

@@ -2142,5 +2142,42 @@ $SWSIM --state "$TMP/sw.img" --test-app-switch prep-scope-slot --no-log > /dev/n
 sw_run "power-up into the app menu with a boot recall into the Scope" \
   --state "$TMP/sw.img" --test-app-switch boot-menu-recall
 
+# Console byte order (Main.cpp is not part of the simulator, so this is a source
+# check): the '%' frequency commands must see a byte only after every dialog that
+# owns the console has had its turn -- the CV meter's `d`/`Q` prompts above all,
+# else a stray '%' inside `d1` + digits eats digits that then reach the DAC prompt.
+MAINCPP=../../software/src/Main.cpp
+fl=$(grep -n 'if (FreqConsoleByte(cmd)) continue;' "$MAINCPP" | head -1 | cut -d: -f1)
+cl=$(grep -n 'if (OC::CvMeter::Consume(cmd)) continue;' "$MAINCPP" | head -1 | cut -d: -f1)
+al=$(grep -n 'if (CalRoutinePorts::Cal259Consume(cmd)) continue;' "$MAINCPP" | head -1 | cut -d: -f1)
+if [ -n "$fl" ] && [ -n "$cl" ] && [ -n "$al" ] && [ "$fl" -gt "$cl" ] && [ "$fl" -gt "$al" ]; then
+  ok "source check: the % frequency commands come after the CV meter and 259e consumers"
+else bad "source check: FreqConsoleByte (line ${fl:-?}) must follow CvMeter::Consume (${cl:-?}) and Cal259Consume (${al:-?}) in Main.cpp"; fi
+
+# ---------------------------------------------------------------------------
+# The frequency counter on the Scope (software/src/ScopeFreqService.h). A tone
+# goes in through the CV frame hook the firmware installs, the screen is read
+# back from the framebuffer. The audio inputs share the counter and the capture
+# hook point but this build has no codec, so the audio feed is host-tested only
+# (test_scope_freq_service).
+# ---------------------------------------------------------------------------
+echo "frequency counter on the Scope"
+sw_run "a 1 kHz tone on CV1: reading, line, marks, clock correction" \
+  --test-app-switch freq-cv-tone
+sw_run "fast 0.1 s update on screen, 1 s gate for calibration" \
+  --test-app-switch freq-fast
+sw_run "NO SIGNAL, TOO QUIET, a good reading, noise refused, SIGNAL LOST" \
+  --test-app-switch freq-status
+sw_run "a 1 Hz CV LFO: the low range, shown in Hz" \
+  --test-app-switch freq-lfo
+sw_run "the arena allocation fails: the counter and its line stay" \
+  --test-app-switch freq-no-arena
+sw_run "app switches stop and restart the counter, the clock correction survives" \
+  --test-app-switch freq-switch
+sw_run "the measurement line never touches the plot (five views)" \
+  --test-app-switch freq-layout
+sw_run "saved Scope settings: the 16- and 3-byte layouts restore, the clock round-trips" \
+  --test-app-switch freq-settings
+
 [ $fail -eq 0 ] && echo "all checks passed" || echo "SOME CHECKS FAILED"
 exit $fail

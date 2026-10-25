@@ -2,6 +2,7 @@
 // persistence (src/ScopeSources.cpp, src/ScopeSettings.cpp). Pure state; no
 // hardware, no Audio.h.
 #include <cstdio>
+#include <initializer_list>
 #include <cstring>
 
 #include "../src/ScopeSources.h"
@@ -118,7 +119,8 @@ static bool Same(const ScopeSettings &a, const ScopeSettings &b) {
          a.stacked == b.stacked && a.trig_src == b.trig_src && a.trig_mode == b.trig_mode &&
          a.trig_level_mv == b.trig_level_mv && a.time_idx == b.time_idx &&
          a.time_auto == b.time_auto && a.volt_idx == b.volt_idx && a.volt_auto == b.volt_auto &&
-         a.screensaver_trace == b.screensaver_trace;
+         a.screensaver_trace == b.screensaver_trace && a.clock_cal == b.clock_cal &&
+         a.clock_ppm10 == b.clock_ppm10;
 }
 
 static void test_settings_roundtrip() {
@@ -142,9 +144,160 @@ static void test_settings_roundtrip() {
   s.volt_idx = 2;
   s.volt_auto = 0;
   s.screensaver_trace = 1;
+  s.clock_cal = 1;
+  s.clock_ppm10 = -1234;
   CHECK(ScopeSettingsPack(s, buf) == kScopeSettingsBytes);
   CHECK(ScopeSettingsUnpack(buf, sizeof(buf), &r));
   CHECK(Same(s, r));
+  CHECK(r.clock_cal == 1 && r.clock_ppm10 == -1234);
+}
+
+static void test_clock_bytes_and_defaults() {
+  printf("test_clock_bytes_and_defaults\n");
+  CHECK(kScopeSettingsBytes == 20 && kScopeSettingsBytesV1 == 16 && kScopeSettingsVersion == 2);
+  ScopeSettings s, r;
+  ScopeSettingsDefaults(&s);
+  CHECK(s.clock_cal == 0 && s.clock_ppm10 == 0);
+  uint8_t buf[kScopeSettingsBytes];
+  s.clock_cal = 1;
+  s.clock_ppm10 = 0x1234 - 0x3000;   // negative, both bytes non-zero
+  ScopeSettingsPack(s, buf);
+  CHECK(buf[16] == kScopeSettingsVersion);
+  CHECK(buf[17] == 1);
+  CHECK(buf[18] == (uint8_t)((uint16_t)s.clock_ppm10 & 0xFF));
+  CHECK(buf[19] == (uint8_t)((uint16_t)s.clock_ppm10 >> 8));
+  // the extremes
+  for (int v : {10000, -10000, 1, -1, 0}) {
+    s.clock_cal = 1;
+    s.clock_ppm10 = (int16_t)v;
+    ScopeSettingsPack(s, buf);
+    CHECK(ScopeSettingsUnpack(buf, sizeof(buf), &r));
+    CHECK(r.clock_cal == 1 && r.clock_ppm10 == v);
+  }
+  // out of range is not believed: the clock is dropped, the rest of the save survives
+  s.quick_idx = 3;
+  s.clock_cal = 1;
+  s.clock_ppm10 = 10001;
+  ScopeSettingsPack(s, buf);
+  CHECK(ScopeSettingsUnpack(buf, sizeof(buf), &r));
+  CHECK(r.clock_cal == 0 && r.clock_ppm10 == 0 && r.quick_idx == 3);
+  s.clock_ppm10 = -10001;
+  ScopeSettingsPack(s, buf);
+  CHECK(ScopeSettingsUnpack(buf, sizeof(buf), &r));
+  CHECK(r.clock_cal == 0 && r.clock_ppm10 == 0 && r.quick_idx == 3);
+  s.clock_ppm10 = -32768;
+  ScopeSettingsPack(s, buf);
+  CHECK(ScopeSettingsUnpack(buf, sizeof(buf), &r));
+  CHECK(r.clock_cal == 0 && r.clock_ppm10 == 0);
+  // uncalibrated carries no value, whatever the bytes say
+  s.clock_cal = 0;
+  s.clock_ppm10 = 77;
+  ScopeSettingsPack(s, buf);
+  CHECK(buf[17] == 0 && buf[18] == 0 && buf[19] == 0);   // and none is written
+  CHECK(ScopeSettingsUnpack(buf, sizeof(buf), &r));
+  CHECK(r.clock_cal == 0 && r.clock_ppm10 == 0);
+  // the calibrated byte is 0 or 1
+  s.clock_cal = 1;
+  s.clock_ppm10 = 50;
+  ScopeSettingsPack(s, buf);
+  buf[17] = 2;
+  CHECK(ScopeSettingsUnpack(buf, sizeof(buf), &r));
+  CHECK(r.clock_cal == 0 && r.clock_ppm10 == 0);
+  // an unknown layout version is not read as version 2
+  ScopeSettingsPack(s, buf);
+  buf[16] = 3;
+  memset(&r, 0x5A, sizeof(r));
+  CHECK(!ScopeSettingsUnpack(buf, sizeof(buf), &r));
+  ScopeSettings d;
+  ScopeSettingsDefaults(&d);
+  CHECK(Same(r, d));
+  buf[16] = 0;
+  CHECK(!ScopeSettingsUnpack(buf, sizeof(buf), &r));
+}
+
+// A version-1 save: exactly what the shipped firmware wrote, spelled out
+// byte by byte, not produced by today's Pack.
+static void test_old_layout_loads() {
+  printf("test_old_layout_loads\n");
+  const uint8_t v1[16] = {
+      /*0 quick*/ 4,
+      /*1-4 custom mask*/ 0x04, 0x00, 0x10, 0x00,   // OUT_L (bit 2) and TR1 (bit 20)
+      /*5 view*/ 1,
+      /*6 stacked*/ 1,
+      /*7 trig_src*/ 1,
+      /*8 trig_mode*/ 2,
+      /*9-10 trig level*/ 0x2E, 0xFB,                // -1234 mV
+      /*11 time*/ 9,
+      /*12 time_auto*/ 0,
+      /*13 volt*/ 2,
+      /*14 volt_auto*/ 0,
+      /*15 screensaver*/ 1,
+  };
+  ScopeSettings r;
+  memset(&r, 0x5A, sizeof(r));
+  CHECK(ScopeSettingsUnpack(v1, sizeof(v1), &r));
+  CHECK(r.quick_idx == 4);
+  CHECK(r.custom_mask == 0x00100004u);
+  CHECK(r.view == 1 && r.stacked == 1 && r.trig_src == 1 && r.trig_mode == 2);
+  CHECK(r.trig_level_mv == -1234);
+  CHECK(r.time_idx == 9 && r.time_auto == 0 && r.volt_idx == 2 && r.volt_auto == 0);
+  CHECK(r.screensaver_trace == 1);
+  // the new fields come up as "never calibrated", not as garbage
+  CHECK(r.clock_cal == 0 && r.clock_ppm10 == 0);
+  // the first 16 bytes of a version-2 save are the version-1 save of the same settings
+  uint8_t v2[kScopeSettingsBytes];
+  CHECK(ScopeSettingsPack(r, v2) == kScopeSettingsBytes);
+  CHECK(memcmp(v2, v1, sizeof(v1)) == 0);
+  CHECK(v2[16] == 2 && v2[17] == 0 && v2[18] == 0 && v2[19] == 0);
+  // load old, store new, load new: stable
+  ScopeSettings r2;
+  CHECK(ScopeSettingsUnpack(v2, sizeof(v2), &r2));
+  CHECK(Same(r, r2));
+  // defaults saved by the old firmware
+  uint8_t zero[16] = {0};
+  zero[11] = 6; zero[13] = 4; zero[12] = 1; zero[14] = 1;
+  CHECK(ScopeSettingsUnpack(zero, sizeof(zero), &r));
+  CHECK(r.clock_cal == 0);
+  // an old save with a bad quick index is still rejected, as before
+  uint8_t bad[16];
+  memcpy(bad, v1, sizeof(bad));
+  bad[0] = (uint8_t)QuickCount();
+  CHECK(!ScopeSettingsUnpack(bad, sizeof(bad), &r));
+}
+
+static void test_payload_length() {
+  printf("test_payload_length\n");
+  CHECK(ScopeSettingsPayloadLength(20) == 20 && ScopeSettingsPayloadLength(21) == 20);
+  CHECK(ScopeSettingsPayloadLength(16) == 16 && ScopeSettingsPayloadLength(17) == 16);
+  CHECK(ScopeSettingsPayloadLength(3) == 3 && ScopeSettingsPayloadLength(4) == 3);
+  const size_t none[] = {0, 1, 2, 5, 6, 15, 18, 19, 22, 23, 24, 32, 100, 65535};
+  for (size_t n : none) CHECK(ScopeSettingsPayloadLength(n) == 0);
+}
+
+static void test_accepted_lengths() {
+  printf("test_accepted_lengths\n");
+  CHECK(ScopeSettingsAcceptsLength(20));
+  CHECK(ScopeSettingsAcceptsLength(16));
+  CHECK(ScopeSettingsAcceptsLength(3));
+  CHECK(ScopeSettingsAcceptsLength(4));    // the legacy save with its even-chunk padding byte
+  const size_t no[] = {0, 1, 2, 5, 15, 17, 18, 19, 21, 22, 32, 64};
+  for (size_t n : no) CHECK(!ScopeSettingsAcceptsLength(n));
+  // every accepted length unpacks (given sane bytes), every other one does not
+  uint8_t buf[32] = {0};
+  buf[11] = 6; buf[13] = 4;
+  ScopeSettings r;
+  for (size_t n = 0; n <= 24; ++n) {
+    buf[16] = 2;
+    const bool ok = ScopeSettingsUnpack(buf, n, &r);
+    CHECK(ok == ScopeSettingsAcceptsLength(n));
+  }
+  // the padded legacy save: byte 3 is padding and ignored
+  const uint8_t leg4a[4] = {3, 3, 1, 0};
+  const uint8_t leg4b[4] = {3, 3, 1, 0xA5};
+  ScopeSettings a, b;
+  CHECK(ScopeSettingsUnpack(leg4a, 4, &a) && ScopeSettingsUnpack(leg4b, 4, &b));
+  CHECK(Same(a, b));
+  CHECK(QuickMask(a.quick_idx) == Bit(SRC_CV_IN4) && a.screensaver_trace == 1);
 }
 
 static void test_legacy_restore() {
@@ -215,6 +368,10 @@ int main() {
   test_mask_to_list_order_and_cap();
   test_no_codec_mask();
   test_settings_roundtrip();
+  test_clock_bytes_and_defaults();
+  test_old_layout_loads();
+  test_payload_length();
+  test_accepted_lengths();
   test_legacy_restore();
   test_unpack_rejects_garbage();
   printf("%d checks, %d failures\n", checks, failures);

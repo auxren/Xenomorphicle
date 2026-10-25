@@ -112,7 +112,7 @@ namespace OC {
 
 // from OC_apps.cpp
 extern void BuildAppData(AppData &data);
-extern void ApplyAppData(const AppData &data);
+extern void ApplyAppDataFromPreset(const AppData &data);
 extern void BuildGlobalSettingsValues();
 extern void RestoreGlobalSettingsFromConfig(uint8_t scala_loaded_mask);
 extern size_t ResolveAppIndexByID(uint16_t app_id);
@@ -1420,7 +1420,7 @@ FLASHMEM bool RecallSlot(uint8_t slot) {
   Chords::Validate();
   for (int i = 0; i < HS::TURING_MACHINE_COUNT; ++i)
     HS::user_turing_machines[i].Validate();
-  ApplyAppData(capture);
+  ApplyAppDataFromPreset(capture);
   watchdog_feed();
   ph[3] = wall.lap_ms();
 
