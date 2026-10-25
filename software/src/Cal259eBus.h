@@ -70,6 +70,8 @@ enum Error {
                           // latched): after that only ok, E_COMMIT_REFUSED, E_NO_SLOT or
                           // E_COMMIT_UNKNOWN end the operation
   E_INTERNAL = -8,        // a frame CalRec::FrameAllowed refuses was about to be sent; nothing was
+  E_INCONSISTENT = -9,    // ReadRecord: two reads of the same record byte (the overlapping
+                          // chunks) disagreed, so the record is not trusted
 };
 
 struct Status { uint8_t flags, fmt; uint16_t seq; };
@@ -154,6 +156,7 @@ class Cal259eBus {
   int sends_ = 0;
   int last_send_rc_ = 0;     // Send's code for the frame that ended in E_BUS_ERROR
   uint8_t chunk_ = 0;        // RECORD: 0..6 (kRecordArgs); PUT: next frame 0..3
+  uint32_t seen_ = 0;        // RECORD: bit n set once record byte n has been read
 
   uint8_t put_rec_[30] = {};
   uint16_t put_seq_ = 0;       // the seq of put_rec_ (valid when it decoded)

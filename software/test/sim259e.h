@@ -187,6 +187,7 @@ struct Sim259e : BusPort {
   // 8 data bytes therefore arrives with data[5] = 0x00 and data[7] = 0x0C. (Status and
   // ADC replies are too short to reach them.) Set false to model a fixed module.
   bool stock_scratch_overlap = true;
+  uint8_t corrupt_read_arg = 0xFF;  // test knob: READ what 0 at this arg returns data[1] flipped
   bool status_hides_valid = false;   // test knob: the status shows bit0 (record valid) clear
 
   void Reply(uint8_t src, uint8_t what, uint8_t arg, const uint8_t *d0, uint8_t dn) {
@@ -225,6 +226,8 @@ struct Sim259e : BusPort {
       case 0:
         if (!has_active || arg > 22) { Reply(addr, 0, arg, d, 0); return; }
         { uint8_t pad[32]; memset(pad, 0xFF, sizeof pad); memcpy(pad, active, 30);
+          // test knob: the read at this arg returns record byte arg+1 corrupted
+          if (arg == corrupt_read_arg) pad[arg + 1] ^= 0x40;
           Reply(addr, 0, arg, pad + arg, 8); }
         return;
       case 1:

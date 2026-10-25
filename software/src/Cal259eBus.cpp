@@ -44,6 +44,7 @@ bool Cal259eBus::Start(Op op) {
   retries_ = 0;
   sends_ = 0;
   chunk_ = 0;
+  seen_ = 0;
   last_send_rc_ = 0;
   return true;
 }
@@ -195,8 +196,20 @@ int Cal259eBus::TickRead() {
         has_record_ = false;  // no record: a result, not an error
         break;
       }
-      for (int i : kGoodData)
-        if (kRecordArgs[chunk_] + i <= 28) record_[kRecordArgs[chunk_] + i] = last_data_[i];
+      // The overlapping chunks read some record bytes twice: free integrity check. A
+      // byte that reads differently the second time means a corrupted reply, so the
+      // record is not trusted (nothing is stored as the record).
+      for (int i : kGoodData) {
+        const int off = kRecordArgs[chunk_] + i;
+        if (off > 28) continue;
+        if ((seen_ >> off & 1u) && record_[off] != last_data_[i]) {
+          has_record_ = false;
+          Finish(E_INCONSISTENT);
+          return E_INCONSISTENT;
+        }
+        record_[off] = last_data_[i];
+        seen_ |= 1u << off;
+      }
       if (chunk_ < kRecordLastChunk) {
         ++chunk_;
         BeginRead(0, kRecordArgs[chunk_]);

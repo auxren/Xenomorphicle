@@ -763,6 +763,7 @@ const char *ErrName(int e) {
     case E_COMMIT_UNKNOWN: return "COMMIT_UNKNOWN";
     case E_BUS_ERROR: return "BUS_ERROR";
     case E_INTERNAL: return "INTERNAL";
+    case E_INCONSISTENT: return "INCONSISTENT";
     default: return "ERROR";
   }
 }

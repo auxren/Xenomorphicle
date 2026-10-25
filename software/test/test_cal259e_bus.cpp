@@ -91,6 +91,36 @@ static void no_record_is_distinct_outcome() {
   CHECK((g.bus.status().flags & 1) == 0);
 }
 
+// The overlapping record reads read some bytes twice; two reads of one byte that differ
+// fail the record read (E_INCONSISTENT) and no record is reported. Overlaps exist at
+// offsets 6, 11, 16, 21..26 (e.g. arg 5's data[1] is offset 6, also read by arg 0).
+static void overlapping_reads_that_disagree_fail() {
+  const int args[7] = {0, 5, 10, 15, 20, 21, 22};
+  for (int a = 1; a < 7; ++a) {   // arg 0 has no earlier read to disagree with
+    Rig g;
+    uint8_t rec[30];
+    MakeRecord(rec, 5);
+    g.sim.Install(rec);
+    g.sim.corrupt_read_arg = (uint8_t)args[a];
+    CHECK(g.bus.ReadRecord());
+    const int rc = g.Run();
+    // the flipped byte is data[1] = offset arg+1: it is a double read only for some args;
+    // where it is read once the record is simply wrong but the CRC check upstream catches it.
+    const int off = args[a] + 1;
+    const bool overlapped = off == 6 || off == 11 || off == 16 || (off >= 21 && off <= 26);
+    if (overlapped) {
+      CHECK(rc == E_INCONSISTENT && !g.bus.has_record());
+    } else {
+      CHECK(rc == 1);
+    }
+  }
+  Rig ok;                          // control: consistent reads still succeed
+  uint8_t rec[30];
+  MakeRecord(rec, 5);
+  ok.sim.Install(rec);
+  CHECK(ok.bus.ReadRecord() && ok.Run() == 1 && ok.bus.has_record());
+}
+
 static void commit_never_resent() {
   Rig g;
   uint8_t rec[30];
@@ -554,6 +584,7 @@ int main() {
   post_commit_malformed_status_is_unknown();
   put_commit_roundtrip();
   no_record_is_distinct_outcome();
+  overlapping_reads_that_disagree_fail();
   commit_never_resent();
   commit_waits_for_the_flash();
   commit_refused();
