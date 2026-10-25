@@ -1,0 +1,45 @@
+# Golden console lines for the Cal Routine's 251e run (src/Cal251eFlow.h, Cal251eLines).
+# test_cal251e_flow.cpp checks the firmware formatter produces each example below byte for
+# byte, that the flow logs exactly these CALR# header lines at the start of a run, and that
+# every CALR line of a simulated run has its header's field count. Change one side and the
+# other fails.
+#
+# Shape: CALR v2 (as cal259e_lines.txt): CALR,<SUB>,<field>,... with no spaces, fixed
+# decimals. ch is the 251e channel 0..3 (CV 1..4); in is the Xeno input 1..4. kind is F (fit
+# point), V (verify point at the corrected code) or D (the drift repeat). raw_code is the raw
+# DAC code held, mv the volts the Xeno input read. a_mv_per_code and b_mv are the measured
+# line V = a r + b. rec76hex is the 38-byte record as 76 upper-case hex digits. 251OLD is the
+# record the module held before the run (NONE, or ERR_<positive bus error number>).
+# 251LINE adds the shape of the fit points about their line: bow_mv (peak of the quadratic
+# component) and inl_mv (worst residual of a quadratic fit). 251STAT is per channel once the verify
+# points are in: noise_rms_mv (window-to-window), lsb_mv (the DAC step), the worst signed verify
+# error, the worst anchor deviation and warn_hex (1 NONLIN, 2 VERIFY, 4 ANCHOR: over a write limit
+# but not gross, so a measuring-only run goes on). 251WARN names each such limit. 251COMMIT is one
+# per COMMIT: n counts COMMITs since power-up (the flow refuses past 20), seq is the record's. result is
+# OK, a fail name, or CANCELLED_<commit result>; warn=<hex> is the run's warning word: the
+# channels over a write limit as bits, non-linearity in bits 0-3, verify 4-7, anchors 8-11 (0 when
+# clean), so a warned run cannot end like a clean one.
+CALR#,version=2
+CALR#,251START,addr
+CALR#,251OLD,rec76hex_or_NONE_or_ERR
+CALR#,251LOOP,in,mv,reading_mv
+CALR#,251PT,ch,kind,raw_code,mv
+CALR#,251LINE,ch,a_mv_per_code,b_mv,nonlin_mv,bow_mv,inl_mv
+CALR#,251STAT,ch,noise_rms_mv,lsb_mv,verify_mv,anchor_mv,warn_hex
+CALR#,251WARN,ch,kind,value_mv,limit_mv
+CALR#,251COMMIT,n,seq
+CALR#,251FIT,ch,gain_hex,offset,pred_worst_mv,anchor_mv
+CALR#,251REC,addr,rec76hex
+CALR#,251END,result,warn
+CALR,251START,5C
+CALR,251OLD,NONE
+CALR,251LOOP,3,4800,4801.234
+CALR,251PT,2,V,1839,4799.500
+CALR,251LINE,1,2.64156,6.927,1.63,0.85,0.40
+CALR,251STAT,2,0.087,2.6103,-1.42,0.65,5
+CALR,251WARN,2,NONLIN,4.12,3.00
+CALR,251COMMIT,3,7
+CALR,251FIT,3,3FA5,-12,1.63,0.25
+CALR,251REC,5C,434C015104000102030405060708000768FAC1804012FFF93FF0000341A0FFF4400000008E13
+CALR,251END,SCALE,warn=0
+CALR,251END,CANCELLED,warn=24

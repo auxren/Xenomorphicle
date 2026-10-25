@@ -118,6 +118,33 @@ flow_variant "CAL259E_ALLOW_WRITE=0 (stays read-only)" -DCAL259E_ALLOW_WRITE=0 w
 flow_variant "CAL259E_ALLOW_COMPACTION=0 (stays read-only)" -DCAL259E_ALLOW_COMPACTION=0 compaction0
 flow_variant "CAL259E_ALLOW_WRITE=1" -DCAL259E_ALLOW_WRITE=1 write
 flow_variant "CAL259E_ALLOW_COMPACTION=1" -DCAL259E_ALLOW_COMPACTION=1 compaction
+# The 251e target (docs/specs/cal-251e.md). Its flow measures with the Xeno's own inputs, so it
+# links the input window of CalRoutineFlow.cpp.
+suite test_calrec251e               ../src/CalRec251e.cpp ../src/CalRec.cpp
+suite test_cal251e_bus              ../src/Cal251eBus.cpp ../src/CalRec.cpp ../src/CalRec251e.cpp
+FLOW251_SRCS="test_cal251e_flow.cpp ../src/Cal251eFlow.cpp ../src/Cal251eBus.cpp ../src/CalRec.cpp \
+  ../src/CalRec251e.cpp ../src/CalRoutineFlow.cpp ../src/CalRoutineMeasure.cpp \
+  ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp ../src/UsbTmc.cpp"
+# Cal251eFlow::kAllowWrite is false in the firmware (CAL251E_ALLOW_WRITE is defined by no shipped
+# build file; CI checks). The plain build and the =0 build run the read-only half and the
+# write-disabled checks; the =1 build keeps the write path and its tests alive.
+flow251_variant() {  # <label> <define> <suffix>
+  suite_count=$((suite_count + 1))
+  printf '\n--- %stest_cal251e_flow (%s) ---\n' "$TAG" "$1"
+  # shellcheck disable=SC2086
+  $CXX $WARN $OPT $2 -o "build/${TAG}test_cal251e_flow_$3" $FLOW251_SRCS
+  "./build/${TAG}test_cal251e_flow_$3"
+}
+suite test_cal251e_flow             ../src/Cal251eFlow.cpp ../src/Cal251eBus.cpp ../src/CalRec.cpp \
+                                    ../src/CalRec251e.cpp ../src/CalRoutineFlow.cpp \
+                                    ../src/CalRoutineMeasure.cpp ../src/CalRoutineMath.cpp \
+                                    ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
+flow251_variant "CAL251E_ALLOW_WRITE=0 (stays read-only)" -DCAL251E_ALLOW_WRITE=0 write0
+flow251_variant "CAL251E_ALLOW_WRITE=1" -DCAL251E_ALLOW_WRITE=1 write
+suite test_cal251e_text             ../src/Cal251eText.cpp ../src/Cal251eFlow.cpp ../src/Cal251eBus.cpp \
+                                    ../src/CalRec.cpp ../src/CalRec251e.cpp ../src/CalRoutineFlow.cpp \
+                                    ../src/CalRoutineMeasure.cpp ../src/CalRoutineMath.cpp \
+                                    ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
 suite test_calroutine_flow          ../src/CalRoutineFlow.cpp ../src/CalRoutineMeasure.cpp \
                                     ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
 
