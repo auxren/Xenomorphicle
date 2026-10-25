@@ -378,7 +378,10 @@ C259_CODE void Cal259eFlow::Tick() {
       break;
     case Stage::Results:
     case Stage::Confirm:
-      if (Expired()) Fail(F_EXPIRED);
+      // The age limit guards the write (modules may have drifted or been re-patched
+      // since they were measured). A read-only build never writes, so a Results
+      // screen left open stays readable until it is discarded.
+      if (kAllowWrite && Expired()) Fail(F_EXPIRED);
       break;
     case Stage::Backup:
       TickBackup();

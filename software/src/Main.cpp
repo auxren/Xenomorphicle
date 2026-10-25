@@ -45,6 +45,7 @@
 #include "src/drivers/USBTMCDevice.h"
 #include "apps/CalRoutinePorts.h"
 #include "CalRec.h"
+#include "Cal259eFlow.h"
 #include "src/drivers/ADC/OC_util_ADC.h"
 #include "util/util_debugpins.h"
 #include "HSMIDI.h"
@@ -891,6 +892,9 @@ FLASHMEM static void print_build_stamp(Print &out) {
              " image=%lu etext=%08lX\n",
              (unsigned long)(uintptr_t)_flashimagelen,
              (unsigned long)(uintptr_t)_etext);
+  // Default builds print nothing here. A build with the 259e write compiled in says so.
+  if (Cal259eFlow::kAllowWrite)
+    out.println("WARNING: 259e write ENABLED in this build");
 }
 
 FLASHMEM __attribute__((noinline)) static void SelfTest() {

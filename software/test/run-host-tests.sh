@@ -114,6 +114,8 @@ flow_variant() {  # <label> <define>
     ../src/CalRoutineMeasure.cpp ../src/CalRoutineMath.cpp ../src/CvMeterMath.cpp ../src/UsbTmc.cpp
   "./build/${TAG}test_cal259e_flow_$3"
 }
+flow_variant "CAL259E_ALLOW_WRITE=0 (stays read-only)" -DCAL259E_ALLOW_WRITE=0 write0
+flow_variant "CAL259E_ALLOW_COMPACTION=0 (stays read-only)" -DCAL259E_ALLOW_COMPACTION=0 compaction0
 flow_variant "CAL259E_ALLOW_WRITE=1" -DCAL259E_ALLOW_WRITE=1 write
 flow_variant "CAL259E_ALLOW_COMPACTION=1" -DCAL259E_ALLOW_COMPACTION=1 compaction
 suite test_calroutine_flow          ../src/CalRoutineFlow.cpp ../src/CalRoutineMeasure.cpp \

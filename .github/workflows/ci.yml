@@ -19,6 +19,19 @@ jobs:
       - name: Fork gates
         run: tools/ci/fork-gates.sh
 
+      # The 259e write is compiled in only by an explicit -DCAL259E_ALLOW_WRITE=1 on a
+      # bench build. No shipped build configuration may carry that define.
+      - name: No 259e write define in shipped build files
+        run: |
+          # Build configuration only (ini, scripts, json); the source files merely document it.
+          if grep -rn "CAL259E_ALLOW" software \
+               --include="*.ini" --include="*.py" --include="*.sh" --include="*.json" \
+               --exclude-dir=test --exclude-dir=docs --exclude-dir=.pio \
+               --exclude-dir=teensy-variable-playback; then
+            echo "::error::CAL259E_ALLOW_* must not appear in shipped build files"
+            exit 1
+          fi
+
   # The same 25 suites under AddressSanitizer and UBSan. Added 2026-09-14
   # after the plain build missed a test that wrote 16 ints past the end of its
   # own array: harmless under one compiler's layout, a corrupted result counter

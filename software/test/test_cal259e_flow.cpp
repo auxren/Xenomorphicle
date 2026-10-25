@@ -1367,6 +1367,9 @@ static void write_disabled_is_read_only() {
   r.Idle(5000);
   const Stage s = r.flow.stage();
   CHECK(s == Stage::Results);
+  // Read-only: no write to guard, so Results does not expire into "Readings over 10 min old".
+  r.Idle(F::kResultsMaxAgeMs + 60000);
+  CHECK(r.flow.stage() == Stage::Results && r.flow.fail() != F::F_EXPIRED);
   CHECK(!saw_confirm);
   CHECK(r.backup.begins == 0);
   CHECK(r.a.count[CalRec::kCmdPut] == 0 && r.a.count[CalRec::kCmdCommit] == 0);
@@ -1385,7 +1388,25 @@ static void write_disabled_is_read_only() {
 // -DCAL259E_ALLOW_WRITE=1 (and, for the compaction path, -DCAL259E_ALLOW_COMPACTION=1).
 #define W(fn) do { if (F::kAllowWrite) fn(); else (void)&fn; } while (0)
 
+// Build-flag robustness: the write and compaction constants are on only when the macro is
+// defined AND non-zero (-DCAL259E_ALLOW_WRITE=0 must stay read-only), and the default build
+// has both off. Flipping the default branch of the constants in Cal259eFlow.h fails here.
+static void build_flags_default_is_read_only() {
+#if !(defined(CAL259E_ALLOW_WRITE) && CAL259E_ALLOW_WRITE) && \
+    !(defined(CAL259E_ALLOW_COMPACTION) && CAL259E_ALLOW_COMPACTION)
+  CHECK(!F::kAllowWrite);
+  CHECK(!F::kAllowCompaction);
+#endif
+#if !(defined(CAL259E_ALLOW_COMPACTION) && CAL259E_ALLOW_COMPACTION)
+  CHECK(!F::kAllowCompaction);
+#endif
+#if defined(CAL259E_ALLOW_COMPACTION) && CAL259E_ALLOW_COMPACTION
+  CHECK(F::kAllowWrite && F::kAllowCompaction);   // compaction implies write
+#endif
+}
+
 int main() {
+  build_flags_default_is_read_only();
   write_disabled_is_read_only();
   W(good_unit_passes);
   scale_off_fails();

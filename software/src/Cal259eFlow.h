@@ -142,7 +142,7 @@ class Cal259eFlow {
   static constexpr double kGainTolerance = 0.10;  // fitted gain vs 0x9041
   static constexpr double kPatchTolMv = 50.0;     // meter median vs requested mV
   static constexpr double kVerifyCents = 3.0;
-  // PROVISIONAL, for Oren to confirm from real bench data: the largest fit-point
+  // PROVISIONAL, for the operator to confirm from real bench data: the largest fit-point
   // residual (UNCLAMPED, see CalRec::ResidualCentsUnclamped) a channel may show
   // after the straight-line fit. Not derived from measurements of a real 259e.
   static constexpr double kMaxNonlinearityCents = 5.0;
@@ -159,10 +159,12 @@ class Cal259eFlow {
   // two bytes of every 8-byte reply: see Cal259eBus.cpp kRecordArgs). Re-enable only by
   // building with -DCAL259E_ALLOW_WRITE=1 after those are closed. The write code and its
   // tests are kept alive: the host suite and the simulator run with the constant on.
-#if defined(CAL259E_ALLOW_COMPACTION) && !defined(CAL259E_ALLOW_WRITE)
+  // The macros count only when non-zero: -DCAL259E_ALLOW_WRITE=0 stays read-only.
+#if defined(CAL259E_ALLOW_COMPACTION) && CAL259E_ALLOW_COMPACTION
+#undef CAL259E_ALLOW_WRITE
 #define CAL259E_ALLOW_WRITE 1   // compaction is a kind of write
 #endif
-#ifdef CAL259E_ALLOW_WRITE
+#if defined(CAL259E_ALLOW_WRITE) && CAL259E_ALLOW_WRITE
   static constexpr bool kAllowWrite = true;
 #else
   static constexpr bool kAllowWrite = false;
@@ -172,7 +174,7 @@ class Cal259eFlow {
   // power cut during the 259e's rewrite re-inits its presets, and a backup that
   // cannot be restored is no net. The code is kept, tested with
   // -DCAL259E_ALLOW_COMPACTION=1, and unreachable in the firmware.
-#ifdef CAL259E_ALLOW_COMPACTION
+#if defined(CAL259E_ALLOW_COMPACTION) && CAL259E_ALLOW_COMPACTION
   static constexpr bool kAllowCompaction = true;
 #else
   static constexpr bool kAllowCompaction = false;
