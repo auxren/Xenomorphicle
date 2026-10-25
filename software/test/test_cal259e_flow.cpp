@@ -210,8 +210,8 @@ struct Rig {
 
 static void good_adc(Sim259e &m) {
   for (int c = 0; c < 2; ++c) {
-    m.adc_k[c] = Sim259e::kNominalK * 1.015;  // gain error +1.5 %
-    m.adc_err_mv[c] = 20.0;                   // offset +20 mV
+    m.adc_k[c] = Sim259e::kNominalK * 1.005;  // gain error +0.5 % (the sanity window is +-1.5 %)
+    m.adc_err_mv[c] = -11.0;                  // raw at 0 V about -72 (the bench unit's), so offset ~ +37
   }
 }
 
@@ -323,13 +323,13 @@ static void good_unit_passes() {
   CHECK(r.flow.target() == 0x28);
   const F::Result &res = r.flow.result();
   CHECK(res.valid_mask == 3);
-  const double want_gain = 0x9041 / 1.015;
+  const double want_gain = CalRec::ExpectedGain(CalRec::kCountsPerOct) / 1.005;
   for (int c = 0; c < 2; ++c) {
     CHECK(std::fabs(res.worst_verify_cents[c]) <= 3.0f);
     CHECK(res.nonlin_cents[c] >= 0.f && res.nonlin_cents[c] <= 3.0f);
     CHECK(std::fabs(res.ch[c].gain - want_gain) / want_gain < 0.003);
-    // corrected = raw * g / 65536 + off; raw carries +20 mV: off ~ -20 * 4096 / 1200
-    CHECK(std::fabs(res.ch[c].offset + 68.3) < 5.0);
+    // corrected = raw * g / 65536 + off; raw carries -11 mV: off ~ +11 * 4096 / 1200
+    CHECK(std::fabs(res.ch[c].offset - 37.5) < 5.0);
   }
   // The record on the module decodes to the fitted values (no record before:
   // entropy unit ID, seq 1, the RTC date).
@@ -804,6 +804,9 @@ static void meter_lost_fails() {
 static void verify_fails() {
   Rig r;
   good_adc(r.a);
+  // The bend below pulls the fitted offset down by ~98 counts; start higher so the sanity
+  // window (offset 0..100) does not stop the run before the verify check.
+  for (int c = 0; c < 2; ++c) r.a.adc_err_mv[c] = -40.0;
   // The 259e input bends: +-25 mV over the range, which no line absorbs.
   r.a.input_mv = [&r](int ch) {
     const double v = r.InputMv(&r.a, ch);
@@ -983,7 +986,10 @@ static void names() {
     CHECK(strcmp(F::StageName(Stage(s)), "?") != 0);
   for (int f = F::F_NONE; f <= F::F_INTERNAL; ++f)
     CHECK(strcmp(F::FailName(F::FailCode(f)), "?") != 0);
-  CHECK(std::fabs(F::IdentityThreshold() - 0.5 * 4800.0 * 4096.0 / 1200.0 / (0x9041 / 65536.0)) < 1e-6);
+  CHECK(std::fabs(F::IdentityThreshold() - 0.5 * 4800.0 * CalRec::kCountsPerOct / 1200.0 / (0x9041 / 65536.0)) < 1e-6);
+  CHECK(std::fabs(F::IdentityThreshold(4096.0) - 0.5 * 4800.0 * 4096.0 / 1200.0 / (0x9041 / 65536.0)) < 1e-6);
+  // It follows T.
+  CHECK(std::fabs(F::IdentityThreshold(4431.48) - 0.5 * 4800.0 * 4431.48 / 1200.0 / (0x9041 / 65536.0)) < 1e-6);
 }
 
 // ---- the reviewer's follow-ups ---------------------------------------------------
@@ -1383,6 +1389,178 @@ static void write_disabled_is_read_only() {
   CHECK(r.a.count[CalRec::kCmdPut] == 0 && r.a.count[CalRec::kCmdCommit] == 0);
 }
 
+// ---- the sanity check in the flow (replays of the first bench run) -------------------
+
+// The raw counts the first bench run logged for the stored record, as a linear ADC per
+// input: ch0 (599.960 mV, 3856) (1200.211, 7792) (2999.988, 19584); ch1 (5400.329, 35248)
+// (7799.810, 50944). Hardware k ~ 6.552 raw/mV and raw at 0 V ~ -72 / -80.
+static void bench_adc(Sim259e &m) {
+  m.adc_k[0] = 6.5522;  m.adc_err_mv[0] = -72.1 / 6.5522;
+  m.adc_k[1] = 6.5416;  m.adc_err_mv[1] = -80.0 / 6.5416;
+}
+
+static bool reached_results(Rig &r) {
+  return r.Run([&] { const Stage s = r.flow.stage(); return s == Stage::Results || s == Stage::Confirm ||
+                     s == Stage::Done || s == Stage::Failed; });
+}
+
+static void no_bus_write(Rig &r) {
+  CHECK(r.a.count[CalRec::kCmdPut] == 0 && r.a.count[CalRec::kCmdCommit] == 0);
+  CHECK(r.b.count[CalRec::kCmdPut] == 0 && r.b.count[CalRec::kCmdCommit] == 0);
+  CHECK(r.backup.begins == 0);
+  CHECK(r.outs.mask == 0);
+}
+
+// bad_record_replay: the stored record came from a fit with T = 4096. The same raw points,
+// fitted with 4096, are checked against the believed truth 4431.48: F_SCALE (GAIN_LOW), zero
+// PUT and COMMIT, although the old +-10 % window would have passed the gain.
+static void bad_record_replay() {
+  Rig r;
+  bench_adc(r.a);
+  r.flow.SetCountsPerOctForTest(4096.0, 4431.48);
+  r.Begin();
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_SCALE);
+  CHECK(r.flow.sanity() == CalRec::SANITY_GAIN_LOW);
+  CHECK(logged("CALR,259END,SCALE"));
+  const CalRec::Channel c = r.flow.result().ch[0];
+  CHECK(std::fabs(double(c.gain) - 34140.0) < 40.0);   // the stored record's gain
+  CHECK(c.offset >= 30 && c.offset <= 45);              // ~ 38
+  CHECK(std::fabs(double(c.gain) - 0x9041) <= 0.10 * 0x9041);  // the old window would pass it
+  no_bus_write(r);
+}
+
+// The same raw points with one consistent T pass: H1 (4096) and H2 (4431.48) alike. The
+// check is about the T-consistency of the record and the hardware span, not about which T
+// is true.
+static void same_points_pass_with_consistent_t() {
+  for (double t : {4096.0, 4431.48}) {
+    Rig r;
+    bench_adc(r.a);
+    r.flow.SetCountsPerOctForTest(t, t);
+    r.Begin();
+    CHECK(reached_results(r));
+    CHECK(r.flow.sanity() == CalRec::SANITY_OK);
+    if (t < 4200.0) {
+      CHECK(r.flow.fail() == F::F_NONE && r.flow.result().valid_mask == 3);
+    } else {
+      // FINDING (open question): at T = 4431.48 the 9000 mV verify point's target (33236)
+      // is above the 259e's 0x7FFF clamp (32767 = 8874 mV), so its clamped residual is
+      // ~100 cents and the run ends F_VERIFY after the scale check passed. The point list
+      // is not changed by this job; see the report. Channel 0 only got that far.
+      CHECK(r.flow.fail() == F::F_VERIFY && r.flow.result().valid_mask == 0);
+    }
+    for (int c = 0; c < (t < 4200.0 ? 2 : 1); ++c) {
+      CHECK(std::fabs(double(r.flow.result().ch[c].gain) / CalRec::ExpectedGain(t) - 1.0) < 0.003);
+      CHECK(r.flow.result().ch[c].offset >= 0 && r.flow.result().ch[c].offset <= 100);
+    }
+    CHECK(std::fabs(double(r.flow.result().ch[0].gain) - (t > 4200.0 ? 36933.0 : 34140.0)) <
+          (t > 4200.0 ? 60.0 : 40.0));
+    CHECK(r.a.count[CalRec::kCmdPut] == 0 || F::kAllowWrite);
+  }
+}
+
+// good_record_accepted, in the flow: fitted with T = 4431.48 and checked against it passes;
+// checked against 4096 it fails (GAIN_HIGH).
+static void good_record_accepted_in_flow() {
+  Rig r;
+  bench_adc(r.a);
+  r.flow.SetCountsPerOctForTest(4431.48, 4096.0);
+  r.Begin();
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_SCALE);
+  CHECK(r.flow.sanity() == CalRec::SANITY_GAIN_HIGH);
+  no_bus_write(r);
+}
+
+// The default flow constant is the unproven 4096 on both sites, and the identity threshold
+// follows it.
+static void default_t_is_one_constant() {
+  Rig r;
+  bench_adc(r.a);
+  r.Begin();
+  CHECK(reached_results(r));
+  CHECK(r.flow.fail() == F::F_NONE);
+  CHECK(std::fabs(double(r.flow.result().ch[0].gain) - 34140.0) < 40.0);  // fitted at kCountsPerOct
+  CHECK(F::IdentityThreshold() == F::IdentityThreshold(CalRec::kCountsPerOct));
+  CHECK(F::IdentityThreshold(4431.48) > F::IdentityThreshold(4096.0) * 1.08);
+}
+
+// The two channels must agree: each inside +-1.5 % of g_exp, but 1.2 % apart.
+static void channel_mismatch_fails() {
+  Rig r;
+  r.a.adc_k[0] = Sim259e::kNominalK * 1.006;  r.a.adc_err_mv[0] = -11.0;
+  r.a.adc_k[1] = Sim259e::kNominalK * 0.994;  r.a.adc_err_mv[1] = -11.0;
+  r.Begin();
+  CHECK(r.Run());
+  CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_SCALE);
+  CHECK(r.flow.sanity() == CalRec::SANITY_CH_MISMATCH);
+  CHECK(r.flow.channel() == 1);
+  CHECK(CalRec::Sanity259e(r.flow.result().ch[0], 4096.0) == CalRec::SANITY_OK);
+  CHECK(CalRec::Sanity259e(r.flow.result().ch[1], 4096.0) == CalRec::SANITY_OK);
+  no_bus_write(r);
+}
+
+// A raw offset the fit turns into a negative (or huge) correction offset.
+static void offset_out_of_range_fails() {
+  for (double err : {20.0, -45.0}) {   // offset ~ -68 / ~ +154
+    Rig r;
+    good_adc(r.a);
+    for (int c = 0; c < 2; ++c) r.a.adc_err_mv[c] = err;
+    r.Begin();
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_SCALE);
+    CHECK(r.flow.sanity() == CalRec::SANITY_OFFSET_RANGE);
+    no_bus_write(r);
+  }
+}
+
+// The scale check is the only thing the 259e write waits on that this job touched: the
+// write stays disabled in the firmware build.
+static void write_stays_disabled_by_default() {
+#if !(defined(CAL259E_ALLOW_WRITE) && CAL259E_ALLOW_WRITE) && \
+    !(defined(CAL259E_ALLOW_COMPACTION) && CAL259E_ALLOW_COMPACTION)
+  CHECK(!F::kAllowWrite);
+#endif
+}
+
+// T = 4300 keeps every target (up to 9000 mV * 4300 / 1200 = 32250) under the 0x7FFF clamp,
+// so a whole run can use a non-default T on every site: the fit, the residuals (verify),
+// the identity threshold and BOTH sanity calls (channel 0 alone, then the pair at channel
+// 1). A site that kept 4096 fails here.
+static void whole_run_with_another_t() {
+  const double t = 4300.0;
+  Rig r;
+  good_adc(r.a);
+  r.flow.SetCountsPerOctForTest(t, t);
+  r.Begin();
+  CHECK(reached_results(r));
+  CHECK(r.flow.fail() == F::F_NONE && r.flow.sanity() == CalRec::SANITY_OK);
+  CHECK(r.flow.result().valid_mask == 3);
+  for (int c = 0; c < 2; ++c) {
+    CHECK(std::fabs(double(r.flow.result().ch[c].gain) / (CalRec::ExpectedGain(t) / 1.005) - 1.0) < 0.003);
+    CHECK(std::fabs(r.flow.result().worst_verify_cents[c]) <= 3.0f);
+  }
+  CHECK(r.a.count[CalRec::kCmdPut] == 0 || F::kAllowWrite);
+}
+
+// The identity step follows T: a module whose input rises only ~15100 counts for the
+// 4800 mV step (k = half the real span) is identified at T = 4096 (threshold ~14538) but
+// not at T = 4431.48 (threshold ~15729).
+static void identity_threshold_follows_t() {
+  for (double t : {4096.0, 4431.48}) {
+    Rig r;
+    for (int c = 0; c < 2; ++c) { r.a.adc_k[c] = Sim259e::kNominalK * 0.48; r.a.adc_err_mv[c] = 0.0; }
+    r.flow.SetCountsPerOctForTest(t, t);
+    r.Begin();
+    CHECK(r.Run());
+    CHECK(r.flow.stage() == Stage::Failed);
+    if (t < 4200.0) CHECK(r.flow.fail() != F::F_IDENTITY);
+    else CHECK(r.flow.fail() == F::F_IDENTITY);
+    no_bus_write(r);
+  }
+}
+
 // The write is disabled in the firmware (Cal259eFlow::kAllowWrite): the default build of this
 // suite runs the read-only half and write_disabled_*; the full suite runs with
 // -DCAL259E_ALLOW_WRITE=1 (and, for the compaction path, -DCAL259E_ALLOW_COMPACTION=1).
@@ -1437,6 +1615,15 @@ int main() {
   W(expiry_counts_from_the_first_point);
   wrong_jack_on_channel_one();
   W(golden_lines);
+  bad_record_replay();
+  same_points_pass_with_consistent_t();
+  good_record_accepted_in_flow();
+  default_t_is_one_constant();
+  channel_mismatch_fails();
+  whole_run_with_another_t();
+  identity_threshold_follows_t();
+  offset_out_of_range_fails();
+  write_stays_disabled_by_default();
   names();
   printf("test_cal259e_flow: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;

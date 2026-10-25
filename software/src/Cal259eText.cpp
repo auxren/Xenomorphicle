@@ -26,7 +26,7 @@ C259T_CODE void Cal259eFailText(Cal259eFlow::FailCode code, int cr, BackupWhy wh
     case F::F_IDENTITY: l1 = "No 259e saw A rise."; l2 = "Wrong jack patched?"; break;
     case F::F_PATCH: l1 = "Meter and held volts"; l2 = "differ by > 50 mV."; break;
     case F::F_NOISY: l1 = "Meter reading noisy"; l2 = "(loose lead?)"; break;
-    case F::F_SCALE: l1 = "Gain is > 10% off"; l2 = "stock: not written."; break;
+    case F::F_SCALE: l1 = "Gain/offset not as"; l2 = "expected: no write."; break;
     case F::F_FIT: l1 = "The fit failed (an"; l2 = "offset out of range)."; break;
     case F::F_VERIFY: l1 = "Verify residual"; l2 = "is over 3 cents."; break;
     case F::F_NONLIN: l1 = "Fit-point nonlinear-"; l2 = "ity is over 5 cents."; break;

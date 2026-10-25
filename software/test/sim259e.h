@@ -22,8 +22,10 @@
 // ADC model (off unless input_mv is set; then the module samples its two
 // inputs every sample_ms on the clock, bumping adc_n once per sample):
 //   raw = (input_mv(ch) + adc_err_mv[ch]) * adc_k[ch] + noise, clamped to 16 bits,
-// noise uniform +-adc_noise counts. kNominalK is the stock correction's inverse:
-// a raw word the stock gain 0x9041 maps onto mv * 4096 / 1200.
+// noise uniform +-adc_noise counts. kNominalK is the real hardware's raw
+// counts per mV: the 259e's ADC spans 10 V over 65536 counts (6.5536; the bench unit reads
+// 6.55). It used to be (4096/1200)/(0x9041/65536) = 6.058, which assumed the stock gain maps
+// onto 4096 counts per octave and so hid the 4096-vs-4431.5 question.
 #pragma once
 #include <stdint.h>
 #include <string.h>
@@ -63,7 +65,7 @@ struct Sim259e : BusPort {
   bool commit_latches = true;  // ...and the module still received the frame (NAK on its last byte)
 
   // ADC model
-  static constexpr double kNominalK = (4096.0 / 1200.0) / (0x9041 / 65536.0);
+  static constexpr double kNominalK = 65536.0 / 10000.0;
   std::function<double(int ch)> input_mv;
   double adc_k[2] = {kNominalK, kNominalK};
   double adc_err_mv[2] = {0.0, 0.0};

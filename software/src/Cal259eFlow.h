@@ -33,7 +33,7 @@
 //               table's code (OutputPort::CodeForMv), MeterMeasure (the Self
 //               rule, kReadings), the meter median within kPatchTolMv of the
 //               requested mV, then the ADC median. Fit (CalRec::Fit259e on the
-//               meter mV), gain within +-10 % of 0x9041, verify residuals
+//               meter mV), CalRec::Sanity259e on the gain/offset (T * 65536 / 7864.32 +-1.5 %), verify residuals
 //               within +-3 cents. Output A is released after each channel.
 //   Results     Continue -> Confirm; ConfirmWrite -> Backup (both only with
 //               kAllowWrite, which is false in the firmware: Results is then the
@@ -136,10 +136,13 @@ class Cal259eFlow {
   static const int32_t kPointMv[kPoints];  // 1200 .. 9600, then 600, 3000, 5400, 7800, 9000
   static constexpr int32_t kIdLowMv = 1200, kIdHighMv = 6000;
   static constexpr uint16_t kNominalGain = 0x9041;
-  // The identity threshold: half of (6000 - 1200) * 4096 / 1200 / (0x9041 / 65536)
-  // raw counts (the stock correction's step, ~29076 counts).
-  static double IdentityThreshold();
-  static constexpr double kGainTolerance = 0.10;  // fitted gain vs 0x9041
+  // The identity threshold: half of (6000 - 1200) * T / 1200 / (0x9041 / 65536)
+  // raw counts (the stock correction's step, ~29076 counts at T = 4096). T defaults to
+  // CalRec::kCountsPerOct, the one (unproven) target scale.
+  static double IdentityThreshold(double counts_per_oct = CalRec::kCountsPerOct);
+  // The pre-write scale check is CalRec::Sanity259e (gain +-1.5 % of T * 65536 / 7864.32,
+  // offset 0..100, channels within 1 %); a failure ends the run with F_SCALE. The old
+  // +-10 % window around 0x9041 could not fail on a wrong T and is gone.
   static constexpr double kPatchTolMv = 50.0;     // meter median vs requested mV
   static constexpr double kVerifyCents = 3.0;
   // PROVISIONAL, for the operator to confirm from real bench data: the largest fit-point
@@ -209,6 +212,22 @@ class Cal259eFlow {
   int channel() const { return ch_; }           // -1 when none
   const Result &result() const { return result_; }
   FailCode fail() const { return fail_; }
+  // With F_SCALE: which sanity check failed (SANITY_OK otherwise). The F_SCALE fail code
+  // and its name stay as they were (append-only).
+  CalRec::Sanity sanity() const { return sanity_; }
+  // HOST TESTS ONLY (nothing in the firmware calls it): the scale the fit, residuals and
+  // identity threshold use, and the believed truth the sanity check compares the gain with.
+  // They are one constant (CalRec::kCountsPerOct) in the firmware; a test splits them to
+  // replay a record fitted with the wrong T against the right one.
+#if defined(__IMXRT1062__)
+  // Firmware: both are the one constant, no storage (RAM2 stays as it was).
+  double fit_t() const { return CalRec::kCountsPerOct; }
+  double sanity_t() const { return CalRec::kCountsPerOct; }
+#else
+  void SetCountsPerOctForTest(double fit_t, double sanity_t) { fit_t_ = fit_t; sanity_t_ = sanity_t; }
+  double fit_t() const { return fit_t_; }
+  double sanity_t() const { return sanity_t_; }
+#endif
   // With F_BACKUP: why the preset backup did not happen (BK_NONE otherwise).
   BackupWhy backup_why() const { return backup_why_; }
   // Progress for the screen: the Measure point (0..kPoints-1) and its mV.
@@ -311,6 +330,12 @@ class Cal259eFlow {
   int id_i_ = 0;       // candidate being sampled
   uint16_t id_low_[kMaxCandidates] = {};
   uint8_t id_moved_ = 0;  // bit i: candidate i rose by the identity threshold
+
+#if !defined(__IMXRT1062__)
+  double fit_t_ = CalRec::kCountsPerOct;
+  double sanity_t_ = CalRec::kCountsPerOct;
+#endif
+  CalRec::Sanity sanity_ = CalRec::SANITY_OK;
 
   // measure
   int pt_ = -1;

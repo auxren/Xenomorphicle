@@ -138,7 +138,7 @@ constexpr int Cal259eFlow::kSourceOutput, Cal259eFlow::kMaxCandidates, Cal259eFl
 constexpr uint8_t Cal259eFlow::kFirstAddr, Cal259eFlow::kLastAddr;
 constexpr int32_t Cal259eFlow::kIdLowMv, Cal259eFlow::kIdHighMv;
 constexpr uint16_t Cal259eFlow::kNominalGain;
-constexpr double Cal259eFlow::kGainTolerance, Cal259eFlow::kPatchTolMv, Cal259eFlow::kVerifyCents,
+constexpr double Cal259eFlow::kPatchTolMv, Cal259eFlow::kVerifyCents,
     Cal259eFlow::kMaxNonlinearityCents;
 constexpr uint32_t Cal259eFlow::kResultsMaxAgeMs;
 constexpr bool Cal259eFlow::kAllowCompaction;
@@ -156,8 +156,8 @@ const int32_t Cal259eFlow::kPointMv[Cal259eFlow::kPoints] = {
   600, 3000, 5400, 7800, 9000,
 };
 
-C259_CODE double Cal259eFlow::IdentityThreshold() {
-  return 0.5 * double(kIdHighMv - kIdLowMv) * 4096.0 / 1200.0 / (double(kNominalGain) / 65536.0);
+C259_CODE double Cal259eFlow::IdentityThreshold(double counts_per_oct) {
+  return 0.5 * double(kIdHighMv - kIdLowMv) * counts_per_oct / 1200.0 / (double(kNominalGain) / 65536.0);
 }
 
 C259_CODE const char *Cal259eFlow::StageName(Stage s) {
@@ -594,7 +594,7 @@ C259_CODE void Cal259eFlow::TickIdentify() {
   if (r < 0) { Fail(F_BUS); return; }
   if (id_level_ == 0) {
     id_low_[id_i_] = adc_median_;
-  } else if (double(adc_median_) - double(id_low_[id_i_]) >= IdentityThreshold()) {
+  } else if (double(adc_median_) - double(id_low_[id_i_]) >= IdentityThreshold(fit_t())) {
     id_moved_ = uint8_t(id_moved_ | (1u << id_i_));
   }
   if (++id_i_ < n_cand_) {
@@ -670,18 +670,18 @@ C259_CODE void Cal259eFlow::FinishChannel() {
   sub_ = S_NONE;
   CalRec::Channel c;
   const CalRec::FitPoint *fit_pts = pts_[ch_], *ver_pts = pts_[ch_] + kFitPoints;
-  if (CalRec::Fit259e(fit_pts, kFitPoints, &c) != CalRec::FIT_OK) {
+  if (CalRec::Fit259e(fit_pts, kFitPoints, fit_t(), &c) != CalRec::FIT_OK) {
     Fail(F_FIT);
     return;
   }
   double nonlin = 0.0, worst = 0.0;
   for (int i = 0; i < kFitPoints; ++i) {
     // Unclamped: the 9600 mV target is above the 259e's 0x7FFF clamp.
-    const double r = CalRec::ResidualCentsUnclamped(fit_pts[i].raw, fit_pts[i].mv, c);
+    const double r = CalRec::ResidualCentsUnclamped(fit_pts[i].raw, fit_pts[i].mv, c, fit_t());
     if (fabs(r) > nonlin) nonlin = fabs(r);
   }
   for (int i = 0; i < kVerifyPoints; ++i) {
-    const double r = CalRec::ResidualCents(ver_pts[i].raw, ver_pts[i].mv, c);
+    const double r = CalRec::ResidualCents(ver_pts[i].raw, ver_pts[i].mv, c, fit_t());
     if (fabs(r) > fabs(worst)) worst = r;
   }
   result_.ch[ch_] = c;
@@ -689,7 +689,13 @@ C259_CODE void Cal259eFlow::FinishChannel() {
   result_.nonlin_cents[ch_] = float(nonlin);
   // Logged from result(), so the line and what the app shows are the same numbers.
   C259_LOG(Fit, ch_, c, double(result_.worst_verify_cents[ch_]), double(result_.nonlin_cents[ch_]));
-  if (fabs(double(c.gain) - double(kNominalGain)) > kGainTolerance * double(kNominalGain)) {
+  // Sanity (replaces the old +-10 % window around 0x9041, which could not fail on a wrong
+  // T: the fit's gain is ~8.3333 * T whatever the meter reads). The second channel is
+  // also checked against the first.
+  sanity_ = (ch_ == 1 && (result_.valid_mask & 1u))
+                ? CalRec::Sanity259e(result_.ch[0], c, sanity_t())
+                : CalRec::Sanity259e(c, sanity_t());
+  if (sanity_ != CalRec::SANITY_OK) {
     Fail(F_SCALE);
     return;
   }
