@@ -104,7 +104,7 @@ all of it from a host and logs CSV.
 | `n` | toggle the **frequency counter** on TR1: `FREQ,<ms>,<hz>,<periods>,<note>,<cents>` every 250 ms (or `FREQ,<ms>,NOSIG`). Refuses while an app owns the counter; TR1 is not a trigger input while it runs |
 
 ### 259e calibration module, read-only (`=`)
-Every letter of the console is taken, so this is `=`. It reads a 259e running the calibration firmware (31.2C4) over the 200e bus; it never writes: **there is no PUT and no COMMIT in `=`** (the raw-frame sender `W` above can send both; only the Cal Routine app is meant to). The bus address is two hex digits (259e `28`-`2B`, the 251e `5C` answers status and record only), then one command; no Enter.
+Every letter of the console is taken, so this is `=`. It reads a 259e running the calibration firmware (31.2C4) over the 200e bus; it never writes: **there is no PUT and no COMMIT in `=`** (the raw-frame sender `W` above can send both; only the Cal Routine app is meant to). The bus address is two hex digits (259e `28`-`2B`, the 251e `5C`: **`=5Cs` only**; `=5Cr` and `=5Ca0` are 259e readers, wrong for a 251e's 38-byte record), then one command; no Enter.
 
 | keys | action |
 |---|---|

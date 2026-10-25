@@ -1759,7 +1759,9 @@ echo "Cal Routine, the 259e row"
 PR='r-down,step40,r-up,step60'
 BP='b-down,step40,b-up,step60'
 LP='l-down,step40,l-up,step60'
-C259="step100,encr+,encr+,encr+,step50,$PR,$PR,step3000"   # menu -> 259e row -> notice -> run -> scan done
+# Menu rows are reached by SPACED turns (a burst is accelerated into bigger steps): the 259e row is
+# the fifth (four turns), the 251e row the fourth (three), the menu starting on the first.
+C259="step100,encr+,step300,encr+,step300,encr+,step300,encr+,step300,step50,$PR,$PR,step3000"   # menu -> 259e row -> notice -> run -> scan done
 c259() {  # keys -> screen text on stdout, the plant's report on $TMP/c259.err
   $SIM --sim-259e --app "Cal Routine" --keys "$1" --dump-fb 2>"$TMP/c259.err" \
     | python3 fbtext.py - | grep -v '{{'
@@ -1785,6 +1787,18 @@ has '259e results' < "$TMP/c259r" && has 'worst' < "$TMP/c259r" && has 'gain' < 
 has '259e results [0-9]* min' < "$TMP/c259r" \
   && ok "the results screen shows how old the measurement is (it expires after 10 minutes)" \
   || bad "the 259e results do not show their age: $(head -5 "$TMP/c259r")"
+
+# A config hand-back (a bare RESUME, here a bus preset SAVE) does not end a run or freeze it.
+c259 "$W259,$PR,step700,wpmsave5,step800" > "$TMP/c259h"
+! has 'Cal Routine' < "$TMP/c259h" && has '259e' < "$TMP/c259h" && grep -q 'run_active=1' "$TMP/c259.err" \
+  && grep -q 'out_mv=[1-9]' "$TMP/c259.err" \
+  && ok "a bare RESUME mid-measure leaves the 259e run going with output A held" \
+  || bad "a hand-back ended or froze the 259e run: $(head -3 "$TMP/c259h") $(cat "$TMP/c259.err")"
+$SIM --sim-251e --app "Cal Routine" --keys "step100,encr+,step300,$PR,step500,wpmsave5,step800" --dump-fb 2>"$TMP/ci.err" \
+  | python3 fbtext.py - | grep -v '{{' > "$TMP/ci"
+! has 'Cal Routine' < "$TMP/ci" && has 'Inputs' < "$TMP/ci" \
+  && ok "a bare RESUME during the Xeno-only Inputs run leaves it running" \
+  || bad "a hand-back ended the Inputs run: $(head -3 "$TMP/ci")"
 
 # ---- the shipped firmware: the 259e write is DISABLED (Cal259eFlow::kAllowWrite) ----------
 has 'Write disabled: scale' < "$TMP/c259r" && has 'unproven. L L:discard' < "$TMP/c259r" \
@@ -1895,6 +1909,153 @@ grep -q 'commits=1,' "$TMP/c259.err" && grep -q 'run_active=0,verdict=1' "$TMP/c
 has '259e cancel: WRITTEN' < "$TMP/c259s" \
   && ok "... and the Cal Routine menu shows the cancelled run's verdict" \
   || bad "no cancelled-verdict banner on the menu: $(head -8 "$TMP/c259s")"
+
+# ---------------------------------------------------------------------------
+# Cal Routine, the 251e row, end to end against --sim-251e: a Sim251e at 5C with an analog error
+# model (the model the host tests use), the Xeno's outputs E-H and inputs 1-4 ideal, no meter.
+# The point is the screens and the controls: the prompts the design names, a measuring-only run
+# that ends with a discard and writes nothing, every override released however the run ends, and
+# (in the build with the write on) a confirm of its own that needs B HELD. The plant's report
+# line is read from stderr.
+echo "Cal Routine, the 251e row"
+C251="step100,encr+,step300,encr+,step300,encr+,step300,step50,$PR,step3000"   # menu -> 251e row -> run -> scan done
+c251() {  # keys -> screen text on stdout, the plant's report on $TMP/c251.err
+  $SIM --sim-251e --app "Cal Routine" --keys "$1" --dump-fb 2>"$TMP/c251.err" \
+    | python3 fbtext.py - | grep -v '{{'
+}
+W251="$C251,$PR"             # warm-up confirmed: the loopback prompt
+L251="$W251,$PR,step12000"   # loopback done: the patch prompt
+M251="$L251,$PR"             # patched: identify, then measure
+R251="$M251,step60000"       # results
+c251 "$C251" > "$TMP/c251w"
+has 'Xeno + 251e on' < "$TMP/c251w" && has '30 min?' < "$TMP/c251w" && has 'sequencers' < "$TMP/c251w" \
+  && has 'Unpatch' < "$TMP/c251w" && has 'destinations' < "$TMP/c251w" \
+  && ok "the 251e warm-up screen asks if both have been on 30 min, says to stop the sequencers and to unpatch the CV outputs' other destinations" \
+  || bad "no 251e warm-up screen: $(head -5 "$TMP/c251w")"
+c251 "$W251" > "$TMP/c251l"
+has 'Out E>In 1' < "$TMP/c251l" && has 'Out G>In 3' < "$TMP/c251l" && has 'no 251e' < "$TMP/c251l" \
+  && ok "the first prompt is the loopback: Xeno out E-H into in 1-4, no 251e cable" \
+  || bad "no loopback prompt: $(cat "$TMP/c251l")"
+c251 "$W251,$PR,step3000" | has 'Point [0-9]/5' \
+  && ok "the loopback shows its progress" || bad "no loopback progress"
+grep -q 'overrides=0,' "$TMP/c251.err" \
+  && ok "the 251e was not driven during the loopback" || bad "the 251e was driven in the loopback: $(cat "$TMP/c251.err")"
+c251 "$L251" > "$TMP/c251p"
+has 'CV1>In1' < "$TMP/c251p" && has 'CV4>In4' < "$TMP/c251p" && has 'Out E-H' < "$TMP/c251p" \
+  && ok "the second prompt moves the cable ends to the 251e's CV 1-4" || bad "no 251e patch prompt: $(cat "$TMP/c251p")"
+c251 "$M251,step6000" | has 'Fit [0-9]/8\|Verify [0-9]/5' \
+  && ok "measuring shows fit and verify points" || bad "no measuring screen"
+c251 "$R251" > "$TMP/c251r"
+has '251e results [0-9]* min' < "$TMP/c251r" && has 'CV1' < "$TMP/c251r" && has 'CV4' < "$TMP/c251r" \
+  && has 'loop' < "$TMP/c251r" \
+  && ok "the results show the four channels, the loopback and how old they are" \
+  || bad "no 251e results screen: $(cat "$TMP/c251r")"
+has 'Write off' < "$TMP/c251r" && has 'L L:discard' < "$TMP/c251r" && ! has 'R:write' < "$TMP/c251r" \
+  && ok "disabled build: results say the write is off and offer only the discard" \
+  || bad "no write-off notice on the results: $(cat "$TMP/c251r")"
+grep -q 'commits=0,puts=0' "$TMP/c251.err" && grep -q 'bad_frames=0' "$TMP/c251.err" \
+  && grep -q 'ovr_active=0' "$TMP/c251.err" && grep -q 'releases=[1-9]' "$TMP/c251.err" \
+  && ok "a full measuring run sent no PUT or COMMIT and let go of the 251e's overrides" \
+  || bad "plant report after a measuring run: $(cat "$TMP/c251.err")"
+c251 "$R251,$PR,step600,$PR,step600" > "$TMP/c251n"
+has '251e results' < "$TMP/c251n" && ! has 'WRITE TO' < "$TMP/c251n" && grep -q 'commits=0,puts=0' "$TMP/c251.err" \
+  && ok "disabled build: encR on Results goes nowhere" || bad "the disabled build reached a confirm: $(cat "$TMP/c251n")"
+c251 "$R251,$BP,$BP,step3000" > "$TMP/c251n"
+has '251e results' < "$TMP/c251n" && grep -q 'commits=0,puts=0' "$TMP/c251.err" \
+  && ok "disabled build: B on Results does nothing" || bad "B on the disabled Results: $(cat "$TMP/c251.err")"
+c251 "$R251,$LP" | has 'Press again: discard' \
+  && ok "one encL on Results only asks" || bad "no discard prompt on the 251e results"
+c251 "$R251,$LP,step500,$LP,step300" | has 'Cal Routine' \
+  && grep -q 'commits=0,puts=0' "$TMP/c251.err" && grep -q 'run_active=0' "$TMP/c251.err" \
+  && ok "a second encL discards: back to the menu, nothing written" \
+  || bad "results discard did not return to the menu: $(cat "$TMP/c251.err")"
+# A channel over a write limit is unmistakable: named on its row (inverted) and on the summary row.
+$SIM --sim-251e --sim-251e-warn --app "Cal Routine" --keys "$R251" --dump-fb 2>"$TMP/c251.err" \
+  | python3 fbtext.py - | grep -v '{{' > "$TMP/c251x"
+has 'WARN 2 nl' < "$TMP/c251x" && has '!n' < "$TMP/c251x" && ! has 'Write off' < "$TMP/c251x" \
+  && grep -q 'commits=0,puts=0' "$TMP/c251.err" \
+  && ok "a channel over a write limit is named on its row and on the summary, the run still ends read-only" \
+  || bad "no unmistakable warning on the results: $(cat "$TMP/c251x")"
+# Cancel and app switch while the overrides are live: every output let go, nothing written.
+c251 "$M251,step4000,$LP,step300,step6000" | has 'Cal Routine' \
+  && grep -q 'ovr_active=0' "$TMP/c251.err" && grep -q 'commits=0,puts=0' "$TMP/c251.err" \
+  && grep -q 'overrides=[1-9]' "$TMP/c251.err" && grep -q 'releases=[1-9]' "$TMP/c251.err" && grep -q 'run_active=0' "$TMP/c251.err" \
+  && ok "cancel while measuring releases the 251e's overrides and writes nothing" \
+  || bad "cancel while measuring: $(cat "$TMP/c251.err")"
+c251 "$M251,step4000,$MENU,step6000" > /dev/null
+grep -q 'ovr_active=0' "$TMP/c251.err" && grep -q 'releases=[1-9]' "$TMP/c251.err" && grep -q 'run_active=0' "$TMP/c251.err" \
+  && grep -q 'commits=0,puts=0' "$TMP/c251.err" \
+  && ok "switching app while measuring releases the 251e's overrides" \
+  || bad "app switch while measuring: $(cat "$TMP/c251.err")"
+# Opening the app menu and dismissing it (the app is suspended, then resumed) mid-measure: the
+# resume must not find a run still open, nor an override held.
+c251 "$M251,step4000,$MENU,step300,$LP,step2000" | has 'Cal Routine' \
+  && grep -q 'ovr_active=0' "$TMP/c251.err" && grep -q 'releases=[1-9]' "$TMP/c251.err" && grep -q 'run_active=0' "$TMP/c251.err" \
+  && ok "opening and dismissing the app menu mid-measure ends the run and releases the overrides" \
+  || bad "app menu dismissed mid-measure: $(cat "$TMP/c251.err")"
+# A bare RESUME (a config hand-back: here a 200e-bus preset SAVE, `wpmsave5`) reaches the open app
+# with no SUSPEND before it. The run must go on, the overrides stay held, and it must still finish
+# and let go.
+c251 "$M251,step4000,wpmsave5,step1500" > "$TMP/c251h"
+has '251e: measuring' < "$TMP/c251h" && ! has 'Cal Routine' < "$TMP/c251h" \
+  && grep -q 'ovr_active=1' "$TMP/c251.err" && grep -q 'run_active=1' "$TMP/c251.err" \
+  && ok "a bare RESUME (bus preset save) mid-measure leaves the 251e run going with its overrides held" \
+  || bad "a hand-back ended or froze the 251e run: $(head -3 "$TMP/c251h") $(cat "$TMP/c251.err")"
+c251 "$M251,step4000,wpmsave5,step60000" > "$TMP/c251h"
+has '251e results' < "$TMP/c251h" && grep -q 'ovr_active=0' "$TMP/c251.err" && grep -q 'releases=[1-9]' "$TMP/c251.err" \
+  && ok "... and the run still reaches Results and releases the overrides" \
+  || bad "the 251e run did not finish after a hand-back: $(head -3 "$TMP/c251h") $(cat "$TMP/c251.err")"
+c251 "$W251,$LP,step500" | has 'Cal Routine' \
+  && ok "cancel at the loopback prompt returns to the menu" || bad "cancel at the loopback prompt"
+
+# ---- the write path, against the build with CAL251E_ALLOW_WRITE=1 (build-write/) ---------------
+c251w() {  # keys -> screen text on stdout, the plant's report on $TMP/c251.err
+  $SIMW --sim-251e --app "Cal Routine" --keys "$1" --dump-fb 2>"$TMP/c251.err" \
+    | python3 fbtext.py - | grep -v '{{'
+}
+CF251="$R251,$PR,step600"    # the write confirm, past its dead time
+c251w "$R251" > "$TMP/c251r"
+has 'R:write' < "$TMP/c251r" && has 'L L:discard' < "$TMP/c251r" && ! has 'Write off' < "$TMP/c251r" \
+  && ok "write build: results offer the write and the discard" || bad "write-build results footer: $(cat "$TMP/c251r")"
+c251w "$CF251" > "$TMP/c251c"
+has 'WRITE TO 251e @5C' < "$TMP/c251c" && has 'One record page' < "$TMP/c251c" && has 'HOLD B for 2 s' < "$TMP/c251c" \
+  && ok "the 251e confirm is its own screen and says B must be held" || bad "no 251e write confirm: $(cat "$TMP/c251c")"
+c251w "$CF251,$BP,step3000" > "$TMP/c251t"
+has 'Hold B to write' < "$TMP/c251t" && grep -q 'commits=0,puts=0' "$TMP/c251.err" \
+  && ok "a B tap does not write" || bad "a B tap wrote or showed no hint: $(cat "$TMP/c251t") $(cat "$TMP/c251.err")"
+c251w "$CF251,b-down,step1900,b-up,step60,step3000" | has 'WRITE TO 251e @5C' \
+  && grep -q 'commits=0,puts=0' "$TMP/c251.err" \
+  && ok "releasing B at 1.9 s writes nothing" || bad "a 1.9 s hold wrote: $(cat "$TMP/c251.err")"
+c251w "$CF251,b-down,step1000,encl+,step1500,b-up,step60,step3000" | has 'WRITE TO 251e @5C' \
+  && grep -q 'commits=0,puts=0' "$TMP/c251.err" \
+  && ok "an encoder turn ends the hold" || bad "an encoder turn did not end the hold: $(cat "$TMP/c251.err")"
+c251w "$CF251,$HOLD,step6000" > "$TMP/c251d"
+has '251e calibrated' < "$TMP/c251d" && has 'byte-exact' < "$TMP/c251d" \
+  && ok "holding B for 2 s writes, reads back and ends on Done" || bad "the 251e write did not reach Done: $(head -4 "$TMP/c251d") $(cat "$TMP/c251.err")"
+grep -q 'commits=1,puts=5' "$TMP/c251.err" && grep -q 'bad_frames=0' "$TMP/c251.err" \
+  && grep -q 'ovr_active=0' "$TMP/c251.err" && grep -q 'seq=1,has_record=1' "$TMP/c251.err" \
+  && ok "one COMMIT, five PUT frames, a first record at seq 1, overrides released" \
+  || bad "plant report after a full write run: $(cat "$TMP/c251.err")"
+c251w "$CF251,b-down,step9000,b-up,step60,step3000" > /dev/null
+grep -q 'commits=1,puts=5' "$TMP/c251.err" \
+  && ok "a long hold still writes once" || bad "a long hold wrote more than once: $(cat "$TMP/c251.err")"
+c251w "$CF251,$LP" | has 'encL again: discard' \
+  && ok "encL on the write confirm asks first" || bad "no discard prompt on the 251e confirm"
+c251w "$CF251,$LP,step500,$LP,step300" | has 'Cal Routine' \
+  && grep -q 'commits=0' "$TMP/c251.err" && grep -q 'ovr_active=0' "$TMP/c251.err" \
+  && ok "discarding at the confirm writes nothing" || bad "cancel at the 251e confirm wrote or held: $(cat "$TMP/c251.err")"
+c251w "$CF251,b-down,step800,$MENU,step2500,b-up,step500" > /dev/null
+grep -q 'commits=0,puts=0' "$TMP/c251.err" && grep -q 'run_active=0' "$TMP/c251.err" \
+  && ok "an app switch during the hold writes nothing" || bad "an app switch during the hold: $(cat "$TMP/c251.err")"
+# Suspend while the COMMIT is in flight: the verdict is read in the background and the menu shows it.
+# (The 251e rewrites one page: its COMMIT verdict takes ~0.3 s, so the switch comes sooner than the 259e's.)
+c251w "$CF251,b-down,step2020,b-up,step20,$MENU,encr+,step100,r,step8000" > "$TMP/c251s"
+grep -q 'commits=1,' "$TMP/c251.err" && grep -q 'run_active=0,verdict=1' "$TMP/c251.err" \
+  && ok "app switch during the write: the COMMIT verdict is collected in the background" \
+  || bad "suspend in Write: $(cat "$TMP/c251.err")"
+has '251e cancel: WRITTEN' < "$TMP/c251s" \
+  && ok "... and the Cal Routine menu shows the cancelled run's verdict" \
+  || bad "no cancelled-verdict banner on the 251e menu: $(head -8 "$TMP/c251s")"
 
 # ---------------------------------------------------------------------------
 # App switching and the Scope's arena. The Scope takes a 62 KB arena from the

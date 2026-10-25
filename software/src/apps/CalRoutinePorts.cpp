@@ -292,6 +292,7 @@ FLASHMEM void Outputs_::Hold(int out, uint16_t code) {
   if (sim_plant) {
     sim_out_mv = SimMvOfCode(*this, out, code);
     sim_plant->OutputMv(sim_out_mv);
+    sim_plant->OutputMvAt(out, sim_out_mv);
   }
 #endif
 }
@@ -302,7 +303,10 @@ FLASHMEM void Outputs_::ReleaseAll() {
   held = 0;
 #ifdef XENO_SIM
   sim_out_mv = 0.0;
-  if (sim_plant) sim_plant->OutputMv(0.0);
+  if (sim_plant) {
+    sim_plant->OutputMv(0.0);
+    for (int o = 0; o < 8; ++o) sim_plant->OutputMvAt(o, 0.0);
+  }
 #endif
 }
 
@@ -364,6 +368,9 @@ FLASHMEM bool Inputs_::WindowDone(PointStats s[8]) {
 }
 
 FLASHMEM void Inputs_::Sample() {
+#ifdef XENO_SIM
+  if (sim_plant) sim_plant->UpdateInputs();
+#endif
   if (!open) return;
   const uint32_t now = micros();
   if (now - last_us < kSampleIntervalUs) return;
@@ -555,11 +562,43 @@ FLASHMEM Cal259eFlow &Flow259e() {
   return *flow259;
 }
 
+// The 251e target's flow, like the 259e's. Its mV port reads the stored input tables (InputCal);
+// the simulator's plant has no stored curves, so there the same model the plant writes the raw
+// counts with: 10600 mV at raw 0, 2.918 mV per count (the Xeno input's nominal span).
+alignas(Cal251eFlow) DMAMEM static uint8_t flow251_store[sizeof(Cal251eFlow)];
+static Cal251eFlow *flow251 = nullptr;
+
+FLASHMEM Cal251eFlow &Flow251e() {
+  if (!flow251) flow251 = new (flow251_store) Cal251eFlow;
+  return *flow251;
+}
+
+struct Mv251_ : Cal251eFlow::MvPort {
+  bool Calibrated(int label) const override;
+  float Millivolts(int label, float raw) const override;
+};
+FLASHMEM bool Mv251_::Calibrated(int label) const {
+#ifdef XENO_SIM
+  if (sim_plant) return true;
+#endif
+  return InputCal::Calibrated(PanelInPhys(label));
+}
+FLASHMEM float Mv251_::Millivolts(int label, float raw) const {
+#ifdef XENO_SIM
+  if (sim_plant) return 10600.f - raw * 2.918f;
+#endif
+  return InputCal::Millivolts(PanelInPhys(label), raw);
+}
+static Mv251_ mv251;
+FLASHMEM Cal251eFlow::MvPort &Mv251() { return mv251; }
+
+FLASHMEM int Cancelled251Verdict() { return flow251 ? flow251->cancelled_verdict() : 0; }
+
 // A cancel (or an app switch) after the COMMIT frame went out leaves the flow
 // waiting for the module's verdict with the app gone: that wait still counts
 // as a run, and CalTask() below finishes it.
 FLASHMEM bool CalRunActive() {
-  return owned || (flow259 && flow259->cancel_pending());
+  return owned || (flow259 && flow259->cancel_pending()) || (flow251 && flow251->cancel_pending());
 }
 
 FLASHMEM int Cancelled259Verdict() { return flow259 ? flow259->cancelled_verdict() : 0; }
@@ -572,6 +611,8 @@ FLASHMEM int Cancelled259Verdict() { return flow259 ? flow259->cancelled_verdict
 // as well while it is open; a second Tick() in a pass is harmless.
 FLASHMEM void CalTask() {
   if (flow259 && flow259->cancel_pending()) flow259->Tick();
+  // The 251e's pending COMMIT verdict, and the RELEASE of a run that ended with overrides live.
+  if (flow251 && flow251->background_work()) flow251->Tick();
 }
 
 FLASHMEM CalRoutine::MeterPort &Meter() { return meter; }

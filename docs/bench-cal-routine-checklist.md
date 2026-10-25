@@ -149,3 +149,45 @@ All of these, before B is held on the write screen (only in a build with the wri
 - [ ] 8 slots full: the run ends "all 8 calibration slots are used; compaction is disabled" and writes nothing (compaction is switched off). **Run this in the 8051 emulator, never on the bench 259e** (each 259e takes only 8 commits for its whole life; this test would need them all).
 - [ ] X4: a full-case soak with the calibration READs on the bus, banks byte-identical before and after.
 - [ ] Cancel after the COMMIT went out (left encoder, or switch app): the Xenomorpher still logs `CALR,259END,CANCELLED_<result>` and the Cal Routine menu shows "259e cancel: ...".
+
+## 251e target (experimental; the write is DISABLED in the firmware)
+
+**State of the evidence.** None: nothing here has run on a 251e. The target is host-tested against a simulated 251e and the simulator. Design, limits and open questions: `docs/specs/cal-251e.md`. The write (`Cal251eFlow::kAllowWrite`) is compiled in only by `-DCAL251E_ALLOW_WRITE=1`; CI refuses that define in any shipped build file, and a build with it prints `WARNING: 251e write ENABLED in this build` in the `t` self-test. A measuring-only run is discarded at Results (L L) and is safe to repeat.
+
+The 251e has no slot count: its one record page is erased and rewritten by every COMMIT (a power cut during that leaves the module on its stock path). The flow logs the previous record (`CALR,251OLD`) before any write.
+
+### H1. Loopback alone (no 251e)
+
+Rig: the T41_console build, the Outputs and Inputs calibrations done (`Qp` shows `verify_mv` about 0.5 mV), four cables, no 251e. Run the 251e row as far as the loopback and stop.
+
+- [ ] Outputs E, F, G, H into inputs 1 to 4: all 20 `CALR,251LOOP` readings within 2 mV of the commanded voltage. Record the worst error and the spread (this is the real chain error and noise; the design budget assumes about 1.3 mV combined).
+- [ ] An unpatched input stops the run with a PATCH message; a 3 mV gain error on one input (a wrong cable to an attenuated source) stops it with LOOPBACK.
+- [ ] Run it twice, five minutes apart: the worst error moves by less than 1 mV (thermal).
+
+### H2. 251e status and measuring-only run
+
+Rig: a 251e on 30.7C4 on the bus (its bench gates in Buchla_FW `docs/cv-calibration/BENCH.md` come first), sequencers stopped, `=5Cs` answers (`fmt` 1).
+
+- [ ] `=5Cs` answers; flags show whether a record is held.
+- [ ] A full measuring-only run reaches Results. Keep the `CALR,251LINE`/`PT`/`FIT` lines: the measured mV per DAC code `a` and the zero `b` per channel are the **first measurement of the 251e's analog scale** (design: about 2.610 mV per code, 10.00 V at code 3831). Note which check, if any, failed.
+- [ ] Status bit1 (override active) shows during the run (`SCALE`, `NO_OVERRIDE` and `IDENTITY` tell the story if not).
+- [ ] After Results, left encoder twice: the outputs return to the sequencer; `=5Cs` shows the same flags and sequence number as before (nothing written).
+- [ ] Cancel at every stage (L): outputs return within 5 s at the latest (normally at once); the Xenomorpher's outputs E to H are released.
+- [ ] Unplug the Xenomorpher's bus cable mid-measure: the 251e's outputs return to the sequencer 5 s after the last override.
+- [ ] Repeat the run three times: gains agree within 2 Q2.14 steps, offsets within 1 code.
+
+### H3. Limits
+
+- [ ] From H1 and H2 set (and write into `docs/specs/cal-251e.md`) the write limits: loopback, non-linearity (placeholder 3 mV), verify (4 mV), anchors (8 mV), scale window (4 %). A measuring-only run only WARNs on the placeholders; read them from the `CALR,251LINE` (bow, INL), `251STAT` (noise, DAC step, verify, anchor) and `251WARN` lines.
+- [ ] The firmware under test is 30.7C4 or 30.7C5: note which, and whether `=5Cs` shows the commit bits clearing during a COMMIT (C5) at H4.
+
+### H4. First write (only in a build with the write enabled, with the owner present)
+
+- [ ] H1 to H3 done; open questions 1, 2 and 3 of the design answered.
+- [ ] The T41_console build with `-DCAL251E_ALLOW_WRITE=1`, flashed with `Qp` and the image hash recorded; the 251e power-cycled and warm.
+- [ ] Hold B for 2 s: expect `CALR,251OLD,...` (the previous record), `CALR,251REC,5C,...`, `CALR,251COMMIT,<count>,<seq>`, `CALR,251END,OK` (at most 20 COMMITs per power-up); `=5Cs` shows flags 05 and the new sequence number after a power cycle.
+- [ ] Never retry a COMMIT blindly: after COMMIT unknown or REFUSED read `=5Cs` by hand.
+
+### H5. End-to-end proof after a write
+
+- [ ] Run a 251e sequence of stages at known volts (1.2 V steps) into the Xenomorpher's inputs 1 to 4; every stage within 4 mV of its displayed volts. The bus override path cannot measure the corrected output, so this is the only proof of the stored correction.

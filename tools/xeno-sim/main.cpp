@@ -48,6 +48,7 @@ namespace weegfx { extern uint32_t weegfx_sim_clipped_last_frame; }
 #include "sim_term.h"
 
 void SimEnable259e();  // sim_cal259.cpp
+void SimEnable251e(bool warn);  // sim_cal251.cpp
 
 namespace {
 
@@ -553,6 +554,9 @@ void Usage() {
       "                       takes the ~60s it takes on the module\n"
       "  --sim-259e           an ideal output A, a USB meter and a 259e at 0x28,\n"
       "                       so Cal Routine's 259e row can run end to end\n"
+      "  --sim-251e           a 251e at 5C with an analog error model, ideal Xeno outputs and\n"
+      "                       inputs, so Cal Routine's 251e row can run end to end\n"
+      "  --sim-251e-warn      with --sim-251e: channel 2 has more INL than the write limit allows\n"
       "  --bus-off            simulate PresetBus::Enabled() == false\n"
       "  --case-off           bus enabled, but no module answers a QUERY\n"
       "                       (module on USB with the case unplugged)\n"
@@ -691,7 +695,7 @@ int main(int argc, char **argv) {
   bool card_present = false, dump_fs = false, reset_cancel = false;
   long snap_at = -1;
   bool write_fault_once = false;
-  bool sim_259e = false;
+  bool sim_259e = false, sim_251e = false, sim_251e_warn = false;
   long replay_at = -1;
   std::string appswitch_test;
   int write_fault = SIM_WRITE_FAITHFUL;
@@ -716,6 +720,8 @@ int main(int argc, char **argv) {
     else if (a == "--real-timing") { cfg.real_timing = true; opts.push_back(a); }
     else if (a == "--bus-off") { cfg.bus_enabled = false; opts.push_back(a); }
     else if (a == "--sim-259e") { sim_259e = true; opts.push_back(a); }
+    else if (a == "--sim-251e") { sim_251e = true; opts.push_back(a); }
+    else if (a == "--sim-251e-warn") { sim_251e_warn = true; opts.push_back(a); }
     else if (a == "--case-off") { cfg.case_off = true; opts.push_back(a); }
     else if (a == "--reset-settings") { reset_settings = true; opts.push_back(a); }
     else if (a == "--sd-card") { card_present = true; opts.push_back(a); }
@@ -756,6 +762,8 @@ int main(int argc, char **argv) {
       else if (o == "--write-fault-once") write_fault_once = true;
       else if (o == "--bus-off") cfg.bus_enabled = false;
       else if (o == "--sim-259e") sim_259e = true;
+      else if (o == "--sim-251e") sim_251e = true;
+      else if (o == "--sim-251e-warn") sim_251e_warn = true;
       else if (o == "--case-off") cfg.case_off = true;
       else if (o == "--real-timing") cfg.real_timing = true;
       else if (o == "--reset-settings") reset_settings = true;
@@ -800,6 +808,7 @@ int main(int argc, char **argv) {
   if (!appswitch_test.empty()) SimAppSwitchPreBoot(appswitch_test);
   SimRuntimeBoot(reset_settings, reset_cancel);
   if (sim_259e) SimEnable259e();
+  if (sim_251e) SimEnable251e(sim_251e_warn);
 
   if (!boot_app.empty()) {
     bool found = false;

@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 
+#include "../Cal251eFlow.h"
 #include "../Cal259eBus.h"
 #include "../Cal259eFlow.h"
 #include "../CalRoutineFlow.h"
@@ -93,6 +94,14 @@ BusPort &Bus();
 // DMAMEM like Flow(). The app drives it from Loop() between Open() and Close().
 Cal259eFlow &Flow259e();
 
+// The 251e target's flow engine (Cal251eFlow.h, docs/specs/cal-251e.md), constructed on first
+// use in DMAMEM like Flow259e(). It measures with the Xeno's own calibrated inputs 1-4 (Inputs())
+// and needs no meter; Mv251() converts their averaged raw readings on the stored input tables.
+Cal251eFlow &Flow251e();
+Cal251eFlow::MvPort &Mv251();
+// The COMMIT verdict of the last 251e run cancelled after its COMMIT went out (0 if none).
+int Cancelled251Verdict();
+
 // The two ports the 259e flow needs besides the meter, output and bus:
 //   Backup   the master BACKUP of one 259e (Bus200eMasterBackup through
 //            OC::PresetBus::MasterBackup, as the console 'm' starts it); on
@@ -150,8 +159,12 @@ void Cal259Task();
 // a USB meter that answers READ? with it, a 259e on the bus, and a backup that
 // completes. The ports tell the plant what output A holds.
 struct SimPlant {
-  virtual BusPort *Bus259e() = 0;
+  virtual BusPort *Bus259e() = 0;   // the plant's 200e bus (the 251e plant answers here too)
   virtual void OutputMv(double mv) = 0;
+  // --sim-251e: the plant sets the inputs' raw counts from what the cables carry, and is told
+  // what each Xeno output holds.
+  virtual void OutputMvAt(int out, double mv) { (void)out; (void)mv; }
+  virtual void UpdateInputs() {}
 };
 void SimSetPlant(SimPlant *plant);
 #endif

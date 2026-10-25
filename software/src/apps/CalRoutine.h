@@ -66,13 +66,15 @@
 // Every member is defined out of class and FLASHMEM: none of it is ISR code,
 // and every byte of ITCM comes out of DTCM in 32 KB steps.
 #include "CalRoutinePorts.h"
+#include "../Cal251eText.h"
 #include "../Cal259eHold.h"
 #include "../Cal259eText.h"
 #include "../CalRoutineFlow.h"
 
 // The Cal Routine menu, one row per routine; a later routine (a bus module)
 // is one more row and one more action.
-enum CalRoutineMenuAction : uint8_t { CALR_MENU_OUTPUTS, CALR_MENU_INPUTS, CALR_MENU_SELF, CALR_MENU_259E };
+enum CalRoutineMenuAction : uint8_t { CALR_MENU_OUTPUTS, CALR_MENU_INPUTS, CALR_MENU_SELF, CALR_MENU_259E,
+                                      CALR_MENU_251E };
 struct CalRoutineMenuEntry {
   const char *name;  // the row, after one leading space (20 columns)
   const char *hint;  // the line under the list for the selected row (21 columns)
@@ -82,6 +84,7 @@ static const CalRoutineMenuEntry kCalRoutineMenu[] = {
   {"Outputs", "A-H with a USB meter", CALR_MENU_OUTPUTS},
   {"Inputs", "A>1 ... H>8, no meter", CALR_MENU_INPUTS},
   {"Self (both)", "outputs, then inputs", CALR_MENU_SELF},
+  {"251e CV outputs", "251e>Xeno in 1-4", CALR_MENU_251E},
   {"259e pitch inputs", "A>259e, USB meter", CALR_MENU_259E},
 };
 static constexpr int kCalRoutineMenuRows =
@@ -113,6 +116,8 @@ private:
   Mode mode_ = Mode::Self;    // the routine chosen in the menu
   bool is259_ = false;        // the 259e row: Flow259e() runs, not Flow()
   Cal259eFlow::Stage last259_ = Cal259eFlow::Stage::Idle;
+  bool is251_ = false;        // the 251e row: Flow251e() runs (no meter)
+  Cal251eFlow::Stage last251_ = Cal251eFlow::Stage::Idle;
   int8_t menu_sel_ = 0;       // kCalRoutineMenu row
   int8_t menu_top_ = 0;       // first menu row on screen
   int8_t cursor_ = 0;         // Results row
@@ -137,6 +142,11 @@ private:
   void HandleConfirm(const UI::Event &event);
   void HandleConfirm259(const UI::Event &event);
   void Fire259Write();
+  void HandleConfirm251(const UI::Event &event);
+  void Fire251Write();
+  void HandlePress251(const UI::Event &event);
+  void Abort251();
+  void End251();
   void HandlePress(const UI::Event &event);
   void HandlePress259(const UI::Event &event);
   void Abort259();
@@ -163,6 +173,10 @@ private:
   void Draw259Results() const;
   void Draw259Failed() const;
   void Draw259Confirm() const;
+  void Draw251() const;
+  void Draw251Results() const;
+  void Draw251Failed() const;
+  void Draw251Confirm() const;
   void DrawConfirm() const;
   void DrawSaved() const;
   void ResultRow(int r, char *buf, size_t n) const;
@@ -235,8 +249,26 @@ FLASHMEM void AppCalRoutine::StartRun() {
     screen_ = SCR_PENDING;
     return;
   }
+  if (is251_ && CalRoutinePorts::Flow251e().cancel_pending()) {
+    screen_ = SCR_PENDING;
+    return;
+  }
   CalRoutinePorts::Open();
   OC::ui.preempt_screensaver(true);
+  if (is251_) {
+    // Needs the Xeno's outputs E-H and inputs 1-4 calibrated by Cal Routine (else NoSelfCal);
+    // no meter. The 251e reads its status first (Scan).
+    if (!CalRoutinePorts::Flow251e().Begin(CalRoutinePorts::Outputs(), CalRoutinePorts::Inputs(),
+                                           CalRoutinePorts::Mv251(), CalRoutinePorts::Clock(),
+                                           CalRoutinePorts::Bus(), CalRoutinePorts::Entropy(),
+                                           CalRoutinePorts::MarkerSet(), CalRoutinePorts::ConsoleLog)) {
+      EndRun(SCR_PENDING);  // (a cancelled COMMIT's verdict is still pending: checked above)
+      return;
+    }
+    last251_ = CalRoutinePorts::Flow251e().stage();
+    screen_ = SCR_RUN;
+    return;
+  }
   if (is259_) {
     // The run needs Output A calibrated by Cal Routine (the marker), else the
     // flow stops at NoSelfCal.
@@ -263,10 +295,11 @@ FLASHMEM void AppCalRoutine::StartRun() {
 FLASHMEM void AppCalRoutine::OpenMenuEntry() {
   const uint8_t action = kCalRoutineMenu[menu_sel_].action;
   is259_ = action == CALR_MENU_259E;
+  is251_ = action == CALR_MENU_251E;
   mode_ = action == CALR_MENU_OUTPUTS ? Mode::Outputs
         : action == CALR_MENU_INPUTS ? Mode::Inputs : Mode::Self;
   if (!CalRoutinePorts::HardwareSupported()) screen_ = SCR_UNSUPPORTED;
-  else if (mode_ == Mode::Inputs) StartRun();  // no meter: the USB notice does not apply
+  else if (mode_ == Mode::Inputs || is251_) StartRun();  // no meter: the USB notice does not apply
   else screen_ = SCR_NOTICE;
 }
 
@@ -274,7 +307,7 @@ FLASHMEM int AppCalRoutine::RowFirst() const { return mode_ == Mode::Inputs ? 8 
 FLASHMEM int AppCalRoutine::RowLast() const { return mode_ == Mode::Outputs ? 7 : kRows - 1; }
 
 FLASHMEM const char *AppCalRoutine::ModeName() const {
-  return is259_ ? "259e" : mode_ == Mode::Outputs ? "Outputs" : mode_ == Mode::Inputs ? "Inputs" : "Self";
+  return is251_ ? "251e" : is259_ ? "259e" : mode_ == Mode::Outputs ? "Outputs" : mode_ == Mode::Inputs ? "Inputs" : "Self";
 }
 
 // The flow is Idle (cancelled, discarded or saved) when this is called.
@@ -305,6 +338,23 @@ FLASHMEM void AppCalRoutine::End259() {
   Cal259eFlow &f = CalRoutinePorts::Flow259e();
   if (f.stage() != Cal259eFlow::Stage::Idle) f.Cancel();
   if (f.stage() != Cal259eFlow::Stage::Idle) f.Cancel();
+  EndRun(SCR_MENU);
+}
+
+// The 251e run: same rules as the 259e's (see Abort259). Before the COMMIT nothing was written;
+// a COMMIT already on the wire is waited for in the background.
+FLASHMEM void AppCalRoutine::Abort251() {
+  Cal251eFlow &f = CalRoutinePorts::Flow251e();
+  f.Cancel();
+  if (f.cancel_pending()) { screen_ = SCR_RUN; return; }
+  if (f.stage() == Cal251eFlow::Stage::Failed && f.commit_result() != 0) { screen_ = SCR_RUN; return; }
+  End251();
+}
+
+FLASHMEM void AppCalRoutine::End251() {
+  Cal251eFlow &f = CalRoutinePorts::Flow251e();
+  if (f.stage() != Cal251eFlow::Stage::Idle) f.Cancel();
+  if (f.stage() != Cal251eFlow::Stage::Idle) f.Cancel();
   EndRun(SCR_MENU);
 }
 
@@ -340,6 +390,29 @@ FLASHMEM void AppCalRoutine::Init() {
 }
 
 FLASHMEM void AppCalRoutine::Loop() {
+  if (is251_) {
+    if (screen_ == SCR_RUN || screen_ == SCR_CONFIRM) {
+      CalRoutinePorts::Service();
+      CalRoutinePorts::Flow251e().Tick();
+      const Cal251eFlow::Stage s = CalRoutinePorts::Flow251e().stage();
+      // The write confirm (only in a build with the write on) needs B HELD, as the 259e's.
+      if (screen_ == SCR_CONFIRM && s == last251_) {
+        if (hold_.Tick(millis(), OC::ui.read_immediate(OC::CONTROL_BUTTON_B))) Fire251Write();
+        else OC::ui.Poke();
+      } else {
+        hold_.Reset();
+      }
+      if (s != last251_) {
+        last251_ = s;
+        hold_.Reset();
+        discard_armed_ms_ = 0;
+        OC::ui.Poke();
+        if (s == Cal251eFlow::Stage::Confirm) ArmSave();
+        else if (screen_ == SCR_CONFIRM) screen_ = SCR_RUN;
+      }
+    }
+    return;
+  }
   if (is259_) {
     if (screen_ == SCR_RUN || screen_ == SCR_CONFIRM) {
       CalRoutinePorts::Service();
@@ -386,13 +459,25 @@ FLASHMEM void AppCalRoutine::Loop() {
 FLASHMEM void AppCalRoutine::HandleAppEvent(OC::AppEvent event) {
   switch (event) {
     case OC::APP_EVENT_RESUME:
+      // A RESUME is not always a re-entry. A config hand-back (a preset saved over the bus or from
+      // the console, a refused recall, a clock-routing save) sends a bare RESUME to the open app
+      // with no SUSPEND before it, and the run must go on: its outputs are held and its result
+      // is minutes of work. A genuine re-entry always follows a SUSPEND, which already ended the
+      // run and put the menu up. So a RESUME with a run open (RUN or CONFIRM screen) is ignored.
+      if (screen_ == SCR_RUN || screen_ == SCR_CONFIRM) break;
       if (screen_ != SCR_MENU) screen_ = SCR_MENU;
       break;
     case OC::APP_EVENT_SUSPEND:
     case OC::APP_EVENT_SCREENSAVER_ON:
       // Never leave an output held, a run half done or a save armed behind a
       // screen that is gone.
-      if (is259_) {
+      if (is251_) {
+        // The same: a COMMIT already on the wire is still waited for with the app gone, and the
+        // 251e's RELEASE is sent by CalTask (CalRoutinePorts::CalTask).
+        CalRoutinePorts::Flow251e().Cancel();
+        if (CalRoutinePorts::Flow251e().stage() != Cal251eFlow::Stage::Idle)
+          CalRoutinePorts::Flow251e().Cancel();
+      } else if (is259_) {
         // A COMMIT already on the wire is still waited for with the app gone:
         // the flow keeps cancel_pending(), CalRunActive() stays true, and
         // CalRoutinePorts::CalTask() (every build, every loop pass) reads the
@@ -446,7 +531,32 @@ FLASHMEM void AppCalRoutine::Fire259Write() {
   screen_ = SCR_RUN;
 }
 
+// The 251e write confirm (a build with the write on): the 259e's gate, B held for 2 s.
+FLASHMEM void AppCalRoutine::HandleConfirm251(const UI::Event &event) {
+  if (event.control == OC::CONTROL_BUTTON_B) {
+    if (event.type == UI::EVENT_BUTTON_DOWN) {
+      discard_armed_ms_ = 0;
+      hold_.BDown(millis(), event.mask == OC::CONTROL_BUTTON_B);
+    } else if (event.type == UI::EVENT_BUTTON_PRESS || event.type == UI::EVENT_BUTTON_LONG_RELEASE) {
+      hold_.BUp();
+    }
+    return;
+  }
+  hold_.Other();
+  if (event.control == OC::CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_PRESS) {
+    if (!DiscardArmed()) { discard_armed_ms_ = millis() | 1; return; }
+    if (millis() - discard_armed_ms_ < kConfirmDeadMs) return;
+    Abort251();
+  }
+}
+
+FLASHMEM void AppCalRoutine::Fire251Write() {
+  CalRoutinePorts::Flow251e().ConfirmWrite();
+  screen_ = SCR_RUN;
+}
+
 FLASHMEM void AppCalRoutine::HandleConfirm(const UI::Event &event) {
+  if (is251_) { HandleConfirm251(event); return; }
   if (is259_) { HandleConfirm259(event); return; }
   if (event.control == OC::CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_PRESS) {
     screen_ = SCR_RUN;  // no: back to Results, nothing written
@@ -493,6 +603,7 @@ FLASHMEM void AppCalRoutine::HandlePress(const UI::Event &event) {
       screen_ = CalRoutinePorts::Flow().stage() == Stage::Results ? SCR_RUN : SCR_MENU;
       break;
     case SCR_RUN: {
+      if (is251_) { HandlePress251(event); break; }
       if (is259_) { HandlePress259(event); break; }
       const Stage s = CalRoutinePorts::Flow().stage();
       if (l) {
@@ -553,6 +664,29 @@ FLASHMEM void AppCalRoutine::HandlePress259(const UI::Event &event) {
   else if (s == S::Done) End259();
 }
 
+FLASHMEM void AppCalRoutine::HandlePress251(const UI::Event &event) {
+  using S = Cal251eFlow::Stage;
+  Cal251eFlow &f = CalRoutinePorts::Flow251e();
+  const S s = f.stage();
+  if (event.control == OC::CONTROL_BUTTON_L) {
+    if (s == S::Results) {
+      // A finished run is a minute of measuring: the first encL only asks.
+      if (!DiscardArmed()) { discard_armed_ms_ = millis() | 1; return; }
+      if (millis() - discard_armed_ms_ < kConfirmDeadMs) return;
+      Abort251();
+    } else if (s == S::Done || s == S::Failed || s == S::NoSelfCal) {
+      End251();
+    } else {
+      Abort251();
+    }
+    return;
+  }
+  discard_armed_ms_ = 0;  // any other press is a no
+  if (event.control != OC::CONTROL_BUTTON_R) return;
+  if (s == S::Warmup || s == S::PromptLoop || s == S::PromptPatch || s == S::Results) f.Continue();
+  else if (s == S::Done) End251();
+}
+
 FLASHMEM void AppCalRoutine::HandleButtonEvent(const UI::Event &event) {
   if (screen_ == SCR_CONFIRM) { HandleConfirm(event); return; }
   if (event.type == UI::EVENT_BUTTON_PRESS) HandlePress(event);
@@ -590,7 +724,12 @@ FLASHMEM void AppCalRoutine::DrawMenuScreen() const {
   // menu (until the next 259e run begins): the Failed screen it belongs to may
   // never have been seen.
   const int cv = CalRoutinePorts::Cancelled259Verdict();
-  if (cv != 0) {
+  const int cv251 = CalRoutinePorts::Cancelled251Verdict();
+  if (cv251 != 0) {
+    snprintf(b, sizeof(b), "251e cancel: %s",
+             cv251 == 1 ? "WRITTEN" : cv251 == E_COMMIT_REFUSED ? "REFUSED" : "UNKNOWN");
+    Row(4, b);
+  } else if (cv != 0) {
     snprintf(b, sizeof(b), "259e cancel: %s",
              cv == 1 ? "WRITTEN" : cv == E_NO_SLOT ? "no slot" : cv == E_COMMIT_REFUSED ? "REFUSED"
              : "UNKNOWN");
@@ -615,7 +754,7 @@ FLASHMEM void AppCalRoutine::DrawUnsupported() const {
 }
 
 FLASHMEM void AppCalRoutine::DrawPending() const {
-  Title("259e: please wait");
+  Title(is251_ ? "251e: please wait" : "259e: please wait");
   Row(0, "A cancelled run's");
   Row(1, "COMMIT is still being");
   Row(2, "read back. Try again");
@@ -661,6 +800,7 @@ FLASHMEM void AppCalRoutine::DrawNoMeter() const {
 }
 
 FLASHMEM void AppCalRoutine::DrawRun() const {
+  if (is251_) { Draw251(); return; }
   if (is259_) { Draw259(); return; }
   char b[24], v[12];
   const Stage s = CalRoutinePorts::Flow().stage();
@@ -985,6 +1125,7 @@ FLASHMEM void AppCalRoutine::DrawResults() const {
 }
 
 FLASHMEM void AppCalRoutine::DrawConfirm() const {
+  if (is251_) { Draw251Confirm(); return; }
   if (is259_) { Draw259Confirm(); return; }
   const CalRoutineFlow::Results &res = CalRoutinePorts::Flow().results();
   char b[24];
@@ -1256,6 +1397,204 @@ FLASHMEM void AppCalRoutine::Draw259Confirm() const {
   Row(0, "This uses 1 of 8");
   Row(1, "slots, forever.");
   Row(2, "Backup, write, check.");
+  if (DiscardArmed()) {
+    Row(3, "encL again: discard");
+    graphics.invertRect(0, 38, 128, 9);
+  } else if (hold_.holding()) {
+    snprintf(b, sizeof(b), "Keep holding... %d%%", int(hold_.permille(millis()) / 10));
+    Row(3, b);
+  } else if (hold_.hint()) {
+    Row(3, "Hold B to write");
+  } else {
+    Row(3, "HOLD B for 2 s");
+  }
+  Bar(4, int(hold_.permille(millis())), 1000);
+  graphics.setPrintPos(0, 56);
+  graphics.print("encL:no  hold B:WRITE");
+}
+
+// ---- the 251e target's screens ---------------------------------------------------
+
+FLASHMEM void AppCalRoutine::Draw251() const {
+  using S = Cal251eFlow::Stage;
+  const Cal251eFlow &f = CalRoutinePorts::Flow251e();
+  char b[24], v[12];
+  switch (f.stage()) {
+    case S::Idle:
+      Title("251e");
+      return;
+    case S::NoSelfCal:
+      Title("251e: not ready");
+      if (f.fail() == Cal251eFlow::F_INPUT_UNCAL) {
+        Row(0, "Xeno inputs 1-4 are");
+        Row(1, "not all calibrated by");
+        Row(2, "Cal Routine. Run");
+        Row(3, "Inputs (or Self).");
+      } else {
+        Row(0, "Outputs are not yet");
+        Row(1, "calibrated by Cal");
+        Row(2, "Routine. Run Outputs");
+        Row(3, "(or Self) first.");
+      }
+      Footer("L:back");
+      return;
+    case S::Scan:
+      Title("251e: scan");
+      Row(0, "Looking for a 251e");
+      Row(1, "at bus address 5C...");
+      Footer("L:cancel");
+      return;
+    case S::Warmup:
+      Title("251e: warm-up");
+      Row(0, "Xeno + 251e on");
+      Row(1, "30 min? Stop its");
+      Row(2, "sequencers. Unpatch");
+      Row(3, "the CV outs' other");
+      Row(4, "destinations: jumps.");
+      Footer("L:cancel      R:yes");
+      return;
+    case S::PromptLoop:
+      Title("251e: loopback");
+      Row(0, "Xeno only, no 251e:");
+      Row(1, "Out E>In 1  F>In 2");
+      Row(2, "Out G>In 3  H>In 4");
+      Row(3, "Checks the Xeno's own");
+      Row(4, "inputs against outs.");
+      Footer("L:cancel   R:patched");
+      return;
+    case S::Loopback:
+      Title("251e: loopback");
+      Volts(v, sizeof(v), Cal251eFlow::kLoopMv[f.loop_index() < Cal251eFlow::kLoopPoints ? f.loop_index() : 0]);
+      snprintf(b, sizeof(b), "Point %d/%d: %sV", f.loop_index() + 1, Cal251eFlow::kLoopPoints, v);
+      Row(0, b);
+      Bar(1, f.loop_index() + 1, Cal251eFlow::kLoopPoints);
+      Row(3, "Leave the cables be.");
+      Footer("L:cancel");
+      return;
+    case S::PromptPatch:
+      Title("251e: patch");
+      Row(0, "Move the cable ends");
+      Row(1, "from Out E-H to 251e:");
+      Row(2, "CV1>In1  CV2>In2");
+      Row(3, "CV3>In3  CV4>In4");
+      Row(4, "Inputs stay put.");
+      Footer("L:cancel   R:patched");
+      return;
+    case S::Identify:
+      Title("251e: patch check");
+      Row(0, "Raising each CV");
+      Row(1, "output alone...");
+      Row(3, "Leave the cables be.");
+      Footer("L:cancel");
+      return;
+    case S::Measure: {
+      Title("251e: measuring");
+      const int pt = f.point_index();
+      if (pt < Cal251eFlow::kFitPoints) {
+        Volts(v, sizeof(v), Cal251eFlow::kFitMv[pt]);
+        snprintf(b, sizeof(b), "Fit %d/%d: %sV", pt + 1, Cal251eFlow::kFitPoints, v);
+      } else if (pt < Cal251eFlow::kPoints - 1) {
+        const int i = pt - Cal251eFlow::kFitPoints;
+        Volts(v, sizeof(v), Cal251eFlow::kVerifyMv[i]);
+        snprintf(b, sizeof(b), "Verify %d/%d: %sV", i + 1, Cal251eFlow::kVerifyPoints, v);
+      } else {
+        snprintf(b, sizeof(b), "Repeat check");
+      }
+      Row(0, b);
+      Bar(1, pt + 1, Cal251eFlow::kPoints);
+      Row(3, "Leave the cables be.");
+      Footer("L:cancel");
+      return;
+    }
+    case S::Results:
+    case S::Confirm:
+      Draw251Results();
+      return;
+    case S::Write:
+      Title("251e: writing");
+      Row(0, "Writing the record");
+      Row(1, "to 251e @5C...");
+      Row(2, "Do not power off.");
+      Footer("L:cancel");
+      return;
+    case S::Verify:
+      Title("251e: verify");
+      Row(0, "Reading the record");
+      Row(1, "back...");
+      Footer("L:cancel");
+      return;
+    case S::Done:
+      Title("251e calibrated");
+      Row(0, "Record written to @5C");
+      Row(1, "and read back");
+      Row(2, "byte-exact.");
+      Row(3, "Log: CALR,251REC");
+      Footer("               R:done");
+      return;
+    case S::Failed:
+      Draw251Failed();
+      return;
+  }
+}
+
+FLASHMEM void AppCalRoutine::Draw251Results() const {
+  const Cal251eFlow &f = CalRoutinePorts::Flow251e();
+  const Cal251eFlow::Result &res = f.result();
+  char b[24], w[12];
+  const bool wr = Cal251eFlow::kAllowWrite;
+  snprintf(b, sizeof(b), "251e results %lu min", (unsigned long)(f.results_age_ms() / 60000u));
+  Title(b);
+  const unsigned any = unsigned(res.warn_nonlin | res.warn_verify | res.warn_anchor);
+  for (int c = 0; c < Cal251eFlow::kChannels; ++c) {
+    Centi(w, sizeof(w), fabsf(res.verify_mv[c]));
+    // A channel over a write limit starts with "!" and the letters of what (n non-linearity, v
+    // verify, a anchors), and its row is inverted: a warning must not look like a clean result.
+    char fl[6] = "";
+    if (any & (1u << c)) snprintf(fl, sizeof(fl), "!%s%s%s", (res.warn_nonlin >> c) & 1 ? "n" : "",
+                                  (res.warn_verify >> c) & 1 ? "v" : "", (res.warn_anchor >> c) & 1 ? "a" : "");
+    snprintf(b, sizeof(b), "%-4sCV%d %04X %+d v%s", fl, c + 1, unsigned(res.ch[c].gain), int(res.ch[c].offset), w);
+    Row(c, b);
+    if (fl[0]) graphics.invertRect(0, 14 + 8 * c, 128, 9);
+  }
+  if (DiscardArmed()) {
+    Row(4, "Press again: discard");
+    graphics.invertRect(0, 46, 128, 9);  // the banner the next encL acts on
+  } else if (any) {
+    // Over a write limit: reported, not fatal, in a measuring-only run (warn first). Names the
+    // channels and what; inverted. The same word ends the console's CALR,251END line.
+    char chs[8] = "";
+    for (int c = 0, n = 0; c < Cal251eFlow::kChannels; ++c)
+      if (any & (1u << c)) chs[n++] = char('1' + c), chs[n] = 0;
+    snprintf(b, sizeof(b), "WARN %s%s%s%s", chs, (res.warn_nonlin & 15) ? " nl" : "",
+             (res.warn_verify & 15) ? " ver" : "", (res.warn_anchor & 15) ? " anc" : "");
+    Row(4, b);
+    graphics.invertRect(0, 46, 128, 9);
+  } else {
+    Centi(w, sizeof(w), res.loop_worst_mv);
+    snprintf(b, sizeof(b), "loop %smV %s", w, wr ? "" : "Write off");
+    Row(4, b);
+  }
+  Footer(wr ? "L L:discard R:write.." : "L L:discard");
+}
+
+FLASHMEM void AppCalRoutine::Draw251Failed() const {
+  using F = Cal251eFlow;
+  const F &f = CalRoutinePorts::Flow251e();
+  Cal251eFailRows rows;
+  Cal251eFailText(f.fail(), f.commit_result(), f.identity_channel(), f.identity_input(), &rows);
+  Title(f.fail() == F::F_CANCELLED ? "Run cancelled" : "Run stopped");
+  for (int r = 0; r < 5; ++r) Row(r, rows.row[r]);
+  Footer("L:back");
+}
+
+FLASHMEM void AppCalRoutine::Draw251Confirm() const {
+  char b[24];
+  graphics.setPrintPos(0, 2);
+  graphics.print("WRITE TO 251e @5C");
+  graphics.invertRect(0, 0, 128, 11);  // inversion is the only emphasis
+  Row(0, "One record page: each");
+  Row(1, "write erases it. The");
+  Row(2, "old record is logged.");
   if (DiscardArmed()) {
     Row(3, "encL again: discard");
     graphics.invertRect(0, 38, 128, 9);

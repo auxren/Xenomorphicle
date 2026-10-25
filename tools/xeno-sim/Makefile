@@ -4,7 +4,7 @@
 #   make run        build and run it interactively, in this terminal
 #   make gui        build and serve the browser front end on 127.0.0.1:8731
 #   make check      the self-checks (determinism, gestures, the 200e write path); also builds
-#                   build-write/xeno-sim (-DCAL259E_ALLOW_WRITE=1) for the 259e write checks
+#                   build-write/xeno-sim (-DCAL259E_ALLOW_WRITE=1 -DCAL251E_ALLOW_WRITE=1) for the 259e and 251e write checks
 #   make clean
 #
 # Nothing here is part of the firmware build: no platformio.ini env references
@@ -91,6 +91,10 @@ FW_SRCS = \
   Cal259eFlow.cpp \
   Cal259eBackup.cpp \
   Cal259eText.cpp \
+  CalRec251e.cpp \
+  Cal251eBus.cpp \
+  Cal251eFlow.cpp \
+  Cal251eText.cpp \
   apps/CalRoutinePorts.cpp \
   UsbTmc.cpp \
   InputCal.cpp \
@@ -125,7 +129,7 @@ $(shell mkdir -p $(BUILD) && ./mkshadow.sh $(SRC) $(SHIM) $(SHADOW) && ln -sfn .
 # weegfx.cpp is the real renderer too, but it needs one host adjustment inside
 # its own translation unit -- see the header comment in shim/weegfx_host.cpp.
 SIM_SRCS = main.cpp sim_bus.cpp sim_capture.cpp sim_host.cpp sim_input.cpp \
-           sim_appswitch.cpp sim_cal259.cpp sim_runtime.cpp sim_selftest.cpp sim_session.cpp sim_storage.cpp \
+           sim_appswitch.cpp sim_cal259.cpp sim_cal251.cpp sim_runtime.cpp sim_selftest.cpp sim_session.cpp sim_storage.cpp \
            sim_stubs.cpp sim_term.cpp \
            shim/weegfx_host.cpp
 
@@ -166,10 +170,11 @@ run: all
 gui: all
 	@python3 xeno_gui.py
 
-# The firmware ships with the 259e write DISABLED (Cal259eFlow::kAllowWrite); the write path's
-# screens and controls are checked against a second build with it on (build-write/).
+# The firmware ships with the 259e and 251e writes DISABLED (Cal259eFlow::kAllowWrite,
+# Cal251eFlow::kAllowWrite); the write paths' screens and controls are checked against a second
+# build with both on (build-write/).
 check: all
-	@$(MAKE) --no-print-directory BUILD=build-write EXTRA_FWFLAGS=-DCAL259E_ALLOW_WRITE=1 all
+	@$(MAKE) --no-print-directory BUILD=build-write EXTRA_FWFLAGS="-DCAL259E_ALLOW_WRITE=1 -DCAL251E_ALLOW_WRITE=1" all
 	@$(MAKE) --no-print-directory BUILD=build-switch EXTRA_FWFLAGS=-DXENO_SIM_APPSWITCH all
 	@./selfcheck.sh
 
