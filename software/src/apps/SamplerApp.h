@@ -149,7 +149,22 @@ enum FocusParam : uint8_t {
 // makes the release depend on a file's absence.
 class SamplerVoice : public AudioPlaySdResmp {
  public:
-  void CloseFile() { if (reader) reader->close(); }
+  // The event responses are masked and the queued event dropped around the
+  // close, as AudioPlayResmp::stop() does (playresmp.h:181-187). A playing
+  // voice queues an evReload every audio block, and close() ends in
+  // _file.close(), which can yield() while SdFat syncs the volume cache; the
+  // yield would run that pending event re-entrantly (triggerReload ->
+  // loadBuffer reading the file being closed, or evClose deleting the source
+  // buffer under IndexableFile::close()). disableResponse()/enableResponse()
+  // are public statics and clearEvent() a public member of the vendored
+  // classes. Nothing can re-arm a closed reader: update() returns at
+  // !isPlaying(), and playWav() clears events before it reloads.
+  void CloseFile() {
+    disableResponse();
+    if (reader) reader->close();
+    clearEvent();
+    enableResponse();
+  }
 };
 
 OC_APP_CLASS(AppSampler, TWOCCS("SM"), "Sampler", "Sample Player") {
@@ -243,6 +258,14 @@ FLASHMEM void AppSampler::WireAudio() {
 
 FLASHMEM void AppSampler::Init() {
   using namespace SamplerMath;
+  // Init runs again at runtime (ReinitApps, a recall with short Sampler data).
+  // Hand back any open file first, or its buffers are orphaned when
+  // file_loaded_ is cleared below; the audio graph is NOT rewired (the
+  // connections built the first time are kept). Re-wiring used to leak 18
+  // unconnected AudioConnection objects (about 0.7 KB) per run: the core
+  // refuses a second connection into an already-used destination input, so
+  // nothing was ever mixed twice.
+  ReleaseSlotBuffers();
   for (int i = 0; i < kSlotCount; ++i) {
     file_num_[i] = 0;
     rate_pct_[i] = (int16_t)kDefaultRatePercent;
@@ -253,8 +276,7 @@ FLASHMEM void AppSampler::Init() {
   }
   slot_ = 0;
   focus_ = SamplerAppNS::FOCUS_FILE;
-  audio_wired_ = false;
-  WireAudio();
+  WireAudio();  // no-op after the first call
 }
 
 FLASHMEM size_t AppSampler::SaveAppData(util::StreamBufferWriter &stream_buffer) const {
@@ -338,7 +360,16 @@ FLASHMEM void AppSampler::ReleaseSlotBuffers() {
 #ifdef XENO_CODEC_AUDIO
   for (int i = 0; i < SamplerMath::kSlotCount; ++i) {
     if (!file_loaded_[i]) continue;
-    players_[i].stop();
+    // CloseFile() alone, not stop() first. AudioPlayResmp::stop() is
+    // clearEvent() + reader->stop() + reader->reset(), and reset() calls
+    // reload() -> preLoadBuffers: it re-reads the read-ahead blocks from SD
+    // (and leaves the state PAUSED) just before they are freed, stalling the
+    // loop as the menu opens. ResamplingSdReader::close() already does
+    // stop() (state STOPPED, so update() returns at !isPlaying() and read()
+    // returns 0), zeroes _file_samples (available() false, reset() returns
+    // early) and deletes the source buffer. What stop() also did that close()
+    // does not -- masking the event responses and dropping the queued event --
+    // CloseFile() does itself, without the reload; see SamplerVoice above.
     players_[i].CloseFile();
     file_loaded_[i] = false;
     need_reload_[i] = true;
@@ -348,6 +379,11 @@ FLASHMEM void AppSampler::ReleaseSlotBuffers() {
 
 FLASHMEM void AppSampler::LoadSlotFile(int i) {
 #ifdef XENO_CODEC_AUDIO
+  // Never take read-ahead buffers while suspended (need_reload_ stays set, so
+  // RESUME reloads). THIS is the required guard: it covers every caller
+  // (PollSlots, button A's StartSlot, any future one). The gate in Loop() is
+  // only an optimisation that skips the polling.
+  if (!SamplerMath::MayHoldSlotBuffers(is_open())) return;
   if (!SDcard_Ready) {
     file_loaded_[i] = false;
     need_reload_[i] = false;
@@ -400,7 +436,8 @@ FLASHMEM void AppSampler::StopSlot(int i) {
 #endif
 }
 
-// Runs every Loop() pass (main non-ISR loop, only while Sampler is current):
+// Runs every Loop() pass (main non-ISR loop, while Sampler is current and
+// open -- Loop() returns early under the app menu, see AppSampler::Loop):
 // polls all 8 CV/gate inputs, edge-detects each against its own previous
 // sample, drives that slot's trigger mode, and pushes each slot's live
 // rate (base % combined with its own CV, SamplerMath::ComputeRateMultiplier)
@@ -441,7 +478,14 @@ FLASHMEM void AppSampler::PollSlots() {
 
 void AppSampler::Process(OC::IOFrame *) {}
 
+// The app menu is drawn over the current app and DispatchLoop() keeps calling
+// this while it is open, after SUSPEND has already released the slots (measured
+// on hardware 2026-10-25: ~232 KB stayed held after leaving the Sampler by the
+// panel menu). PollSlots reloads a suspended slot's file, so it must not run
+// until RESUME; the set_current_app() that follows the menu then finds open_
+// false and cannot suspend it a second time.
 FLASHMEM void AppSampler::Loop() {
+  if (!SamplerMath::MayHoldSlotBuffers(is_open())) return;
   PollSlots();
 }
 

@@ -113,6 +113,12 @@ GateEdge UpdateGate(int32_t raw, bool &prev_high);
 // same OC::ADC::value() reading UpdateGate() was given.
 float ComputeRateMultiplier(int rate_percent, int32_t cv_raw);
 
+// True only while the Sampler is the open (resumed) app. A suspended Sampler
+// has handed its ~29 KB-per-slot read-ahead buffers back and must not take
+// them again until RESUME, even though its Loop() keeps being called under
+// the app menu.
+inline constexpr bool MayHoldSlotBuffers(bool app_open) { return app_open; }
+
 }  // namespace SamplerMath
 
 #endif  // SAMPLERMATH_H_

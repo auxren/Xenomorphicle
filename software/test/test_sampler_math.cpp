@@ -178,7 +178,46 @@ static void test_compute_rate_multiplier_clamps_out_of_range_cv() {
   CHECK(NearlyEqual(r_under, kMinRateMult));
 }
 
+// Model of the app-menu route: SUSPEND releases, then DispatchLoop keeps
+// calling Loop() under the menu. Mirrors AppSampler::Loop/PollSlots/
+// ReleaseSlotBuffers (one load per pass, gated on MayHoldSlotBuffers).
+struct SlotModel {
+  bool open = false;
+  bool loaded[kSlotCount] = {};
+  bool need_reload[kSlotCount] = {};
+  int held() const { int n = 0; for (bool b : loaded) n += b; return n; }
+  void resume() { open = true; }
+  void suspend() {
+    open = false;
+    for (int i = 0; i < kSlotCount; ++i)
+      if (loaded[i]) { loaded[i] = false; need_reload[i] = true; }
+  }
+  void loop() {
+    if (!MayHoldSlotBuffers(open)) return;
+    for (int i = 0; i < kSlotCount; ++i)
+      if (need_reload[i]) { loaded[i] = true; need_reload[i] = false; break; }
+  }
+};
+
+static void test_suspended_sampler_does_not_reload_under_menu() {
+  SlotModel m;
+  for (bool &b : m.need_reload) b = true;
+  m.resume();
+  for (int k = 0; k < 20; ++k) m.loop();
+  CHECK(m.held() == kSlotCount);
+  m.suspend();
+  CHECK(m.held() == 0);
+  for (int k = 0; k < 1000; ++k) m.loop();  // menu open, Loop() still called
+  CHECK(m.held() == 0);
+  m.resume();                                // coming back reloads, one per pass
+  m.loop();
+  CHECK(m.held() == 1);
+  for (int k = 0; k < 20; ++k) m.loop();
+  CHECK(m.held() == kSlotCount);
+}
+
 int main() {
+  test_suspended_sampler_does_not_reload_under_menu();
   test_slot_count_is_8();
   test_wrap_slot_index();
   test_clamp_file_num();
