@@ -1,7 +1,6 @@
 // Host tests for the input-curve record codec and the A/B store
 // (src/InputCurveStore.cpp) over an in-memory CurveStorage.
-//   g++ -std=c++17 -Wall -Werror -O2 -o build/test_input_curve_store \
-//     test_input_curve_store.cpp ../src/InputCurveStore.cpp
+//   g++ -std=c++17 -Wall -Werror -O2 -o build/test_input_curve_store test_input_curve_store.cpp ../src/InputCurveStore.cpp
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

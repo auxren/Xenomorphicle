@@ -1,6 +1,5 @@
 // Host tests for the ADC33131D frame-slot map (src/AdcSlotMap.h).
-//   g++ -std=c++17 -Wall -Werror -O2 -o build/test_adc_slot_map \
-//     test_adc_slot_map.cpp ../src/CvMeterMath.cpp ../src/InputCurveStore.cpp
+//   g++ -std=c++17 -Wall -Werror -O2 -o build/test_adc_slot_map test_adc_slot_map.cpp ../src/CvMeterMath.cpp ../src/InputCurveStore.cpp
 //
 // The map cannot be read off the datasheet (not in the tree), and the FlexIO
 // reference leaves one detail open: whether a trigger that is already
