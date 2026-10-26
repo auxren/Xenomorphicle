@@ -40,6 +40,7 @@
 #include "../OC_DAC.h"
 #include "../ScopeCapture.h"
 #include "../ScopeFft.h"
+#include "../ScopeDecim.h"
 #include "../ScopeFmt.h"
 #include "../ScopeFreqLine.h"
 #include "../ScopeFreqService.h"
@@ -83,6 +84,36 @@ inline int Wrap(int i, int n) {
 }
 
 enum Field { F_CH, F_TIME, F_VOLT, F_TRIG, F_COUNT };
+
+// The spectrum view's span (the pk field) and window/averaging preset (the FFT field).
+// Span 0 is the whole 20 Hz - 20 kHz log axis; the others are linear from 0 to 0.8 of the
+// decimated Nyquist (so nothing folded over the edge is shown) after a /4, /16, /64 decimation.
+constexpr int kSpans = 4;
+constexpr int kFftModes = 7;
+// Functions, not tables: on the Teensy build the linker puts every const table in RAM1
+// data (see ScopeFmt.h on why that matters), and the compiler turns switches into tables
+// too, so these are plain comparisons.
+inline int ZoomStages(int span) { return span == 1 ? 2 : span == 2 ? 4 : span == 3 ? 6 : 0; }
+// The shown span depends on the source: 0.8 of the decimated Nyquist (ScopeFft::ZoomSpanHz),
+// 4800 / 1200 / 300 Hz for the audio jacks, 3735 / 934 / 233 Hz for the CV inputs.
+// Only the audio jacks and the CV inputs can be zoomed (the others are not fed to the decimator).
+inline bool ZoomOk(ScopeSources::Source s) {
+  const ScopeSources::Kind k = ScopeSources::KindOf(s);
+  return k == ScopeSources::KIND_AUDIO_IN || k == ScopeSources::KIND_AUDIO_OUT || k == ScopeSources::KIND_CV_IN;
+}
+inline float ZoomSpanHz(int span, ScopeSources::Source s) {
+  return span == 0 ? 0.f
+                   : (float)ScopeFft::ZoomSpanHz((double)ScopeSources::RateHz(s) / (double)(1 << ZoomStages(span)));
+}
+// Presets in order: FFT(Hann) H4 H16 BH BH4 FT REC; text at most 3 characters.
+inline ScopeFft::Window ModeWindow(int m) {
+  return m <= 2 ? ScopeFft::Window::HANN : m <= 4 ? ScopeFft::Window::BLACKMAN_HARRIS
+       : m == 5 ? ScopeFft::Window::FLATTOP : ScopeFft::Window::RECT;
+}
+inline int ModeAvg(int m) { return (m == 1 || m == 4) ? 4 : m == 2 ? 16 : 0; }
+inline const char *ModeText(int m) {
+  return m == 0 ? "FFT" : m == 1 ? "H4" : m == 2 ? "H16" : m == 3 ? "BH" : m == 4 ? "BH4" : m == 5 ? "FT" : "REC";
+}
 enum TrigMode { TM_AUTO = 0, TM_LEVEL = 1, TM_EXT = 2 };  // TM_EXT + n = TRn+1
 
 inline ADC_CHANNEL AdcChannelForSub(int sub) {
@@ -128,7 +159,7 @@ inline uint32_t LatencyCyc(Source s) {
     case KIND_AUDIO_IN:
       return (uint32_t)((uint64_t)F_CPU_ACTUAL * ScopeCapture::kAudioInLatencySamples / 48000);
     case KIND_CV_IN:
-      return (uint32_t)((uint64_t)F_CPU_ACTUAL * ScopeCapture::kCvInLatencyFrames / 37500);
+      return (uint32_t)((uint64_t)F_CPU_ACTUAL * ScopeCapture::kCvInLatencyFrames / ScopeFreqSvc::kCvFsHz);
     default: return 0;
   }
 }
@@ -144,6 +175,8 @@ struct Arena {
   ScopeRing rings[ScopeSources::kMaxTraces];
   float mv[kAnalyse], lo[kAnalyse], hi[kAnalyse];
   float fft_in[ScopeFft::kN], fft_db[ScopeFft::kN / 2 + 1];
+  float fft_avg[ScopeFft::kN / 2 + 1];  // the averaged power spectrum (averaging presets)
+  ScopeDecim::Feed zoom;                // the zoomed spans' decimated input (ScopeDecim.h)
   float acorr[kAnalyse / 2 + 4];  // EstimatePeriod scratch: lags up to n/2, plus 3
   ScopeFft::Work fft;
 };
@@ -203,6 +236,12 @@ private:
   mutable ScopeTrigger::AutoTrigger atrig_;
   mutable bool locked_ = false;
   mutable float peak_hz_ = 0.f;
+  // spectrum view state: runtime only, back to full span / plain Hann when the Scope opens
+  uint8_t span_ = 0;
+  uint8_t fftmode_ = 0;
+  mutable bool avg_valid_ = false;
+  mutable uint16_t avg_key_ = 0;
+  mutable uint32_t avg_count_ = 0;   // source sample count at the last averaging step
   mutable float last_mv_[ScopeSources::kMaxTraces] = {};
   mutable int pending_time_idx_ = -1;  // auto timebase moved: re-arm in Loop()
 
@@ -236,7 +275,7 @@ private:
   void RenderPicker() const;
   void RenderSpectrum() const;
   void DrawHeader(const char *trig_text, const char *time_text, const char *volt_text) const;
-  void DrawHeaderFft(const char *pk_text) const;
+  void DrawHeaderFft(const char *pk_text, const char *mode_text) const;
   bool FftView() const { return set_.view == 1 && !TrigIsTr(); }
 };
 
@@ -303,6 +342,14 @@ FLASHMEM void AppScope::Rearm(bool keep_frozen) {
     ScopeCapture::Disarm();
   } else {
     ScopeCapture::Arm(list_, n_, armed_time_idx_, fft ? ts : -1, ext);
+  }
+  // A frozen view keeps the zoom ring as it is (SetZoom would reset it, and nothing refills it
+  // while the capture is disarmed); only a live view starts, moves or stops the feed.
+  if (!frozen_) {
+    if (fft && span_ > 0 && ScopeAppNS::g_arena && ScopeAppNS::ZoomOk(list_[ts]))
+      ScopeCapture::SetZoom(&ScopeAppNS::g_arena->zoom, ts, ScopeAppNS::ZoomStages(span_));
+    else
+      ScopeCapture::SetZoom(nullptr, -1, 0);
   }
   atrig_.Reset();
   locked_ = false;
@@ -390,6 +437,9 @@ FLASHMEM void AppScope::HandleAppEvent(OC::AppEvent event) {
   switch (event) {
     case OC::APP_EVENT_RESUME:
       ScopeAppNS::g_open = true;
+      span_ = 0;       // the spectrum's zoom and window are not saved: plain every time
+      fftmode_ = 0;
+      avg_valid_ = false;
       Rearm();
       break;
     case OC::APP_EVENT_SUSPEND:
@@ -416,6 +466,17 @@ FLASHMEM void AppScope::Loop() {
 
 FLASHMEM void AppScope::TurnField(int v) {
   using namespace ScopeAppNS;
+  if (FftView() && focus_ == F_TIME) {            // pk: the span
+    span_ = (uint8_t)Wrap(span_ + v, kSpans);
+    avg_valid_ = false;
+    Rearm();
+    return;
+  }
+  if (FftView() && focus_ == F_VOLT) {            // FFT: window / averaging preset
+    fftmode_ = (uint8_t)Wrap(fftmode_ + v, kFftModes);
+    avg_valid_ = false;
+    return;
+  }
   switch (focus_) {
     case F_CH:
       set_.quick_idx = (uint8_t)ScopeAppNS::Wrap(set_.quick_idx + v, ScopeSources::QuickCount());
@@ -458,6 +519,8 @@ FLASHMEM void AppScope::TurnField(int v) {
 
 FLASHMEM void AppScope::PushField() {
   using namespace ScopeAppNS;
+  if (FftView() && focus_ == F_TIME) { span_ = 0; avg_valid_ = false; Rearm(); return; }
+  if (FftView() && focus_ == F_VOLT) { fftmode_ = 0; avg_valid_ = false; return; }
   switch (focus_) {
     case F_CH:
       if (ScopeSources::QuickIsCustom(set_.quick_idx)) {
@@ -526,9 +589,8 @@ FLASHMEM void AppScope::HandleEncoderEvent(const UI::Event &event) {
     return;
   }
   if (event.control == OC::CONTROL_ENCODER_L) {
-    // the spectrum has no time, volts or trigger field: only the source is selectable
-    focus_ = FftView() ? (uint8_t)ScopeAppNS::F_CH
-                       : (uint8_t)ScopeAppNS::Wrap(focus_ + event.value, ScopeAppNS::F_COUNT);
+    // the spectrum has three live fields: source, pk (span), FFT (window/averaging); no trigger field
+    focus_ = (uint8_t)ScopeAppNS::Wrap(focus_ + event.value, FftView() ? ScopeAppNS::F_TRIG : ScopeAppNS::F_COUNT);
   } else if (event.control == OC::CONTROL_ENCODER_R) {
     TurnField(event.value);
   }
@@ -579,23 +641,26 @@ FLASHMEM void AppScope::DrawHeader(const char *trig_text, const char *time_text,
 
 // The spectrum view's top line, in fixed places so a change in the peak's digits
 // moves nothing: the channel at the left (at most 8 columns), the peak reading
-// right-aligned in a 8-column field ending at column 16, FFT at columns 18-20.
-// Only the channel field is live here (time and volts do not apply to the
-// spectrum), so it is the only one that can be selected.
-FLASHMEM void AppScope::DrawHeaderFft(const char *pk_text) const {
+// right-aligned in an 8-column field ending at column 16 (the span field), and the
+// window/averaging text right-aligned in columns 18-20. The three are the live
+// fields here, in that order; the selected one is inverted.
+FLASHMEM void AppScope::DrawHeaderFft(const char *pk_text, const char *mode_text) const {
   using namespace ScopeAppNS;
   char ch[10];
   snprintf(ch, sizeof(ch), "%s", ScopeSources::QuickLabel(set_.quick_idx));
   if (strlen(ch) > 8) ch[8] = 0;
   graphics.setPrintPos(1, 1);
   graphics.print(ch);
-  if (!picker_) graphics.invertRect(0, 0, (int)strlen(ch) * 6 + 1, 9);
+  if (focus_ == F_CH && !picker_) graphics.invertRect(0, 0, (int)strlen(ch) * 6 + 1, 9);
   int len = (int)strlen(pk_text);
   if (len > 8) len = 8;
   graphics.setPrintPos(1 + (17 - len) * 6, 1);
   graphics.print(pk_text);
-  graphics.setPrintPos(1 + 18 * 6, 1);
-  graphics.print("FFT");
+  if (focus_ == F_TIME && !picker_) graphics.invertRect((17 - len) * 6, 0, len * 6 + 1, 9);
+  const int ml = (int)strlen(mode_text);
+  graphics.setPrintPos(1 + (21 - ml) * 6, 1);
+  graphics.print(mode_text);
+  if (focus_ == F_VOLT && !picker_) graphics.invertRect((21 - ml) * 6, 0, ml * 6 + 1, 9);
   if (frozen_) {
     graphics.setPrintPos(128 - 6 * 3, kTop + 1);
     graphics.print("FRZ");
@@ -628,31 +693,90 @@ FLASHMEM void AppScope::RenderSpectrum() const {
   Arena &ar = *g_arena;  // Render() checked it
   const int ts = TrigSlot();
   char pk[12] = "pk --";
+  char label[12] = "";
+  int stages = ZoomStages(span_);
+  const int mode_avg = ModeAvg(fftmode_);
+  const ScopeFft::Window mode_win = ModeWindow(fftmode_);
   if (ts >= 0) {
     const ScopeRing &r = ScopeCapture::g_rings[ts];
     const uint32_t c = r.Committed();
     const Source s = list_[ts];
     const float fs = (KindOf(s) == KIND_CV_IN || KindOf(s) == KIND_CV_OUT) ? kCvFsMv : kAudioFsMv;
-    const float rate = RateHz(s);
-    if (c >= (uint32_t)ScopeFft::kN && r.Decim() == 1) {
+    float rate = RateHz(s);
+    bool have = false;
+    uint32_t count = c;   // fresh-sample counter of whatever feeds this FFT
+    if (stages > 0 && !ZoomOk(s)) {
+      snprintf(label, sizeof(label), "no zoom");   // CV out and TR are not fed to the decimator
+      stages = 0;
+    } else if (stages > 0) {
+      // the decimated stream, once it has filled the FFT (85 ms at /4, 1.4 s at /64). A frozen
+      // view keeps showing the ring it froze with.
+      rate /= (float)(1 << stages);
+      count = ar.zoom.Count();
+      if (ar.zoom.stages() == stages && ar.zoom.Full())
+        have = ar.zoom.Read([&](int i, int16_t v) { ar.fft_in[i] = ToMv(s, v) / fs; });
+      ScopeFmt::SpanText(label, sizeof(label), ZoomSpanHz(span_, s));
+    } else if (c >= (uint32_t)ScopeFft::kN && r.Decim() == 1) {
       for (int i = 0; i < ScopeFft::kN; ++i)
         ar.fft_in[i] = ToMv(s, r.At(c - ScopeFft::kN + i).lo) / fs;
-      ScopeFft::MagnitudeDb(ar.fft_in, ar.fft_db, ar.fft);
-      peak_hz_ = ScopeFft::PeakHz(ar.fft_db, rate);
+      have = true;
+    }
+    if (have) {
+      if (mode_avg == 0) {
+        ScopeFft::MagnitudeDb(ar.fft_in, ar.fft_db, ar.fft, mode_win);
+        avg_valid_ = false;
+      } else {
+        // power averaged (exponentially, weight 1/avg), then to dB. It restarts when the span,
+        // preset or source changes, advances once per half frame of FRESH samples (not per
+        // redraw: at /64 the ring takes 0.7 s to bring in half a frame), and holds still when frozen.
+        const uint16_t key = (uint16_t)(span_ | (fftmode_ << 2) | ((uint16_t)s << 5));
+        if (!avg_valid_ || avg_key_ != key) {
+          ScopeFft::PowerSpectrum(ar.fft_in, ar.fft_avg, ar.fft, mode_win);
+          avg_valid_ = true;
+          avg_key_ = key;
+          avg_count_ = count;
+        } else if (!frozen_ && ScopeFft::AvgDue(count, avg_count_)) {
+          ScopeFft::PowerSpectrum(ar.fft_in, ar.fft_db, ar.fft, mode_win);   // fft_db holds power for now
+          const float w = 1.f / (float)mode_avg;
+          for (int k = 0; k <= ScopeFft::kN / 2; ++k) ar.fft_avg[k] += (ar.fft_db[k] - ar.fft_avg[k]) * w;
+          avg_count_ = count;
+        }
+        ScopeFft::PowerToDb(ar.fft_avg, ar.fft_db);
+      }
       uint8_t rows[kCols];
-      ScopeFft::Columns(ar.fft_db, rate, kPlotH, rows);
+      if (stages == 0) {
+        peak_hz_ = ScopeFft::PeakHz(ar.fft_db, rate);
+        ScopeFft::Columns(ar.fft_db, rate, kPlotH, rows);
+      } else {
+        const float df = rate / ScopeFft::kN;
+        const float span = ZoomSpanHz(span_, s);
+        // from 20 Hz (or three bins where finer) to the edge of the shown span
+        peak_hz_ = ScopeFft::PeakHz(ar.fft_db, rate, nullptr, ScopeFft::PeakFloorHz(df), span);
+        ScopeFft::ColumnsLinear(ar.fft_db, rate, span, kPlotH, rows);
+      }
       for (int x = 0; x < kCols; ++x)
         if (rows[x]) graphics.drawVLine(x, kPlotBottom - rows[x], rows[x]);
-      const float grid[3] = {100.f, 1000.f, 10000.f};
-      for (float g : grid) {
-        if (g >= rate / 2) continue;
-        graphics.drawVLinePattern(ScopeFft::ColumnForHz(g, rate), kTop, kPlotH, 0x55);
+      if (stages == 0) {
+        const float grid[3] = {100.f, 1000.f, 10000.f};
+        for (float g : grid) {
+          if (g >= rate / 2) continue;
+          graphics.drawVLinePattern(ScopeFft::ColumnForHz(g, rate), kTop, kPlotH, 0x55);
+        }
+      } else {
+        const float span = ZoomSpanHz(span_, s);
+        for (int q = 1; q < 4; ++q)   // quarter marks of the span
+          graphics.drawVLinePattern(ScopeFft::ColumnForHzLinear(span * q / 4.f, span), kTop, kPlotH, 0x55);
       }
-      ScopeFmt::PeakText(pk, sizeof(pk), peak_hz_);
+      ScopeFmt::PeakText(pk, sizeof(pk), peak_hz_, span_ == 3 && stages > 0);
     }
   }
-  // spectrum top line: channel, peak, and the analysed source
-  DrawHeaderFft(pk);
+  if (label[0]) {   // the zoomed span (or why there is none), top left of the plot, also while it fills
+    graphics.clearRect(0, kTop, (int)strlen(label) * 6 + 2, 9);   // legible over a tall bar
+    graphics.setPrintPos(1, kTop + 1);
+    graphics.print(label);
+  }
+  // spectrum top line: channel, peak (span field), window/averaging
+  DrawHeaderFft(pk, ModeText(fftmode_));
 }
 
 FLASHMEM void AppScope::DrawFreqLine() const {
@@ -662,7 +786,7 @@ FLASHMEM void AppScope::DrawFreqLine() const {
     ScopeFreqLine::FormatNa(text, sizeof(text));
   } else {
     const int src = ScopeFreqSvc::ActiveSource();
-    const bool unverified = !ScopeFreqSvc::kCvRateVerified && KindOf((Source)src) == KIND_CV_IN;
+    const bool unverified = ScopeFreqSvc::RateUnverified((Source)src);
     ScopeFreqLine::FormatLine(ScopeFreqSvc::CurrentReading(), ScopeFreqSvc::ClockCalibrated(), text,
                               sizeof(text), unverified);
   }

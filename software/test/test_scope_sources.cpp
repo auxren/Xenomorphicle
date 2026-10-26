@@ -5,6 +5,8 @@
 #include <initializer_list>
 #include <cstring>
 
+#include <cmath>
+#include "../src/ScopeFreqService.h"
 #include "../src/ScopeSources.h"
 #include "../src/ScopeSettings.h"
 
@@ -45,7 +47,9 @@ static void test_source_count_and_kinds() {
   CHECK(IsAc(SRC_IN_R));
   CHECK(!IsAc(SRC_OUT_L));
   CHECK(!IsAc(SRC_CV_IN1));
-  CHECK(RateHz(SRC_CV_IN1) == 37500.f);
+  // the CV frame rate is the verified 37,350.598 Hz (ScopeFreqService.h kCvFsHz), not the nominal 37.5 kHz
+  CHECK(fabs(RateHz(SRC_CV_IN1) - 37350.598) < 0.01);
+  for (int s = SRC_CV_IN1; s <= SRC_CV_IN8; ++s) CHECK(RateHz((Source)s) == (float)ScopeFreqSvc::kCvFsHz);
   CHECK(RateHz(SRC_IN_R) == 48000.f);
   CHECK(RateHz(SRC_TR1) == 16666.f);
   char buf[8];

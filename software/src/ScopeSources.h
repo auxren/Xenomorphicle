@@ -10,7 +10,7 @@
 // entry is "Custom", which means "use the stored custom mask" (the picker).
 //
 // Rates are what each source is captured at (hardware/xenomorpher/README.md):
-// audio 48 kHz through the codec; CV in 37.5 kHz (MCP33131D at 300 kHz
+// audio 48 kHz through the codec; CV in 37,350.6 Hz (kCvFsHz, ScopeFreqService.h; MCP33131D at 300 kHz
 // through the 8-way mux); CV out and TR sampled in the 16.666 kHz core ISR.
 // Only the audio INPUTS are AC-coupled (1 uF / 100 k, ~1.6 Hz).
 // ---------------------------------------------------------------------------

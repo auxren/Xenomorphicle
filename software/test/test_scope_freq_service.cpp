@@ -121,7 +121,13 @@ static void test_cv_rate_formula() {
   CHECK(fabs((kCvFsHz / 37500.0 - 1.0) * 1e6 + 3984.0) < 1.0);
   CHECK(MakeConfig(Profile::CV, Gate::FAST, 0).fs == kCvFsHz);
   CHECK(MakeConfig(Profile::CV_LOW, Gate::FAST, 0).fs == kCvFsHz);
-  CHECK(!kCvRateVerified);   // until the bench procedure in the spec has been run
+  CHECK(kCvRateVerified);    // measured on the hardware 2026-10-25/26: -2 ppm against the audio counter
+  // the unverified path stays alive for a future change of the constant
+  for (int src = SRC_IN_L; src <= SRC_TR4; ++src) {
+    CHECK(RateUnverified((Source)src, false) == (src >= SRC_CV_IN1 && src <= SRC_CV_IN8));
+    CHECK(!RateUnverified((Source)src, true));
+    CHECK(!RateUnverified((Source)src));        // as shipped: nothing is unverified
+  }
 }
 
 static void test_audio_fast_gate() {

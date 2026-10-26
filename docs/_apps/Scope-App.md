@@ -39,7 +39,17 @@ Auto mode locks to the **whole repeat** of a complex wave, not to whichever wigg
 
 With several traces, **Y** switches between **overlaid** (one shared volt scale, each trace in its own line style with its number at the right end) and **stacked** (one lane each, each scaled on its own, the jack number at the left and the live voltage at the right; TR jacks draw as on/off lanes).
 
-**X** switches to the **spectrum**: frequency runs left to right on a log scale from 20 Hz to 20 kHz, with faint lines at 100 Hz, 1 kHz and 10 kHz, and the top line shows the strongest peak (`pk 550Hz`). A ring modulator's sum and difference tones show up as pairs either side of the carrier. The spectrum analyses the trigger trace; a TR jack has none. The top line there has fixed places: the channel at the left, the peak reading right-aligned just left of `FFT` (so a change in its digits moves nothing), and only the channel field can be selected. The average of the signal (any offset) is removed before the analysis, for every source.
+**X** switches to the **spectrum**: by default frequency runs left to right on a log scale from 20 Hz to 20 kHz, with faint lines at 100 Hz, 1 kHz and 10 kHz, and the top line shows the strongest peak (`pk 550Hz`). A ring modulator's sum and difference tones show up as pairs either side of the carrier. The spectrum analyses the trigger trace; a TR jack has none. Any offset (the average of the signal) is removed before the analysis, for every source, and between bins the low end is drawn as a slope, not as flat blocks.
+
+The spectrum's top line has three live fields, in this order (encL moves along them, encR changes the one selected, encR push puts it back to its default):
+
+| Field | Does |
+|---|---|
+| **source** (left) | the channel, as in the scope view |
+| **pk** (the peak reading) | the **span**: full (20 Hz - 20 kHz, log), then three zoomed spans on a **linear** axis from 0 Hz, each 0.8 of the decimated Nyquist so that nothing above its edge is drawn: for the **audio jacks 0-4.8k, 0-1.2k, 0-300** (bins of 11.7, 2.9 and 0.73 Hz), for the **CV inputs 0-3.7k, 0-934, 0-233** (their frame rate is 37,350.6 Hz). The span shows at the top left of the plot with quarter marks. A zoomed span needs the signal for a moment before it appears (85 ms, 340 ms, 1.4 s). The peak reading uses the zoomed resolution (the narrowest span shows one decimal: `pk 98.4`) and looks from 20 Hz (or three bins, where finer) up to the edge of the span, so 50 Hz hum is read. Anything above the span's edge is filtered out, not folded in. CV out and TR cannot be zoomed: the top left says `no zoom`. Freezing a zoomed spectrum (A) keeps what is on screen. |
+| **FFT** (right) | the window and averaging preset: **FFT** = Hann, no averaging (the default); **H4** and **H16** = Hann, averaged over 4 or 16 frames; **BH** and **BH4** = Blackman-Harris (the lowest skirts, a wider peak), plain or averaged over 4; **FT** = flat-top (reads a tone's level most exactly); **REC** = rectangular (sharpest peak, leaks most). Averaging is in power, then to dB; it restarts when the span, preset or source changes and takes a step for every half frame of new samples (about every 11 ms in the full view, 0.7 s on the narrowest zoom), not for every redraw. |
+
+The peak reading sits right-aligned in its field and the preset text right-aligned at the edge, so a change in digits moves nothing. The span and preset are **not saved**: the Scope opens on the full span and plain Hann every time.
 
 ### The frequency line
 
@@ -56,7 +66,7 @@ The number of decimals follows what the counter can actually tell, so a low tone
 | **`?`** | not confirmed yet: the last two 0.1 s counts have not agreed. Wait a moment, or the signal is moving. |
 | **`!`** | the input is not a clean repeating tone (noise, hum, several tones at once). The number is the best guess, not a measurement. |
 | **`*`** | steady, but the Xeno's crystal has not been calibrated yet, so the absolute value is only as good as the crystal (typically a few cents at most). |
-| **`#`** | a CV-input reading whose sample rate is still unverified on the hardware. |
+| **`#`** | a reading whose source's sample rate is not confirmed on the hardware. Not shown at present: the CV inputs' rate was checked against the audio inputs on 2026-10-25/26 and agrees to within 5 ppm. |
 
 The line follows the trigger trace's source: the jack whose trace the Scope is triggering on. Instead of a number you may see NO SIGNAL, TOO QUIET (the tone is too small to count), SIGNAL LOST, TOO LOW or TOO HIGH (the range is 10 Hz to 8 kHz, specified 20 Hz to 5 kHz). Below 16 Hz it shows plain Hz, no note: an LFO on a CV input is counted down to 0.5 Hz (the reading then takes a few seconds). It keeps counting when the trace is frozen. The console commands that read it and set the crystal correction are in [the bench console](bench-console).
 

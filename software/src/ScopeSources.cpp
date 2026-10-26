@@ -7,6 +7,7 @@
 #endif
 
 #include "ScopeSources.h"
+#include "ScopeFreqService.h"   // kCvFsHz: the one place the CV frame rate is written down
 
 #include <stdio.h>
 
@@ -69,7 +70,7 @@ SCOPE_CODE float RateHz(Source s) {
   switch (KindOf(s)) {
     case KIND_AUDIO_IN:
     case KIND_AUDIO_OUT: return 48000.f;
-    case KIND_CV_IN: return 37500.f;
+    case KIND_CV_IN: return (float)ScopeFreqSvc::kCvFsHz;   // 37,350.598 Hz, verified on the hardware
     default: return 16666.f;
   }
 }

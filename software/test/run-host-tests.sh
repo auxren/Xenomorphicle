@@ -47,7 +47,7 @@ suite() {
 # files below for a float conversion in a format string; the second is the
 # nofloat_printf.h shim on the formatter suites (snprintf aborts on one).
 float_guard() {
-  local files="../src/ScopeFmt.h ../src/ScopeFreq.h ../src/ScopeFreqLine.cpp ../src/ScopeFreqLine.h \
+  local files="../src/ScopeFmt.h ../src/ScopeDecim.h ../src/ScopeFreq.h ../src/ScopeFreqLine.cpp ../src/ScopeFreqLine.h \
     ../src/ScopeFreqService.cpp ../src/ScopeFreqConsole.cpp ../src/ScopeRange.cpp ../src/ScopeSources.cpp \
     ../src/ScopeSettings.cpp ../src/ClockStats.h ../src/ClockStats.cpp ../src/ScopeCapture.cpp ../src/ScopeFft.cpp ../src/ScopeTrigger.cpp ../src/apps/ScopeApp.h"
   local bad
@@ -100,6 +100,7 @@ suite test_scope_ring
 suite test_scope_range              ../src/ScopeRange.cpp
 suite test_scope_trigger            ../src/ScopeTrigger.cpp
 suite test_scope_fft                ../src/ScopeFft.cpp
+suite test_scope_decim            -pthread ../src/ScopeFft.cpp
 suite test_scope_freq
 suite test_scope_fmt
 suite test_scope_freq_line          -include host_stubs/nofloat_printf.h ../src/ScopeFreqLine.cpp

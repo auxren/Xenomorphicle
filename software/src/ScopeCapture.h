@@ -19,6 +19,7 @@
 
 #include <Arduino.h>
 
+#include "ScopeDecim.h"
 #include "ScopeFreqService.h"
 #include "ScopeRing.h"
 #include "ScopeSources.h"
@@ -42,6 +43,10 @@ extern volatile int8_t g_audio_slot[4];  // tap: 0 in L, 1 in R, 2 out L, 3 out 
 extern volatile int8_t g_cvin_slot[8];
 extern volatile int8_t g_cvout_slot[8];
 extern volatile int8_t g_tr_slot[4];
+// The spectrum zoom's decimating feed (ScopeDecim.h), owned by the caller like the rings
+// (it lives in the Scope's arena); fed from the slot named by g_zoom_slot, -1 when off.
+extern ScopeDecim::Feed *g_zoom;
+extern volatile int8_t g_zoom_slot;
 
 // Loop context. Binds list[0..n) to slots 0..n-1 with each ring's decimation
 // for time_idx; slot fft_slot (or -1) is captured undecimated for the FFT.
@@ -58,6 +63,10 @@ int SlotCount();
 // runs with the arena missing or the Scope frozen. Takes care of the CV frame
 // hook, which both the rings and the counter share.
 void SelectFreq(int src);
+// Loop context. Turns the zoom feed on for ring slot `slot` with 2^stages decimation, or
+// off (slot < 0 or stages == 0). Resets the feed whenever it is (re)started. Arm()/Disarm()
+// switch it off with everything else, so call this after Arm().
+void SetZoom(ScopeDecim::Feed *feed, int slot, int stages);
 
 inline void OnAudio(int tap, const int16_t *data, int n) {
   ScopeFreqSvc::OnAudio(tap, data, n);  // one load and a compare when nothing is counted
@@ -65,6 +74,7 @@ inline void OnAudio(int tap, const int16_t *data, int n) {
   if (s < 0) return;
   ScopeRing &r = g_rings[s];
   for (int i = 0; i < n; ++i) r.Push(data[i]);
+  if (s == g_zoom_slot) g_zoom->Push(data, n);   // the spectrum zoom (a load and a compare when off)
   r.commit_cyc = ARM_DWT_CYCCNT;
 }
 

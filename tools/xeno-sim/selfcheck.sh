@@ -2178,6 +2178,22 @@ sw_run "the measurement line never touches the plot (five views)" \
   --test-app-switch freq-layout
 sw_run "the spectrum header does not move when the peak digits change; only the source is selectable" \
   --test-app-switch freq-fft-header
+sw_run "the spectrum zoom: three spans, the tone's column and peak reading, the span label" \
+  --test-app-switch freq-fft-zoom
+sw_run "the spectrum zoom on the audio jacks: the round spans, tones near the top edge" \
+  --test-app-switch freq-fft-zoom-audio
+sw_run "freezing a zoomed spectrum keeps its peak reading and plot" \
+  --test-app-switch freq-fft-freeze
+sw_run "a zoom on a CV out or TR says no zoom" \
+  --test-app-switch freq-fft-nozoom
+sw_run "encR push resets span and preset; reopening the Scope does too" \
+  --test-app-switch freq-fft-resets
+sw_run "averaging restarts on a source change" \
+  --test-app-switch freq-fft-avgsource
+sw_run "the spectrum windows and averaging presets; averaging calms the columns" \
+  --test-app-switch freq-fft-window
+sw_run "the spectrum's low band is a slope, not blocks" \
+  --test-app-switch freq-fft-lowband
 sw_run "saved Scope settings: the 16- and 3-byte layouts restore, the clock round-trips" \
   --test-app-switch freq-settings
 

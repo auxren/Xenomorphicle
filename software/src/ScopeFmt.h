@@ -73,16 +73,45 @@ inline int Fixed(char *out, size_t n, double v, int decimals, bool force_sign = 
 // The spectrum peak for the Scope's header: "pk 79Hz", "pk 808Hz", "pk 1.1k",
 // "pk 12.3k". At most 8 characters (the field the header gives it). Below 999.5 Hz
 // whole hertz, from there kilohertz with one decimal.
-inline int PeakText(char *out, size_t n, double hz) {
+// fine (the 0-300 Hz zoom, 0.73 Hz bins): one decimal and no unit below 1 kHz ("pk 98.4"),
+// since "pk 98.4Hz" does not fit the field.
+inline int PeakText(char *out, size_t n, double hz, bool fine = false) {
   char num[24];
   int k = 0;
   char t[40];
   t[k++] = 'p'; t[k++] = 'k'; t[k++] = ' ';
   if (!(hz >= 0)) hz = 0;
-  if (hz < 999.5) {
+  if (fine && hz < 999.95) {
+    Fixed(num, sizeof(num), hz, 1);
+    for (const char *c = num; *c; ++c) t[k++] = *c;
+  } else if (hz < 999.5) {
     Fixed(num, sizeof(num), hz, 0);
     for (const char *c = num; *c; ++c) t[k++] = *c;
     t[k++] = 'H'; t[k++] = 'z';
+  } else {
+    Fixed(num, sizeof(num), hz / 1000.0, 1);
+    for (const char *c = num; *c; ++c) t[k++] = *c;
+    t[k++] = 'k';
+  }
+  t[k] = 0;
+  if (out && n) {
+    size_t c = (size_t)k < n - 1 ? (size_t)k : n - 1;
+    for (size_t i = 0; i < c; ++i) out[i] = t[i];
+    out[c] = 0;
+  }
+  return k;
+}
+
+// The zoomed span's label: "0-4.8k", "0-3.7k", "0-934", "0-233". At most 8 characters.
+inline int SpanText(char *out, size_t n, double hz) {
+  char num[24];
+  char t[32];
+  int k = 0;
+  t[k++] = '0'; t[k++] = '-';
+  if (!(hz >= 0)) hz = 0;
+  if (hz < 999.5) {
+    Fixed(num, sizeof(num), hz, 0);
+    for (const char *c = num; *c; ++c) t[k++] = *c;
   } else {
     Fixed(num, sizeof(num), hz / 1000.0, 1);
     for (const char *c = num; *c; ++c) t[k++] = *c;

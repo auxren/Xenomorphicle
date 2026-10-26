@@ -19,6 +19,8 @@ volatile int8_t g_audio_slot[4] = {-1, -1, -1, -1};
 volatile int8_t g_cvin_slot[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
 volatile int8_t g_cvout_slot[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
 volatile int8_t g_tr_slot[4] = {-1, -1, -1, -1};
+ScopeDecim::Feed *g_zoom = nullptr;
+volatile int8_t g_zoom_slot = -1;
 
 namespace {
 
@@ -48,6 +50,7 @@ void Unmap() {
   for (auto &v : g_cvin_slot) v = -1;
   for (auto &v : g_cvout_slot) v = -1;
   for (auto &v : g_tr_slot) v = -1;
+  g_zoom_slot = -1;
 }
 
 // The one ADC frame hook serves the CV rings and the counter's CV input.
@@ -115,6 +118,19 @@ FLASHMEM void Disarm() {
 
 int SlotCount() { return slot_count; }
 
+FLASHMEM void SetZoom(ScopeDecim::Feed *feed, int slot, int stages) {
+  if (!feed || slot < 0 || stages <= 0 || !g_rings) {
+    g_zoom_slot = -1;
+    return;
+  }
+  __disable_irq();
+  g_zoom_slot = -1;           // nothing feeds it while it resets
+  feed->Reset(stages);
+  g_zoom = feed;
+  g_zoom_slot = (int8_t)slot;
+  __enable_irq();
+}
+
 FLASHMEM void SelectFreq(int src) {
   ScopeFreqSvc::Select(src);
   UpdateCvHook();
@@ -131,7 +147,9 @@ void OnCvFrame(const int16_t in[8]) {
     const int s = g_cvin_slot[cv];
     if (s < 0) continue;
     const int32_t v = in[j] < 0 ? 0 : in[j];
-    g_rings[s].Push((int16_t)((v * 2) >> (OC::ADC::kAdcScanResolution - OC::ADC::kAdcResolution)));
+    const int16_t sample = (int16_t)((v * 2) >> (OC::ADC::kAdcScanResolution - OC::ADC::kAdcResolution));
+    g_rings[s].Push(sample);
+    if (s == g_zoom_slot) g_zoom->Push(sample);
     g_rings[s].commit_cyc = now;
   }
 }

@@ -444,8 +444,7 @@ FLASHMEM __attribute__((optimize("no-jump-tables"))) static bool FreqConsoleByte
       const int src = ScopeFreqSvc::ActiveSource();
       char lab[8] = "-";
       if (src >= 0) ScopeSources::Label((ScopeSources::Source)src, lab, sizeof(lab));
-      const bool rate_ok = src < 0 || ScopeFreqSvc::kCvRateVerified ||
-                           ScopeSources::KindOf((ScopeSources::Source)src) != ScopeSources::KIND_CV_IN;
+      const bool rate_ok = src < 0 || !ScopeFreqSvc::RateUnverified((ScopeSources::Source)src);
       ScopeFreqLine::FormatSfreq(line, sizeof(line), lab, src >= 0 ? &ScopeFreqSvc::CurrentReading() : nullptr,
                                  ScopeFreqSvc::ClockCalibrated(), rate_ok);
       Serial.println(line);

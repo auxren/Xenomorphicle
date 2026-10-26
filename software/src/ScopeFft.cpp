@@ -23,8 +23,37 @@ void Tables(Work &w) {
     w.cos_t[i] = (float)cos(2 * kPi * i / kN);
     w.sin_t[i] = (float)sin(2 * kPi * i / kN);
   }
-  for (int i = 0; i < kN; ++i) w.win[i] = (float)(0.5 - 0.5 * cos(2 * kPi * i / kN));  // periodic Hann
   w.tables = true;
+}
+
+// Periodic windows (a sum of cosines); Hann is the formula the view always used.
+void MakeWindow(Work &w, Window kind) {
+  if (w.win_kind == (uint8_t)kind) return;
+  double sum = 0;
+  for (int i = 0; i < kN; ++i) {
+    const double x = 2 * kPi * i / kN;
+    double v;
+    switch (kind) {
+      case Window::BLACKMAN_HARRIS:
+        v = 0.35875 - 0.48829 * cos(x) + 0.14128 * cos(2 * x) - 0.01168 * cos(3 * x);
+        break;
+      case Window::FLATTOP:
+        v = 0.21557895 - 0.41663158 * cos(x) + 0.277263158 * cos(2 * x) - 0.083578947 * cos(3 * x) +
+            0.006947368 * cos(4 * x);
+        break;
+      case Window::RECT:
+        v = 1.0;
+        break;
+      default:
+        v = 0.5 - 0.5 * cos(x);
+        break;
+    }
+    w.win[i] = (float)v;
+    sum += v;
+  }
+  // Hann keeps its exact constant (4/N); the others are normalised to the same meaning.
+  w.win_scale = kind == Window::HANN ? 4.f / kN : (float)(2.0 / sum);
+  w.win_kind = (uint8_t)kind;
 }
 
 float TopHz(float rate_hz) {
@@ -40,8 +69,11 @@ float HzAt(float c, float rate_hz) {
 
 }  // namespace
 
-SCOPE_CODE void MagnitudeDb(const float *in, float *db_out, Work &w) {
+namespace {
+// Mean removed, windowed, transformed: the result is left in w.re / w.im.
+void Transform(const float *in, Work &w, Window win) {
   Tables(w);
+  MakeWindow(w, win);
   float *const re_ = w.re, *const im_ = w.im, *const cos_ = w.cos_t, *const sin_ = w.sin_t;
   const float *const win_ = w.win;
   // The mean comes off before the window, for every source: any offset (a codec's,
@@ -73,8 +105,14 @@ SCOPE_CODE void MagnitudeDb(const float *in, float *db_out, Work &w) {
       }
     }
   }
-  // Hann coherent gain 0.5, one-sided: a sine of amplitude A peaks at A*N/4.
-  const float scale = 4.f / kN;
+}
+}  // namespace
+
+SCOPE_CODE void MagnitudeDb(const float *in, float *db_out, Work &w, Window win) {
+  Transform(in, w, win);
+  const float *const re_ = w.re, *const im_ = w.im;
+  // a sine of amplitude A peaks at A*N/4 with Hann (coherent gain 0.5, one-sided)
+  const float scale = w.win_scale;
   for (int k = 0; k <= kN / 2; ++k) {
     const float m = sqrtf(re_[k] * re_[k] + im_[k] * im_[k]) * scale;
     const float d = m > 0.f ? 20.f * log10f(m) : kFloorDb;
@@ -82,12 +120,31 @@ SCOPE_CODE void MagnitudeDb(const float *in, float *db_out, Work &w) {
   }
 }
 
-SCOPE_CODE float PeakHz(const float *db, float rate_hz, float *peak_db) {
+SCOPE_CODE void PowerSpectrum(const float *in, float *pow_out, Work &w, Window win) {
+  Transform(in, w, win);
+  const float scale = w.win_scale;
+  for (int k = 0; k <= kN / 2; ++k) {
+    const float m = sqrtf(w.re[k] * w.re[k] + w.im[k] * w.im[k]) * scale;
+    pow_out[k] = m * m;
+  }
+}
+
+SCOPE_CODE void PowerToDb(const float *pow, float *db_out) {
+  for (int k = 0; k <= kN / 2; ++k) {
+    const float d = pow[k] > 0.f ? 10.f * log10f(pow[k]) : kFloorDb;
+    db_out[k] = d < kFloorDb ? kFloorDb : d;
+  }
+}
+
+SCOPE_CODE float PeakHz(const float *db, float rate_hz, float *peak_db, float min_hz, float max_hz) {
   const float df = rate_hz / kN;
-  int k0 = (int)ceilf(20.f / df);
+  int k0 = (int)ceilf(min_hz / df);
   if (k0 < 1) k0 = 1;
+  int k1 = (int)floorf(max_hz / df);
+  if (k1 > kN / 2 - 1) k1 = kN / 2 - 1;
+  if (k1 < k0) k1 = k0;
   int best = k0;
-  for (int k = k0; k < kN / 2; ++k)
+  for (int k = k0; k <= k1; ++k)
     if (db[k] > db[best]) best = k;
   const float a = db[best - 1], b = db[best], c = db[best + 1];
   const float den = a - 2 * b + c;
@@ -105,6 +162,25 @@ SCOPE_CODE int ColumnForHz(float hz, float rate_hz) {
   return c < 0 ? 0 : c > 127 ? 127 : c;
 }
 
+namespace {
+// Level at fractional bin position pos: linear in dB between the bins around it.
+float DbAt(const float *db, float pos) {
+  if (pos < 0.f) pos = 0.f;
+  if (pos > (float)(kN / 2)) pos = (float)(kN / 2);
+  int k = (int)pos;
+  if (k > kN / 2 - 1) k = kN / 2 - 1;
+  const float t = pos - (float)k;
+  return db[k] * (1.f - t) + db[k + 1] * t;
+}
+
+uint8_t RowFor(float m, int plot_h) {
+  float r = (m - kRowBottomDb) / (kRowTopDb - kRowBottomDb) * plot_h;
+  if (r < 0) r = 0;
+  if (r > plot_h) r = (float)plot_h;
+  return (uint8_t)lroundf(r);
+}
+}  // namespace
+
 SCOPE_CODE void Columns(const float *db, float rate_hz, int plot_h, uint8_t rows_out[128]) {
   const float df = rate_hz / kN;
   for (int c = 0; c < 128; ++c) {
@@ -117,15 +193,32 @@ SCOPE_CODE void Columns(const float *db, float rate_hz, int plot_h, uint8_t rows
       m = db[k0];
       for (int k = k0 + 1; k <= k1; ++k) if (db[k] > m) m = db[k];
     } else {
-      int k = (int)lroundf(HzAt((float)c, rate_hz) / df);
-      if (k < 1) k = 1;
-      if (k > kN / 2) k = kN / 2;
-      m = db[k];
+      m = DbAt(db, HzAt((float)c, rate_hz) / df);   // no bin in this column: interpolate
     }
-    float r = (m - kRowBottomDb) / (kRowTopDb - kRowBottomDb) * plot_h;
-    if (r < 0) r = 0;
-    if (r > plot_h) r = (float)plot_h;
-    rows_out[c] = (uint8_t)lroundf(r);
+    rows_out[c] = RowFor(m, plot_h);
+  }
+}
+
+SCOPE_CODE int ColumnForHzLinear(float hz, float span_hz) {
+  const int c = (int)lroundf(hz / span_hz * 127.f);
+  return c < 0 ? 0 : c > 127 ? 127 : c;
+}
+
+SCOPE_CODE void ColumnsLinear(const float *db, float rate_hz, float span_hz, int plot_h, uint8_t rows_out[128]) {
+  const float df = rate_hz / kN;
+  for (int c = 0; c < 128; ++c) {
+    const float f0 = span_hz * (c - 0.5f) / 127.f, f1 = span_hz * (c + 0.5f) / 127.f;
+    int k0 = (int)ceilf(f0 / df), k1 = (int)floorf(f1 / df);
+    if (k0 < 1) k0 = 1;
+    if (k1 > kN / 2) k1 = kN / 2;
+    float m;
+    if (k0 <= k1) {
+      m = db[k0];
+      for (int k = k0 + 1; k <= k1; ++k) if (db[k] > m) m = db[k];
+    } else {
+      m = DbAt(db, span_hz * c / 127.f / df);
+    }
+    rows_out[c] = RowFor(m, plot_h);
   }
 }
 

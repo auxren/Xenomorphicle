@@ -152,7 +152,29 @@ static void test_peak_text() {
   CHECK(pk(0.0) == "pk 0Hz");
   CHECK(pk(-5.0) == "pk 0Hz");
   CHECK(pk(NAN) == "pk 0Hz");
+  auto fine = [](double hz) { char b[16]; ScopeFmt::PeakText(b, sizeof(b), hz, true); return std::string(b); };
+  CHECK(fine(98.43) == "pk 98.4");          // the 0-300 Hz span: 0.73 Hz bins
+  CHECK(fine(5.04) == "pk 5.0");
+  CHECK(fine(299.96) == "pk 300.0");
+  CHECK(fine(999.96) == "pk 1.0k");
+  CHECK(fine(1100.0) == "pk 1.1k");
+  for (double hz = 1.0; hz < 24000.0; hz *= 1.01) { char b[16]; ScopeFmt::PeakText(b, sizeof(b), hz, true); CHECK(std::strlen(b) <= 8); }
   for (double hz = 20.0; hz < 24000.0; hz *= 1.0007) CHECK(pk(hz).size() <= 8);   // the header's field
+}
+
+static void test_span_text() {
+  printf("test_span_text\n");
+  auto sp = [](double hz) { char b[16]; ScopeFmt::SpanText(b, sizeof(b), hz); return std::string(b); };
+  CHECK(sp(4800.0) == "0-4.8k");
+  CHECK(sp(1200.0) == "0-1.2k");
+  CHECK(sp(300.0) == "0-300");
+  CHECK(sp(3735.06) == "0-3.7k");        // the CV spans, from the verified frame rate
+  CHECK(sp(933.76) == "0-934");
+  CHECK(sp(233.44) == "0-233");
+  CHECK(sp(999.4) == "0-999");
+  CHECK(sp(999.5) == "0-1.0k");
+  CHECK(sp(-1.0) == "0-0");
+  for (double hz = 10.0; hz < 24000.0; hz *= 1.02) CHECK(sp(hz).size() <= 8);
 }
 
 int main() {
@@ -161,6 +183,7 @@ int main() {
   test_against_printf();
   test_grid_values();
   test_peak_text();
+  test_span_text();
   printf("%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }

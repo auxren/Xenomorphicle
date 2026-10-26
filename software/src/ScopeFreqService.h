@@ -46,22 +46,30 @@ constexpr double kAudioFsHz = 48000.0;
 //   every compare; one reading is taken per OFLAG period (2 compares); the 8-way
 //   mux makes 8 readings one frame.
 //   F_BUS_ACTUAL is 150 MHz at 600 MHz (clockspeed.c: IPG = CPU/4, capped at 150 MHz).
-// Ticks per compare: UNVERIFIED. The NXP SDK programs COMP1 = period - 1 for this
-// counter mode, i.e. COMP1 + 1 ticks per compare, which gives 37,350.6 Hz
-// (-3984 ppm against the nominal 37.5 kHz the comment in the driver implies). The
-// reference manual is not in the repo and the hardware has not been asked.
+// Ticks per compare: COMP1 + 1 (the NXP SDK's convention for this counter mode), giving
+// 37,350.6 Hz, 3984 ppm below the nominal 37.5 kHz. VERIFIED on the hardware 2026-10-25/26
+// (build de16e011): one steady 513.39 Hz tone patched into IN L and CV IN 1, five
+// interleaved 0.1 s readings each, all status OK: IN L mean 513.390384 Hz (spread 0.0007),
+// CV1 mean 513.389406 Hz (spread 0.0011), ratio CV1/INL = 0.999998 (-2 ppm). 37,500 would
+// have read 4,000 ppm apart. Bound on the agreement: +-5 ppm, including the audio PLL's
+// <= 3.5 ppm truncation. Both counters share the crystal path. To recheck, see the bench
+// procedure in docs/specs/xeno-frequency-counter.md ("CV frame rate").
 // Everything below follows from these four lines; test_cv_rate_formula pins them.
 // Time base: the ARM PLL (12 MHz * mult from the same 24 MHz crystal as the audio
 // PLL), so crystal error is common with the audio sample rate; the audio PLL's own
 // fractional-N error is not.
 constexpr double kCvBusHz = 150000000.0;
 constexpr int kCvTimerComp1 = 250;
-constexpr int kCvTimerTicksPerCompare = kCvTimerComp1 + 1;   // UNVERIFIED (see above)
+constexpr int kCvTimerTicksPerCompare = kCvTimerComp1 + 1;   // COMP1 + 1: verified on the hardware (see above)
 constexpr int kCvReadingsPerFrame = 8;
 constexpr double kCvFsHz = kCvBusHz / (2.0 * kCvTimerTicksPerCompare * kCvReadingsPerFrame);
-// Flip to true only after the bench procedure (docs/specs/xeno-frequency-counter.md,
-// "CV frame rate") has agreed with kCvFsHz. While false, a CV reading carries the # mark.
-constexpr bool kCvRateVerified = false;
+// While false, a CV reading carries the # mark and the console's rate field is 0.
+constexpr bool kCvRateVerified = true;
+// Whether readings from `s` should say the sample rate is unconfirmed. `verified` is a
+// parameter so a test can exercise the false case.
+inline bool RateUnverified(ScopeSources::Source s, bool verified = kCvRateVerified) {
+  return !verified && ScopeSources::KindOf(s) == ScopeSources::KIND_CV_IN;
+}
 // clock correction, in tenths of a ppm: +-1000 ppm
 constexpr int kClockMaxPpm10 = 10000;
 // An input that moves by more than this (LSB of the 0..32767 CV word, about 35 mV)

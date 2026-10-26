@@ -77,6 +77,7 @@
 
 #include <math.h>
 
+#include <algorithm>
 #include <string>
 
 #include "OC_ADC.h"
@@ -89,6 +90,8 @@
 #include "PhzConfig.h"
 #include "PresetBusUI.h"
 #include "PresetEngine.h"
+#include "ScopeCapture.h"
+#include "ScopeFft.h"
 #include "ScopeFreqLine.h"
 #include "ScopeFreqService.h"
 #include "ScopeSettings.h"
@@ -889,6 +892,26 @@ void RunCv(int cv, uint32_t ms, F word) {
   }
 }
 
+// The same for the audio jacks: samples at 48 kHz of simulated time, through the real
+// capture entry (ScopeCapture::OnAudio, what AudioScopeCapture::update calls), tap 0 = IN L.
+template <typename F>
+void RunAudio(int tap, uint32_t ms, F sample) {
+  static uint64_t n = 0;
+  static uint32_t base_us = 0;
+  static bool started = false;
+  if (!started) { base_us = SimNowUs(); started = true; }
+  for (uint32_t t = 0; t < ms; ++t) {
+    Run(1);
+    const uint64_t due = (uint64_t)((double)(uint32_t)(SimNowUs() - base_us) * 48000.0 * 1e-6);
+    while (n < due) {
+      int16_t blk[128];
+      int k = 0;
+      for (; n < due && k < 128; ++n, ++k) blk[k] = (int16_t)lround(sample(n));
+      ScopeCapture::OnAudio(tap, blk, k);
+    }
+  }
+}
+
 auto Sine(double hz, double amp, double mid = 16000.0) {
   return [=](uint64_t n) { return mid + amp * sin(2 * M_PI * (0.1 + hz * n / kCvFs)); };
 }
@@ -930,7 +953,7 @@ void FreqCvTone() {
   CHECK(r.confirmed, "two gates that agree confirm it");
   std::string line = BottomLine();
   printf("  line: \"%s\"\n", line.c_str());
-  CHECK(StartsWith(line, "#1000.0"), "a CV rate not yet confirmed on hardware: the line starts with the # mark");
+  CHECK(StartsWith(line, "*1000.0"), "uncalibrated crystal: the line starts with the * mark (the CV rate is verified: no #)");
   CHECK(Has(line, "Hz B5 +21.3"), "...then the note and the cents against it");
   CHECK(line.size() <= 21, "...and fits the 21 columns");
   CHECK(InkOutsideLine(line.size()) == 0, "...and nothing else is drawn on that page");
@@ -944,7 +967,7 @@ void FreqCvTone() {
   RunCv(0, 300, Sine(1000.0, 6000.0));
   line = BottomLine();
   printf("  line: \"%s\"\n", line.c_str());
-  CHECK(StartsWith(line, "#1000.0"), "confirmed and calibrated, the CV rate still unconfirmed: # (the * is gone)");
+  CHECK(!line.empty() && line[0] >= '0' && line[0] <= '9', "confirmed and calibrated: no mark at all");
   CHECK(Has(line, "Hz B5 +21."), "...");
   const double hz_cal = ScopeFreqSvc::CurrentReading().hz;
   ScopeFreqSvc::SetClock(false, 0);
@@ -1013,7 +1036,7 @@ void FreqStatus() {
   std::string line = BottomLine();
   printf("  line: \"%s\"\n", line.c_str());
   CHECK(Has(line, "Hz A4 "), "a tone of 6000 counts reads as A4");
-  CHECK(line[0] == '#' || line[0] == '?', "...marked, the CV rate being unconfirmed");
+  CHECK(line[0] == '*' || line[0] == '?', "...marked, the crystal being uncalibrated");
   // heavy noise on the same tone: counted wrong, so refused
   uint32_t seed = 12345;
   auto noisy = [&](uint64_t n) {
@@ -1023,7 +1046,7 @@ void FreqStatus() {
   RunCv(0, 700, noisy);
   line = BottomLine();
   printf("  line: \"%s\"\n", line.c_str());
-  CHECK(!(line[0] >= '0' && line[0] <= '9') && line[0] != '#',
+  CHECK(!(line[0] >= '0' && line[0] <= '9') && line[0] != '*',
         "noise as big as the signal is never shown as a good reading");
   // the tone stops
   RunCv(0, 350, [](uint64_t) { return 16000.0; });
@@ -1154,7 +1177,7 @@ void FreqLayout() {
 
 // The top line's 21 character cells, decoded from the framebuffer (text at y = 1,
 // so not page aligned; a cell may be inverted, as the selected field is).
-std::string HeaderCells() {
+std::string RowCells(int y0) {
   uint8_t fb[1024];
   SimPanelVisible(fb);
   std::string out;
@@ -1164,7 +1187,7 @@ std::string HeaderCells() {
     bool blank = true;
     for (int c = 0; c < 6; ++c) {
       uint8_t b = 0;
-      for (int cy = 0; cy < 8; ++cy) b |= (uint8_t)(((fb[((1 + cy) >> 3) * 128 + x + c] >> ((1 + cy) & 7)) & 1) << cy);
+      for (int cy = 0; cy < 8; ++cy) b |= (uint8_t)(((fb[((y0 + cy) >> 3) * 128 + x + c] >> ((y0 + cy) & 7)) & 1) << cy);
       col[c] = b;
       if (b) blank = false;
     }
@@ -1179,6 +1202,22 @@ std::string HeaderCells() {
     out += found;
   }
   return out;
+}
+
+std::string HeaderCells() { return RowCells(1); }
+
+// Height in pixels of the bar in each plot column: the run of set pixels up from the bottom row.
+void Bars(int out[128]) {
+  uint8_t fb[1024];
+  SimPanelVisible(fb);
+  for (int x = 0; x < 128; ++x) {
+    int h = 0;
+    for (int y = 54; y >= 11; --y) {
+      if ((fb[(y >> 3) * 128 + x] >> (y & 7)) & 1) ++h;
+      else break;
+    }
+    out[x] = h;
+  }
 }
 
 void FreqFftHeader() {
@@ -1216,22 +1255,374 @@ void FreqFftHeader() {
   CHECK(a.compare(17, 4, b.substr(17, 4)) == 0, "the columns right of the field are identical for 79 Hz and 12.3k");
   CHECK(a.size() == b.size() && a.find("pk") != b.find("pk"), "(the text did change width: it starts in different columns)");
 
-  // only the source is selectable here: encL stays on it, so encR still changes the source
+  // three live fields, in order: source, pk (span), FFT (window/averaging)
   CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN1, "(on CV1)");
-  SimInputEncoder(false, 1);
+  SimInputEncoder(false, 1);   // to pk
   Run(250);
-  SimInputEncoder(false, 1);
+  TurnN(1);                    // the span, not the source
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN1, "with pk selected encR changes the span, not the source");
+  CHECK(RowCells(12).compare(0, 6, "0-3.7k") == 0, "...and the span (for CV1: 0-3.7k) shows at the top left of the plot");
+  SimInputEncoder(false, 1);   // to FFT
   Run(250);
   TurnN(1);
-  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN2,
-        "in the spectrum encL leaves the source field alone: encR still changes the source");
-  // leaving the spectrum, the other fields are back
+  CHECK(HeaderCells().compare(19, 2, "H4") == 0, "with FFT selected encR steps the preset: H4, right-aligned");
+  SimInputEncoder(false, 1);   // around to the source
+  Run(250);
+  TurnN(1);
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN2, "a third encL is back on the source: encR changes it");
+  // leaving the spectrum, the scope view's own fields are back
   Tap(OC::CONTROL_BUTTON_X);
   Run(100);
   SimInputEncoder(false, 1);   // to the time field
   Run(250);
   TurnN(1);
   CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN2, "(in the scope view encL moves to the time field: encR no longer changes the source)");
+}
+
+// ---- the spectrum zoom, windows and averaging ---------------------------------
+
+// To the spectrum with the span and preset asked for. Focus order: source, pk, FFT.
+int g_focus = 0;   // 0 source, 1 pk, 2 FFT: where the spectrum's selection is
+void FocusTo(int f) {
+  while (g_focus != f) {
+    SimInputEncoder(false, 1);
+    Run(250);
+    g_focus = (g_focus + 1) % 3;
+  }
+}
+void SpectrumSet(int span, int mode) {
+  Tap(OC::CONTROL_BUTTON_X);
+  Run(50);
+  g_focus = 0;   // entering the spectrum selects the source
+  FocusTo(1);
+  TurnN(span);
+  FocusTo(2);
+  TurnN(mode);
+}
+
+// The zoom's source: CV1 or IN L, with the span the Scope really shows for it.
+struct ZSrc {
+  bool audio;
+  double Rate() const { return audio ? 48000.0 : ScopeFreqSvc::kCvFsHz; }
+  double Span(int span) const { return ScopeFft::ZoomSpanHz(Rate() / (1 << (span == 1 ? 2 : span == 2 ? 4 : 6))); }
+  void Feed(uint32_t ms, double hz, double amp) const {
+    if (audio) RunAudio(0, ms, [=](uint64_t n) { return amp * sin(2 * M_PI * (0.1 + hz * n / 48000.0)); });
+    else RunCv(0, ms, Sine(hz, amp));
+  }
+};
+
+// One tone at one span: the header reading, the tallest bar's column, the label.
+void ZoomCase(const ZSrc &z, int span, double hz, double tol, const char *label, bool fine) {
+  z.Feed(span == 3 ? 2700 : span == 2 ? 1000 : 450, hz, z.audio ? 9000.0 : 6000.0);
+  const std::string h = HeaderCells();
+  char msg[220];
+  const size_t p = h.find("pk ");
+  const double v = p == std::string::npos ? 0 : atof(h.c_str() + p + 3) * (h[16] == 'k' ? 1000.0 : 1.0);
+  printf("  %s span %d, %.1f Hz: \"%s\" -> %.2f\n", z.audio ? "IN L" : "CV1", span, hz, h.c_str(), v);
+  if (v >= 999.5) tol = std::max(tol, 50.0);   // the kHz form has one decimal: 100 Hz steps
+  snprintf(msg, sizeof(msg), "%s span %d, %.1f Hz: pk reads %.2f, within %.2f Hz", z.audio ? "IN L" : "CV1", span, hz, v, tol);
+  CHECK(p != std::string::npos && fabs(v - hz) <= tol, msg);
+  if (p != std::string::npos) {   // the fine reading (one decimal, no unit) only on the 0-300 span
+    const std::string num = h.substr(p + 3, 8);
+    const bool has_dot = num.find('.') != std::string::npos && num.find('k') == std::string::npos;
+    const bool has_hz = num.find("Hz") != std::string::npos;
+    snprintf(msg, sizeof(msg), "span %d: the peak text is in the %s form", span, fine ? "fine (98.4)" : "whole-hertz (98Hz)");
+    if (hz < 999) CHECK(fine ? (has_dot && !has_hz) : (!has_dot && has_hz), msg);
+  }
+  int bars[128];
+  Bars(bars);
+  int best = 0;
+  for (int x = 1; x < 128; ++x) if (bars[x] > bars[best]) best = x;
+  const int want = (int)lround(hz / z.Span(span) * 127.0);
+  snprintf(msg, sizeof(msg), "%s span %d, %.1f Hz: the tallest bar is in column %d (expected %d)", z.audio ? "IN L" : "CV1", span, hz, best, want);
+  CHECK(abs(best - want) <= 1 && bars[best] >= 30, msg);
+  snprintf(msg, sizeof(msg), "span %d: the span label %s is shown", span, label);
+  CHECK(RowCells(12).compare(0, strlen(label), label) == 0, msg);
+}
+
+void FreqFftZoom() {
+  ScopeOnCv1();
+  SpectrumSet(0, 0);
+  const ZSrc cv{false};
+  const double s1 = cv.Span(1), s2 = cv.Span(2), s3 = cv.Span(3);
+  printf("  CV spans: %.2f %.2f %.2f Hz\n", s1, s2, s3);
+  CHECK(fabs(s1 - 3735.06) < 0.01 && fabs(s2 - 933.76) < 0.01 && fabs(s3 - 233.44) < 0.01, "the CV spans are 0.8 of the decimated Nyquist at the verified frame rate");
+  FocusTo(1);
+  TurnN(1);   // 0-3.7k
+  ZoomCase(cv, 1, 1000.0, 2.0, "0-3.7k", false);
+  ZoomCase(cv, 1, 440.0, 2.0, "0-3.7k", false);
+  ZoomCase(cv, 1, 50.0, 3.0, "0-3.7k", false);                     // mains hum is read
+  ZoomCase(cv, 1, 30.0, 4.0, "0-3.7k", false);                     // and so is a tone between 3 and 5 bins (the floor is 20 Hz)
+  ZoomCase(cv, 1, 0.95 * s1, 4.0, "0-3.7k", false);                // near the top of the span
+  TurnN(1);   // 0-934
+  ZoomCase(cv, 2, 440.0, 0.8, "0-934", false);
+  ZoomCase(cv, 2, 100.0, 0.8, "0-934", false);
+  ZoomCase(cv, 2, 0.95 * s2, 1.5, "0-934", false);
+  TurnN(1);   // 0-233
+  ZoomCase(cv, 3, 100.0, 0.2, "0-233", true);
+  ZoomCase(cv, 3, 40.0, 0.2, "0-233", true);
+  ZoomCase(cv, 3, 0.95 * s3, 0.3, "0-233", true);
+  // quarter marks: dotted lines at 1/4, 1/2 and 3/4 of the span, nowhere else (the tone is at 0.95)
+  {
+    uint8_t fb[1024];
+    SimPanelVisible(fb);
+    auto ink_in_column = [&](int x) { int n = 0; for (int y = 11; y < 55; ++y) n += (fb[(y >> 3) * 128 + x] >> (y & 7)) & 1; return n; };
+    for (int q = 1; q <= 3; ++q) {
+      const int col = ScopeFft::ColumnForHzLinear((float)(s3 * q / 4), (float)s3);
+      printf("  quarter mark %d at column %d: %d px\n", q, col, ink_in_column(col));
+      CHECK(ink_in_column(col) >= 15, "a quarter mark is a dotted line in its column");
+      CHECK(ink_in_column(col + 6) < 8 && ink_in_column(col - 6) < 8, "...and nothing is drawn six columns either side");
+    }
+  }
+  // a tone just above the span edge and a tone well above the decimated Nyquist are filtered
+  // out, not folded into the shown band: no false peak, no tall bar
+  FocusTo(1);
+  TurnN(-2 + 4);   // 0-3.7k again (wraps 3 -> 0 -> 1)
+  for (double hz : {1.15 * s1, 4300.0, 5000.0}) {
+    cv.Feed(600, hz, 6000.0);
+    int bars[128];
+    Bars(bars);
+    int tall = 0;
+    for (int x = 0; x < 128; ++x) tall = std::max(tall, bars[x]);
+    const std::string h = HeaderCells();
+    const size_t p = h.find("pk ");
+    const double v = p == std::string::npos ? 0 : atof(h.c_str() + p + 3) * (h[16] == 'k' ? 1000.0 : 1.0);
+    printf("  %.0f Hz above the 0-3.7k span: tallest bar %d, \"%s\"\n", hz, tall, h.c_str());
+    char msg[160];
+    snprintf(msg, sizeof(msg), "%.0f Hz is not drawn inside the 0-3.7k span (tallest bar %d)", hz, tall);
+    CHECK(tall < 12, msg);
+    snprintf(msg, sizeof(msg), "%.0f Hz does not read as a peak inside the span (pk %.0f)", hz, v);
+    CHECK(fabs(v - hz) > 150.0 && fabs(v - (2 * 4668.8 - hz)) > 150.0, msg);
+  }
+  // back to the full span: no label, the log axis (1 kHz sits at its log column)
+  FocusTo(1);
+  TurnN(3);   // wraps round to 0
+  cv.Feed(500, 1000.0, 6000.0);
+  CHECK(RowCells(12).compare(0, 2, "0-") != 0, "the full span has no label");
+  int bars[128];
+  Bars(bars);
+  int best = 0;
+  for (int x = 1; x < 128; ++x) if (bars[x] > bars[best]) best = x;
+  const int want_log = ScopeFft::ColumnForHz(1000.f, (float)ScopeFreqSvc::kCvFsHz);
+  printf("  full span: loudest column %d (log axis puts 1 kHz at %d)\n", best, want_log);
+  CHECK(abs(best - want_log) <= 1, "...and 1 kHz is where the log axis puts it");
+  // the full-span reading is right to the bin: 100.0 Hz, not 100.4 (the nominal-rate error)
+}
+
+// The audio jacks: the spans are the round ones (4800 / 1200 / 300), through ScopeCapture::OnAudio.
+void FreqFftZoomAudio() {
+  Go("Scope");   // opens on IN L
+  Run(50);
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_IN_L, "(the Scope opens on IN L)");
+  SpectrumSet(0, 0);
+  const ZSrc au{true};
+  CHECK(fabs(au.Span(1) - 4800.0) < 1e-6 && fabs(au.Span(2) - 1200.0) < 1e-6 && fabs(au.Span(3) - 300.0) < 1e-6, "the audio spans are the round 4800 / 1200 / 300 Hz");
+  FocusTo(1);
+  TurnN(1);
+  ZoomCase(au, 1, 1000.0, 2.0, "0-4.8k", false);
+  ZoomCase(au, 1, 0.95 * 4800.0, 4.0, "0-4.8k", false);
+  TurnN(1);
+  ZoomCase(au, 2, 440.0, 0.8, "0-1.2k", false);
+  ZoomCase(au, 2, 0.95 * 1200.0, 1.5, "0-1.2k", false);
+  TurnN(1);
+  ZoomCase(au, 3, 100.0, 0.2, "0-300", true);
+  ZoomCase(au, 3, 0.95 * 300.0, 0.3, "0-300", true);
+}
+
+// Freezing a zoomed span keeps what is on screen (the ring is not reset); unfreezing goes live.
+void FreqFftFreeze() {
+  ScopeOnCv1();
+  SpectrumSet(1, 0);
+  const ZSrc cv{false};
+  cv.Feed(600, 1000.0, 6000.0);
+  const std::string live = HeaderCells();
+  int b0[128];
+  Bars(b0);
+  long ink0 = 0;
+  for (int x = 0; x < 128; ++x) ink0 += b0[x];
+  printf("  live:   \"%s\" ink %ld\n", live.c_str(), ink0);
+  CHECK(live.find("pk 1.0k") != std::string::npos && ink0 > 30, "(live: pk 1.0k and a plot)");
+  Tap(OC::CONTROL_BUTTON_A);   // freeze
+  Run(400);
+  const std::string frozen = HeaderCells();
+  int b1[128];
+  Bars(b1);
+  long ink1 = 0;
+  for (int x = 0; x < 128; ++x) ink1 += b1[x];
+  printf("  frozen: \"%s\" ink %ld\n", frozen.c_str(), ink1);
+  CHECK(frozen.find("pk 1.0k") != std::string::npos, "frozen: the same peak reading");
+  CHECK(ink1 > 30 && labs(ink1 - ink0) <= ink0 / 10, "frozen: the same plot");
+  // frames that arrive while frozen change nothing
+  cv.Feed(300, 440.0, 6000.0);
+  int b2[128];
+  Bars(b2);
+  long ink2 = 0;
+  for (int x = 0; x < 128; ++x) ink2 += b2[x];
+  CHECK(ink2 == ink1 && HeaderCells() == frozen, "frozen: later frames change nothing");
+  Tap(OC::CONTROL_BUTTON_A);   // run
+  cv.Feed(600, 440.0, 6000.0);
+  CHECK(HeaderCells().find("pk 440Hz") != std::string::npos || HeaderCells().find("pk 44") != std::string::npos,
+        "unfrozen: live again at the new tone");
+}
+
+// CV out and TR are not fed to the decimator: a zoom there says so.
+void FreqFftNoZoomOnOutputs() {
+  ScopeOnCv1();
+  TurnN(12);   // quick entry 15: OUT1-4
+  Run(50);
+  SpectrumSet(1, 0);
+  Run(600);
+  const std::string label = RowCells(12);
+  printf("  label row: \"%s\"\n", label.c_str());
+  CHECK(label.compare(0, 7, "no zoom") == 0, "a zoomed span on a CV out says \"no zoom\"");
+  CHECK(HeaderCells().find("pk --") != std::string::npos, "...and has no peak reading");
+  FocusTo(1);
+  TurnN(3);   // back to the full span: the spectrum of the output works as before
+  Run(300);
+  CHECK(RowCells(12).compare(0, 7, "no zoom") != 0, "the full span has no such label");
+}
+
+// Push resets the fields; span and preset are plain every time the Scope opens; averaging restarts
+// when the source changes; the preset text.
+void FreqFftResets() {
+  ScopeOnCv1();
+  SpectrumSet(2, 3);
+  CHECK(RowCells(12).compare(0, 6, "0-934") == 0 || RowCells(12).compare(0, 5, "0-934") == 0, "(span 2 set)");
+  CHECK(HeaderCells().compare(19, 2, "BH") == 0, "(preset BH set)");
+  FocusTo(1);
+  Tap(OC::CONTROL_BUTTON_R);
+  Run(150);
+  CHECK(RowCells(12).compare(0, 2, "0-") != 0, "encR push on pk puts the span back to full");
+  CHECK(HeaderCells().compare(19, 2, "BH") == 0, "...and leaves the preset alone");
+  TurnN(1);
+  FocusTo(2);
+  Tap(OC::CONTROL_BUTTON_R);
+  Run(150);
+  CHECK(HeaderCells().compare(18, 3, "FFT") == 0, "encR push on FFT puts the preset back to plain Hann");
+  // reopen: a zoomed span and a preset do not survive
+  FocusTo(1);
+  TurnN(1);
+  FocusTo(2);
+  TurnN(4);
+  Go("Tweighty");
+  Go("Scope");
+  Run(300);
+  CHECK(RowCells(12).compare(0, 2, "0-") != 0, "reopening the Scope: the span is full again");
+  CHECK(HeaderCells().compare(18, 3, "FFT") == 0, "...and the preset is plain Hann again");
+}
+
+// Averaging restarts when the source changes: the old source's tone leaves no ghost.
+void FreqFftAveragingSource() {
+  ScopeOnCv1();
+  SpectrumSet(0, 2);   // H16
+  CHECK(HeaderCells().compare(18, 3, "H16") == 0, "(H16 set)");
+  const ZSrc cv{false};
+  cv.Feed(1500, 1000.0, 6000.0);
+  const int col_1k = ScopeFft::ColumnForHz(1000.f, (float)ScopeFreqSvc::kCvFsHz);
+  int bars[128];
+  Bars(bars);
+  int before = 0;
+  for (int x = col_1k - 2; x <= col_1k + 2; ++x) before = std::max(before, bars[x]);
+  printf("  before the source change: the 1 kHz column %d px\n", before);
+  CHECK(before >= 30, "(the averaged 1 kHz tone is on screen)");
+  FocusTo(0);
+  TurnN(1);   // CV2
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN2, "(on CV2)");
+  RunCv(1, 200, Sine(440.0, 6000.0));
+  Bars(bars);
+  int ghost = 0;
+  for (int x = col_1k - 2; x <= col_1k + 2; ++x) ghost = std::max(ghost, bars[x]);
+  printf("  after the source change: 1 kHz column %d px\n", ghost);
+  CHECK(ghost < 14, "the old source's tone is gone at once (the average restarted)");
+}
+
+void FreqFftWindowAndAveraging() {
+  ScopeOnCv1();
+  SpectrumSet(0, 0);
+  uint32_t seed = 99;
+  auto noisy = [&](uint64_t n) {
+    seed = seed * 1664525u + 1013904223u;
+    return 16000.0 + 3000.0 * sin(2 * M_PI * (0.1 + 1000.0 * n / kCvFs)) + ((seed >> 8) % 4000) - 2000.0;
+  };
+  // frame-to-frame change of the bars (mean absolute, in pixels) over a stretch of frames
+  auto jitter = [&]() {
+    int prev[128], cur[128];
+    RunCv(0, 300, noisy);
+    Bars(prev);
+    double sum = 0;
+    int frames = 0;
+    for (int f = 0; f < 24; ++f) {
+      RunCv(0, 40, noisy);
+      Bars(cur);
+      for (int x = 20; x < 120; ++x) sum += abs(cur[x] - prev[x]);
+      for (int x = 0; x < 128; ++x) prev[x] = cur[x];
+      ++frames;
+    }
+    return sum / (frames * 100.0);
+  };
+  const double plain = jitter();
+  // the FFT field to H16 (two steps), then measure again
+  FocusTo(2);
+  TurnN(2);
+  CHECK(HeaderCells().compare(18, 3, "H16") == 0, "the preset H16 is shown");
+  const double avg = jitter();
+  printf("  mean column change per frame: plain %.3f px, H16 %.3f px\n", plain, avg);
+  CHECK(plain > 0.15, "(the noisy tone does jitter without averaging)");
+  CHECK(avg < 0.6 * plain, "averaging 16 frames cuts the column jitter to under 60%");
+  // every preset finds the tone; their skirts differ (total bar ink with a clean tone:
+  // Rect leaks the most, Blackman-Harris and flat-top the least, outside the main lobe). Presets in order:
+  // FFT(Hann) H4 H16 BH BH4 FT REC. Now on H16.
+  const int tone_col = ScopeFft::ColumnForHz(1000.f, (float)ScopeFreqSvc::kCvFsHz);
+  // ink well away from the tone (the skirts), not its main lobe
+  auto ink = [&]() { int b[128]; Bars(b); long t = 0; for (int x = 0; x < 128; ++x) if (abs(x - tone_col) > 14) t += b[x]; return t; };
+  long ink_of[7] = {0};
+  TurnN(5);   // H16 wraps round to FFT
+  for (int idx = 0; idx < 7; ++idx) {
+    RunCv(0, 300, Sine(1000.0, 6000.0));
+    ink_of[idx] = ink();
+    const std::string h = HeaderCells();
+    const size_t p = h.find("pk ");
+    const double v = p == std::string::npos ? 0 : atof(h.c_str() + p + 3) * (h[16] == 'k' ? 1000.0 : 1.0);
+    printf("  preset %d: \"%s\", ink %ld\n", idx, h.c_str(), ink_of[idx]);
+    CHECK(fabs(v - 1000.0) < 60.0, "each window finds the 1 kHz tone");
+    if (idx < 6) TurnN(1);
+  }
+  CHECK(ink_of[6] > ink_of[0] + 100, "Rect leaks more than Hann (more ink in the plot)");
+  // (on a 12-bit CV input the floor, not leakage, is what the wide-noise-bandwidth windows
+  // show more of: Blackman-Harris and flat-top sit higher than Hann, flat-top most)
+  CHECK(ink_of[0] < ink_of[3] && ink_of[3] < ink_of[5] && ink_of[5] < ink_of[6], "the four windows draw four different skirts");
+  CHECK(ink_of[1] != ink_of[2] || ink_of[0] != ink_of[2], "(averaging changes the picture too)");
+  // wraps back to the default, and encR push on the field restores it at once
+  CHECK(HeaderCells().compare(18, 3, "REC") == 0, "(the last preset is Rect)");
+  Tap(OC::CONTROL_BUTTON_R);
+  Run(100);
+  CHECK(HeaderCells().compare(18, 3, "FFT") == 0, "encR push puts the FFT field back to the default");
+}
+
+// 1 kHz sine, an offset and mains hum: the low columns are a slope, not blocks.
+void FreqFftLowBand() {
+  ScopeOnCv1();
+  SpectrumSet(0, 0);
+  uint32_t seed = 7;
+  auto word = [&](uint64_t n) {
+    seed = seed * 1664525u + 1013904223u;
+    return 14000.0 + 5000.0 * sin(2 * M_PI * (0.1 + 1000.0 * n / kCvFs)) + 100.0 * sin(2 * M_PI * 50.0 * n / kCvFs) +
+           ((seed >> 8) % 8) - 4.0;
+  };
+  RunCv(0, 600, word);
+  int bars[128];
+  Bars(bars);
+  printf("  columns 0-39:");
+  for (int x = 0; x < 40; ++x) printf(" %d", bars[x]);
+  printf("\n");
+  int step = 0, run = 0, longest = 0;
+  for (int x = 1; x < 40; ++x) {
+    step = std::max(step, abs(bars[x] - bars[x - 1]));
+    run = bars[x] == bars[x - 1] ? run + 1 : 0;
+    longest = std::max(longest, run);
+  }
+  CHECK(longest <= 12, "no plateau of more than 12 equal columns in the low band (it was 23)");
+  CHECK(bars[0] < 30, "the offset (bin 0) does not fill the first columns");
 }
 
 // ---- saved settings -----------------------------------------------------------
@@ -1478,6 +1869,14 @@ int SimAppSwitchTest(const std::string &s) {
   else if (s == "freq-layout") FreqLayout();
   else if (s == "freq-settings") FreqSettings();
   else if (s == "freq-fft-header") FreqFftHeader();
+  else if (s == "freq-fft-zoom") FreqFftZoom();
+  else if (s == "freq-fft-zoom-audio") FreqFftZoomAudio();
+  else if (s == "freq-fft-freeze") FreqFftFreeze();
+  else if (s == "freq-fft-nozoom") FreqFftNoZoomOnOutputs();
+  else if (s == "freq-fft-resets") FreqFftResets();
+  else if (s == "freq-fft-avgsource") FreqFftAveragingSource();
+  else if (s == "freq-fft-window") FreqFftWindowAndAveraging();
+  else if (s == "freq-fft-lowband") FreqFftLowBand();
   else if (s == "prep-scope") PrepScope(false);
   else if (s == "prep-scope-slot") PrepScope(true);
   else if (s == "boot-menu") BootMenu(false);
