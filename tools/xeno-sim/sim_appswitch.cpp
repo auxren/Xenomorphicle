@@ -136,6 +136,7 @@ void ReinitApps(bool reset_settings);
 namespace OC {
 bool SimScopeArenaLive();
 void SimScopeAllocFails(bool fails);
+void SimScopeReadFails(int draws);
 AppProbeQuad *SimProbeQuad();
 AppProbeCaptain *SimProbeCaptain();
 }
@@ -1304,7 +1305,8 @@ void SpectrumSet(int span, int mode) {
 struct ZSrc {
   bool audio;
   double Rate() const { return audio ? 48000.0 : ScopeFreqSvc::kCvFsHz; }
-  double Span(int span) const { return ScopeFft::ZoomSpanHz(Rate() / (1 << (span == 1 ? 2 : span == 2 ? 4 : 6))); }
+  // written out here, not taken from the code under test: 0.8 of the decimated Nyquist
+  double Span(int span) const { return 0.8 * (Rate() / (span == 1 ? 4.0 : span == 2 ? 16.0 : 64.0)) / 2.0; }
   void Feed(uint32_t ms, double hz, double amp) const {
     if (audio) RunAudio(0, ms, [=](uint64_t n) { return amp * sin(2 * M_PI * (0.1 + hz * n / 48000.0)); });
     else RunCv(0, ms, Sine(hz, amp));
@@ -1368,7 +1370,7 @@ void FreqFftZoom() {
     SimPanelVisible(fb);
     auto ink_in_column = [&](int x) { int n = 0; for (int y = 11; y < 55; ++y) n += (fb[(y >> 3) * 128 + x] >> (y & 7)) & 1; return n; };
     for (int q = 1; q <= 3; ++q) {
-      const int col = ScopeFft::ColumnForHzLinear((float)(s3 * q / 4), (float)s3);
+      const int col = q == 1 ? 32 : q == 2 ? 64 : 95;   // 127 * q / 4 = 31.75, 63.5, 95.25, rounded
       printf("  quarter mark %d at column %d: %d px\n", q, col, ink_in_column(col));
       CHECK(ink_in_column(col) >= 15, "a quarter mark is a dotted line in its column");
       CHECK(ink_in_column(col + 6) < 8 && ink_in_column(col - 6) < 8, "...and nothing is drawn six columns either side");
@@ -1403,7 +1405,8 @@ void FreqFftZoom() {
   Bars(bars);
   int best = 0;
   for (int x = 1; x < 128; ++x) if (bars[x] > bars[best]) best = x;
-  const int want_log = ScopeFft::ColumnForHz(1000.f, (float)ScopeFreqSvc::kCvFsHz);
+  // log axis 20 Hz .. Nyquist (18,675 Hz) over 128 columns, worked out here
+  const int want_log = (int)lround(log10(1000.0 / 20.0) / log10(ScopeFreqSvc::kCvFsHz / 2.0 / 20.0) * 127.0);
   printf("  full span: loudest column %d (log axis puts 1 kHz at %d)\n", best, want_log);
   CHECK(abs(best - want_log) <= 1, "...and 1 kHz is where the log axis puts it");
   // the full-span reading is right to the bin: 100.0 Hz, not 100.4 (the nominal-rate error)
@@ -1482,6 +1485,108 @@ void FreqFftNoZoomOnOutputs() {
   CHECK(RowCells(12).compare(0, 7, "no zoom") != 0, "the full span has no such label");
 }
 
+// A snapshot that never comes out clean (an ISR pushing all the time) redraws the last good
+// frame: no blank plot, no "pk --".
+void FreqFftReadFailure() {
+  ScopeOnCv1();
+  SpectrumSet(1, 0);
+  const ZSrc cv{false};
+  cv.Feed(700, 1000.0, 6000.0);
+  const std::string live = HeaderCells();
+  int b0[128];
+  Bars(b0);
+  long ink0 = 0;
+  for (int x = 0; x < 128; ++x) ink0 += b0[x];
+  CHECK(live.find("pk 1.0k") != std::string::npos && ink0 > 30, "(live: pk 1.0k and a plot)");
+  OC::SimScopeReadFails(1000000);   // every draw for the whole stretch
+  cv.Feed(300, 1000.0, 6000.0);   // many draws, all refused
+  const std::string held = HeaderCells();
+  int b1[128];
+  Bars(b1);
+  long ink1 = 0;
+  for (int x = 0; x < 128; ++x) ink1 += b1[x];
+  printf("  live \"%s\" ink %ld, with every snapshot refused \"%s\" ink %ld\n", live.c_str(), ink0, held.c_str(), ink1);
+  CHECK(held.find("pk 1.0k") != std::string::npos, "with every snapshot refused the peak reading stays");
+  CHECK(ink1 > 30 && labs(ink1 - ink0) <= ink0 / 10, "...and so does the plot (no blank frame)");
+  OC::SimScopeReadFails(0);
+  cv.Feed(300, 440.0, 6000.0);
+  CHECK(HeaderCells().find("pk 440Hz") != std::string::npos || HeaderCells().find("pk 44") != std::string::npos, "and it is live again afterwards");
+}
+
+// Averaging is reset by a live re-arm: unfreeze (or button B) must not blend the new feed into
+// the pre-freeze average.
+void FreqFftAveragingRearm() {
+  ScopeOnCv1();
+  SpectrumSet(1, 2);   // 0-3.7k, H16
+  const ZSrc cv{false};
+  cv.Feed(1200, 1000.0, 6000.0);
+  const int col_1k = (int)lround(1000.0 / cv.Span(1) * 127.0);
+  int bars[128];
+  Bars(bars);
+  int before = 0;
+  for (int x = col_1k - 2; x <= col_1k + 2; ++x) before = std::max(before, bars[x]);
+  CHECK(before >= 30, "(the averaged 1 kHz tone is on screen)");
+  Tap(OC::CONTROL_BUTTON_A);          // freeze on it
+  Run(200);
+  Tap(OC::CONTROL_BUTTON_A);          // run again, with another tone on the input
+  cv.Feed(500, 300.0, 6000.0);
+  Bars(bars);
+  int ghost = 0;
+  for (int x = col_1k - 2; x <= col_1k + 2; ++x) ghost = std::max(ghost, bars[x]);
+  printf("  1 kHz column: %d px before the freeze, %d px after the unfreeze\n", before, ghost);
+  CHECK(ghost < 14, "after an unfreeze the old average is gone");
+}
+
+// The average takes a step per half frame of FRESH samples, not per redraw: on the narrowest zoom
+// (0.7 s per half frame) a noisy picture changes about once in that time, not at every draw.
+void FreqFftAveragingRate() {
+  ScopeOnCv1();
+  SpectrumSet(3, 2);   // 0-233, H16
+  uint32_t seed = 31;
+  auto noisy = [&](uint64_t n) {
+    seed = seed * 1664525u + 1013904223u;
+    return 16000.0 + 3000.0 * sin(2 * M_PI * (0.1 + 100.0 * n / kCvFs)) + ((seed >> 8) % 3000) - 1500.0;
+  };
+  RunCv(0, 2600, noisy);   // fill
+  int prev[128], cur[128];
+  Bars(prev);
+  int changes = 0, frames = 0;
+  for (int f = 0; f < 30; ++f) {
+    RunCv(0, 40, noisy);
+    Bars(cur);
+    bool diff = false;
+    for (int x = 0; x < 128; ++x) if (cur[x] != prev[x]) diff = true;
+    if (diff) ++changes;
+    for (int x = 0; x < 128; ++x) prev[x] = cur[x];
+    ++frames;
+  }
+  printf("  %d of %d frames (40 ms apart, 1.2 s) differ from the one before\n", changes, frames);
+  CHECK(changes <= 4, "averaging steps only when a half frame of new samples has arrived (about every 0.7 s)");
+}
+
+// A near-full-scale tone far above the shown span folds through the first decimator stage: it
+// must not appear in the plot.
+void FreqFftFolding() {
+  Go("Scope");
+  Run(50);
+  SpectrumSet(1, 0);
+  const ZSrc au{true};
+  for (double hz : {19500.0, 19800.0, 21000.0}) {
+    au.Feed(500, hz, 30000.0);
+    int bars[128];
+    Bars(bars);
+    int tall = 0;
+    for (int x = 0; x < 128; ++x) tall = std::max(tall, bars[x]);
+    const std::string h = HeaderCells();
+    printf("  IN L 0-4.8k, %.0f Hz at -1 dBFS: tallest bar %d, \"%s\"\n", hz, tall, h.c_str());
+    char msg[160];
+    snprintf(msg, sizeof(msg), "a %.0f Hz tone at -1 dBFS does not fold into the 0-4.8k plot (tallest bar %d)", hz, tall);
+    CHECK(tall < 12, msg);
+    snprintf(msg, sizeof(msg), "...and the header reads no peak, not a ghost frequency (\"%s\")", h.c_str());
+    CHECK(h.find("pk --") != std::string::npos, msg);
+  }
+}
+
 // Push resets the fields; span and preset are plain every time the Scope opens; averaging restarts
 // when the source changes; the preset text.
 void FreqFftResets() {
@@ -1518,7 +1623,7 @@ void FreqFftAveragingSource() {
   CHECK(HeaderCells().compare(18, 3, "H16") == 0, "(H16 set)");
   const ZSrc cv{false};
   cv.Feed(1500, 1000.0, 6000.0);
-  const int col_1k = ScopeFft::ColumnForHz(1000.f, (float)ScopeFreqSvc::kCvFsHz);
+  const int col_1k = (int)lround(log10(1000.0 / 20.0) / log10(ScopeFreqSvc::kCvFsHz / 2.0 / 20.0) * 127.0);
   int bars[128];
   Bars(bars);
   int before = 0;
@@ -1572,7 +1677,7 @@ void FreqFftWindowAndAveraging() {
   // every preset finds the tone; their skirts differ (total bar ink with a clean tone:
   // Rect leaks the most, Blackman-Harris and flat-top the least, outside the main lobe). Presets in order:
   // FFT(Hann) H4 H16 BH BH4 FT REC. Now on H16.
-  const int tone_col = ScopeFft::ColumnForHz(1000.f, (float)ScopeFreqSvc::kCvFsHz);
+  const int tone_col = (int)lround(log10(1000.0 / 20.0) / log10(ScopeFreqSvc::kCvFsHz / 2.0 / 20.0) * 127.0);
   // ink well away from the tone (the skirts), not its main lobe
   auto ink = [&]() { int b[128]; Bars(b); long t = 0; for (int x = 0; x < 128; ++x) if (abs(x - tone_col) > 14) t += b[x]; return t; };
   long ink_of[7] = {0};
@@ -1874,6 +1979,10 @@ int SimAppSwitchTest(const std::string &s) {
   else if (s == "freq-fft-freeze") FreqFftFreeze();
   else if (s == "freq-fft-nozoom") FreqFftNoZoomOnOutputs();
   else if (s == "freq-fft-resets") FreqFftResets();
+  else if (s == "freq-fft-readfail") FreqFftReadFailure();
+  else if (s == "freq-fft-avgrearm") FreqFftAveragingRearm();
+  else if (s == "freq-fft-avgrate") FreqFftAveragingRate();
+  else if (s == "freq-fft-folding") FreqFftFolding();
   else if (s == "freq-fft-avgsource") FreqFftAveragingSource();
   else if (s == "freq-fft-window") FreqFftWindowAndAveraging();
   else if (s == "freq-fft-lowband") FreqFftLowBand();

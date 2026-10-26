@@ -47,6 +47,9 @@ int ColumnForHz(float hz, float rate_hz);
 // the decimated stream's spectrum at rate_hz). Same rules as Columns().
 void ColumnsLinear(const float *db, float rate_hz, float span_hz, int plot_h, uint8_t rows_out[128]);
 int ColumnForHzLinear(float hz, float span_hz);
+// Below this the strongest bin is the noise floor or filter leakage, not a signal: the header
+// says "pk --" rather than a frequency (a -1 dBFS tone far above a zoomed span leaks at -75 dB).
+constexpr float kPeakMinDb = -70.f;
 // The shown span of a zoomed view: 0.8 of the decimated Nyquist (0.4 of the decimated rate),
 // so nothing from the filter's transition band is drawn; it depends on the SOURCE's rate.
 inline double ZoomSpanHz(double decimated_rate_hz) { return decimated_rate_hz * 4.0 / 10.0; }

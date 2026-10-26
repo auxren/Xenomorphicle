@@ -184,6 +184,7 @@ static Arena *g_arena = nullptr;
 static bool g_open = false;  // between RESUME and SUSPEND
 #ifdef XENO_SIM_APPSWITCH
 static bool g_sim_alloc_fails = false;  // the simulator's seam: an arena allocation that fails
+static int g_sim_read_fails = 0;        // ...and zoom snapshots that never come out clean (this many draws)
 #endif
 
 FLASHMEM static bool AllocArena() {
@@ -241,7 +242,8 @@ private:
   uint8_t fftmode_ = 0;
   mutable bool avg_valid_ = false;
   mutable uint16_t avg_key_ = 0;
-  mutable uint32_t avg_count_ = 0;   // source sample count at the last averaging step
+  mutable uint32_t avg_count_ = 0;
+  mutable bool fft_valid_ = false;   // ar.fft_db holds a frame that was drawn   // source sample count at the last averaging step
   mutable float last_mv_[ScopeSources::kMaxTraces] = {};
   mutable int pending_time_idx_ = -1;  // auto timebase moved: re-arm in Loop()
 
@@ -346,6 +348,8 @@ FLASHMEM void AppScope::Rearm(bool keep_frozen) {
   // A frozen view keeps the zoom ring as it is (SetZoom would reset it, and nothing refills it
   // while the capture is disarmed); only a live view starts, moves or stops the feed.
   if (!frozen_) {
+    avg_valid_ = false;   // a live re-arm (unfreeze, B, a new source or span) resets the zoom feed:
+    fft_valid_ = false;   // averaging starts again, and the last frame is not drawn for a new feed
     if (fft && span_ > 0 && ScopeAppNS::g_arena && ScopeAppNS::ZoomOk(list_[ts]))
       ScopeCapture::SetZoom(&ScopeAppNS::g_arena->zoom, ts, ScopeAppNS::ZoomStages(span_));
     else
@@ -704,6 +708,7 @@ FLASHMEM void AppScope::RenderSpectrum() const {
     const float fs = (KindOf(s) == KIND_CV_IN || KindOf(s) == KIND_CV_OUT) ? kCvFsMv : kAudioFsMv;
     float rate = RateHz(s);
     bool have = false;
+    bool drawn_again = false;
     uint32_t count = c;   // fresh-sample counter of whatever feeds this FFT
     if (stages > 0 && !ZoomOk(s)) {
       snprintf(label, sizeof(label), "no zoom");   // CV out and TR are not fed to the decimator
@@ -713,16 +718,32 @@ FLASHMEM void AppScope::RenderSpectrum() const {
       // view keeps showing the ring it froze with.
       rate /= (float)(1 << stages);
       count = ar.zoom.Count();
-      if (ar.zoom.stages() == stages && ar.zoom.Full())
-        have = ar.zoom.Read([&](int i, int16_t v) { ar.fft_in[i] = ToMv(s, v) / fs; });
+      if (ar.zoom.stages() == stages && ar.zoom.Full()) {
+        // Raw copy first (a few microseconds: an ISR push during it costs a retry), conversion
+        // after it. ar.mv is free in the spectrum view and exactly 2 KB.
+        static_assert(sizeof(ar.mv) >= ScopeDecim::kRingLen * sizeof(int16_t), "scratch for one snapshot");
+        int16_t *raw = reinterpret_cast<int16_t *>(ar.mv);
+        bool ok = ar.zoom.Snapshot(raw);
+#ifdef XENO_SIM_APPSWITCH
+        if (g_sim_read_fails > 0) { --g_sim_read_fails; ok = false; }
+#endif
+        if (ok) {
+          for (int i = 0; i < ScopeFft::kN; ++i) ar.fft_in[i] = ToMv(s, raw[i]) / fs;
+          have = true;
+        } else if (fft_valid_) {
+          drawn_again = true;   // never came out clean: draw the last good frame again, not a blank
+        }
+      }
       ScopeFmt::SpanText(label, sizeof(label), ZoomSpanHz(span_, s));
     } else if (c >= (uint32_t)ScopeFft::kN && r.Decim() == 1) {
       for (int i = 0; i < ScopeFft::kN; ++i)
         ar.fft_in[i] = ToMv(s, r.At(c - ScopeFft::kN + i).lo) / fs;
       have = true;
     }
-    if (have) {
-      if (mode_avg == 0) {
+    if (have || drawn_again) {
+      if (drawn_again) {
+        // ar.fft_db still holds the last frame's dB (the scratch is ar.mv)
+      } else if (mode_avg == 0) {
         ScopeFft::MagnitudeDb(ar.fft_in, ar.fft_db, ar.fft, mode_win);
         avg_valid_ = false;
       } else {
@@ -744,14 +765,15 @@ FLASHMEM void AppScope::RenderSpectrum() const {
         ScopeFft::PowerToDb(ar.fft_avg, ar.fft_db);
       }
       uint8_t rows[kCols];
+      float peak_db = -120.f;
       if (stages == 0) {
-        peak_hz_ = ScopeFft::PeakHz(ar.fft_db, rate);
+        peak_hz_ = ScopeFft::PeakHz(ar.fft_db, rate, &peak_db);
         ScopeFft::Columns(ar.fft_db, rate, kPlotH, rows);
       } else {
         const float df = rate / ScopeFft::kN;
         const float span = ZoomSpanHz(span_, s);
         // from 20 Hz (or three bins where finer) to the edge of the shown span
-        peak_hz_ = ScopeFft::PeakHz(ar.fft_db, rate, nullptr, ScopeFft::PeakFloorHz(df), span);
+        peak_hz_ = ScopeFft::PeakHz(ar.fft_db, rate, &peak_db, ScopeFft::PeakFloorHz(df), span);
         ScopeFft::ColumnsLinear(ar.fft_db, rate, span, kPlotH, rows);
       }
       for (int x = 0; x < kCols; ++x)
@@ -767,7 +789,8 @@ FLASHMEM void AppScope::RenderSpectrum() const {
         for (int q = 1; q < 4; ++q)   // quarter marks of the span
           graphics.drawVLinePattern(ScopeFft::ColumnForHzLinear(span * q / 4.f, span), kTop, kPlotH, 0x55);
       }
-      ScopeFmt::PeakText(pk, sizeof(pk), peak_hz_, span_ == 3 && stages > 0);
+      if (peak_db >= ScopeFft::kPeakMinDb) ScopeFmt::PeakText(pk, sizeof(pk), peak_hz_, span_ == 3 && stages > 0);
+      fft_valid_ = true;
     }
   }
   if (label[0]) {   // the zoomed span (or why there is none), top left of the plot, also while it fills

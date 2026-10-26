@@ -2176,7 +2176,7 @@ sw_run "app switches stop and restart the counter, the clock correction survives
   --test-app-switch freq-switch
 sw_run "the measurement line never touches the plot (five views)" \
   --test-app-switch freq-layout
-sw_run "the spectrum header does not move when the peak digits change; only the source is selectable" \
+sw_run "the spectrum header does not move when the peak digits change; the three fields are selectable in order" \
   --test-app-switch freq-fft-header
 sw_run "the spectrum zoom: three spans, the tone's column and peak reading, the span label" \
   --test-app-switch freq-fft-zoom
@@ -2188,6 +2188,14 @@ sw_run "a zoom on a CV out or TR says no zoom" \
   --test-app-switch freq-fft-nozoom
 sw_run "encR push resets span and preset; reopening the Scope does too" \
   --test-app-switch freq-fft-resets
+sw_run "a snapshot that never comes out clean redraws the last good frame" \
+  --test-app-switch freq-fft-readfail
+sw_run "averaging restarts on an unfreeze" \
+  --test-app-switch freq-fft-avgrearm
+sw_run "averaging steps per half frame of fresh samples, not per redraw" \
+  --test-app-switch freq-fft-avgrate
+sw_run "a near-full-scale tone far above the span does not fold into the plot" \
+  --test-app-switch freq-fft-folding
 sw_run "averaging restarts on a source change" \
   --test-app-switch freq-fft-avgsource
 sw_run "the spectrum windows and averaging presets; averaging calms the columns" \

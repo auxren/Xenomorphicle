@@ -47,9 +47,7 @@ suite() {
 # files below for a float conversion in a format string; the second is the
 # nofloat_printf.h shim on the formatter suites (snprintf aborts on one).
 float_guard() {
-  local files="../src/ScopeFmt.h ../src/ScopeDecim.h ../src/ScopeFreq.h ../src/ScopeFreqLine.cpp ../src/ScopeFreqLine.h \
-    ../src/ScopeFreqService.cpp ../src/ScopeFreqConsole.cpp ../src/ScopeRange.cpp ../src/ScopeSources.cpp \
-    ../src/ScopeSettings.cpp ../src/ClockStats.h ../src/ClockStats.cpp ../src/ScopeCapture.cpp ../src/ScopeFft.cpp ../src/ScopeTrigger.cpp ../src/apps/ScopeApp.h"
+  local files="../src/Scope*.h ../src/Scope*.cpp ../src/ClockStats.h ../src/ClockStats.cpp ../src/apps/ScopeApp.h"
   local bad
   # code only: a format string is "...%[flags][width][.prec][l]f...", comments are dropped first
   bad=$(for f in $files; do sed -e 's://.*$::' "$f" | grep -nE '"[^"]*%[-+ #0-9.*]*(l|L|z)?[fFeEgGaA]' | sed "s:^:$f\::"; done)

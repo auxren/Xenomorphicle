@@ -2,6 +2,7 @@
 // accuracy, alias rejection, output rate and the peak frequency found in the
 // decimated spectrum.
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <thread>
@@ -98,7 +99,30 @@ static void test_passband_and_aliases() {
       }
     }
     printf("  /%g worst alias into the shown band: %.1f dB\n", D, worst);
-    CHECK(worst < -40.0);
+    CHECK(worst < -60.0);
+  }
+}
+
+// Tones that fold through the first stage: with the plot reaching -90 dB, a near-full-scale
+// tone anywhere between the first stage's passband and the input Nyquist must come out below
+// -65 dB (the first version's 11-tap first stage let 19.5 kHz through at -43 dB: 21 px of plot).
+static void test_first_stage_folding() {
+  printf("test_first_stage_folding\n");
+  struct Case { double fs; int stages; };
+  for (Case c : {Case{48000.0, 2}, Case{48000.0, 4}, Case{48000.0, 6}, Case{37350.598, 2}, Case{37350.598, 4}, Case{37350.598, 6}}) {
+    const double D = (double)(1 << c.stages);
+    const double nyq = c.fs / D / 2.0, shown = 0.8 * nyq;
+    double worst = -300;
+    // every frequency from 0.3 of the input rate up to just below its Nyquist that lands in [0, shown]
+    for (double f = 0.30 * c.fs; f < 0.4999 * c.fs; f += c.fs * 0.0037) {
+      double r = fmod(f, c.fs / D);
+      if (r > c.fs / D / 2.0) r = c.fs / D - r;       // where it lands after the final decimation
+      if (r > shown) continue;
+      const double g = Db(Gain(c.stages, f, c.fs, 30000.0));
+      if (g > worst) worst = g;
+    }
+    printf("  fs %.0f /%g: worst fold-in from the upper band %.1f dB\n", c.fs, D, worst);
+    CHECK(worst < -65.0);
   }
 }
 
@@ -117,7 +141,7 @@ static void test_peak_frequency() {
     for (long i = 0; i < need; ++i) feed.Push((int16_t)lround(12000.0 * sin(2 * kPi * c.hz * i / fs)));
     CHECK(feed.Full());
     std::vector<float> in(1024), db(513);
-    CHECK(feed.Read([&](int i, int16_t v) { in[i] = v / 32768.f; }));
+    { std::vector<int16_t> raw(1024); CHECK(feed.Snapshot(raw.data())); for (int i = 0; i < 1024; ++i) in[i] = raw[i] / 32768.f; }
     ScopeFft::MagnitudeDb(in.data(), db.data(), g_work);
     const float rate = (float)(fs / (1 << c.stages));
     const float hz = ScopeFft::PeakHz(db.data(), rate, nullptr, 5.f * rate / 1024.f, 0.8f * rate / 2.f);
@@ -139,9 +163,9 @@ static void test_feed_ring() {
   f.Reset(1);
   for (int i = 0; i < 3000; ++i) f.Push(7);
   for (int i = 0; i < 100; ++i) f.Push(9);
-  int16_t first = 0, last = 0;
-  CHECK(f.Read([&](int i, int16_t v) { if (i == 0) first = v; if (i == 1023) last = v; }));
-  CHECK(first == 7 && last == 9);
+  std::vector<int16_t> snap0(1024);
+  CHECK(f.Snapshot(snap0.data()));
+  CHECK(snap0[0] == 7 && snap0[1023] == 9);
   // Reset forgets
   f.Reset(3);
   CHECK(f.Count() == 0 && f.stages() == 3);
@@ -233,13 +257,15 @@ static void test_snapshot_not_torn() {
     uint32_t i = 0;
     while (!stop.load()) {
       f.Push((int16_t)i++);
-      for (volatile int spin = 0; spin < 20; ++spin) {}
+      const auto t0 = std::chrono::steady_clock::now();
+      while (std::chrono::steady_clock::now() - t0 < std::chrono::microseconds(25)) {}   // a decimated sample every 25 us: four times the CV /4 rate
     }
   });
+  while (!f.Full()) {}                            // the producer needs 25 ms to fill the ring
   long ok = 0, torn = 0, refused = 0;
   std::vector<int16_t> snap(ScopeDecim::kRingLen);
-  for (int rep = 0; rep < 200000; ++rep) {
-    const bool got = f.Read([&](int i, int16_t v) { snap[i] = v; });
+  for (int rep = 0; rep < 40000; ++rep) {
+    const bool got = f.Snapshot(snap.data());
     if (!got) { ++refused; continue; }
     ++ok;
     for (int i = 1; i < ScopeDecim::kRingLen; ++i)
@@ -248,8 +274,8 @@ static void test_snapshot_not_torn() {
   stop = true;
   prod.join();
   printf("  %ld snapshots, %ld refused, %ld torn\n", ok, refused, torn);
-  CHECK(ok > 100);
   CHECK(torn == 0);
+  CHECK(ok > 0.95 * (ok + refused));   // a push every 25 us costs almost no snapshots with a fast copy
   // The deterministic version of the race: a push caught between writing its slot and bumping
   // the count (the reader runs in the middle) must not disturb the window being read.
   {
@@ -257,25 +283,44 @@ static void test_snapshot_not_torn() {
     h.Reset(0);
     for (int i = 0; i < 3000; ++i) h.Push((int16_t)i);
     std::vector<int16_t> before(ScopeDecim::kRingLen), mid(ScopeDecim::kRingLen);
-    CHECK(h.Read([&](int i, int16_t v) { before[i] = v; }));
+    CHECK(h.Snapshot(before.data()));
     h.WriteSlot((int16_t)-1);                       // sample 3000 stored, not yet published
-    CHECK(h.Read([&](int i, int16_t v) { mid[i] = v; }));
+    CHECK(h.Snapshot(mid.data()));
     CHECK(before == mid);
     h.Publish();                                    // now it is part of the window
-    int16_t last = 0;
-    CHECK(h.Read([&](int i, int16_t v) { if (i == ScopeDecim::kRingLen - 1) last = v; }));
-    CHECK(last == -1);
+    CHECK(h.Snapshot(mid.data()));
+    CHECK(mid[ScopeDecim::kRingLen - 1] == -1);
+  }
+  // The retry rules, with a push injected between the copy and the recheck (what an ISR does):
+  {
+    ScopeDecim::Feed h;
+    h.Reset(0);
+    for (int i = 0; i < 3000; ++i) h.Push((int16_t)i);
+    std::vector<int16_t> out(ScopeDecim::kRingLen);
+    int calls = 0;
+    // one push during the first copy: the snapshot is retried and is the NEW window
+    CHECK(h.Snapshot(out.data(), [&](int attempt) { ++calls; if (attempt == 0) h.Push(7777); }));
+    CHECK(calls == 2 && out[ScopeDecim::kRingLen - 1] == 7777);
+    // pushes during the first three copies: the fourth attempt is clean and accepted
+    calls = 0;
+    CHECK(h.Snapshot(out.data(), [&](int attempt) { ++calls; if (attempt < 3) h.Push(5555); }));
+    CHECK(calls == 4 && out[ScopeDecim::kRingLen - 1] == 5555);
+    // pushes during every one of the four: refused, not accepted torn
+    calls = 0;
+    CHECK(!h.Snapshot(out.data(), [&](int) { ++calls; h.Push(4444); }));
+    CHECK(calls == ScopeDecim::kReadAttempts && ScopeDecim::kReadAttempts == 4);
   }
   // not full yet: refused
   ScopeDecim::Feed g;
   g.Reset(2);
   for (int i = 0; i < 100; ++i) g.Push(1);
-  CHECK(!g.Read([](int, int16_t) {}));
+  { std::vector<int16_t> tmp(1024); CHECK(!g.Snapshot(tmp.data())); }
 }
 
 int main() {
   test_dc_gain_and_rate();
   test_passband_and_aliases();
+  test_first_stage_folding();
   test_peak_frequency();
   test_feed_ring();
   test_overshoot_clamps();

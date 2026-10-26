@@ -279,6 +279,7 @@ static void test_zoom_geometry() {
   CHECK(fabs(ZoomSpanHz(cv / 4) - 3735.06) < 0.01);
   CHECK(fabs(ZoomSpanHz(cv / 16) - 933.76) < 0.01);
   CHECK(fabs(ZoomSpanHz(cv / 64) - 233.44) < 0.01);
+  CHECK(kPeakMinDb == -70.f);
   // the peak search floor: 20 Hz, or three bins where the bins are finer
   CHECK(fabs(PeakFloorHz(48000.f / 4 / 1024) - 20.f) < 1e-3f);    // 11.7 Hz bins: 20 Hz
   CHECK(fabs(PeakFloorHz(48000.f / 16 / 1024) - 8.789f) < 1e-2f); // 2.93 Hz bins: 3 bins

@@ -88,6 +88,7 @@ uint16_t SimAppIdAt(size_t i) { return app_container[i].id(); }
 // stand-ins' instances; the check reaches them through these.
 bool SimScopeArenaLive() { return ScopeAppNS::g_arena != nullptr; }
 void SimScopeAllocFails(bool fails) { ScopeAppNS::g_sim_alloc_fails = fails; }
+void SimScopeReadFails(int draws) { ScopeAppNS::g_sim_read_fails = draws; }
 AppProbeQuad *SimProbeQuad() {
   return static_cast<AppProbeQuad *>(app_container.FindAppByID(AppProbeQuad::kAppId));
 }
