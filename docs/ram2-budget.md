@@ -47,16 +47,16 @@ bookkeeping (not itemised).
 
 | App | Bytes of RAM2 heap | Notes |
 | --- | --- | --- |
-| Scope | about 70,000 | `malloc(sizeof(Arena))` on open, freed on close (`ScopeApp.h`); the model for lazy apps |
+| Scope | about 70,000 (unverified: from a source comment, no `sizeof` taken) | `malloc(sizeof(Arena))` on open, freed on close (`ScopeApp.h`); the model for lazy apps |
 | Sampler | 0 idle; about 28,700 per playing voice, up to about 229,000 for 8 | SD read-ahead, `BUFFER_COUNT_SD` 7 x `BUFFER_SIZE_SD` 2048 x int16, per file in use; freed when the file closes |
 | Tweighty, PSRAM fitted | 0 (buffers 2 x 2 MB in PSRAM) | `ExtAudioBuffer`, `extmem_calloc` |
 | Tweighty, no PSRAM | 131,072 | the same call falls back to `calloc` (see below); 2 x 16,384 floats |
 | Tweighty crossfade table | 0 (was 16,384) | now a shared constant in flash |
 | Delay, PSRAM fitted | 0 heap | 2 x 2 MB PSRAM |
-| Delay, no PSRAM | 131,072 | 2 x (524,288 / 32) floats, same fallback |
+| Delay, no PSRAM | 131,072 (stereo: 2 x 65,536) | 2 x (524,288 / 32) floats, same fallback |
 | Delay crossfade table | 0 (was 32,768 stereo) | shared constant in flash |
-| Reverb (Freeverb) | 50,348 | Factory block, held until the next reboot |
-| Samverb / Bungverb | 77,792 | Factory block, held until the next reboot |
+| Reverb (Freeverb) | 50,348 (unverified: computed in `docs/ui-redesign`) | Factory block, held until the next reboot |
+| Samverb / Bungverb | 77,792 (unverified: computed in `docs/ui-redesign`) | Factory block, held until the next reboot |
 | Abyss | 230,028 | `malloc`, PSRAM fallback; held until the next reboot |
 
 ### The core's external-memory fallback
@@ -65,9 +65,16 @@ bookkeeping (not itemised).
 try the PSRAM pool and, when that returns null, return `malloc` / `calloc`
 from RAM2. With no PSRAM chip fitted the pool is empty, so every "PSRAM" buffer
 above silently becomes a RAM2 allocation. A module without the chip therefore
-pays for Tweighty and Delay out of the same heap the card needs. Earlier notes
-in `docs/ui-redesign` describe the no-PSRAM Delay as silent; that is only true
-when the heap cannot supply the reduced buffer.
+pays for Tweighty and Delay out of the same heap the card needs. Source: `cores/teensy4/extmem.c` in the pinned core (framework-arduinoteensy
+1.161.0). With no chip the stereo Delay takes 2 x 65,536 bytes of RAM2, as well
+as Tweighty.
+
+Statements that the no-PSRAM Delay is silent, "PSRAM only" or has "no RAM2
+fallback" are superseded by this: they hold only when the heap cannot supply the
+reduced buffer. They were in `docs/ui-redesign` (Audio-Apps-Architecture.md,
+Audio-Apps-Screens.md, Audio-Apps-Implementation-Brief.md) and in comments in
+`AudioDelayExtF32.h`, `DelayApplet.h` and `DelayApp.h` (comments now corrected;
+the Delay screen footer text still says "no PSRAM fitted", the common cause).
 
 ## What does not give memory back
 
@@ -85,7 +92,8 @@ Two mechanisms hold RAM2 until the next reboot after a single visit:
 
 * Crossfade tables (Tweighty and the F32 delay): compile-time constant in flash,
   one shared copy, no allocation. Saves 16 KB of heap per Tweighty and 16 KB per
-  delay channel. Linked image: flash grows by 16,392 bytes, RAM1 variables and
+  delay channel. Linked image: free-for-files falls by a net 15,360 bytes
+  (data +16,384, code -344, headers -680), RAM1 variables and
   RAM2 are unchanged (the table is kept out of DTCM on purpose, see
   `Audio/XfadeTable.h`).
 * Sampler read-ahead buffers can be asked for in PSRAM with `-DXENO_SAMPLER_PSRAM`
@@ -100,6 +108,12 @@ Two mechanisms hold RAM2 until the next reboot after a single visit:
   Bench: open Reverb, Samverb and Abyss in turn on a module with `t` before and
   after each; evict; confirm `heap free` / `largest_run` rise; leave audio
   running with a signal patched for several minutes and watch for a fault.
+* Audio CPU cost of the flash-resident tables. They are the only flash data
+  read in the audio path (cached XIP). Worst case, all taps fading from a cold
+  cache, is about 256 misses in one block, roughly 5-10 % of that block. Bench:
+  sweep Tweighty and Delay times while watching audio CPU (now / max) in `t`, and
+  compare with a build from before this change. (`platformio.ini` already warns
+  against ISR tables in flash.)
 * Turning `XENO_SAMPLER_PSRAM` on. Needs a board with the chip: play 8 voices
   from SD at once with it off and on, compare audio CPU in `t` and listen for
   dropouts, and confirm `largest_run` rises by the buffer size.

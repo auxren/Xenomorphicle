@@ -47,7 +47,7 @@
 // The other states are drawn, never inverted: bypass is a filled/hollow 8x8
 // box at (118,1) -- the same presence idiom as Tweighty's transport box
 // (TweightyApp.h:556-557) and the rig's banana-jack glyphs -- the clock gate is
-// the same filled/hollow box in the bar gutter, and the no-PSRAM refusal is a
+// the same filled/hollow box in the bar gutter, and the no-buffer refusal is a
 // drawn frame with words in it.
 //
 // CONTROLS
@@ -386,15 +386,16 @@ FLASHMEM void AppDelay::DrawMenu() const {
   }
 
   if (!delay_applet.BufferReady()) {
-    // No PSRAM: the wet path produces nothing at all and only the dry leg
-    // survives, so at Wet=100% this app is silent. Say so, with the
+    // No buffer (neither PSRAM nor the RAM2 fallback could supply it): the wet
+    // path produces nothing at all and only the dry leg survives, so at
+    // Wet=100% this app is silent. Say so, with the
     // consequence, rather than letting it be discovered by ear. There is no
     // remedy from the panel -- a fact stated plainly beats an invented one.
     AudioEffectScreen::RefusalBox("NO RAM: DRY ONLY");
     // Worded for THIS app's actual cause. Delay's buffer comes only from
-    // extmem_calloc (Audio/AudioBuffer.h:145-150), so the failure is a missing
-    // PSRAM chip and a reboot frees nothing -- unlike the reverbs, whose arena
-    // comes off the RAM2 heap where a reboot genuinely does help.
+    // extmem_calloc (Audio/AudioBuffer.h), which tries PSRAM and then the RAM2
+    // heap (core extmem.c). The footer text assumes the common cause, no PSRAM
+    // chip; a heap too full for the reduced buffer gives the same screen.
     gfxFooter("no PSRAM fitted - dry");
     return;
   }

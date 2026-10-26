@@ -42,9 +42,10 @@ public:
     // per instance, 16 KB of RAM2 each; two of those faulted the module on the
     // bench when the Sampler held the rest of the heap (2026-09-18).
     //
-    // Failing to get the PSRAM buffer is still not fatal to the instrument;
-    // this class documents the no-PSRAM path as "no delay, not a shorter
-    // delay", and IsReady() is false so update() early-returns.
+    // Failing to get the buffer is not fatal to the instrument: IsReady() is
+    // false and update() early-returns. With no PSRAM chip, extmem_calloc falls
+    // back to calloc (RAM2), so the buffer is the reduced size if the heap can
+    // supply it, and absent only when it cannot.
   }
 
   void Release() {
@@ -77,9 +78,10 @@ public:
     taps_ = num;
   }
 
-  // Did Acquire() actually get the buffer? It comes from extmem_calloc and
-  // nowhere else (AudioBuffer.h:145-150), so on a board with no PSRAM this is
-  // false forever and update() below produces nothing at all. update()'s own
+  // Did Acquire() actually get the buffer? It comes from extmem_calloc, which
+  // falls back to calloc in RAM2 when no PSRAM is fitted (core extmem.c), so
+  // this is false only when neither pool could supply it; then update() below
+  // produces nothing at all. update()'s own
   // `!buffer.IsReady()` guard keeps that from crashing; this lets an applet
   // or an app SAY so instead of going quietly silent.
   bool BufferReady() const {

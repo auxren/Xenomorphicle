@@ -17,9 +17,11 @@
 //
 // Flash, not DTCM: see kTable below.
 //
-// The values can differ from the old run-time fill by at most the last bit:
-// the compiler evaluates the curve without fused multiply-add, while the
-// device build may contract it.
+// The values differ slightly from the old run-time fill: the compiler
+// evaluates the curve without fused multiply-add, the device build contracted
+// it (vfma). Measured against that fill: up to 3 ulp, 692 of 2048 entries
+// differ, largest absolute difference 2.4e-7; the end points are exact
+// (out[0] == 1.0, in[0] == 0.0, in[N-1] == 1.0, out[N-1] == 0.0).
 
 #include <array>
 #include <cstddef>

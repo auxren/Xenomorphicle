@@ -74,7 +74,7 @@ float_guard
 heap_guard() {
   local bad="" f
   for f in ../src/Audio/AudioDelayExtF32.h ../src/Audio/AudioTweightyF32.h; do
-    bad="$bad$(sed -e 's://.*$::' "$f" | grep -nE '\bnew\b[^;]*float|\bmalloc\(|\bcalloc\(|extmem_(m|c)alloc\(' | sed "s:^:$f\::")"
+    bad="$bad$(sed -e 's://.*$::' "$f" | grep -nE '\bnew\b[^;]*float|vector *<[^>]*float|\bmalloc\(|\bcalloc\(|extmem_(m|c)alloc\(' | sed "s:^:$f\::")"
   done
   if [ -n "$bad" ]; then
     echo "heap allocation in a crossfade-table class (use XfadeLut::kTable):"
@@ -92,6 +92,13 @@ heap_guard() {
   if [ "$calls" != "1" ] || ! sed -e 's://.*$::' ../src/apps/SamplerApp.h \
       | grep -q 'setBufferInPSRAM(SamplerMath::PreferPsramBuffers(SamplerAppNS::kPsramOptIn, external_psram_size))'; then
     echo "SamplerApp.h must call setBufferInPSRAM once, through SamplerMath::PreferPsramBuffers"
+    return 1
+  fi
+  # The opt-in constant: true only under the define, false in the #else branch.
+  local optin
+  optin=$(sed -e 's://.*$::' ../src/apps/SamplerApp.h | grep -B1 'kPsramOptIn = ' | tr -d '\n ')
+  if [ "$optin" != '#ifdefXENO_SAMPLER_PSRAMinlineconstexprboolkPsramOptIn=true;#elseinlineconstexprboolkPsramOptIn=false;' ]; then
+    echo "SamplerApp.h: kPsramOptIn must be true only under XENO_SAMPLER_PSRAM and false in the #else branch"
     return 1
   fi
   echo "heap guard: no heap table in Tweighty/Delay; Sampler PSRAM choice is gated"

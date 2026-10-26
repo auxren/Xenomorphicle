@@ -418,13 +418,14 @@ private:
   // "just under 12 s" this comment used to claim -- that was the 44.1 kHz
   // figure, and the core runs at 48 kHz.
   //
-  // THIS DELAY REQUIRES PSRAM. There is no RAM2 fallback, whatever the /32
-  // below looks like: `ExtAudioBuffer::Acquire()` (Audio/AudioBuffer.h:145-150)
-  // only ever calls `extmem_calloc`. On a board with no PSRAM chip the buffer
-  // stays nullptr and the smaller size buys nothing -- so the failure mode is
-  // NOT "a shorter delay", it is NO DELAY. The wet path goes silent; only the
-  // dry leg through wet_dry_mixer's WD_DRY_CH survives, which means at Wet=100%
-  // the applet is silent outright.
+  // PSRAM IS PREFERRED, NOT REQUIRED. `ExtAudioBuffer::Acquire()`
+  // (Audio/AudioBuffer.h) calls `extmem_calloc`, which in the pinned core
+  // (cores/teensy4/extmem.c) falls back to `calloc` from RAM2 when the PSRAM
+  // pool is empty. With no chip the /32 size below is therefore a real, shorter
+  // delay (2 x 65,536 bytes of RAM2 for the stereo instance) as long as the
+  // heap can supply it. When it cannot, the buffer stays nullptr: NO DELAY, the
+  // wet path goes silent and only the dry leg through wet_dry_mixer's
+  // WD_DRY_CH survives, so at Wet=100% the applet is silent outright.
   //
   // It does at least fail safely rather than crashing: AudioDelayExtF32's
   // update() early-returns on `!buffer.IsReady()`
@@ -538,8 +539,8 @@ public:
   CVInputMap& FeedbackCV() { return feedback_cv; }
   CVInputMap& WetCV() { return wet_cv; }
 
-  // False on a board with no PSRAM: there is no wet signal at all, not a
-  // shorter one. See the DELAY_LENGTH comment above.
+  // False when neither PSRAM nor the RAM2 fallback could supply the buffer:
+  // there is no wet signal at all. See the DELAY_LENGTH comment above.
   bool BufferReady() const { return channels[0].delaystream.BufferReady(); }
 
 private:
