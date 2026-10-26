@@ -44,11 +44,18 @@ SCOPE_CODE void MagnitudeDb(const float *in, float *db_out, Work &w) {
   Tables(w);
   float *const re_ = w.re, *const im_ = w.im, *const cos_ = w.cos_t, *const sin_ = w.sin_t;
   const float *const win_ = w.win;
+  // The mean comes off before the window, for every source: any offset (a codec's,
+  // an ADC's, a CV input's) leaks through the Hann window into the lowest bins and
+  // swamps them. Exact, and no filter: a bin is 47 Hz wide, so a high-pass at 10 Hz
+  // would be below one bin and only add settling.
+  float mean = 0.f;
+  for (int i = 0; i < kN; ++i) mean += in[i];
+  mean *= 1.f / kN;
   for (int i = 0; i < kN; ++i) {
     // bit-reversed load, windowed
     unsigned r = 0;
     for (int b = 0; b < kLog2N; ++b) r |= ((i >> b) & 1u) << (kLog2N - 1 - b);
-    re_[r] = in[i] * win_[i];
+    re_[r] = (in[i] - mean) * win_[i];
     im_[r] = 0.f;
   }
   for (int len = 2; len <= kN; len <<= 1) {

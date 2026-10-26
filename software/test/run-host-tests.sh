@@ -40,6 +40,30 @@ suite() {
   "./build/${TAG}${name}"
 }
 
+# The module's snprintf (newlib-nano, no -u _printf_float) prints NOTHING for %f,
+# %e, %g: a field formatted with one is blank on the OLED and in the console while
+# every host test, whose libc prints floats, passes. Sources that format text on
+# the module must use ScopeFmt::Fixed (src/ScopeFmt.h). The first check greps the
+# files below for a float conversion in a format string; the second is the
+# nofloat_printf.h shim on the formatter suites (snprintf aborts on one).
+float_guard() {
+  local files="../src/ScopeFmt.h ../src/ScopeFreq.h ../src/ScopeFreqLine.cpp ../src/ScopeFreqLine.h \
+    ../src/ScopeFreqService.cpp ../src/ScopeFreqConsole.cpp ../src/ScopeRange.cpp ../src/ScopeSources.cpp \
+    ../src/ScopeSettings.cpp ../src/ScopeCapture.cpp ../src/ScopeFft.cpp ../src/ScopeTrigger.cpp ../src/apps/ScopeApp.h"
+  local bad
+  # code only: a format string is "...%[flags][width][.prec][l]f...", comments are dropped first
+  bad=$(for f in $files; do sed -e 's://.*$::' "$f" | grep -nE '"[^"]*%[-+ #0-9.*]*(l|L|z)?[fFeEgGaA]' | sed "s:^:$f\::"; done)
+  # the console handler lives in Main.cpp among a lot of older code: only its own span
+  bad="$bad$(awk '/static bool FreqConsoleByte/,/^}/' ../src/Main.cpp | sed -e 's://.*$::' | grep -nE '"[^"]*%[-+ #0-9.*]*(l|L|z)?[fFeEgGaA]' | sed 's:^:Main.cpp FreqConsoleByte\::')"
+  if [ -n "$bad" ]; then
+    echo "float conversion in a format string (blank on the module; use ScopeFmt::Fixed):"
+    echo "$bad"
+    return 1
+  fi
+  echo "float-printf guard: no %f/%e/%g in the Scope and counter sources"
+}
+float_guard
+
 suite test_bus200e                  ../src/PresetBus200e.cpp
 suite test_bus200e_master           ../src/Bus200eMaster.cpp ../src/PresetBus200e.cpp
 suite test_bus200e_sysex            ../src/Bus200eSysEx.cpp
@@ -77,7 +101,8 @@ suite test_scope_range              ../src/ScopeRange.cpp
 suite test_scope_trigger            ../src/ScopeTrigger.cpp
 suite test_scope_fft                ../src/ScopeFft.cpp
 suite test_scope_freq
-suite test_scope_freq_line          ../src/ScopeFreqLine.cpp
+suite test_scope_fmt
+suite test_scope_freq_line          -include host_stubs/nofloat_printf.h ../src/ScopeFreqLine.cpp
 suite test_scope_freq_service       -pthread ../src/ScopeFreqService.cpp ../src/ScopeFreqLine.cpp ../src/ScopeSources.cpp
 suite test_scope_freq_console       ../src/ScopeFreqConsole.cpp
 suite test_sampler_math             ../src/SamplerMath.cpp

@@ -53,6 +53,8 @@
 //                    it, and the clock correction survives both
 //   freq-layout      the line never touches the plot: single, overlaid, stacked,
 //                    CV+TR lanes and the spectrum
+//   freq-fft-header  the spectrum header stays put as the peak's digits change, and
+//                    only the source field is selectable there
 //   freq-settings    a saved Scope from the 16-byte and 3-byte layouts is
 //                    restored, the new layout carries the clock, and a save
 //                    from before the calibration does not wipe a live one
@@ -1147,6 +1149,91 @@ void FreqLayout() {
   Tap(OC::CONTROL_BUTTON_X);
 }
 
+
+// ---- the spectrum header ------------------------------------------------------
+
+// The top line's 21 character cells, decoded from the framebuffer (text at y = 1,
+// so not page aligned; a cell may be inverted, as the selected field is).
+std::string HeaderCells() {
+  uint8_t fb[1024];
+  SimPanelVisible(fb);
+  std::string out;
+  for (int cell = 0; cell < 21; ++cell) {
+    const int x = 1 + cell * 6;
+    uint8_t col[6];
+    bool blank = true;
+    for (int c = 0; c < 6; ++c) {
+      uint8_t b = 0;
+      for (int cy = 0; cy < 8; ++cy) b |= (uint8_t)(((fb[((1 + cy) >> 3) * 128 + x + c] >> ((1 + cy) & 7)) & 1) << cy);
+      col[c] = b;
+      if (b) blank = false;
+    }
+    if (blank) { out += ' '; continue; }
+    char found = '\x01';
+    for (int inv = 0; inv < 2 && found == '\x01'; ++inv)
+      for (int g = 0; g < 92; ++g) {
+        bool same = true;
+        for (int c = 0; c < 6 && same; ++c) same = (uint8_t)(inv ? ~col[c] : col[c]) == ssd1306xled_font6x8[g * 6 + c];
+        if (same) { found = (char)(' ' + g); break; }
+      }
+    out += found;
+  }
+  return out;
+}
+
+void FreqFftHeader() {
+  ScopeOnCv1();
+  Tap(OC::CONTROL_BUTTON_X);   // spectrum
+  Run(50);
+  struct { double hz; } tones[] = {{79.0}, {98.0}, {808.0}, {1100.0}, {12300.0}};
+  for (auto &t : tones) {
+    RunCv(0, 500, Sine(t.hz, 6000.0));
+    const std::string h = HeaderCells();
+    char msg[200];
+    printf("  %6.0f Hz: \"%s\"\n", t.hz, h.c_str());
+    snprintf(msg, sizeof(msg), "%.0f Hz: FFT sits in columns 18-20", t.hz);
+    CHECK(h.compare(18, 3, "FFT") == 0, msg);
+    snprintf(msg, sizeof(msg), "%.0f Hz: the peak text is right-aligned, ending at column 16", t.hz);
+    CHECK(h[16] != ' ' && h[17] == ' ', msg);
+    // the field (columns 9-16): spaces, then "pk <number><unit>"
+    const size_t p = h.find("pk ", 9);
+    snprintf(msg, sizeof(msg), "%.0f Hz: the peak text starts with pk inside the field", t.hz);
+    CHECK(p != std::string::npos && p >= 9 && p <= 12, msg);
+    snprintf(msg, sizeof(msg), "%.0f Hz: nothing else between the channel and the peak", t.hz);
+    CHECK(h.compare(0, 4, "CV1 ") == 0 || h.compare(0, 3, "CV1") == 0, msg);
+    // the number is the tone, within one bin
+    double v = atof(h.c_str() + p + 3);
+    if (h[16] == 'k') v *= 1000.0;
+    snprintf(msg, sizeof(msg), "%.0f Hz: the reading %.1f is the tone", t.hz, v);
+    CHECK(fabs(v - t.hz) < 0.1 * t.hz + 40.0, msg);
+  }
+  // the digits changed width four times above and FFT never moved: compare two
+  // extremes directly
+  RunCv(0, 500, Sine(79.0, 6000.0));
+  const std::string a = HeaderCells();
+  RunCv(0, 500, Sine(12300.0, 6000.0));
+  const std::string b = HeaderCells();
+  CHECK(a.compare(17, 4, b.substr(17, 4)) == 0, "the columns right of the field are identical for 79 Hz and 12.3k");
+  CHECK(a.size() == b.size() && a.find("pk") != b.find("pk"), "(the text did change width: it starts in different columns)");
+
+  // only the source is selectable here: encL stays on it, so encR still changes the source
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN1, "(on CV1)");
+  SimInputEncoder(false, 1);
+  Run(250);
+  SimInputEncoder(false, 1);
+  Run(250);
+  TurnN(1);
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN2,
+        "in the spectrum encL leaves the source field alone: encR still changes the source");
+  // leaving the spectrum, the other fields are back
+  Tap(OC::CONTROL_BUTTON_X);
+  Run(100);
+  SimInputEncoder(false, 1);   // to the time field
+  Run(250);
+  TurnN(1);
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN2, "(in the scope view encL moves to the time field: encR no longer changes the source)");
+}
+
 // ---- saved settings -----------------------------------------------------------
 
 constexpr uint16_t kScopeId = TWOCCS("SP");
@@ -1390,6 +1477,7 @@ int SimAppSwitchTest(const std::string &s) {
   else if (s == "freq-switch") FreqSwitch();
   else if (s == "freq-layout") FreqLayout();
   else if (s == "freq-settings") FreqSettings();
+  else if (s == "freq-fft-header") FreqFftHeader();
   else if (s == "prep-scope") PrepScope(false);
   else if (s == "prep-scope-slot") PrepScope(true);
   else if (s == "boot-menu") BootMenu(false);

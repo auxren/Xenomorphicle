@@ -13,6 +13,7 @@
 #endif
 
 #include "ScopeFreqLine.h"
+#include "ScopeFmt.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -129,13 +130,14 @@ FREQ_LINE_CODE void FormatLine(const Reading &r, bool clock_calibrated, char *bu
   }
   char out[48];
   for (;;) {
-    int k = snprintf(out, sizeof(out), "%s%.*fHz", mark, hz_dec, r.hz);
+    // integer-only number text: the module's snprintf prints nothing for %f
+    int k = snprintf(out, sizeof(out), "%s", mark);
+    k += ScopeFmt::Fixed(out + k, sizeof(out) - (size_t)k, r.hz, hz_dec);
+    k += snprintf(out + k, sizeof(out) - (size_t)k, "Hz");
     if (has_note) {
-      double c = cents;
-      double unit = 1.0;
-      for (int i = 0; i < c_dec; ++i) unit *= 0.1;
-      if (fabs(c) < 0.5 * unit) c = 0.0;  // no "-0.00"
-      snprintf(out + k, sizeof(out) - (size_t)k, " %s %+.*fc", note, c_dec, c);
+      k += snprintf(out + k, sizeof(out) - (size_t)k, " %s ", note);
+      k += ScopeFmt::Fixed(out + k, sizeof(out) - (size_t)k, cents, c_dec, true);
+      snprintf(out + k, sizeof(out) - (size_t)k, "c");
     }
     if (strlen(out) <= (size_t)kLineChars) break;
     if (hz_dec > 0) --hz_dec;
@@ -167,10 +169,12 @@ FREQ_LINE_CODE int FormatSfreq(char *buf, size_t n, const char *src, const Readi
                     rate_verified ? 1 : 0);
   }
   const bool num = r->have && (r->status == Status::OK || r->status == Status::UNSTABLE);
-  return snprintf(buf, n, "SFREQ,%s,%.5f,%.5f,%s,%ld,%u,%lu,%d,%d", src, num ? r->hz : 0.0,
-                  num ? r->sigma_cents : 0.0, StatusToken(*r), (long)lround(r->have ? r->gate_s * 1000.0 : 0.0),
-                  (unsigned)(r->have ? r->flags : 0), (unsigned long)(r->have ? r->seq : 0),
-                  clock_calibrated ? 1 : 0, rate_verified ? 1 : 0);
+  char hz[24], sg[24];
+  ScopeFmt::Fixed(hz, sizeof(hz), num ? r->hz : 0.0, 5);
+  ScopeFmt::Fixed(sg, sizeof(sg), num ? r->sigma_cents : 0.0, 5);
+  return snprintf(buf, n, "SFREQ,%s,%s,%s,%s,%ld,%u,%lu,%d,%d", src, hz, sg, StatusToken(*r),
+                  (long)lround(r->have ? r->gate_s * 1000.0 : 0.0), (unsigned)(r->have ? r->flags : 0),
+                  (unsigned long)(r->have ? r->seq : 0), clock_calibrated ? 1 : 0, rate_verified ? 1 : 0);
 }
 
 }  // namespace ScopeFreqLine

@@ -40,6 +40,7 @@
 #include "../OC_DAC.h"
 #include "../ScopeCapture.h"
 #include "../ScopeFft.h"
+#include "../ScopeFmt.h"
 #include "../ScopeFreqLine.h"
 #include "../ScopeFreqService.h"
 #include "../ScopeRange.h"
@@ -235,6 +236,8 @@ private:
   void RenderPicker() const;
   void RenderSpectrum() const;
   void DrawHeader(const char *trig_text, const char *time_text, const char *volt_text) const;
+  void DrawHeaderFft(const char *pk_text) const;
+  bool FftView() const { return set_.view == 1 && !TrigIsTr(); }
 };
 
 // ---------------------------------------------------------------------------
@@ -493,7 +496,11 @@ FLASHMEM void AppScope::HandleButtonEvent(const UI::Event &event) {
     case OC::CONTROL_BUTTON_A: SetFrozen(!frozen_); break;
     case OC::CONTROL_BUTTON_B: AllAuto(); break;
     case OC::CONTROL_BUTTON_X:
-      if (!TrigIsTr()) { set_.view = set_.view ? 0 : 1; Rearm(); }
+      if (!TrigIsTr()) {
+        set_.view = set_.view ? 0 : 1;
+        if (set_.view) focus_ = ScopeAppNS::F_CH;   // the other fields do not exist in the spectrum
+        Rearm();
+      }
       break;
     case OC::CONTROL_BUTTON_Y:
       if (n_ > 1) set_.stacked = set_.stacked ? 0 : 1;
@@ -519,7 +526,9 @@ FLASHMEM void AppScope::HandleEncoderEvent(const UI::Event &event) {
     return;
   }
   if (event.control == OC::CONTROL_ENCODER_L) {
-    focus_ = (uint8_t)ScopeAppNS::Wrap(focus_ + event.value, ScopeAppNS::F_COUNT);
+    // the spectrum has no time, volts or trigger field: only the source is selectable
+    focus_ = FftView() ? (uint8_t)ScopeAppNS::F_CH
+                       : (uint8_t)ScopeAppNS::Wrap(focus_ + event.value, ScopeAppNS::F_COUNT);
   } else if (event.control == OC::CONTROL_ENCODER_R) {
     TurnField(event.value);
   }
@@ -568,6 +577,31 @@ FLASHMEM void AppScope::DrawHeader(const char *trig_text, const char *time_text,
   }
 }
 
+// The spectrum view's top line, in fixed places so a change in the peak's digits
+// moves nothing: the channel at the left (at most 8 columns), the peak reading
+// right-aligned in a 8-column field ending at column 16, FFT at columns 18-20.
+// Only the channel field is live here (time and volts do not apply to the
+// spectrum), so it is the only one that can be selected.
+FLASHMEM void AppScope::DrawHeaderFft(const char *pk_text) const {
+  using namespace ScopeAppNS;
+  char ch[10];
+  snprintf(ch, sizeof(ch), "%s", ScopeSources::QuickLabel(set_.quick_idx));
+  if (strlen(ch) > 8) ch[8] = 0;
+  graphics.setPrintPos(1, 1);
+  graphics.print(ch);
+  if (!picker_) graphics.invertRect(0, 0, (int)strlen(ch) * 6 + 1, 9);
+  int len = (int)strlen(pk_text);
+  if (len > 8) len = 8;
+  graphics.setPrintPos(1 + (17 - len) * 6, 1);
+  graphics.print(pk_text);
+  graphics.setPrintPos(1 + 18 * 6, 1);
+  graphics.print("FFT");
+  if (frozen_) {
+    graphics.setPrintPos(128 - 6 * 3, kTop + 1);
+    graphics.print("FRZ");
+  }
+}
+
 FLASHMEM void AppScope::RenderPicker() const {
   using namespace ScopeSources;
   Source tmp[kMaxTraces];
@@ -594,7 +628,6 @@ FLASHMEM void AppScope::RenderSpectrum() const {
   Arena &ar = *g_arena;  // Render() checked it
   const int ts = TrigSlot();
   char pk[12] = "pk --";
-  const char *none = "";
   if (ts >= 0) {
     const ScopeRing &r = ScopeCapture::g_rings[ts];
     const uint32_t c = r.Committed();
@@ -604,12 +637,6 @@ FLASHMEM void AppScope::RenderSpectrum() const {
     if (c >= (uint32_t)ScopeFft::kN && r.Decim() == 1) {
       for (int i = 0; i < ScopeFft::kN; ++i)
         ar.fft_in[i] = ToMv(s, r.At(c - ScopeFft::kN + i).lo) / fs;
-      if (KindOf(s) == KIND_CV_IN || KindOf(s) == KIND_CV_OUT) {  // DC would swamp bin 0..1
-        float m = 0;
-        for (int i = 0; i < ScopeFft::kN; ++i) m += ar.fft_in[i];
-        m /= ScopeFft::kN;
-        for (int i = 0; i < ScopeFft::kN; ++i) ar.fft_in[i] -= m;
-      }
       ScopeFft::MagnitudeDb(ar.fft_in, ar.fft_db, ar.fft);
       peak_hz_ = ScopeFft::PeakHz(ar.fft_db, rate);
       uint8_t rows[kCols];
@@ -621,12 +648,11 @@ FLASHMEM void AppScope::RenderSpectrum() const {
         if (g >= rate / 2) continue;
         graphics.drawVLinePattern(ScopeFft::ColumnForHz(g, rate), kTop, kPlotH, 0x55);
       }
-      if (peak_hz_ >= 1000.f) snprintf(pk, sizeof(pk), "pk %.1fk", peak_hz_ / 1000.f);
-      else snprintf(pk, sizeof(pk), "pk %dHz", (int)lroundf(peak_hz_));
+      ScopeFmt::PeakText(pk, sizeof(pk), peak_hz_);
     }
   }
   // spectrum top line: channel, peak, and the analysed source
-  DrawHeader(none, pk, "FFT");
+  DrawHeaderFft(pk);
 }
 
 FLASHMEM void AppScope::DrawFreqLine() const {
@@ -773,7 +799,9 @@ FLASHMEM void AppScope::RenderBody() const {
     if (n_ == 1) snprintf(gtext, sizeof(gtext), "%s", locked_ ? "AUTO" : "FREE");
     else snprintf(gtext, sizeof(gtext), "%c%d", locked_ ? 'A' : 'F', ts + 1);
   } else if (set_.trig_mode == TM_LEVEL) {
-    snprintf(gtext, sizeof(gtext), "%+.1fV", LevelMv() / 1000.f);
+    char lv[12];
+    ScopeFmt::Fixed(lv, sizeof(lv), LevelMv() / 1000.0, 1, true);   // not %f: blank on the module
+    snprintf(gtext, sizeof(gtext), "%sV", lv);
   } else {
     snprintf(gtext, sizeof(gtext), "TR%d", set_.trig_mode - TM_EXT + 1);
   }
@@ -880,7 +908,11 @@ FLASHMEM void AppScope::RenderBody() const {
         graphics.print((char)('1' + t));
         graphics.invertRect(0, ytop + (lane_h - 8) / 2 - 1, 7, 9);
         if (is_tr) snprintf(lab, sizeof(lab), "%s", last_mv_[t] > 0.5f ? "HI" : "LO");
-        else snprintf(lab, sizeof(lab), "%.1fV", last_mv_[t] / 1000.f);
+        else {
+          char lv[12];
+          ScopeFmt::Fixed(lv, sizeof(lv), last_mv_[t] / 1000.0, 1);
+          snprintf(lab, sizeof(lab), "%sV", lv);
+        }
         graphics.setPrintPos(127, ytop + (lane_h - 8) / 2);
         graphics.print_right(lab);
       }

@@ -88,11 +88,43 @@ static void test_cv_rate_axis() {
   CHECK(c1k > 60 && c1k < 80);  // 1 kHz sits ~57 % along a 20 Hz..20 kHz log axis
 }
 
+// An offset must not reach the spectrum: it comes off before the window for every
+// source (a codec's or ADC's offset, not just CV inputs'). Hann leaks a DC of 0.5
+// into bins 0 and 1 at about -6 dB unless it is removed.
+static void test_dc_removed() {
+  printf("test_dc_removed\n");
+  const float rate = 48000.f;
+  std::vector<float> clean(kN), dc(kN), db_clean(kN / 2 + 1), db_dc(kN / 2 + 1);
+  for (int i = 0; i < kN; ++i) {
+    clean[i] = 0.1f * sinf(6.2831853f * 1000.f * i / rate);
+    dc[i] = clean[i] + 0.5f;
+  }
+  MagnitudeDb(clean.data(), db_clean.data(), g_work);
+  MagnitudeDb(dc.data(), db_dc.data(), g_work);
+  float pk_clean = 0, pk_dc = 0;
+  const float hz_clean = PeakHz(db_clean.data(), rate, &pk_clean);
+  const float hz_dc = PeakHz(db_dc.data(), rate, &pk_dc);
+  CHECK(fabsf(hz_dc - hz_clean) < 0.01f && fabsf(hz_dc - 1000.f) < 5.f);
+  CHECK(fabsf(pk_dc - pk_clean) < 0.01f);
+  for (int k = 0; k < 6; ++k) CHECK(fabsf(db_dc[k] - db_clean[k]) < 0.5f);   // the low bins are the clean ones
+  CHECK(db_dc[0] < 0.f - 40.f && db_dc[1] < -40.f);   // nowhere near the -6 dB an uncorrected 0.5 offset leaks
+  // a pure offset is silence
+  std::vector<float> flat(kN, 0.7f), db_flat(kN / 2 + 1);
+  MagnitudeDb(flat.data(), db_flat.data(), g_work);
+  for (int k = 0; k <= kN / 2; ++k) CHECK(db_flat[k] < -90.f);
+  // a small offset on a low tone still finds the tone above 20 Hz, not bin 0
+  std::vector<float> lo(kN), db_lo(kN / 2 + 1);
+  for (int i = 0; i < kN; ++i) lo[i] = 0.3f + 0.05f * sinf(6.2831853f * 94.f * i / rate);
+  MagnitudeDb(lo.data(), db_lo.data(), g_work);
+  CHECK(fabsf(PeakHz(db_lo.data(), rate) - 94.f) < 6.f);
+}
+
 int main() {
   test_peak_sine();
   test_ringmod_sidebands();
   test_silence_floor();
   test_cv_rate_axis();
+  test_dc_removed();
   printf("%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }

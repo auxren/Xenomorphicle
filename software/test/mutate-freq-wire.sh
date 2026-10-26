@@ -14,7 +14,8 @@ W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 mkdir -p "$W/src" "$W/test"
 cp ../src/Scope*.h ../src/Scope*.cpp "$W/src/"
-cp test_scope_freq.cpp test_scope_freq_service.cpp test_scope_freq_line.cpp \
+cp host_stubs/nofloat_printf.h "$W/nofloat_printf.h"
+cp test_scope_freq.cpp test_scope_fmt.cpp test_scope_fft.cpp test_scope_freq_service.cpp test_scope_freq_line.cpp \
    test_scope_freq_console.cpp test_scope_sources.cpp "$W/test/"
 mkdir -p "$W/orig" && cp "$W"/src/* "$W/orig/"
 
@@ -22,7 +23,9 @@ mkdir -p "$W/orig" && cp "$W"/src/* "$W/orig/"
 suite_cmd() {
   case "$1" in
     service)  echo "test_scope_freq_service.cpp -pthread ScopeFreqService.cpp ScopeFreqLine.cpp ScopeSources.cpp" ;;
-    line)     echo "test_scope_freq_line.cpp ScopeFreqLine.cpp" ;;
+    line)     echo "test_scope_freq_line.cpp @NOFLOAT@ ScopeFreqLine.cpp" ;;
+    fmt)      echo "test_scope_fmt.cpp" ;;
+    fft)      echo "test_scope_fft.cpp ScopeFft.cpp" ;;
     console)  echo "test_scope_freq_console.cpp ScopeFreqConsole.cpp" ;;
     settings) echo "test_scope_sources.cpp ScopeSources.cpp ScopeSettings.cpp ScopeRange.cpp" ;;
     est)      echo "test_scope_freq.cpp" ;;
@@ -32,7 +35,7 @@ build_run() {  # suite -> prints output, returns the test's status (99 = did not
   local spec; spec=$(suite_cmd "$1")
   local t=${spec%% *}; local rest=${spec#* }; local args=() f
   [ "$rest" = "$spec" ] && rest=""
-  for f in $rest; do case "$f" in -*) args+=("$f");; *) args+=("$W/src/$f");; esac; done
+  for f in $rest; do case "$f" in @NOFLOAT@) args+=(-include "$W/nofloat_printf.h");; -*) args+=("$f");; *) args+=("$W/src/$f");; esac; done
   $CXX -std=c++17 -Wall -Wsign-compare -Werror -O2 -o "$W/bin" "$W/test/$t" ${args[@]+"${args[@]}"} 2>"$W/cc.log" || return 99
   "$W/bin" 2>&1
 }
@@ -53,7 +56,6 @@ MUTS=(
  "line@@ScopeFreqLine.cpp@@acceptance at 2 sigma@@kAgreeSigmas * comb@@2.0 * comb"
  "line@@ScopeFreqLine.h@@acceptance floor removed@@constexpr double kAgreeFloorCents = 0.01;@@constexpr double kAgreeFloorCents = 0.0;"
  "line@@ScopeFreqLine.cpp@@gate confirms itself@@n.confirmed = prev_ok_ && Agree(prev_, r);@@n.confirmed = prev_ok_;"
- "line@@ScopeFreqLine.cpp@@negative zero not guarded@@if (fabs(c) < 0.5 * unit) c = 0.0;@@(void)unit;"
  "line@@ScopeFreqLine.cpp@@decimals ignore sigma@@int hz_dec = DecimalsForSigma(r.hz * r.sigma_cents / kCentsPerLn, 3);@@int hz_dec = DecimalsForSigma(r.hz * r.sigma_cents / kCentsPerLn, 3) * 0 + 3;"
  "line@@ScopeFreqLine.cpp@@line not cut back to 21 columns@@    if (strlen(out) <= (size_t)kLineChars) break;@@    break;"
  "line@@ScopeFreqLine.cpp@@uncalibrated mark is the tilde (not in the font)@@mark[0] = '*';@@mark[0] = '~';"
@@ -75,12 +77,19 @@ MUTS=(
  "line@@ScopeFreqLine.cpp@@SFREQ drops the rate field@@clock_calibrated ? 1 : 0, rate_verified ? 1 : 0);\n}@@clock_calibrated ? 1 : 0, 1);\n}"
  "console@@ScopeFreqConsole.cpp@@a cancel leaks the rest of the burst@@    else { last_ms_ = now_ms; return Make(Kind::PENDING); }@@    else { state_ = IDLE; return Action(); }"
  "console@@ScopeFreqConsole.cpp@@unsigned clock value accepted@@      if (c == '+' || c == '-') {@@      if (c == '+' || c == '-' || (c >= '0' && c <= '9')) {"
+ "fmt@@ScopeFmt.h@@Fixed rounds down@@const uint64_t q = (uint64_t)(a * (double)sc + 0.5);@@const uint64_t q = (uint64_t)(a * (double)sc);"
+ "fmt@@ScopeFmt.h@@Fixed prints -0.00@@      if (q == 0) neg = false;@@"
+ "fmt@@ScopeFmt.h@@Fixed drops the zero padding of the fraction@@          t[k++] = (char)('0' + (int)((fp / p) % 10));@@          if (fp / p || i == 0) t[k++] = (char)('0' + (int)((fp / p) % 10));"
+ "fmt@@ScopeFmt.h@@peak text switches to kHz at 1000 Hz, not 999.5@@  if (hz < 999.5) {@@  if (hz < 1000.0) {"
+ "fft@@ScopeFft.cpp@@spectrum keeps the DC@@    re_[r] = (in[i] - mean) * win_[i];@@    re_[r] = (in[i] - mean * 0.f) * win_[i];"
+ "line@@ScopeFreqLine.cpp@@line formats with %f again (blank on the module)@@    k += ScopeFmt::Fixed(out + k, sizeof(out) - (size_t)k, r.hz, hz_dec);@@    k += snprintf(out + k, sizeof(out) - (size_t)k, \"%.*f\", hz_dec, r.hz);"
+ "line@@ScopeFreqLine.cpp@@SFREQ formats hz with %f again@@  ScopeFmt::Fixed(hz, sizeof(hz), num ? r->hz : 0.0, 5);@@  snprintf(hz, sizeof(hz), \"%.5f\", num ? r->hz : 0.0);"
  "est@@ScopeFreq.h@@Log2 series cut short@@for (int k = 1; k <= 21; k += 2) {@@for (int k = 1; k <= 3; k += 2) {"
  "est@@ScopeFreq.h@@Result.pp not recorded@@    r.pp = hi_ >= lo_ ? (int32_t)hi_ - (int32_t)lo_ : 0;\n    r.crossings = line_.n;@@    r.crossings = line_.n;"
  "est@@ScopeFreq.h@@note names shifted by a semitone@@kNames[3 * n];@@kNames[3 * ((n + 1) % 12)];"
 )
 
-for s in service line console settings est; do
+for s in service line console settings est fmt fft; do
   cp "$W/orig"/* "$W/src/"
   out=$(build_run $s); rc=$?
   [ $rc -eq 0 ] || { echo "baseline $s is RED (rc=$rc): fix the tests first"; echo "$out" | tail -5; exit 2; }

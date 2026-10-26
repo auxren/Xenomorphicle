@@ -2176,6 +2176,8 @@ sw_run "app switches stop and restart the counter, the clock correction survives
   --test-app-switch freq-switch
 sw_run "the measurement line never touches the plot (five views)" \
   --test-app-switch freq-layout
+sw_run "the spectrum header does not move when the peak digits change; only the source is selectable" \
+  --test-app-switch freq-fft-header
 sw_run "saved Scope settings: the 16- and 3-byte layouts restore, the clock round-trips" \
   --test-app-switch freq-settings
 

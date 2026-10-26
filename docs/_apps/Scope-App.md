@@ -39,7 +39,7 @@ Auto mode locks to the **whole repeat** of a complex wave, not to whichever wigg
 
 With several traces, **Y** switches between **overlaid** (one shared volt scale, each trace in its own line style with its number at the right end) and **stacked** (one lane each, each scaled on its own, the jack number at the left and the live voltage at the right; TR jacks draw as on/off lanes).
 
-**X** switches to the **spectrum**: frequency runs left to right on a log scale from 20 Hz to 20 kHz, with faint lines at 100 Hz, 1 kHz and 10 kHz, and the top line shows the strongest peak (`pk 550Hz`). A ring modulator's sum and difference tones show up as pairs either side of the carrier. The spectrum analyses the trigger trace; a TR jack has none.
+**X** switches to the **spectrum**: frequency runs left to right on a log scale from 20 Hz to 20 kHz, with faint lines at 100 Hz, 1 kHz and 10 kHz, and the top line shows the strongest peak (`pk 550Hz`). A ring modulator's sum and difference tones show up as pairs either side of the carrier. The spectrum analyses the trigger trace; a TR jack has none. The top line there has fixed places: the channel at the left, the peak reading right-aligned just left of `FFT` (so a change in its digits moves nothing), and only the channel field can be selected. The average of the signal (any offset) is removed before the analysis, for every source.
 
 ### The frequency line
 
@@ -49,7 +49,16 @@ The bottom line of the screen counts the frequency of the **trigger trace** when
 440.012Hz A4 +0.05c
 ```
 
-The number of decimals follows what the counter can actually tell, so a low tone prints fewer digits than a high one. A mark in front says how far to trust it: **`?`** the last two readings have not agreed yet, **`#`** the reading is steady but the sample rate of CV inputs has not yet been confirmed on the hardware (CV readings only), **`*`** the reading is steady but the module's crystal has not been calibrated (the absolute value can be off by up to 0.05 cent), **`!`** the signal is moving and the number is an average. Instead of a number you may see NO SIGNAL, TOO QUIET (the tone is too small to count), SIGNAL LOST, TOO LOW or TOO HIGH (the range is 10 Hz to 8 kHz, specified 20 Hz to 5 kHz). Below 16 Hz it shows plain Hz, no note: an LFO on a CV input is counted down to 0.5 Hz (the reading then takes a few seconds). It keeps counting when the trace is frozen. The console commands that read it and set the crystal correction are in [the bench console](bench-console).
+The number of decimals follows what the counter can actually tell, so a low tone prints fewer digits than a high one. A mark in front says how far to trust it. No mark means the reading is confirmed (two 0.1 s counts in a row agreed) and the module's crystal has been calibrated.
+
+| Mark | Meaning |
+|---|---|
+| **`?`** | not confirmed yet: the last two 0.1 s counts have not agreed. Wait a moment, or the signal is moving. |
+| **`!`** | the input is not a clean repeating tone (noise, hum, several tones at once). The number is the best guess, not a measurement. |
+| **`*`** | steady, but the Xeno's crystal has not been calibrated yet, so the absolute value is only as good as the crystal (typically a few cents at most). |
+| **`#`** | a CV-input reading whose sample rate is still unverified on the hardware. |
+
+The line follows the trigger trace's source: the jack whose trace the Scope is triggering on. Instead of a number you may see NO SIGNAL, TOO QUIET (the tone is too small to count), SIGNAL LOST, TOO LOW or TOO HIGH (the range is 10 Hz to 8 kHz, specified 20 Hz to 5 kHz). Below 16 Hz it shows plain Hz, no note: an LFO on a CV input is counted down to 0.5 Hz (the reading then takes a few seconds). It keeps counting when the trace is frozen. The console commands that read it and set the crystal correction are in [the bench console](bench-console).
 
 ### Controls
 
