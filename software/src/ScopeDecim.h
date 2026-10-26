@@ -13,7 +13,7 @@
 // passband flat to 0.1): the band that is finally shown is small against its rate,
 // but a near-full-scale tone anywhere above 0.4 of the input rate folds into it, and
 // the plot reaches -90 dB (the first version's 11-tap filter, -42 dB there, drew a
-// 19.5 kHz tone at 21 px). The last stage has the long one (47 taps, -80 dB from 0.3 of
+// 19.5 kHz tone at 21 px). The last stage has the long one (55 taps, -81 dB from 0.3 of
 // its input rate, flat to 0.2), because the shown band is 0.8 of the final Nyquist (0.2 of
 // the last stage's input rate) and everything that would fold into it comes from 0.3 and up.
 // ---------------------------------------------------------------------------
@@ -65,30 +65,48 @@ private:
   static inline __attribute__((always_inline)) int32_t Tap(const int16_t *b, unsigned p, unsigned mask, int k) {
     return b[(p - 1u - (unsigned)k) & mask];
   }
+  // Both filters are written out tap by tap with literal coefficients: a loop over a table was
+  // measured at ~14 instructions per iteration (not unrolled, table reloaded from the stack).
+#define SCOPEDECIM_PAIR(b, p, mask, centre, c, d) \
+  acc += (c) * (Tap((b), (p), (mask), (centre) - (d)) + Tap((b), (p), (mask), (centre) + (d)))
+
   // 19-tap Kaiser (beta 7) halfband, Q15: centre 16386, odd taps below (the sum is 32768).
   // Flat to 0.1 of its input rate, -74 dB or better from 0.42 (a -122 dB null at 0.4).
   __attribute__((always_inline)) inline int16_t Short(int s) const {
-    static const int16_t kS[5] = {10022, -2403, 706, -141, 7};
     const int16_t *b = sbuf_[s];
     const unsigned p = spos_[s];
     int32_t acc = 16386 * Tap(b, p, 31, 9);
-    for (int j = 0; j < 5; ++j) {
-      const int d = 2 * j + 1;
-      acc += kS[j] * (Tap(b, p, 31, 9 - d) + Tap(b, p, 31, 9 + d));
-    }
+    SCOPEDECIM_PAIR(b, p, 31, 9, 10022, 1);
+    SCOPEDECIM_PAIR(b, p, 31, 9, -2403, 3);
+    SCOPEDECIM_PAIR(b, p, 31, 9, 706, 5);
+    SCOPEDECIM_PAIR(b, p, 31, 9, -141, 7);
+    SCOPEDECIM_PAIR(b, p, 31, 9, 7, 9);
     return Clamp16((acc + 16384) >> 15);
   }
-  // 47-tap Kaiser (beta 7) halfband, Q15: centre 16382, odd taps below (sum is 32768).
+  // 55-tap Kaiser (beta 9) halfband, Q15: centre 16384, odd taps below (the sum is 32768).
+  // Flat to 0.2 of its input rate (within 0.001 dB), at least -81 dB from 0.30: the shown band
+  // is 0.8 of the final Nyquist = 0.2 of this stage's input rate, and a tone at 0.30 folds to
+  // exactly its top edge (the previous 47-tap filter was only -69 dB between 0.300 and 0.305).
   __attribute__((always_inline)) inline int16_t Long() const {
-    static const int16_t kC[12] = {10367, -3290, 1787, -1096, 693, -433, 261, -148, 77, -35, 13, -3};
     const unsigned p = lpos_;
-    int32_t acc = 16382 * Tap(lbuf_, p, 63, 23);
-    for (int j = 0; j < 12; ++j) {
-      const int d = 2 * j + 1;
-      acc += kC[j] * (Tap(lbuf_, p, 63, 23 - d) + Tap(lbuf_, p, 63, 23 + d));
-    }
+    int32_t acc = 16384 * Tap(lbuf_, p, 63, 27);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, 10378, 1);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, -3322, 3);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, 1837, 5);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, -1160, 7);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, 763, 9);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, -504, 11);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, 327, 13);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, -206, 15);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, 124, 17);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, -70, 19);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, 37, 21);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, -17, 23);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, 7, 25);
+    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, -2, 27);
     return Clamp16((acc + 16384) >> 15);
   }
+#undef SCOPEDECIM_PAIR
 
   int16_t sbuf_[kMaxStages - 1][32] = {};
   int16_t lbuf_[64] = {};
@@ -130,7 +148,8 @@ public:
   // is an ISR that may push at any moment, so a copy during which the count moved is thrown
   // away and retried (kReadAttempts times; false if it never came out clean, or if the ring is not
   // yet full). A push in progress cannot tear it (the spare slot). The copy is two plain loops
-  // on purpose, about 3 instructions a sample: do any conversion AFTER it, on dst, or the
+  // on purpose (a few instructions a sample in this header, about 9 in the caller's flash-resident
+  // build): do any conversion AFTER it, on dst, or the
   // window for a push grows from microseconds to over a hundred (every attempt would lose).
   // `between(attempt)` runs after each copy and before the check: a test's stand-in for the ISR.
   template <class H> bool Snapshot(int16_t *dst, H between) const {

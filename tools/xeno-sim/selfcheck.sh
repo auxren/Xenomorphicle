@@ -2196,6 +2196,12 @@ sw_run "averaging steps per half frame of fresh samples, not per redraw" \
   --test-app-switch freq-fft-avgrate
 sw_run "a near-full-scale tone far above the span does not fold into the plot" \
   --test-app-switch freq-fft-folding
+sw_run "a tone at 1.5 times the span edge reads no ghost peak" \
+  --test-app-switch freq-fft-ghost
+sw_run "the -70 dB peak gate on the full span" \
+  --test-app-switch freq-fft-gate
+sw_run "a refilling zoom feed does not borrow the old span's picture" \
+  --test-app-switch freq-fft-stale
 sw_run "averaging restarts on a source change" \
   --test-app-switch freq-fft-avgsource
 sw_run "the spectrum windows and averaging presets; averaging calms the columns" \

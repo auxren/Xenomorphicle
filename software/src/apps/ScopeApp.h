@@ -173,7 +173,13 @@ inline uint32_t LatencyCyc(Source s) {
 // allocation failed: the Scope then says so instead of drawing).
 struct Arena {
   ScopeRing rings[ScopeSources::kMaxTraces];
-  float mv[kAnalyse], lo[kAnalyse], hi[kAnalyse];
+  // mv doubles as the spectrum view's 2 KB scratch for one raw zoom snapshot (a union, so the
+  // int16 view of those bytes is not a cast between pointer types)
+  union {
+    float mv[kAnalyse];
+    int16_t snap[ScopeDecim::kRingLen];
+  };
+  float lo[kAnalyse], hi[kAnalyse];
   float fft_in[ScopeFft::kN], fft_db[ScopeFft::kN / 2 + 1];
   float fft_avg[ScopeFft::kN / 2 + 1];  // the averaged power spectrum (averaging presets)
   ScopeDecim::Feed zoom;                // the zoomed spans' decimated input (ScopeDecim.h)
@@ -242,8 +248,8 @@ private:
   uint8_t fftmode_ = 0;
   mutable bool avg_valid_ = false;
   mutable uint16_t avg_key_ = 0;
-  mutable uint32_t avg_count_ = 0;
-  mutable bool fft_valid_ = false;   // ar.fft_db holds a frame that was drawn   // source sample count at the last averaging step
+  mutable uint32_t avg_count_ = 0;   // source sample count at the last averaging step
+  mutable bool fft_valid_ = false;   // ar.fft_db holds a frame that was drawn for the current feed
   mutable float last_mv_[ScopeSources::kMaxTraces] = {};
   mutable int pending_time_idx_ = -1;  // auto timebase moved: re-arm in Loop()
 
@@ -719,10 +725,11 @@ FLASHMEM void AppScope::RenderSpectrum() const {
       rate /= (float)(1 << stages);
       count = ar.zoom.Count();
       if (ar.zoom.stages() == stages && ar.zoom.Full()) {
-        // Raw copy first (a few microseconds: an ISR push during it costs a retry), conversion
-        // after it. ar.mv is free in the spectrum view and exactly 2 KB.
-        static_assert(sizeof(ar.mv) >= ScopeDecim::kRingLen * sizeof(int16_t), "scratch for one snapshot");
-        int16_t *raw = reinterpret_cast<int16_t *>(ar.mv);
+        // Raw copy first (about 9 instructions a sample here, 15 to 20 us a try against a decimated
+        // sample every 107 us at the fastest), conversion after it. ar.snap shares ar.mv's bytes,
+        // free in the spectrum view.
+        static_assert(sizeof(ar.snap) == ScopeDecim::kRingLen * sizeof(int16_t), "scratch for one snapshot");
+        int16_t *raw = ar.snap;
         bool ok = ar.zoom.Snapshot(raw);
 #ifdef XENO_SIM_APPSWITCH
         if (g_sim_read_fails > 0) { --g_sim_read_fails; ok = false; }

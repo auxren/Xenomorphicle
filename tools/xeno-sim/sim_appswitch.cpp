@@ -1587,6 +1587,87 @@ void FreqFftFolding() {
   }
 }
 
+// A tone at 1.51 times the span edge folds into the top 2% of the span (the stop band of the last
+// decimator stage has to have begun by 1.5): it must come out under the -70 dB gate, so the
+// header reads no peak. Audio 0-4.8k and CV1 0-3.7k, the spans' first (/4) zoom.
+void FreqFftGhostPeak() {
+  Go("Scope");
+  Run(50);
+  SpectrumSet(1, 0);
+  const ZSrc au{true};
+  for (double hz : {1.50 * 4800.0, 1.51 * 4800.0, 1.53 * 4800.0}) {
+    au.Feed(500, hz, 32000.0);
+    int bars[128];
+    Bars(bars);
+    int tall = 0;
+    for (int x = 0; x < 128; ++x) tall = std::max(tall, bars[x]);
+    const std::string h = HeaderCells();
+    printf("  IN L 0-4.8k, %.0f Hz at -0.2 dBFS: tallest bar %d, \"%s\"\n", hz, tall, h.c_str());
+    char msg[200];
+    snprintf(msg, sizeof(msg), "IN L %.0f Hz (1.5x the span) draws nothing above the floor and reads pk --", hz);
+    CHECK(tall < 12 && h.find("pk --") != std::string::npos, msg);
+  }
+  FocusTo(0);
+  TurnN(3);   // CV1
+  CHECK(ScopeFreqSvc::ActiveSource() == ScopeSources::SRC_CV_IN1, "(on CV1)");
+  const ZSrc cv{false};
+  for (double hz : {1.50 * cv.Span(1), 1.51 * cv.Span(1), 1.53 * cv.Span(1)}) {
+    cv.Feed(500, hz, 14000.0);
+    int bars[128];
+    Bars(bars);
+    int tall = 0;
+    for (int x = 0; x < 128; ++x) tall = std::max(tall, bars[x]);
+    const std::string h = HeaderCells();
+    printf("  CV1 0-3.7k, %.0f Hz: tallest bar %d, \"%s\"\n", hz, tall, h.c_str());
+    char msg[200];
+    snprintf(msg, sizeof(msg), "CV1 %.0f Hz (1.5x the span) draws nothing above the floor and reads pk --", hz);
+    CHECK(tall < 12 && h.find("pk --") != std::string::npos, msg);
+  }
+}
+
+// The -70 dB gate on the full span too: a tone at -80 dBFS reads no peak, a loud one does.
+void FreqFftFullSpanGate() {
+  Go("Scope");
+  Run(50);
+  SpectrumSet(0, 0);
+  const ZSrc au{true};
+  au.Feed(500, 1000.0, 3.0);          // about -80.8 dBFS (and the 16-bit rounding)
+  const std::string quiet = HeaderCells();
+  au.Feed(500, 1000.0, 3000.0);
+  const std::string loud = HeaderCells();
+  printf("  full span: \"%s\" quiet, \"%s\" loud\n", quiet.c_str(), loud.c_str());
+  CHECK(quiet.find("pk --") != std::string::npos, "a tone at -80 dBFS reads no peak on the full span");
+  CHECK(loud.find("pk 1.0k") != std::string::npos, "...and a loud one reads 1.0k");
+}
+
+// After a live re-arm the zoom feed starts again; if the snapshot is refused once it has refilled
+// there is NO good frame for it, and the old span's picture must not stand in.
+void FreqFftNoStaleFrame() {
+  ScopeOnCv1();
+  SpectrumSet(1, 0);
+  const ZSrc cv{false};
+  cv.Feed(700, 1000.0, 6000.0);
+  int b0[128];
+  Bars(b0);
+  long ink0 = 0;
+  for (int x = 0; x < 128; ++x) ink0 += b0[x];
+  CHECK(ink0 > 30 && HeaderCells().find("pk 1.0k") != std::string::npos, "(live on 0-3.7k)");
+  OC::SimScopeReadFails(1000000);
+  FocusTo(1);
+  TurnN(1);                          // 0-934: a re-arm, the feed starts over
+  cv.Feed(1500, 440.0, 6000.0);      // longer than the 340 ms it takes to fill
+  int b1[128];
+  Bars(b1);
+  long ink1 = 0;
+  for (int x = 0; x < 128; ++x) ink1 += b1[x];
+  const std::string h = HeaderCells();
+  printf("  refused snapshots on the new span: ink %ld, \"%s\"\n", ink1, h.c_str());
+  CHECK(ink1 < 12 && h.find("pk --") != std::string::npos, "no picture of the old span stands in for a feed that has none");
+  OC::SimScopeReadFails(0);
+  cv.Feed(700, 440.0, 6000.0);
+  CHECK(HeaderCells().find("pk 440Hz") != std::string::npos, "and it comes back when snapshots work again");
+}
+
 // Push resets the fields; span and preset are plain every time the Scope opens; averaging restarts
 // when the source changes; the preset text.
 void FreqFftResets() {
@@ -1983,6 +2064,9 @@ int SimAppSwitchTest(const std::string &s) {
   else if (s == "freq-fft-avgrearm") FreqFftAveragingRearm();
   else if (s == "freq-fft-avgrate") FreqFftAveragingRate();
   else if (s == "freq-fft-folding") FreqFftFolding();
+  else if (s == "freq-fft-ghost") FreqFftGhostPeak();
+  else if (s == "freq-fft-gate") FreqFftFullSpanGate();
+  else if (s == "freq-fft-stale") FreqFftNoStaleFrame();
   else if (s == "freq-fft-avgsource") FreqFftAveragingSource();
   else if (s == "freq-fft-window") FreqFftWindowAndAveraging();
   else if (s == "freq-fft-lowband") FreqFftLowBand();
