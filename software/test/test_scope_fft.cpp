@@ -268,6 +268,30 @@ static void test_columns_linear() {
   CHECK(fabsf(PeakHz(db.data(), rate, nullptr, 1500.f, 4800.f) - 1000.f) > 100.f);   // 1 kHz is below the floor
 }
 
+// The peak gate pinned from both sides: a tone at -66 dBFS is still a peak (a gate raised to
+// -66 would swallow it), one at -80 dBFS is not.
+static void test_peak_gate_both_sides() {
+  printf("test_peak_gate_both_sides\n");
+  std::vector<float> db(kN / 2 + 1);
+  const double bin = 48000.0 / kN;
+  for (double dbfs : {-60.0, -64.0, -66.0, -68.0}) {
+    auto x = Tone(64.5 * bin, pow(10.0, dbfs / 20.0));       // between two bins: the worst scalloping
+    MagnitudeDb(x.data(), db.data(), g_work);
+    float pk = 0;
+    PeakHz(db.data(), 48000.f, &pk);
+    printf("  %.0f dBFS tone reads %.1f dB\n", dbfs, pk);
+    CHECK(pk >= kPeakMinDb);                                 // still read as a peak
+    if (dbfs <= -68.0) CHECK(pk < -66.0f);                   // so a gate at -66 dB would have swallowed it
+  }
+  for (double dbfs : {-75.0, -80.0, -90.0}) {
+    auto x = Tone(64.0 * bin, pow(10.0, dbfs / 20.0));
+    MagnitudeDb(x.data(), db.data(), g_work);
+    float pk = 0;
+    PeakHz(db.data(), 48000.f, &pk);
+    CHECK(pk < kPeakMinDb);                                  // under the gate: no frequency printed
+  }
+}
+
 // The zoom's geometry, shared by the draw code and the tests.
 static void test_zoom_geometry() {
   printf("test_zoom_geometry\n");
@@ -299,6 +323,7 @@ int main() {
   test_power_and_averaging();
   test_columns_low_end();
   test_columns_linear();
+  test_peak_gate_both_sides();
   test_zoom_geometry();
   printf("%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;

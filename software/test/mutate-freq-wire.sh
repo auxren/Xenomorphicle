@@ -114,6 +114,7 @@ MUTS=(
  "decim@@ScopeDecim.h@@last stage filter cut to eight tap pairs (the ghost peak at 1.5x the span)@@    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, 124, 17);\n    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, -70, 19);\n    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, 37, 21);\n    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, -17, 23);\n    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, 7, 25);\n    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, -2, 27);\n@@"
  "decim@@ScopeDecim.h@@short filter overshoot wraps (no clamp in Short)@@    SCOPEDECIM_PAIR(b, p, 31, 9, 7, 9);\n    return Clamp16((acc + 16384) >> 15);@@    SCOPEDECIM_PAIR(b, p, 31, 9, 7, 9);\n    return (int16_t)((acc + 16384) >> 15);"
  "decim@@ScopeDecim.h@@last stage filter taps shifted (a tap sign flipped)@@    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, -3322, 3);@@    SCOPEDECIM_PAIR(lbuf_, p, 63, 27, 3322, 3);"
+ "fft@@ScopeFft.h@@peak gate raised to -66 dB (swallows a -68 dBFS tone)@@constexpr float kPeakMinDb = -70.f;@@constexpr float kPeakMinDb = -66.f;"
  "est@@ScopeFreq.h@@Log2 series cut short@@for (int k = 1; k <= 21; k += 2) {@@for (int k = 1; k <= 3; k += 2) {"
  "est@@ScopeFreq.h@@Result.pp not recorded@@    r.pp = hi_ >= lo_ ? (int32_t)hi_ - (int32_t)lo_ : 0;\n    r.crossings = line_.n;@@    r.crossings = line_.n;"
  "est@@ScopeFreq.h@@note names shifted by a semitone@@kNames[3 * n];@@kNames[3 * ((n + 1) % 12)];"
