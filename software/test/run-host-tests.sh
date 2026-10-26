@@ -49,7 +49,7 @@ suite() {
 float_guard() {
   local files="../src/ScopeFmt.h ../src/ScopeFreq.h ../src/ScopeFreqLine.cpp ../src/ScopeFreqLine.h \
     ../src/ScopeFreqService.cpp ../src/ScopeFreqConsole.cpp ../src/ScopeRange.cpp ../src/ScopeSources.cpp \
-    ../src/ScopeSettings.cpp ../src/ScopeCapture.cpp ../src/ScopeFft.cpp ../src/ScopeTrigger.cpp ../src/apps/ScopeApp.h"
+    ../src/ScopeSettings.cpp ../src/ClockStats.h ../src/ClockStats.cpp ../src/ScopeCapture.cpp ../src/ScopeFft.cpp ../src/ScopeTrigger.cpp ../src/apps/ScopeApp.h"
   local bad
   # code only: a format string is "...%[flags][width][.prec][l]f...", comments are dropped first
   bad=$(for f in $files; do sed -e 's://.*$::' "$f" | grep -nE '"[^"]*%[-+ #0-9.*]*(l|L|z)?[fFeEgGaA]' | sed "s:^:$f\::"; done)
@@ -105,6 +105,7 @@ suite test_scope_fmt
 suite test_scope_freq_line          -include host_stubs/nofloat_printf.h ../src/ScopeFreqLine.cpp
 suite test_scope_freq_service       -pthread ../src/ScopeFreqService.cpp ../src/ScopeFreqLine.cpp ../src/ScopeSources.cpp
 suite test_scope_freq_console       ../src/ScopeFreqConsole.cpp
+suite test_clock_stats              -include host_stubs/nofloat_printf.h ../src/ClockStats.cpp
 suite test_sampler_math             ../src/SamplerMath.cpp
 suite test_sample_convert
 suite test_preset_op_queue

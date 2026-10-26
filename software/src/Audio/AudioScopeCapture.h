@@ -16,6 +16,7 @@
 // and AudioTweightyF32::update() (Audio/AudioTweightyF32.h).
 // ---------------------------------------------------------------------------
 #include "../ScopeCapture.h"
+#include "../ClockStats.h"
 
 class AudioScopeCapture : public AudioStream {
 public:
@@ -36,6 +37,7 @@ private:
 
 // Audio-ISR context: never FLASHMEM (see the class comment above).
 inline void AudioScopeCapture::update(void) {
+  ClockStats::AudioBlock();  // always on: one load/add/store per block (ClockStats.h)
   for (int ch = 0; ch < kChannels; ++ch) {
     audio_block_t *blk = receiveReadOnly(ch);
     if (!blk) continue;

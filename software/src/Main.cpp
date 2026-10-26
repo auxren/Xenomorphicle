@@ -58,6 +58,7 @@
 #include "Bus200eBridgeUsb.h"
 #include "HSUtils.h"
 #include "CvMeter.h"
+#include "ClockStats.h"
 #include "ScopeFreqConsole.h"
 #include "ScopeFreqLine.h"
 #include "ScopeFreqService.h"
@@ -447,6 +448,13 @@ FLASHMEM __attribute__((optimize("no-jump-tables"))) static bool FreqConsoleByte
                            ScopeSources::KindOf((ScopeSources::Source)src) != ScopeSources::KIND_CV_IN;
       ScopeFreqLine::FormatSfreq(line, sizeof(line), lab, src >= 0 ? &ScopeFreqSvc::CurrentReading() : nullptr,
                                  ScopeFreqSvc::ClockCalibrated(), rate_ok);
+      Serial.println(line);
+      break;
+    }
+    case Kind::TIME: {
+      // read-only; the stamp is taken when the loop gets to the byte (loop_max ~6 ms of jitter)
+      static ClockStats::Clock clk(F_CPU_ACTUAL / 1000);
+      ClockStats::FormatStime(line, sizeof(line), clk.Sample(ClockStats::Capture()));
       Serial.println(line);
       break;
     }

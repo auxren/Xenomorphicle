@@ -43,6 +43,7 @@ FREQ_CON_CODE Action Parser::Feed(int c, uint32_t now_ms) {
   switch (state_) {
     case PREFIX:
       if (c == 'r') { state_ = IDLE; return Make(Kind::READ); }
+      if (c == 't') { state_ = IDLE; return Make(Kind::TIME); }
       if (c == 'c') { state_ = CLOCK_SIGN; return Make(Kind::PENDING); }
       if (c == 'g') { state_ = GATE; return Make(Kind::PENDING); }
       break;

@@ -13,6 +13,7 @@
 //   %c+0012.3     set the crystal correction, ppm of the sample rate above
 //   %c-0012.3     nominal: sign, FOUR digits, '.', ONE digit, nothing after it
 //   %cx           forget the correction (uncalibrated)
+//   %t            time:   STIME,<cycles64>,<audio_samples64>,<cv_frames64>,<seq> (ClockStats.h)
 //   %gf / %gs     gate: fast (0.1 s) or slow (1 s)
 //
 // No Enter anywhere: a command ends with its last character. Any byte that
@@ -37,6 +38,7 @@ enum class Kind : uint8_t {
   NONE,         // not ours: the caller handles the byte
   PENDING,      // consumed, command not complete
   READ,
+  TIME,         // read-only: the free-running counters (host measures the crystal)
   CLOCK_SET,    // ppm10 valid
   CLOCK_CLEAR,
   GATE_FAST,

@@ -3,6 +3,7 @@
 #include "OC_io.h"
 #include "DMAChannel.h"
 #include "AdcSlotMap.h"
+#include "ClockStats.h"
 #include <algorithm>
 
 ADC_CHANNEL ADC_CHANNEL_1=0, ADC_CHANNEL_2=1, ADC_CHANNEL_3=2, ADC_CHANNEL_4=3;
@@ -528,6 +529,7 @@ FLASHMEM void ADC33131D_Start() {
     uint32_t poffset = ((uint32_t)p - (uint32_t)adc_buffer) & 0xFFF0;
     size_t count = ((poffset - old_poffset) % sizeof(adc_buffer)) / sizeof(adc33131_frame_t);
     if (count > 0) {
+      ClockStats::CvFrames((uint32_t)count);   // always on, for `%t` (ClockStats.h)
       // The Scope's hook sees every new frame once, oldest first: they run
       // from old_poffset (the read cursor) up to the DMA's current frame.
       if (scope_frame_hook_) {

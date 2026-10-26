@@ -148,7 +148,7 @@ static void test_clock_malformed() {
 static void test_cancel_swallows() {
   printf("test_cancel_swallows\n");
   // a stray prefix followed by a real command letter: the letter is eaten
-  const char *letters = "pewkmxWtTXdDI(){}<>jAoSRHM=nvQ";
+  const char *letters = "pewkmxWTXdDI(){}<>jAoSRHM=nvQ";   // not 't': %t is the time command now
   for (const char *c = letters; *c; ++c) {
     Parser p;
     CHECK(p.Feed('%', 0).kind == Kind::PENDING);
@@ -291,6 +291,53 @@ static void test_replies() {
   CHECK(std::strncmp(CancelLine(), "SFREQ,", 6) == 0 && std::strncmp(RangeLine(), "SFREQ,", 6) == 0);
 }
 
+static void test_time() {
+  printf("test_time\n");
+  // %t completes on its last character, no Enter; read-only, no payload
+  Parser p;
+  Out o = Feed(p, "%t");
+  CHECK(o.last.kind == Kind::TIME && o.consumed == 2 && !p.Pending());
+  CHECK(Feed(p, "%").last.kind == Kind::PENDING && p.Pending());
+  CHECK(p.Feed('t', g_clock + 1).kind == Kind::TIME);
+  // after it the next byte is ordinary again (a second 't' is the selftest, as after %r)
+  CHECK(p.Feed('t', g_clock + 2).kind == Kind::NONE);
+  // malformed: the prefix then anything that is not r c g t cancels and is swallowed
+  Parser q;
+  Out m = Feed(q, "%T");
+  CHECK(m.last.kind == Kind::CANCEL && m.consumed == m.bytes);
+  Out m2 = Feed(q, "%x");
+  CHECK(m2.last.kind == Kind::CANCEL);
+  // a cancelled %t-lookalike swallows the burst behind it ('.' recall, '(' save)
+  Parser d;
+  Out m3 = Feed(d, "%T.(t");
+  CHECK(m3.consumed == m3.bytes);
+  // %t never leaves a half command that eats the next one
+  Parser r;
+  CHECK(Feed(r, "%t").last.kind == Kind::TIME);
+  CHECK(Feed(r, "%r").last.kind == Kind::READ);
+  CHECK(Feed(r, "%t%r%t").last.kind == Kind::TIME);
+  // interaction with the other % commands: abandoned mid-command, %t is a malformed byte
+  Parser c;
+  Out i1 = Feed(c, "%c+0012%t");     // '%' where the point belongs: cancel, and %t is swallowed
+  CHECK(i1.consumed == i1.bytes && i1.last.kind != Kind::TIME);
+  Parser g;
+  Out i2 = Feed(g, "%gt");            // 't' is not a gate letter
+  CHECK(i2.last.kind == Kind::CANCEL && i2.consumed == i2.bytes);
+  Parser c2;
+  CHECK(Feed(c2, "%c+0012.3").last.kind == Kind::CLOCK_SET);
+  CHECK(Feed(c2, "%t").last.kind == Kind::TIME);
+  CHECK(Feed(c2, "%gs").last.kind == Kind::GATE_SLOW);
+  CHECK(Feed(c2, "%t").last.kind == Kind::TIME);
+  // an expired prefix: 3 s later 't' is an ordinary byte, not %t
+  Parser e;
+  CHECK(e.Feed('%', 1000).kind == Kind::PENDING);
+  CHECK(e.Feed('t', 1000 + kTimeoutMs + 1).kind == Kind::NONE);
+  // a pending %c does not turn into %t
+  Parser f;
+  Feed(f, "%c");
+  CHECK(Feed(f, "t").last.kind == Kind::CANCEL);
+}
+
 int main() {
   test_read();
   test_ordinary_bytes_pass_through();
@@ -301,6 +348,7 @@ int main() {
   test_gate();
   test_timeout();
   test_replies();
+  test_time();
   printf("%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }
