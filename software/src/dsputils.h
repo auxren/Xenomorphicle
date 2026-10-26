@@ -1,6 +1,7 @@
 #pragma once
 #include "extern/fastapprox/fastexp.h"
 #include "extern/fastapprox/fastlog.h"
+#include "EqualPowerFade.h"
 
 #define ONE_POLE(out, in, coefficient) out += (coefficient) * ((in) - out);
 
@@ -86,17 +87,8 @@ static const float EQUAL_POWER_EQUAL_MIX[]{
   0.353553390593273731f
 };
 
-// From https://signalsmith-audio.co.uk/writing/2021/cheap-energy-crossfade/
-// Could use a LUT, but meh
-inline void EqualPowerFade(float& fade_out, float& fade_in, float t) {
-  float mt = 1.0f - t;
-  float a = t * mt;
-  float b = a * (1.0f + 1.4186f * a);
-  float c = b + t;
-  float d = b + mt;
-  fade_out = d * d;
-  fade_in = c * c;
-}
+// EqualPowerFade() lives in EqualPowerFade.h (constexpr, no dependencies) so
+// the crossfade lookup table can be built at compile time from the same curve.
 
 inline float EqualPowerFadeBetween(float from, float to, float t) {
   float out;

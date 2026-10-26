@@ -62,6 +62,42 @@ float_guard() {
 }
 float_guard
 
+# RAM2 heap guards, on source text because the firmware classes need the Audio
+# library and cannot be built on the host.
+#  1. The crossfade tables are constexpr flash (src/Audio/XfadeTable.h). A
+#     per-instance `new float[...]` / malloc in these two classes would put 16 KB
+#     of RAM2 heap per instance back, which the unit tests of the table cannot see.
+#  2. The Sampler decides where its read-ahead buffers go in exactly one place,
+#     SamplerMath::PreferPsramBuffers (opt-in AND chip fitted). A literal
+#     setBufferInPSRAM(true), or a second call site, would bypass the no-PSRAM
+#     guarantee.
+heap_guard() {
+  local bad="" f
+  for f in ../src/Audio/AudioDelayExtF32.h ../src/Audio/AudioTweightyF32.h; do
+    bad="$bad$(sed -e 's://.*$::' "$f" | grep -nE '\bnew\b[^;]*float|\bmalloc\(|\bcalloc\(|extmem_(m|c)alloc\(' | sed "s:^:$f\::")"
+  done
+  if [ -n "$bad" ]; then
+    echo "heap allocation in a crossfade-table class (use XfadeLut::kTable):"
+    echo "$bad"
+    return 1
+  fi
+  # The table must stay in flash: without section .progmem + externally_visible
+  # the linker script (and LTO) put it in DTCM, 16 KB of the scarcest RAM.
+  if ! grep -q 'section(".progmem"), externally_visible' ../src/Audio/XfadeTable.h; then
+    echo "XfadeTable.h: kTable must carry section(\".progmem\"), externally_visible (else it lands in DTCM)"
+    return 1
+  fi
+  local calls
+  calls=$(sed -e 's://.*$::' ../src/apps/SamplerApp.h | grep -c 'setBufferInPSRAM(')
+  if [ "$calls" != "1" ] || ! sed -e 's://.*$::' ../src/apps/SamplerApp.h \
+      | grep -q 'setBufferInPSRAM(SamplerMath::PreferPsramBuffers(SamplerAppNS::kPsramOptIn, external_psram_size))'; then
+    echo "SamplerApp.h must call setBufferInPSRAM once, through SamplerMath::PreferPsramBuffers"
+    return 1
+  fi
+  echo "heap guard: no heap table in Tweighty/Delay; Sampler PSRAM choice is gated"
+}
+heap_guard
+
 suite test_bus200e                  ../src/PresetBus200e.cpp
 suite test_bus200e_master           ../src/Bus200eMaster.cpp ../src/PresetBus200e.cpp
 suite test_bus200e_sysex            ../src/Bus200eSysEx.cpp
@@ -79,6 +115,7 @@ suite test_f32_int_convert
 suite test_arp_engine
 suite test_audio_graph_topo
 suite test_fade
+suite test_xfade_table
 suite test_buchla251e_slot_codec    -I host_stubs ../src/Buchla251eSlotCodec.cpp \
                                     ../src/Buchla251eGenerator.cpp ../src/src/extern/bjorklund.cpp
 suite test_buchla251e_recorder      ../src/Buchla251eSlotCodec.cpp ../src/Buchla251eRecorder.cpp

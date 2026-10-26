@@ -38,6 +38,7 @@
 #include <new>   // std::nothrow
 #include "AudioBuffer.h"
 #include "AudioParam.h"
+#include "XfadeTable.h"
 #include "../dsputils.h"
 #include "../util/util_macros.h"
 #include "../extern/f32/AudioStream_F32.h"
@@ -91,45 +92,18 @@ public:
   void Acquire() {
     buffer_l_.Acquire();
     buffer_r_.Acquire();
-    // TODO xfade lut should be static (see AudioDelayExtF32::Acquire, same TODO)
-    //
-    // std::nothrow, and checked. This firmware builds -fno-exceptions, so a
-    // failed new returns nullptr rather than throwing, and the fill loop below
-    // writes through both pointers immediately -- a store to address 0. The
-    // same mistake was fixed in AudioDelayExtF32 and AudioDelayExt after it
-    // hard-faulted the module on the bench; this third copy was missed then.
-    // 2 x 2048 floats is 16 KB of RAM2, and that is measurably not always
-    // there: opening this app costs 16,400 bytes, and after the Sampler has
-    // been visited there is far less than that free.
-    //
-    // ready_ stays false on failure, which is the flag update() already checks
-    // before touching either buffer -- the documented "no engine" state rather
-    // than a fault.
-    // Idempotent from here, like the PSRAM buffer above. Acquire() allocated
-    // these unconditionally, so a second call without an intervening Release()
-    // dropped the first pair on the floor -- 16 KB, or 32 KB for a stereo pair.
-    // Both callers happen to guard today; the class should not rely on that
-    // when its own buffer does not.
-    if (xfade_in_scalars_ && xfade_out_scalars_) return;
-    xfade_in_scalars_ = new (std::nothrow) float[kCrossfadeSamples];
-    xfade_out_scalars_ = new (std::nothrow) float[kCrossfadeSamples];
-    if (!xfade_in_scalars_ || !xfade_out_scalars_) {
-      Release();
-      return;
-    }
-    const float n = static_cast<float>(kCrossfadeSamples - 1);
-    for (size_t i = 0; i < kCrossfadeSamples; i++) {
-      EqualPowerFade(xfade_out_scalars_[i], xfade_in_scalars_[i], i / n);
-    }
+    // The crossfade tables are constexpr (XfadeTable.h), shared with the
+    // delay and held in flash. They were two `new float[2048]` here, 16 KB of
+    // RAM2 heap per Tweighty, null-checked after one of them took the module
+    // down on the bench; with nothing left to allocate there is nothing left
+    // to fail. ready_ is still set last, after the buffers are requested, and
+    // IsReady() still also requires both buffers: a missing buffer (no PSRAM
+    // and no room in RAM2) is the "no engine" state, not a fault.
     ready_ = true;
   }
 
   void Release() {
     ready_ = false;
-    delete[] xfade_in_scalars_;
-    delete[] xfade_out_scalars_;
-    xfade_in_scalars_ = nullptr;
-    xfade_out_scalars_ = nullptr;
     buffer_l_.Release();
     buffer_r_.Release();
   }
@@ -408,8 +382,8 @@ private:
   // ISR) -- see the Acquire()/Release() comment for why this is the real
   // safety gate, not just buffer_l_/buffer_r_'s own IsReady().
   volatile bool ready_ = false;
-  float *xfade_in_scalars_ = nullptr;
-  float *xfade_out_scalars_ = nullptr;
+  const float *xfade_in_scalars_ = XfadeLut::kTable<kCrossfadeSamples>.in.data();
+  const float *xfade_out_scalars_ = XfadeLut::kTable<kCrossfadeSamples>.out.data();
 
   std::array<CrossfadeTarget, kTaps> target_delay_;
   std::array<OnePole<Interpolated>, kTaps> delay_secs_;

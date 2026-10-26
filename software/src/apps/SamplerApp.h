@@ -105,7 +105,15 @@
 #include "../AudioIO.h"
 #endif
 
+extern "C" uint8_t external_psram_size;  // 0 when no PSRAM chip is fitted (core startup.c)
+
 namespace SamplerAppNS {
+
+#ifdef XENO_SAMPLER_PSRAM
+inline constexpr bool kPsramOptIn = true;
+#else
+inline constexpr bool kPsramOptIn = false;
+#endif
 
 // Same ADC_CHANNEL_n indirection as ScopeApp.h's AdcChannelForSub -- these
 // globals are not guaranteed to be plain 0..7 (OC_ADC.cpp can remap them),
@@ -240,7 +248,10 @@ FLASHMEM void AppSampler::WireAudio() {
 #ifdef XENO_CODEC_AUDIO
   for (int i = 0; i < SamplerMath::kSlotCount; ++i) {
     players_[i].enableInterpolation(true);
-    players_[i].setBufferInPSRAM(false);  // prefer RAM2; see class comment's risk note
+    // RAM2 unless the build opted in AND a PSRAM chip is fitted (see
+    // SamplerMath::PreferPsramBuffers). Without the opt-in this is the
+    // constant false it always was; without the chip it is false in every build.
+    players_[i].setBufferInPSRAM(SamplerMath::PreferPsramBuffers(SamplerAppNS::kPsramOptIn, external_psram_size));
     conn_player_l_[i] = new (std::nothrow) AudioConnection(
         players_[i], 0, slot_mix_, i * OC::AudioIO::kOutputRouteChannels + 0);
     conn_player_r_[i] = new (std::nothrow) AudioConnection(

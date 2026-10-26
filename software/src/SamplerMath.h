@@ -35,6 +35,17 @@ namespace SamplerMath {
 
 inline constexpr int kSlotCount = 8;
 
+// Where each slot's SD read-ahead buffers are ASKED to live (the library falls
+// back to the other pool when the first is full, so this is a preference).
+// PSRAM only when BOTH the build opted in (-DXENO_SAMPLER_PSRAM, off in every
+// shipped environment until it has been measured with 8 voices on a board that
+// has the chip) AND the chip reports a size: external_psram_size is 0 on a
+// Teensy 4.1 with no PSRAM fitted, and then the answer is false in every
+// build, which is the call the app has always made.
+inline constexpr bool PreferPsramBuffers(bool build_opt_in, uint32_t psram_mb) {
+  return build_opt_in && psram_mb != 0;
+}
+
 inline constexpr int kMinFileNum = 0;
 inline constexpr int kMaxFileNum = 999;
 

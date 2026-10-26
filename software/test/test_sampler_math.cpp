@@ -216,7 +216,21 @@ static void test_suspended_sampler_does_not_reload_under_menu() {
   CHECK(m.held() == kSlotCount);
 }
 
+static void test_prefer_psram_buffers_needs_opt_in_and_chip() {
+  using namespace SamplerMath;
+  CHECK(!PreferPsramBuffers(false, 0));   // no chip, not opted in: RAM2
+  CHECK(!PreferPsramBuffers(true, 0));    // opted in but no chip fitted: RAM2, exactly as before
+  CHECK(!PreferPsramBuffers(false, 8));   // chip fitted but not opted in: RAM2, as shipped
+  CHECK(!PreferPsramBuffers(false, 16));
+  CHECK(PreferPsramBuffers(true, 8));     // the only way to PSRAM
+  CHECK(PreferPsramBuffers(true, 16));
+  // external_psram_size is a uint8_t: the widest value the core can report
+  CHECK(!PreferPsramBuffers(true, (uint32_t)(uint8_t)0));
+  CHECK(PreferPsramBuffers(true, (uint32_t)(uint8_t)255));
+}
+
 int main() {
+  test_prefer_psram_buffers_needs_opt_in_and_chip();
   test_suspended_sampler_does_not_reload_under_menu();
   test_slot_count_is_8();
   test_wrap_slot_index();

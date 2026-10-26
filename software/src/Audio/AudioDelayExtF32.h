@@ -6,6 +6,7 @@
 
 #include <new>   // std::nothrow
 #include "AudioBuffer.h"
+#include "XfadeTable.h"
 #include "AudioParam.h"
 #include "../dsputils.h"
 #include "../util/util_macros.h"
@@ -36,40 +37,17 @@ public:
 
   void Acquire() {
     buffer.Acquire();
-    // TODO xfade lut should be static
-    // operator new returns nullptr here rather than throwing: this firmware
-    // builds -fno-exceptions. The loop below writes through both pointers
-    // immediately, so an unchecked failure stored to address 0 and hard-faulted
-    // the module -- reproduced on the bench 2026-09-18 by opening the Sampler
-    // (which holds its buffers in RAM2) and then the Delay: 2 x 2048 floats per
-    // channel is 32 KB for a stereo delay, against 31 KB of heap left.
+    // The crossfade tables are constexpr (XfadeTable.h): nothing to allocate,
+    // so there is no failure path left here. They used to be two `new float[]`
+    // per instance, 16 KB of RAM2 each; two of those faulted the module on the
+    // bench when the Sampler held the rest of the heap (2026-09-18).
     //
-    // Failing here is not fatal to the instrument; this class already documents
-    // the no-PSRAM path as "no delay, not a shorter delay". Release() puts it in
-    // exactly that state, so IsReady() is false and update() early-returns.
-    // Idempotent from here, like the PSRAM buffer above. Acquire() allocated
-    // these unconditionally, so a second call without an intervening Release()
-    // dropped the first pair on the floor -- 16 KB, or 32 KB for a stereo pair.
-    // Both callers happen to guard today; the class should not rely on that
-    // when its own buffer does not.
-    if (xfade_in_scalars && xfade_out_scalars) return;
-    xfade_in_scalars = new (std::nothrow) float[CrossfadeSamples];
-    xfade_out_scalars = new (std::nothrow) float[CrossfadeSamples];
-    if (!xfade_in_scalars || !xfade_out_scalars) {
-      Release();
-      return;
-    }
-    float n = static_cast<float>(CrossfadeSamples - 1);
-    for (size_t i = 0; i < CrossfadeSamples; i++) {
-      EqualPowerFade(xfade_out_scalars[i], xfade_in_scalars[i], i / n);
-    }
+    // Failing to get the PSRAM buffer is still not fatal to the instrument;
+    // this class documents the no-PSRAM path as "no delay, not a shorter
+    // delay", and IsReady() is false so update() early-returns.
   }
 
   void Release() {
-    delete[] xfade_in_scalars;
-    delete[] xfade_out_scalars;
-    xfade_in_scalars = nullptr;
-    xfade_out_scalars = nullptr;
     buffer.Release();
   }
 
@@ -173,8 +151,8 @@ private:
   };
 
   audio_block_f32_t* input_queue_array[1];
-  float* xfade_in_scalars = nullptr;
-  float* xfade_out_scalars = nullptr;
+  const float* xfade_in_scalars = XfadeLut::kTable<CrossfadeSamples>.in.data();
+  const float* xfade_out_scalars = XfadeLut::kTable<CrossfadeSamples>.out.data();
   std::array<CrossfadeTarget, Taps> target_delay;
   std::array<OnePole<Interpolated>, Taps> delay_secs;
   std::array<Interpolated, Taps> fb;
