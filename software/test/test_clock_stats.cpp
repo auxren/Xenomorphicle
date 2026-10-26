@@ -106,7 +106,8 @@ static void test_cycle_wrap() {
 
 static void test_long_gaps() {
   printf("test_long_gaps\n");
-  // a 45 s stall (a flash format) and a host that polls once a minute / an hour
+  // gaps between two reads from 7 s to 4 h (stalled loop, slow host); the code's limit is the
+  // 49.7 days of millis(), checked below by the millis wrap case
   const uint32_t gaps_ms[] = {7000, 7200, 20000, 45000, 60000, 3600000, 4u * 3600000u};
   for (uint32_t g : gaps_ms) {
     Chip chip;

@@ -22,11 +22,13 @@
 // and per ADC pass that found frames. Everything else runs in the console handler.
 //
 // Wrap handling (state is touched from loop context only, never from an ISR):
-//   cycles   the 32-bit counter wraps every 7.16 s. The extender also looks at millis()
-//            and picks the number of wraps that agrees with the elapsed milliseconds, so
-//            a loop stall (a 45 s flash format) or a host that polls every few minutes
-//            still gets a monotonic 64-bit value. Needs the two reads to be within a
-//            fraction of a wrap (3.5 s) of each other in cycles vs millis() skew: true.
+//   cycles   the 32-bit counter wraps every 7.16 s. The extender also reads millis() and picks
+//            the number of wraps that agrees with the elapsed milliseconds, so the gap between
+//            two `%t` (or a stalled loop) may be anything up to the 49.7 days of the 32-bit
+//            millis() count. It relies on millis() and the cycle counter agreeing to within
+//            half a wrap (3.6 s), which they do (same crystal; the two reads are in one
+//            interrupts-off window). The extender state is only touched by `%t`, so the
+//            first `%t` after boot reports cycles since boot, not a reference point.
 //   audio    32-bit count of 128-sample blocks: wraps after 3.3 years. Extended by delta.
 //   cv       32-bit count of frames: wraps after 32 h at 37.35 kHz, so a host must ask
 //            at least once per 32 h (the extender adds the modular delta).
