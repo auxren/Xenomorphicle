@@ -21,6 +21,11 @@ static bool has(const Cal251eFailRows &r, const char *s) {
 }
 
 int main() {
+  {
+    Cal251eFailRows r;
+    Cal251eFailText(F::F_LOOPBACK, 0, 1, 2, &r);
+    CHECK(has(r, "by > 2.5 mV"));
+  }
   const int crs[] = {0, 1, E_COMMIT_REFUSED, E_COMMIT_UNKNOWN, E_BUS_ERROR, E_BUS_BUSY, E_INTERNAL, E_NO_SLOT};
   for (int f = 0; f <= F::F_WRITE_CAP; ++f) {
     for (int cr : crs) {

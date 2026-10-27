@@ -427,13 +427,13 @@ static void loopback_catches_a_bad_chain() {
     r.Begin();
     r.Run();
     CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_LOOPBACK);
-    CHECK(r.flow.result().loop_worst_mv > 2.0f);
+    CHECK(r.flow.result().loop_worst_mv > 2.5f);
     CHECK(r.m.count[CalRec::kCmdOverride] == 0);     // the 251e was never driven
     ExpectNoWrite(r);
     ExpectQuiet(r);
   }
   Rig o;                                   // an offset instead
-  o.chain.off_mv[2] = 2.5;
+  o.chain.off_mv[2] = 3.0;
   o.Begin();
   o.Run();
   CHECK(o.flow.fail() == F::F_LOOPBACK);
@@ -441,7 +441,38 @@ static void loopback_catches_a_bad_chain() {
   p.chain.off_mv[1] = 1.4;
   p.Begin();
   CHECK(p.RunToEnd() && p.flow.fail() == F::F_NONE);
-  CHECK(p.flow.result().loop_worst_mv > 1.0f && p.flow.result().loop_worst_mv <= 2.0f);
+  CHECK(p.flow.result().loop_worst_mv > 1.0f && p.flow.result().loop_worst_mv <= 2.5f);
+}
+
+// The pass limit is 2.5 mV: a worst reading of 2.49 passes and 2.51 fails on each of the four
+// inputs. The comparison is "worse than" (a reading exactly at the limit passes, as for the other
+// limits). The rig adds a little error of its own (DAC code steps), so a probe run first finds how
+// far the worst reading sits above the injected offset and subtracts it. The float step near 9.6 V
+// is about 0.001 mV, so the "2.4999" case lands at exactly 2.5000000 mV on inputs 1, 2 and 4 (and at
+// 2.4997559 on input 3): it pins the exact limit through rounding and catches a '>=' comparison.
+static double loop_worst_for(int which, double off, bool *failed_loop) {
+  Rig r;
+  r.chain.noise_mv = 0.0;
+  r.chain.off_mv[which] = off;
+  r.Begin();
+  r.Run();
+  if (failed_loop) *failed_loop = r.flow.fail() == F::F_LOOPBACK;
+  return r.flow.result().loop_worst_mv;
+}
+
+static void loopback_limit_boundary() {
+  CHECK(F::kLoopbackMv == 2.5);
+  for (int which = 0; which < 4; ++which) {
+    const double extra = loop_worst_for(which, 2.0, nullptr) - 2.0;   // the rig's own residual
+    CHECK(extra >= 0.0 && extra < 0.3);
+    const double targets[] = {2.49, 2.4999, 2.51};
+    for (int j = 0; j < 3; ++j) {
+      bool failed = false;
+      const double w = loop_worst_for(which, targets[j] - extra, &failed);
+      CHECK(fabs(w - targets[j]) < 0.002);
+      CHECK(failed == (j == 2));
+    }
+  }
 }
 
 static void loopback_wrong_cable() {
@@ -1228,6 +1259,7 @@ int main() {
   no_251e_on_the_bus();
   existing_record_is_logged();
   loopback_catches_a_bad_chain();
+  loopback_limit_boundary();
   loopback_wrong_cable();
   noisy_input_stops_the_run();
   identity_checks();

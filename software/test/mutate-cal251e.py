@@ -108,6 +108,10 @@ MUTATIONS = [
   'Cal251eFlow.cpp', 'snprintf(t, sizeof(t), ",warn=%X", warn);', 'snprintf(t, sizeof(t), ",warn=%X", warn & 0u);'),
  ('M37', 'the fit stops at the first failing channel',
   'Cal251eFlow.cpp', 'if (!R::ScaleOk(an)) { if (first == F_NONE) first = F_SCALE; continue; }', 'if (!R::ScaleOk(an)) { Fail(F_SCALE); return; }'),
+ ('M38', 'loopback limit back at the old 2.0 mV',
+  'Cal251eFlow.h', 'kLoopbackMv = 2.5;', 'kLoopbackMv = 2.0;'),
+ ('M39', 'loopback comparison made inclusive (a reading exactly at the limit fails)',
+  'Cal251eFlow.cpp', '  if (loop_bad_ > kLoopbackMv) { Fail(F_LOOPBACK); return; }', '  if (loop_bad_ >= kLoopbackMv) { Fail(F_LOOPBACK); return; }'),
  ('M22', 'the write ignores its own anchor re-check (write build)',
   'Cal251eFlow.cpp', '    if (!R::AnchorsOk(an_[k], result_.ch[k], nullptr)) { Fail(F_RECORD); return; }', ''),
 ]

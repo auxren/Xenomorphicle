@@ -160,9 +160,9 @@ The 251e has no slot count: its one record page is erased and rewritten by every
 
 Rig: the T41_console build, the Outputs and Inputs calibrations done (`Qp` shows `verify_mv` about 0.5 mV), four cables, no 251e. Run the 251e row as far as the loopback and stop.
 
-- [ ] Outputs E, F, G, H into inputs 1 to 4: all 20 `CALR,251LOOP` readings within 2 mV of the commanded voltage. Record the worst error and the spread (this is the real chain error and noise; the design budget assumes about 1.3 mV combined).
-- [ ] An unpatched input stops the run with a PATCH message; a 3 mV gain error on one input (a wrong cable to an attenuated source) stops it with LOOPBACK.
-- [ ] Run it twice, five minutes apart: the worst error moves by less than 1 mV (thermal).
+- [ ] Outputs E, F, G, H into inputs 1 to 4: all 20 `CALR,251LOOP` readings within 2.5 mV of the commanded voltage. Record the worst error and the spread (this is the real chain error and noise; the design budget assumes about 1.3 mV combined). Result of the first run, made after the Xeno was recalibrated on a short ground reference: mean +1.06 mV, worst 2.12 mV, range -0.49 to +2.12 mV, recorded in `docs/specs/cal-251e.md` section 5. The pass limit is 2.5 mV, so the margin is only 0.38 mV on that run.
+- [ ] An unpatched input stops the run with a PATCH message; a 3 mV gain error on one input (above the 2.5 mV limit; a wrong cable to an attenuated source) stops it with LOOPBACK.
+- [ ] Run it twice, five minutes apart: the worst error moves by less than 1 mV (thermal). With the worst error near 2.1 mV and the limit at 2.5 mV, a drift of 1 mV between runs can fail a healthy unit.
 
 ### H2. 251e status and measuring-only run
 

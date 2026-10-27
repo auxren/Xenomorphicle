@@ -22,7 +22,7 @@ C251T_CODE void Cal251eFailText(Cal251eFlow::FailCode code, int cr, int id_ch, i
     case F::F_INPUT_UNCAL: l1 = "Run Inputs first."; l2 = "(Xeno in 1-4 uncal)"; break;
     case F::F_NO_251E: l1 = "No 251e answered at"; l2 = "5C. On 30.7C4?"; break;
     case F::F_PATCH: l1 = "A loopback cable is"; l2 = "missing or wrong."; break;
-    case F::F_LOOPBACK: l1 = "Xeno out vs in differ"; l2 = "by > 2 mV: no go."; break;
+    case F::F_LOOPBACK: l1 = "Xeno out vs in differ"; l2 = "by > 2.5 mV: no go."; break;
     case F::F_IDENTITY:
       if (id_ch >= 0) {
         snprintf(l1b, sizeof(l1b), "CV%d did not move", id_ch + 1);

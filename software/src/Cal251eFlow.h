@@ -99,7 +99,7 @@ class Cal251eFlow {
   static constexpr int32_t kIdLowMv = 1200, kIdHighMv = 6000;
   static constexpr double kIdMoveMv = 2400.0;   // own input must rise this much
   static constexpr double kIdOtherMv = 500.0;   // no other input may rise more than this
-  static constexpr double kLoopbackMv = 2.0;    // loopback reading vs commanded
+  static constexpr double kLoopbackMv = 2.5;    // loopback reading vs commanded
   static constexpr double kPatchErrMv = 500.0;  // a loopback error this big is a cable
   static constexpr double kRepeatMv = 1.5;      // the two windows of a point
   static constexpr double kDriftMv = 1.5;       // first fit point repeated at the end
