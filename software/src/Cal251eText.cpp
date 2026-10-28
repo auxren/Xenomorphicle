@@ -60,7 +60,7 @@ C251T_CODE void Cal251eFailText(Cal251eFlow::FailCode code, int cr, int id_ch, i
     case F::F_READBACK: l1 = "Read-back differs:"; l2 = "new run, CALR,251OLD."; break;
     case F::F_CANCELLED: l1 = "Cancelled."; break;
     case F::F_WRITE_CAP: l1 = "20 COMMITs since"; l2 = "power-up: power-cycle."; break;
-    case F::F_OLD_UNREADABLE: l1 = "Old record unreadable"; l2 = "so not overwritten."; break;
+    case F::F_OLD_UNREADABLE: l1 = "Old record unreadable"; l2 = "so not overwritten."; snprintf(r4, sizeof(r4), "Retry; see 251OLD."); break;
     default: break;
   }
   if (code != F::F_COMMIT_REFUSED) {

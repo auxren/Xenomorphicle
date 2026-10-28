@@ -152,6 +152,8 @@ C251_CODE int Old(char *buf, size_t n, const uint8_t *rec, int err) {
   char t[2 * R::kRecLen + 24];
   int k = snprintf(t, sizeof(t), "CALR,251OLD,");
   if (rec) {
+    // err != 0 with bytes: a record that was read but does not decode (ERR_<n>,<hex>).
+    if (err != 0) k += snprintf(t + k, sizeof(t) - size_t(k), "ERR_%d,", -err);
     for (int i = 0; i < R::kRecLen; ++i) k += snprintf(t + k, sizeof(t) - size_t(k), "%02X", unsigned(rec[i]));
   } else if (err == 0) {
     snprintf(t + k, sizeof(t) - size_t(k), "NONE");
@@ -432,7 +434,8 @@ C251_CODE void Cal251eFlow::Tick() {
           C251_LOG(Old, bus_.record(), 0);
         } else {
           old_read_ok_ = false;
-          C251_LOG(Old, nullptr, rc < 0 ? rc : -1000);
+          if (rc == 1 && bus_.has_record()) C251_LOG(Old, bus_.record(), -1000);  // read, but does not decode
+          else C251_LOG(Old, nullptr, rc < 0 ? rc : -1000);
         }
       }
       sub_ = S_NONE;
@@ -849,7 +852,8 @@ C251_CODE void Cal251eFlow::TickWrite() {
     if (had_record_ && !decoded) {
       // A record exists but cannot be read now: it would be overwritten with a new unit ID and
       // seq 1 and never logged. Refuse; nothing has been sent.
-      C251_LOG(Old, nullptr, -1000);
+      if (bus_.has_record()) C251_LOG(Old, bus_.record(), -1000);
+      else C251_LOG(Old, nullptr, -1000);
       Fail(F_OLD_UNREADABLE);
       return;
     }

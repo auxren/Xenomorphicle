@@ -2018,7 +2018,7 @@ c251w "$R251" > "$TMP/c251r"
 has 'R:write' < "$TMP/c251r" && has 'L L:discard' < "$TMP/c251r" && ! has 'Write off' < "$TMP/c251r" \
   && ok "write build: results offer the write and the discard" || bad "write-build results footer: $(cat "$TMP/c251r")"
 c251w "$CF251" > "$TMP/c251c"
-has 'WRITE TO 251e @5C' < "$TMP/c251c" && has 'One record page' < "$TMP/c251c" && has 'HOLD B for 2 s' < "$TMP/c251c" \
+has 'WRITE TO 251e @5C' < "$TMP/c251c" && has 'One record page' < "$TMP/c251c" && has '251OLD at Scan' < "$TMP/c251c" && has 'HOLD B for 2 s' < "$TMP/c251c" \
   && ok "the 251e confirm is its own screen and says B must be held" || bad "no 251e write confirm: $(cat "$TMP/c251c")"
 c251w "$CF251,$BP,step3000" > "$TMP/c251t"
 has 'Hold B to write' < "$TMP/c251t" && grep -q 'commits=0,puts=0' "$TMP/c251.err" \

@@ -1283,6 +1283,49 @@ static void write_never_overwrites_an_unreadable_record() {
     CHECK(r.ent.fills == 0);
     ExpectQuiet(r);
   }
+  {   // the Scan read the record but its CRC fails: logged with its bytes, and the write refused at Confirm
+    Rig r;
+    install(r.m, 5, 0x40);
+    r.m.active[10] ^= 0x01;
+    r.hold_confirm = true;
+    r.Begin();
+    r.Run([&] { return r.flow.stage() == Stage::Confirm; });
+    CHECK(has_line("CALR,251OLD,ERR_1000,"));
+    r.flow.ConfirmWrite();
+    CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_OLD_UNREADABLE);
+    r.Idle(50);
+    ExpectNoWrite(r);
+    CHECK(r.ent.fills == 0);
+  }
+  {   // old_read_ok_ is per run: refused once, then allowed when the record reads
+    Rig r;
+    install(r.m, 5, 0x40);
+    r.m.active[10] ^= 0x01;
+    r.Begin();
+    r.RunToEnd();
+    CHECK(r.flow.fail() == F::F_OLD_UNREADABLE);
+    ExpectNoWrite(r);
+    r.m.active[10] ^= 0x01;
+    r.flow.Cancel();
+    r.Begin();
+    CHECK(r.RunToEnd() && r.flow.stage() == Stage::Done);
+    CHECK(commits_in(r.m) == 1);
+  }
+  for (int with_rec = 0; with_rec < 2; ++with_rec) {   // the write-time READ gets no answer: F_BUS, nothing sent
+    Rig r;
+    if (with_rec) install(r.m, 5, 0x40);
+    r.hold_confirm = true;
+    r.Begin();
+    r.Run([&] { return r.flow.stage() == Stage::Confirm; });
+    r.m.drop_replies = true;
+    r.flow.ConfirmWrite();
+    r.Run([&] { return r.flow.stage() == Stage::Failed; });
+    CHECK(r.flow.fail() == F::F_BUS);
+    r.m.drop_replies = false;
+    r.Idle(50);
+    ExpectNoWrite(r);
+    CHECK(r.ent.fills == 0);
+  }
   {   // a readable record is logged at the Scan and again at the write, the same bytes
     Rig r;
     install(r.m, 5, 0x40);

@@ -185,8 +185,8 @@ Rig: a 251e on 30.7C4 on the bus (its bench gates in Buchla_FW `docs/cv-calibrat
 
 - [ ] H1 to H3 done; open questions 1, 2 and 3 of the design answered.
 - [ ] The T41_console build with `-DCAL251E_ALLOW_WRITE=1`, flashed with `Qp` and the image hash recorded; the 251e power-cycled and warm.
-- [ ] Hold B for 2 s: expect `CALR,251OLD,...` (the previous record), `CALR,251REC,5C,...`, `CALR,251COMMIT,<count>,<seq>`, `CALR,251END,OK` (at most 20 COMMITs per power-up); `=5Cs` shows flags 05 and the new sequence number after a power cycle.
-- [ ] Never retry a COMMIT blindly: after COMMIT unknown or REFUSED read `=5Cs` by hand.
+- [ ] Hold B for 2 s: expect `CALR,251OLD,...` (the previous record, logged again; on a module with no record `NONE` was logged at Scan only and this line is absent), `CALR,251REC,5C,...`, `CALR,251COMMIT,<count>,<seq>`, `CALR,251END,OK` (at most 20 COMMITs per power-up); `=5Cs` shows flags 05 and the new sequence number after a power cycle.
+- [ ] Never retry a COMMIT blindly: after COMMIT unknown or REFUSED start a new 251e run and take `CALR,251OLD` at Scan (`=5Cs` reads only the status).
 
 ### H5. End-to-end proof after a write
 

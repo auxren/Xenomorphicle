@@ -290,7 +290,8 @@ int Warn(char *buf, size_t n, int ch, const char *kind, double value_mv, double 
 // One per COMMIT: n counts COMMITs since power-up, seq is the record's sequence number.
 int Commit(char *buf, size_t n, int count, unsigned seq);
 int Fit(char *buf, size_t n, int ch, const CalRec::Channel &c, double pred_worst_mv, double anchor_mv);
-// rec is the record bytes, or null for none; err (when rec is null and nonzero) a Cal251eBus Error.
+// rec is the record bytes, or null for none; err a Cal251eBus Error (nonzero with bytes: they were
+// read but do not decode, logged ERR_<n>,<hex>).
 int Old(char *buf, size_t n, const uint8_t *rec, int err);
 int Rec(char *buf, size_t n, uint8_t addr, const uint8_t rec[CalRec251e::kRecLen]);
 // warn: the run's warning word (Cal251eFlow::warn_word()), printed as warn=<hex>; 0 when clean.

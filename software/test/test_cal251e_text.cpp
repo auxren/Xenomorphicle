@@ -76,6 +76,7 @@ int main() {
     }
   Cal251eFailText(F::F_OLD_UNREADABLE, 0, -1, -1, &r);
   CHECK(has(r, "Old record unreadable") && has(r, "Nothing was written."));
+  CHECK(has(r, "Retry") && has(r, "251OLD"));
   printf("test_cal251e_text: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
 }
