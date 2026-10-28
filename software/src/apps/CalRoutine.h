@@ -1596,8 +1596,8 @@ FLASHMEM void AppCalRoutine::Draw251Confirm() const {
   graphics.print("WRITE TO 251e @5C");
   graphics.invertRect(0, 0, 128, 11);  // inversion is the only emphasis
   Row(0, "One record page: each");
-  Row(1, "write erases it. The");
-  Row(2, "old record is logged.");
+  Row(1, "write erases it; old");
+  Row(2, "one: 251OLD at Scan.");
   if (DiscardArmed()) {
     Row(3, "encL again: discard");
     graphics.invertRect(0, 38, 128, 9);

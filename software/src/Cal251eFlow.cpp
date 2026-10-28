@@ -263,6 +263,7 @@ C251_CODE const char *Cal251eFlow::FailName(FailCode f) {
     case F_INTERNAL: return "INTERNAL";
     case F_NO_INPUT: return "NO_INPUT";
     case F_WRITE_CAP: return "WRITE_CAP";
+    case F_OLD_UNREADABLE: return "OLD_UNREADABLE";
   }
   return "?";
 }
@@ -821,6 +822,9 @@ C251_CODE void Cal251eFlow::ConfirmWrite() {
   if (result_.valid_mask != (1u << kChannels) - 1) { Fail(F_INTERNAL); return; }
   if (now_ - results_ms_ >= kResultsMaxAgeMs) { Fail(F_EXPIRED); return; }
   if (commits_power_up_ >= kWriteCap) { Fail(F_WRITE_CAP); return; }
+  // A record exists that the Scan could not read: its unit ID and sequence number are unknown, so
+  // nothing may overwrite it.
+  if (had_record_ && !old_read_ok_) { Fail(F_OLD_UNREADABLE); return; }
   for (int k = 0; k < kChannels; ++k)
     if (!R::AnchorsOk(an_[k], result_.ch[k], nullptr)) { Fail(F_RECORD); return; }
   SetStage(Stage::Write);
@@ -841,7 +845,16 @@ C251_CODE void Cal251eFlow::TickWrite() {
   if (sub_ == S_READREC) {
     if (rc < 0) { Fail(F_BUS); return; }
     R::Record r, old;
-    if (bus_.has_record() && R::Decode(bus_.record(), R::kRecLen, &old)) {
+    const bool decoded = bus_.has_record() && R::Decode(bus_.record(), R::kRecLen, &old);
+    if (had_record_ && !decoded) {
+      // A record exists but cannot be read now: it would be overwritten with a new unit ID and
+      // seq 1 and never logged. Refuse; nothing has been sent.
+      C251_LOG(Old, nullptr, -1000);
+      Fail(F_OLD_UNREADABLE);
+      return;
+    }
+    if (decoded) {
+      C251_LOG(Old, bus_.record(), 0);
       memcpy(r.unit_id, old.unit_id, sizeof(r.unit_id));  // the unit keeps its ID
       r.seq = uint16_t(old.seq + 1);
       if (r.seq == 0) r.seq = 1;

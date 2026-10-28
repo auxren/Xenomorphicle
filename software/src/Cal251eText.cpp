@@ -10,6 +10,10 @@
 
 #include <stdio.h>
 
+// What to do about a record whose state is unknown: a new run logs the module's record at Scan
+// (CALR,251OLD), then L at Warm-up leaves. (=5Cr is the 259e's reader: never on a 251e.)
+static const char kNewRun[] = "New run: CALR,251OLD";
+
 C251T_CODE void Cal251eFailText(Cal251eFlow::FailCode code, int cr, int id_ch, int id_in,
                                 Cal251eFailRows *out) {
   using F = Cal251eFlow;
@@ -20,7 +24,7 @@ C251T_CODE void Cal251eFailText(Cal251eFlow::FailCode code, int cr, int id_ch, i
   switch (code) {
     case F::F_NO_SELF_CAL: l1 = "Run Outputs first."; break;
     case F::F_INPUT_UNCAL: l1 = "Run Inputs first."; l2 = "(Xeno in 1-4 uncal)"; break;
-    case F::F_NO_251E: l1 = "No 251e answered at"; l2 = "5C. On 30.7C4?"; break;
+    case F::F_NO_251E: l1 = "No 251e status reply"; l2 = "from address 5C."; break;
     case F::F_PATCH: l1 = "A loopback cable is"; l2 = "missing or wrong."; break;
     case F::F_LOOPBACK: l1 = "Xeno out vs in differ"; l2 = "by > 2.5 mV: no go."; break;
     case F::F_IDENTITY:
@@ -34,7 +38,7 @@ C251T_CODE void Cal251eFailText(Cal251eFlow::FailCode code, int cr, int id_ch, i
         l1 = "Patch check failed.";
       }
       break;
-    case F::F_NO_OVERRIDE: l1 = "251e took no hold"; l2 = "(status bit1). 30.7C4?"; break;
+    case F::F_NO_OVERRIDE: l1 = "251e took no hold:"; l2 = "status bit1 not set."; break;
     case F::F_NOISY: l1 = "Input reading noisy"; l2 = "(loose cable?)"; break;
     case F::F_DRIFT: l1 = "Readings drift over"; l2 = "1.5 mV: warm up more."; break;
     case F::F_INPUT_RANGE: l1 = "An input is too near"; l2 = "its top: not written."; break;
@@ -50,12 +54,13 @@ C251T_CODE void Cal251eFailText(Cal251eFlow::FailCode code, int cr, int id_ch, i
     case F::F_COMMIT_REFUSED:
       l1 = "The 251e refused the"; l2 = "COMMIT (see below).";
       snprintf(r3, sizeof(r3), "Its page may be torn.");
-      snprintf(r4, sizeof(r4), "Read =5Cs by hand.");
+      snprintf(r4, sizeof(r4), "%s", kNewRun);
       break;
-    case F::F_COMMIT_UNKNOWN: l1 = "COMMIT unknown: read"; l2 = "=5Cs by hand."; break;
-    case F::F_READBACK: l1 = "Read-back differs:"; l2 = "read =5Cs by hand."; break;
+    case F::F_COMMIT_UNKNOWN: l1 = "COMMIT unknown: new"; l2 = "run, CALR,251OLD."; break;
+    case F::F_READBACK: l1 = "Read-back differs:"; l2 = "new run, CALR,251OLD."; break;
     case F::F_CANCELLED: l1 = "Cancelled."; break;
     case F::F_WRITE_CAP: l1 = "20 COMMITs since"; l2 = "power-up: power-cycle."; break;
+    case F::F_OLD_UNREADABLE: l1 = "Old record unreadable"; l2 = "so not overwritten."; break;
     default: break;
   }
   if (code != F::F_COMMIT_REFUSED) {
@@ -63,7 +68,7 @@ C251T_CODE void Cal251eFailText(Cal251eFlow::FailCode code, int cr, int id_ch, i
       snprintf(r3, sizeof(r3), "Record committed.");
     } else if (cr == E_COMMIT_REFUSED) {
       snprintf(r3, sizeof(r3), "Its page may be torn.");
-      snprintf(r4, sizeof(r4), "Read =5Cs by hand.");
+      snprintf(r4, sizeof(r4), "%s", kNewRun);
     } else if (cr != 0 && cr != E_NO_SLOT && cr != E_BUS_BUSY && cr != E_INTERNAL) {
       snprintf(r3, sizeof(r3), "Written: UNKNOWN.");
     }

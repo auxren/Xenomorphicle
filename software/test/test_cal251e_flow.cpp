@@ -1245,6 +1245,65 @@ static void write_failures() {
   }
 }
 
+// A record that exists but cannot be read is never overwritten blind (a new unit ID and seq 1,
+// the old one never logged), and the record that is overwritten is logged again at the write.
+static void write_never_overwrites_an_unreadable_record() {
+  if (!F::kAllowWrite) return;
+  {   // the Scan could not read the record; the write-time READ would: still refused
+    Rig r;
+    install(r.m, 5, 0x40);
+    r.m.corrupt_read_arg = 30;
+    r.hold_confirm = true;
+    r.Begin();
+    r.Run([&] { return r.flow.stage() == Stage::Confirm; });
+    CHECK(r.flow.had_record() && has_line("CALR,251OLD,ERR_"));
+    r.m.corrupt_read_arg = 0xFF;
+    r.flow.ConfirmWrite();
+    CHECK(r.flow.stage() == Stage::Failed && r.flow.fail() == F::F_OLD_UNREADABLE);
+    CHECK(has_line("CALR,251END,OLD_UNREADABLE"));
+    r.Idle(50);
+    ExpectNoWrite(r);
+    CHECK(r.ent.fills == 0);
+    ExpectQuiet(r);
+  }
+  {   // the Scan read it; the write-time READ gets bytes that do not decode: refused, logged as unreadable
+    Rig r;
+    install(r.m, 5, 0x40);
+    r.hold_confirm = true;
+    r.Begin();
+    r.Run([&] { return r.flow.stage() == Stage::Confirm; });
+    r.m.active[10] ^= 0x01;                // reads consistently, but the CRC no longer holds
+    r.flow.ConfirmWrite();
+    r.Run([&] { return r.flow.stage() == Stage::Failed; });
+    CHECK(r.flow.fail() == F::F_OLD_UNREADABLE);
+    CHECK(count_prefix("CALR,251OLD,") == 2 && has_line("CALR,251OLD,ERR_"));
+    CHECK(count_prefix("CALR,251REC") == 0);
+    r.Idle(50);
+    ExpectNoWrite(r);
+    CHECK(r.ent.fills == 0);
+    ExpectQuiet(r);
+  }
+  {   // a readable record is logged at the Scan and again at the write, the same bytes
+    Rig r;
+    install(r.m, 5, 0x40);
+    r.Begin();
+    CHECK(r.RunToEnd() && r.flow.stage() == Stage::Done);
+    CHECK(count_prefix("CALR,251OLD,") == 2);
+    std::string first;
+    int n = 0;
+    for (const auto &l : g_log)
+      if (l.compare(0, 12, "CALR,251OLD,") == 0) { if (n++ == 0) first = l; else CHECK(l == first); }
+    CHECK(has_line("CALR,251COMMIT,1,6") && r.ent.fills == 0);
+  }
+  {   // no record on the module: the first write is unchanged (one NONE line, new ID, seq 1)
+    Rig r;
+    r.Begin();
+    CHECK(r.RunToEnd() && r.flow.stage() == Stage::Done);
+    CHECK(count_prefix("CALR,251OLD,") == 1 && has_line("CALR,251OLD,NONE"));
+    CHECK(r.ent.fills == 1 && has_line("CALR,251COMMIT,1,1"));
+  }
+}
+
 int main() {
   // The write is compiled out unless asked for: the default build, and the ones with the macro 0,
   // must be read-only.
@@ -1285,6 +1344,7 @@ int main() {
   write_on_c4_and_c5();
   write_cap();
   write_failures();
+  write_never_overwrites_an_unreadable_record();
   printf("test_cal251e_flow: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
 }

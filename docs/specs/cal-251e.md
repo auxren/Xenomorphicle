@@ -262,10 +262,11 @@ and the flow's test proves it. Defining `CAL251E_ALLOW_WRITE` in a shipped build
 guard as the 259e); a build with it on prints `WARNING: 251e write ENABLED in this build`.
 
 If enabled: Confirm (B held 2 s, the 259e's gate) -> re-check both the age (10 min from the first
-loopback point) and the absolute anchors -> READ the old record and log it (`CALR,251OLD`) -> PUT x5 ->
+loopback point) and the absolute anchors -> READ the old record again (logged as `CALR,251OLD`, a second time when a record exists) -> PUT x5 ->
 a status read (the baseline for the refused bit) -> COMMIT once (never resent; a Wire error counts
 as sent) -> status poll (bit2, bit0 and the seq of the record put) -> READ the record back, byte-exact, CRC valid -> Done. The unit ID is kept and the
 sequence number incremented when a record exists, else the entropy port supplies the ID and seq is 1.
+**Old record.** The Scan reads the module's record and logs it (`CALR,251OLD,<76 hex>`, `NONE` when there is none, `ERR_<n>` when it could not be read). The write refuses (`F_OLD_UNREADABLE`, nothing sent) when the status said a record exists and either the Scan could not read and decode it, or the write-time READ returns bytes that do not decode: the write would otherwise carry a new unit ID and seq 1 and the old record would never be logged. The first write on a module with no record is unaffected. After the B hold a successful write logs, in order, `CALR,251OLD` (second time), `CALR,251REC`, `CALR,251COMMIT,<n>,<seq>` and `CALR,251END,OK`; the Confirm screen says the old record was logged at Scan.
 **Cap and log:** at most 20 COMMITs per power-up (`F_WRITE_CAP`, the counter survives runs, not a
 reboot), and one `CALR,251COMMIT,<count>,<seq>` line per COMMIT. There is no preset backup: a COMMIT touches only the record page. A cancel after the COMMIT frame
 went out waits for its verdict in the background, like the 259e.
@@ -278,8 +279,8 @@ went out waits for its verdict in the background, like the 259e.
   time out in 5 s; Fail, Cancel and Done release the Xeno outputs and send RELEASE.
 * While a Cal Routine run is open the existing gates already refuse console PUT and COMMIT frames,
   `m`, `x`, `w`, `k` and the SysEx bridge's dump writes.
-* Console: **no new `=` command.** `=5Cs` (the existing 259e status reader, address 5C allowed) reads the
-  251e status. `=5Cr` and `=5Ca0` are 259e readers (30-byte record, byte-5/7 workaround) and are
+* Console: **no new `=` command.** `=5Cs` (the existing 259e status reader, address 5C allowed) reads only the
+  251e status. To read the old record, start a new 251e run and take `CALR,251OLD` at Scan, then press L at Warm-up. `=5Cr` and `=5Ca0` are 259e readers (30-byte record, byte-5/7 workaround) and are
   **not valid for a 251e**; do not use them. (Any `=` command is a keystroke state machine with no Enter.)
 
 ## 10. UI states
@@ -297,7 +298,7 @@ Menu row "251e CV outputs" (hint "251e>Xeno in 1-4"), above the 259e row; no met
 | Identify | "Checking patch" |
 | Measure | "251e fit n/8" / "verify n/5" / "drift" |
 | Results | title "251e results N min"; per channel gain, offset, worst verify mV; a channel over a write limit starts with `!` and letters (n non-linearity, v verify, a anchors) and its row is inverted, and the summary row reads `WARN <channels> nl ver anc` (inverted); with no warning it shows the loopback worst and "Write off"; footer "L L:discard" or "R:write L L:discard" |
-| Confirm (write build) | inverted "WRITE TO 251e @5C"; "Hold B 2 s" |
+| Confirm (write build) | inverted "WRITE TO 251e @5C"; one record page, each write erases it, old record logged at Scan (`CALR,251OLD`); "Hold B 2 s" |
 | Write, Verify | progress |
 | Done / Failed | result; Failed shows the code name and what became of the record |
 
@@ -305,8 +306,8 @@ Menu row "251e CV outputs" (hint "251e>Xeno in 1-4"), above the 259e row; no met
 
 `NONE, NO_SELF_CAL, INPUT_UNCAL, NO_251E, PATCH, LOOPBACK, IDENTITY, NO_OVERRIDE, NOISY, DRIFT,
 INPUT_RANGE, SCALE, FIT, NONLIN, RECORD, VERIFY, BUS, COMMIT_REFUSED, COMMIT_UNKNOWN, READBACK,
-CANCELLED, EXPIRED, INTERNAL, NO_INPUT, WRITE_CAP` (`NO_INPUT`: an input window delivered no samples).
-New codes are appended after `WRITE_CAP`; none renumbered.
+CANCELLED, EXPIRED, INTERNAL, NO_INPUT, WRITE_CAP, OLD_UNREADABLE` (`NO_INPUT`: an input window delivered no samples; `OLD_UNREADABLE`: a record exists that could not be read, so the write is refused). `NO_251E` means only that the status reply from address 5C did not come or was not format 1; its text names no firmware version.
+New codes are appended after `OLD_UNREADABLE`; none renumbered.
 
 Log lines (`CALR` v2 style): `CALR,251START`, `CALR,251LOOP,in,mv,reading`, `CALR,251PT,ch,kind,r,mv`,
 `CALR,251FIT,ch,gain,offset,pred_worst,anchor`, `CALR,251STAT` (noise, DAC step, verify, anchor, warn bits), `CALR,251WARN`, `CALR,251COMMIT,n,seq`, `CALR,251OLD`, `CALR,251REC`, `CALR,251END,<result>,warn=<hex>`: the warning word (non-linearity channels in bits 0-3, verify 4-7, anchors 8-11; 0 when clean), so a warned run never ends like a clean one.

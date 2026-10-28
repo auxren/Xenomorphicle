@@ -27,7 +27,7 @@ int main() {
     CHECK(has(r, "by > 2.5 mV"));
   }
   const int crs[] = {0, 1, E_COMMIT_REFUSED, E_COMMIT_UNKNOWN, E_BUS_ERROR, E_BUS_BUSY, E_INTERNAL, E_NO_SLOT};
-  for (int f = 0; f <= F::F_WRITE_CAP; ++f) {
+  for (int f = 0; f <= F::F_OLD_UNREADABLE; ++f) {
     for (int cr : crs) {
       Cal251eFailRows r;
       memset(&r, 'x', sizeof r);
@@ -55,11 +55,27 @@ int main() {
   CHECK(has(r, "CV2") && has(r, "input 3"));
   Cal251eFailText(F::F_IDENTITY, 0, 2, -1, &r);
   CHECK(has(r, "CV3") && has(r, "no cable"));
-  // The records of a refused COMMIT are read with the 251e-valid command, not the 259e record reader.
+  // The records of a refused COMMIT are read by a new run's Scan (CALR,251OLD), never the 259e record reader.
   Cal251eFailText(F::F_COMMIT_UNKNOWN, 0, -1, -1, &r);
-  CHECK(has(r, "=5Cs") && !has(r, "=5Cr"));
+  CHECK(has(r, "251OLD") && !has(r, "=5Cr") && !has(r, "by hand"));
   Cal251eFailText(F::F_READBACK, 1, -1, -1, &r);
-  CHECK(has(r, "=5Cs") && !has(r, "=5Cr"));
+  CHECK(has(r, "251OLD") && !has(r, "=5Cr") && !has(r, "by hand"));
+  // No row names a firmware string the build does not carry; the missing-251e rows say what is checked.
+  Cal251eFailText(F::F_NO_251E, 0, -1, -1, &r);
+  CHECK(has(r, "status reply") && has(r, "5C") && !has(r, "30.7C"));
+  Cal251eFailText(F::F_NO_OVERRIDE, 0, -1, -1, &r);
+  CHECK(has(r, "bit1") && !has(r, "30.7C"));
+  // Every failure that leaves the module's record in doubt says how to read it, never "by hand" or =5Cr.
+  for (int f = 0; f <= F::F_OLD_UNREADABLE; ++f)
+    for (int cr : crs) {
+      Cal251eFailText(F::FailCode(f), cr, -1, -1, &r);
+      CHECK(!has(r, "by hand") && !has(r, "=5Cr"));
+      const bool doubt = f == F::F_COMMIT_UNKNOWN || f == F::F_READBACK || f == F::F_COMMIT_REFUSED ||
+                         cr == E_COMMIT_REFUSED;
+      if (doubt) CHECK(has(r, "251OLD"));
+    }
+  Cal251eFailText(F::F_OLD_UNREADABLE, 0, -1, -1, &r);
+  CHECK(has(r, "Old record unreadable") && has(r, "Nothing was written."));
   printf("test_cal251e_text: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
 }

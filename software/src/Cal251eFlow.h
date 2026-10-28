@@ -20,7 +20,8 @@
 //
 // The run:
 //   Begin       self cal absent or inputs 1-4 uncalibrated: NoSelfCal (nothing happens).
-//   Scan        READ status at 0x5C (must answer, fmt 1); a record, if any, is read and logged.
+//   Scan        READ status at 0x5C (must answer, fmt 1); a record, if any, is read and logged
+//               (CALR,251OLD). A record that cannot be read or decoded blocks the write.
 //   Warmup      both on >= 30 min: owner-confirmed (Continue).
 //   PromptLoop  Xeno out E,F,G,H -> in 1,2,3,4 (no 251e cable). Continue.
 //   Loopback    5 voltages: outputs E-H held, inputs read (two windows); every reading must be
@@ -31,7 +32,7 @@
 //   Measure     8 fit points (raw code held, volts read), the fit and the physical checks per
 //               channel, 5 verify points at the corrected code, one drift repeat.
 //   Results     a read-only run ends here (discard with Cancel). With kAllowWrite: Continue ->
-//               Confirm; ConfirmWrite -> Write (READ old record, PUT x5, COMMIT once) -> Verify
+//               Confirm; ConfirmWrite -> Write (READ old record again and log it, PUT x5, COMMIT once) -> Verify
 //               (READ back, byte-exact) -> Done.
 //
 // Only Xeno outputs E-H are held, and only in the loopback. Nothing here saves any Xeno
@@ -68,7 +69,8 @@ class Cal251eFlow {
     F_NO_OVERRIDE, F_NOISY, F_DRIFT, F_INPUT_RANGE, F_SCALE, F_FIT, F_NONLIN, F_RECORD, F_VERIFY,
     F_BUS, F_COMMIT_REFUSED, F_COMMIT_UNKNOWN, F_READBACK, F_CANCELLED, F_EXPIRED, F_INTERNAL,
     F_NO_INPUT,  // an input window delivered no samples
-    F_WRITE_CAP  // the cap on COMMITs per power-up was reached (kWriteCap)
+    F_WRITE_CAP,  // the cap on COMMITs per power-up was reached (kWriteCap)
+    F_OLD_UNREADABLE  // a record exists but could not be read and decoded: never overwritten blind
   };
 
   struct Result {
