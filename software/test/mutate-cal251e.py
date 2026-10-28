@@ -134,6 +134,10 @@ MUTATIONS = [
   'Cal251eFlow.cpp', 'if (rc == 1 && bus_.has_record()) C251_LOG(Old, bus_.record(), -1000);  // read', 'if (false) C251_LOG(Old, bus_.record(), -1000);  // read'),
  ('M50', 'OLD_UNREADABLE screen gives no next step',
   'Cal251eText.cpp', ' snprintf(r4, sizeof(r4), "Retry; see 251OLD."); break;', ' break;'),
+ ('M51', 'the write-time refusal logs the old record without its bytes (write build)',
+  'Cal251eFlow.cpp', '      if (bus_.has_record()) C251_LOG(Old, bus_.record(), -1000);\n      else C251_LOG(Old, nullptr, -1000);', '      C251_LOG(Old, nullptr, -1000);'),
+ ('M52', 'Old() line buffer back at 100 bytes (the longest ERR line is cut)',
+  'Cal251eFlow.cpp', 'char t[2 * R::kRecLen + 40];\n  int k = snprintf(t, sizeof(t), "CALR,251OLD,");', 'char t[2 * R::kRecLen + 24];\n  int k = snprintf(t, sizeof(t), "CALR,251OLD,");'),
  ('M22', 'the write ignores its own anchor re-check (write build)',
   'Cal251eFlow.cpp', '    if (!R::AnchorsOk(an_[k], result_.ch[k], nullptr)) { Fail(F_RECORD); return; }', ''),
 ]

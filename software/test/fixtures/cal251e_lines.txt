@@ -9,7 +9,8 @@
 # point), V (verify point at the corrected code) or D (the drift repeat). raw_code is the raw
 # DAC code held, mv the volts the Xeno input read. a_mv_per_code and b_mv are the measured
 # line V = a r + b. rec76hex is the 38-byte record as 76 upper-case hex digits. 251OLD is the
-# record the module held before the run (NONE, or ERR_<positive bus error number>).
+# record the module held before the run (NONE, ERR_<positive bus error number>, or for a record that
+# was read but does not decode ERR_<n>,rec76hex: the header spells that ERRn+hex).
 # 251LINE adds the shape of the fit points about their line: bow_mv (peak of the quadratic
 # component) and inl_mv (worst residual of a quadratic fit). 251STAT is per channel once the verify
 # points are in: noise_rms_mv (window-to-window), lsb_mv (the DAC step), the worst signed verify
@@ -21,7 +22,7 @@
 # clean), so a warned run cannot end like a clean one.
 CALR#,version=2
 CALR#,251START,addr
-CALR#,251OLD,rec76hex_or_NONE_or_ERR
+CALR#,251OLD,rec76hex_or_NONE_or_ERRn_or_ERRn+hex
 CALR#,251LOOP,in,mv,reading_mv
 CALR#,251PT,ch,kind,raw_code,mv
 CALR#,251LINE,ch,a_mv_per_code,b_mv,nonlin_mv,bow_mv,inl_mv

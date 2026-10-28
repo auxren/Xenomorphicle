@@ -1046,6 +1046,19 @@ static void fixture_lines() {
   CHECK(have_end_examples);
   Cal251eLines::Old(buf, sizeof buf, nullptr, 0);
   CHECK(want["251OLD"] == buf);
+  {   // the longest line (largest error number with the bytes) is whole, and a short buffer is cut, not overrun
+    uint8_t ff[38];
+    memset(ff, 0xAB, sizeof ff);
+    char big[Cal251eLines::kMaxLine];
+    const int n = Cal251eLines::Old(big, sizeof big, ff, -2147483647);
+    CHECK(n == int(strlen(big)) && n == 12 + 15 + 76);
+    std::string want_big = "CALR,251OLD,ERR_2147483647,";
+    for (int i2 = 0; i2 < 38; ++i2) want_big += "AB";
+    CHECK(std::string(big) == want_big);
+    char small[20];
+    Cal251eLines::Old(small, sizeof small, ff, -2147483647);
+    CHECK(strlen(small) < sizeof small);
+  }
   // a whole run: every CALR line has its header's field count, the headers come first
   Rig r;
   r.Begin();
@@ -1277,6 +1290,15 @@ static void write_never_overwrites_an_unreadable_record() {
     r.Run([&] { return r.flow.stage() == Stage::Failed; });
     CHECK(r.flow.fail() == F::F_OLD_UNREADABLE);
     CHECK(count_prefix("CALR,251OLD,") == 2 && has_line("CALR,251OLD,ERR_"));
+    {   // the refusal line carries the bytes that did not decode (the module's record, CRC-damaged)
+      std::string hex;
+      char h[4];
+      for (int i = 0; i < 38; ++i) { snprintf(h, sizeof h, "%02X", r.m.active[i]); hex += h; }
+      CHECK(has_line("CALR,251OLD,ERR_1000," + hex));
+      int n = 0;
+      for (const auto &l : g_log) n += l == "CALR,251OLD,ERR_1000," + hex;
+      CHECK(n == 1);   // Scan read it fine: only the write-time line has the error shape
+    }
     CHECK(count_prefix("CALR,251REC") == 0);
     r.Idle(50);
     ExpectNoWrite(r);

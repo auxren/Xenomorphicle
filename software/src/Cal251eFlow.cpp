@@ -25,7 +25,7 @@ namespace Cal251eLines {
 static const char *const kHeaders[] = {
   "CALR#,version=2",
   "CALR#,251START,addr",
-  "CALR#,251OLD,rec76hex_or_NONE_or_ERR",
+  "CALR#,251OLD,rec76hex_or_NONE_or_ERRn_or_ERRn+hex",
   "CALR#,251LOOP,in,mv,reading_mv",
   "CALR#,251PT,ch,kind,raw_code,mv",
   "CALR#,251LINE,ch,a_mv_per_code,b_mv,nonlin_mv,bow_mv,inl_mv",
@@ -149,7 +149,8 @@ C251_CODE int Fit(char *buf, size_t n, int ch, const CalRec::Channel &c, double 
 
 C251_CODE int Old(char *buf, size_t n, const uint8_t *rec, int err) {
   if (!n) return 0;
-  char t[2 * R::kRecLen + 24];
+  // Longest: "CALR,251OLD," 12 + "ERR_2147483647," 15 + 76 hex + NUL = 104; t has room to spare.
+  char t[2 * R::kRecLen + 40];
   int k = snprintf(t, sizeof(t), "CALR,251OLD,");
   if (rec) {
     // err != 0 with bytes: a record that was read but does not decode (ERR_<n>,<hex>).
