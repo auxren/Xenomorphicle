@@ -1678,6 +1678,16 @@ FLASHMEM __attribute__((noinline)) void loop() {
           restore_addr_value = (uint8_t)((restore_addr_value << 4) | v);
           if (++restore_addr_digits < 2) continue;  // wait for the 2nd digit
           restore_addr_pending = false;
+#if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+          // Refuse before arming as well as before firing: after a failed or
+          // holed m the image is blanked, and pushing it erases the bank.
+          if (const char *why = OC::PresetBus::RestoreRefusal()) {
+            destructive_arm_ms = 0;
+            Serial.printf("master restore: REFUSED - %s. Take a clean m%02X first.\n",
+                          why, restore_addr_value);
+            continue;
+          }
+#endif
           // The prompt says "the SAME 2 hex digits", and the code now means
           // it: a second 'x' with a DIFFERENT address inside the window used
           // to fire at that address, which had never been confirmed at all.

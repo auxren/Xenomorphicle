@@ -137,6 +137,12 @@ typedef struct {
   // Bus200eMasterBytesTransferred() reports this for a BACKUP instead of the
   // card_activity() delta, which counts rewrites and misses lost bytes.
   uint32_t (*capture_bytes)(void);
+
+  // A BACKUP job ended: done = 1 for DONE, 0 for FAILED. Called once per job,
+  // on the transition, after the last capture_bytes() sample. On target it
+  // freezes the capture verdict that decides whether the image may be pushed
+  // back (BusCardImageCaptureEnd). Never called for a RESTORE.
+  void (*end_capture)(int done);
 } Bus200eMasterOps;
 
 // Reset all state and store `ops`. All fields of `ops` must be non-NULL

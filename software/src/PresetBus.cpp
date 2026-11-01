@@ -861,6 +861,10 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
     Serial.println("PresetBus: card serve failed - bad geometry");
     return -3;
   }
+  // What the console's x may push: a whole PBCARD.BIN, nothing else, until a
+  // capture says otherwise (BusCardRestoreCheck).
+  if (fw_mode) BusCardImageForget();
+  else BusCardImageFromFile(got == BUSCARD_SIZE);
   fw_size = size;
   fw_addr_bytes = abytes;
   if (fw_mode) {
@@ -1152,8 +1156,12 @@ static void master_begin_capture() {
   card_image_capture = true;
   __disable_irq();
   BusCardCoverageReset();
+  BusCardImageCaptureBegin();
   __enable_irq();
 }
+
+// The BACKUP ended (DONE or FAILED): freeze its verdict for RestoreRefusal().
+static void master_end_capture(int done) { BusCardImageCaptureEnd(done); }
 
 // The capture's trustworthy size: bytes [0, contig) each landed at their own
 // card address, in order, since master_begin_capture(). See PresetBusCard.h.
@@ -1162,7 +1170,7 @@ static uint32_t master_capture_bytes() { return BusCardGetCoverage()->contig; }
 static const Bus200eMasterOps kMasterOps = {
   master_now_ms, master_tx_gate_open, master_probe_card,
   master_send_frame, master_suppress_echo, master_card_activity,
-  master_begin_capture, master_capture_bytes,
+  master_begin_capture, master_capture_bytes, master_end_capture,
 };
 
 // Raw arbitrary-frame master send. See PresetBus.h for the contract. Mirrors
@@ -1202,8 +1210,14 @@ FLASHMEM static int master_backup_impl(uint8_t mod_addr) {
     if (err != 0) return -BUS200E_MASTER_ERR_NO_FREE_CARD;
   }
   // The capture blanks the image (master_begin_capture). A module's own
-  // backup into us that has not been flushed yet goes to PBCARD.BIN first;
-  // a no-op when nothing is dirty.
+  // backup into us that has not been flushed yet goes to PBCARD.BIN first --
+  // but only once it has settled (3 s without a write, card_task's own rule):
+  // flushing mid-burst would persist a half-written bank. Until then, BUSY.
+  if (card_serving &&
+      !BusCardSelfBackupSettled(BusCardDirty(), card_burst_ours, card_flush_arm_ms, millis())) {
+    Serial.println("PresetBus: BACKUP refused - a module is still writing its own backup into the card (try again in 3 s)");
+    return -BUS200E_MASTER_ERR_BUSY;
+  }
   card_image_flush("before capture");
   return Bus200eMasterBackup(mod_addr, card_lo);
 }
@@ -1236,6 +1250,12 @@ bool MasterTransferring() {
   return in_flight;
 }
 uint8_t *MasterCardImage() { return card_serving ? card_image : nullptr; }
+
+const char *RestoreRefusal() {
+  if (!card_serving || !card_image) return "no card image (not serving)";
+  const BusCardRestoreBlock b = BusCardRestoreCheck();
+  return b == BUSCARD_RESTORE_OK ? nullptr : BusCardRestoreBlockText(b);
+}
 void MasterReset() { Bus200eMasterReset(); }
 
 // ---- module identification (QUERY; transient master; new) ------------------
@@ -1902,8 +1922,10 @@ FLASHMEM void DebugDump() {
     const Bus200eMasterState ms = Bus200eMasterGetState();
     const Bus200eMasterError me = Bus200eMasterLastError();
     // bytes = what can be trusted (a BACKUP: contiguous coverage from 0);
-    // acked = the module sent its 0x0A completion frame -- NOT that the
-    // BACKUP frame was acknowledged (a refused send ends in SEND_TIMEOUT).
+    // acked = the module sent its 0x0A completion frame. It says nothing about
+    // the BACKUP frame being received: that frame goes to the general call,
+    // and our own slave (GCEN) ACKs it, so a clean send -- and a NO_RESPONSE
+    // after one -- does not prove the target heard it.
     Serial.printf("master: state=%s error=%s mod=%02X card_lo=%02X restore=%d bytes=%lu acked=%d\n",
                   ms <= 6 ? mstates[ms] : "?", me <= 6 ? merrs[me] : "?",
                   Bus200eMasterModAddr(), Bus200eMasterCardAddr(),

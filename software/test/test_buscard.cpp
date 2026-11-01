@@ -529,6 +529,104 @@ static void test_coverage_pointer_jump_is_holed() {
   CHECK(BusCardCaptureJudge(BusCardGetCoverage()) == BUSCARD_CAPTURE_HOLED);
 }
 
+static void test_coverage_out_of_order_is_holed() {
+  // An out-of-order writer that still covers everything: the second half
+  // first, then the whole range. contig catches up to extent, but bytes were
+  // written past contig before their predecessors existed -- the addresses do
+  // not prove an in-order bank, so the verdict stays HOLED (conservative).
+  BusCardInit(img, BUSCARD_SIZE);
+  uint8_t d[16];
+  for (int i = 0; i < 16; ++i) d[i] = (uint8_t)i;
+  m_write_at(8, d + 8, 8);
+  m_write_at(0, d, 16);
+  const BusCardCoverage *c = BusCardGetCoverage();
+  CHECK(c->contig == 16 && c->extent == 16 && c->rewrites == 0);
+  CHECK(c->beyond == 8);
+  CHECK(BusCardCaptureJudge(c) == BUSCARD_CAPTURE_HOLED);
+}
+
+static void test_restore_check_provenance() {
+  BusCardInit(img, BUSCARD_SIZE);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_NO_IMAGE);   // fresh init: unknown
+  BusCardImageFromFile(0);                                     // short/missing PBCARD.BIN
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_NO_IMAGE);
+  BusCardImageFromFile(1);                                     // whole file
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);
+  BusCardImageCaptureEnd(1);                                   // no capture began: ignored
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);
+
+  // a capture opens: refused until it ends
+  BusCardCoverageReset(); BusCardImageCaptureBegin();
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_CAPTURE_OPEN);
+  // ... and it failed with nothing written
+  BusCardImageCaptureEnd(0);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_CAPTURE_FAILED);
+
+  // DONE but EMPTY (a module that sends 0x0A and writes nothing)
+  BusCardCoverageReset(); BusCardImageCaptureBegin();
+  BusCardImageCaptureEnd(1);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_CAPTURE_BAD);
+
+  // DONE and HOLED
+  BusCardCoverageReset(); BusCardImageCaptureBegin();
+  emit_bank(106, 30, 128, 3, 40);
+  BusCardImageCaptureEnd(1);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_CAPTURE_BAD);
+
+  // DONE and CLEAN: allowed; a direct image patch (the console's w) keeps it so
+  BusCardCoverageReset(); BusCardImageCaptureBegin();
+  emit_bank(106, 30, 128);
+  BusCardImageCaptureEnd(1);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);
+  img[5] ^= 0x01;
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);
+  // the module reading it back (a RESTORE) does not change that
+  uint8_t r[8]; m_read_at(0, r, 8);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);
+  // a module writing into the card afterwards does
+  const uint8_t w1[1] = {0x42};
+  m_write_at(0x2000, w1, 1);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_WRITTEN_SINCE);
+
+  // REWRITTEN counts as whole
+  BusCardCoverageReset(); BusCardImageCaptureBegin();
+  emit_bank(106, 30, 128, -1, 0, 10);
+  BusCardImageCaptureEnd(1);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);
+  // a FAILED job is refused even if its coverage looks whole
+  BusCardCoverageReset(); BusCardImageCaptureBegin();
+  emit_bank(106, 30, 128);
+  BusCardImageCaptureEnd(0);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_CAPTURE_FAILED);
+
+  // a new capture after a clean one: refused again until it ends
+  BusCardCoverageReset(); BusCardImageCaptureBegin();
+  emit_bank(106, 30, 128); BusCardImageCaptureEnd(1);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);
+  BusCardCoverageReset(); BusCardImageCaptureBegin();
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_CAPTURE_OPEN);
+  // a reload from the file resets it; a detach or firmware card forgets
+  BusCardImageFromFile(1);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);
+  BusCardImageForget();
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_NO_IMAGE);
+  BusCardImageFromFile(1);
+  BusCardInit(NULL, 0);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_NO_IMAGE);
+  for (int b = 0; b <= BUSCARD_RESTORE_WRITTEN_SINCE; ++b)
+    CHECK(strcmp(BusCardRestoreBlockText((BusCardRestoreBlock)b), "?") != 0);
+}
+
+static void test_self_backup_settled() {
+  CHECK(BusCardSelfBackupSettled(0, 0, 0, 100) == 1);          // nothing dirty
+  CHECK(BusCardSelfBackupSettled(1, 1, 0, 100) == 1);          // our own capture
+  CHECK(BusCardSelfBackupSettled(1, 0, 0, 100) == 0);          // written, not yet seen
+  CHECK(BusCardSelfBackupSettled(1, 0, 1000, 1000 + BUSCARD_SETTLE_MS - 1) == 0);
+  CHECK(BusCardSelfBackupSettled(1, 0, 1000, 1000 + BUSCARD_SETTLE_MS) == 1);
+  CHECK(BusCardSelfBackupSettled(1, 0, 0xFFFFFF00u, 0xFFFFFF00u + 10) == 0);   // across the wrap
+  CHECK(BusCardSelfBackupSettled(1, 0, 0xFFFFFF00u, 0xFFFFFF00u + BUSCARD_SETTLE_MS) == 1);
+}
+
 static void test_coverage_verdict_text() {
   CHECK(strcmp(BusCardCaptureVerdictText(BUSCARD_CAPTURE_CLEAN), "CLEAN") == 0);
   CHECK(strcmp(BusCardCaptureVerdictText(BUSCARD_CAPTURE_HOLED), "HOLED") == 0);
@@ -563,6 +661,9 @@ int main() {
   test_coverage_reset();
   test_coverage_pointer_jump_is_holed();
   test_coverage_verdict_text();
+  test_coverage_out_of_order_is_holed();
+  test_restore_check_provenance();
+  test_self_backup_settled();
   printf("test_buscard: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
 }

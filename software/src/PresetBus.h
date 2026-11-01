@@ -192,6 +192,12 @@ Bus200eMasterError MasterError();
 // evidence and calling the write BAD.
 bool MasterTransferring();
 uint8_t *MasterCardImage();   // the 64K card buffer; NULL unless CardServing()
+// Why the console's x must not push the resident image right now, or NULL if it
+// may: a whole PBCARD.BIN with no BACKUP since, or a DONE CLEAN/REWRITTEN
+// capture with no BACKUP and no module write since (BusCardRestoreCheck). A
+// failed or holed m leaves the image blanked, and pushing it erases a bank.
+// Console only: the 200e app and the USB bridge have their own write checks.
+const char *RestoreRefusal();
 void MasterReset();           // acknowledge a DONE/FAILED result, back to IDLE
 // hex-dump the last completed master transfer's bytes (0..
 // Bus200eMasterBytesTransferred()) from MasterCardImage() -- NOT
@@ -316,6 +322,7 @@ inline Bus200eMasterState MasterState() { return BUS200E_MASTER_IDLE; }
 inline Bus200eMasterError MasterError() { return BUS200E_MASTER_ERR_NONE; }
 inline bool MasterTransferring() { return false; }
 inline uint8_t *MasterCardImage() { return nullptr; }
+inline const char *RestoreRefusal() { return "no preset bus in this build"; }
 inline void MasterReset() {}
 inline void DumpCard() {}
 inline int MasterQuery(uint8_t) { return -1; }

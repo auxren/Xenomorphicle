@@ -129,6 +129,14 @@ static void sample_capture(void) {
   if (!job_is_restore && ops->capture_bytes) capture_val = ops->capture_bytes();
 }
 
+// Every exit of a running job goes through here, so a BACKUP's end is
+// reported exactly once.
+static void finish_job(Bus200eMasterState st, Bus200eMasterError err) {
+  state = st;
+  if (st == BUS200E_MASTER_FAILED) last_error = err;
+  if (!job_is_restore && ops->end_capture) ops->end_capture(st == BUS200E_MASTER_DONE);
+}
+
 MASTER_CODE void Bus200eMasterTask(void) {
   if (!ops_complete(ops)) return;
   if (state != BUS200E_MASTER_SENDING && state != BUS200E_MASTER_WAIT_ACTIVITY &&
@@ -140,8 +148,7 @@ MASTER_CODE void Bus200eMasterTask(void) {
   switch (state) {
     case BUS200E_MASTER_SENDING: {
       if (now - send_start_ms > BUS200E_MASTER_SEND_TIMEOUT_MS) {
-        state = BUS200E_MASTER_FAILED;
-        last_error = BUS200E_MASTER_ERR_SEND_TIMEOUT;
+        finish_job(BUS200E_MASTER_FAILED, BUS200E_MASTER_ERR_SEND_TIMEOUT);
         return;
       }
       if (!ops->tx_gate_open()) return;  // retry next Task() pass
@@ -151,8 +158,7 @@ MASTER_CODE void Bus200eMasterTask(void) {
       const int n = Bus200eBuildTransferFrame(op, job_mod_addr, job_card_lo, 0,
                                                f, sizeof(f));
       if (n < 0) {  // can't happen with a valid op, but fail closed
-        state = BUS200E_MASTER_FAILED;
-        last_error = BUS200E_MASTER_ERR_BAD_ARGS;
+        finish_job(BUS200E_MASTER_FAILED, BUS200E_MASTER_ERR_BAD_ARGS);
         return;
       }
       // A BACKUP starts from a blank image and zero coverage, set up here on
@@ -179,8 +185,7 @@ MASTER_CODE void Bus200eMasterTask(void) {
         return;
       }
       if (now - phase_start_ms > BUS200E_MASTER_ACTIVITY_TIMEOUT_MS) {
-        state = BUS200E_MASTER_FAILED;
-        last_error = BUS200E_MASTER_ERR_NO_RESPONSE;
+        finish_job(BUS200E_MASTER_FAILED, BUS200E_MASTER_ERR_NO_RESPONSE);
       }
       return;
     }
@@ -195,14 +200,14 @@ MASTER_CODE void Bus200eMasterTask(void) {
       const uint32_t quiet = job_acked ? BUS200E_MASTER_QUIET_ACKED_MS
                                        : BUS200E_MASTER_QUIET_DONE_MS;
       if (now - last_activity_change_ms > quiet) {
-        state = BUS200E_MASTER_DONE;
+        finish_job(BUS200E_MASTER_DONE, BUS200E_MASTER_ERR_NONE);
         return;
       }
       if (now - send_start_ms > BUS200E_MASTER_HARD_CAP_MS) {
         // Safety net: activity never went quiet (a chatty bus, or our
         // quiet-detection missed a gap). We saw real transfer bytes move,
         // so call it done rather than fail a job that likely succeeded.
-        state = BUS200E_MASTER_DONE;
+        finish_job(BUS200E_MASTER_DONE, BUS200E_MASTER_ERR_NONE);
       }
       return;
     }

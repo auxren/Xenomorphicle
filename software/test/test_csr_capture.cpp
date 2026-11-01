@@ -43,11 +43,13 @@ static uint32_t t_activity(void) {
 static void t_begin(void) {           // PresetBus.cpp master_begin_capture()
   memset(img, 0xFF, sizeof(img));
   BusCardCoverageReset();
+  BusCardImageCaptureBegin();
 }
 static uint32_t t_capture(void) { return BusCardGetCoverage()->contig; }
+static void t_end(int done) { BusCardImageCaptureEnd(done); }
 
 static const Bus200eMasterOps ops = {
-  t_now, t_gate, t_probe, t_send, t_echo, t_activity, t_begin, t_capture,
+  t_now, t_gate, t_probe, t_send, t_echo, t_activity, t_begin, t_capture, t_end,
 };
 
 // ---- the CSR, as the card sees it -----------------------------------------
@@ -160,6 +162,49 @@ static void test_restore_keeps_image(void) {
   CHECK(Bus200eMasterBytesTransferred() == kBank);
 }
 
+// The console's x after each kind of m: refused after a failed or holed one
+// (the image is blanked), allowed after a clean one, with w patches, twice.
+static void test_restore_refused_after_failed_backup(void) {
+  printf("test_restore_refused_after_failed_backup\n");
+  // a whole PBCARD.BIN, no BACKUP yet: x allowed
+  BusCardImageFromFile(1);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);
+
+  // m20 with the CSR silent (2026-10-31): NO_RESPONSE, image blanked
+  memcpy(img, bank, kBank);
+  start_backup();
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_CAPTURE_OPEN);
+  now_ms += BUS200E_MASTER_ACTIVITY_TIMEOUT_MS + 10; Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_FAILED);
+  CHECK(img[0] == 0xFF && img[kBank - 1] == 0xFF);    // what x would have pushed
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_CAPTURE_FAILED);
+
+  // a holed m: refused
+  start_backup();
+  csr_backup(25, 30, -1);
+  finish();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_DONE);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_CAPTURE_BAD);
+
+  // the bench workflow: m CLEAN -> w patch -> c -> x x
+  start_backup();
+  csr_backup(-1, 0, -1);
+  finish();
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);
+  img[0x100] ^= 0x01;                                   // w0100xx
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);
+  Bus200eMasterReset();
+  CHECK(Bus200eMasterRestore(0x20, 0x00) == 0);         // x20 x20
+  Bus200eMasterTask();
+  BusCardStart(0); BusCardRxByte(0); BusCardRxByte(0); BusCardStart(1);
+  for (uint32_t i = 0; i < kBank; ++i) (void)BusCardTxByte();
+  BusCardStop();
+  now_ms += 10; Bus200eMasterTask(); finish();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_DONE);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);   // a RESTORE reads; still allowed
+  img[0x100] ^= 0x01;
+}
+
 int main() {
   for (uint32_t i = 0; i < kBank; ++i) {
     // CSR-like content: 0xFF fill, a 0x00 trailer per record, a few edited slots
@@ -172,6 +217,7 @@ int main() {
   test_clean_capture_is_exact();
   test_resent_burst_does_not_inflate();
   test_restore_keeps_image();
+  test_restore_refused_after_failed_backup();
   printf("\ntest_csr_capture: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
 }

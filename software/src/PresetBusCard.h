@@ -124,6 +124,41 @@ const BusCardCoverage *BusCardGetCoverage(void);
 BusCardCaptureVerdict BusCardCaptureJudge(const BusCardCoverage *c);
 const char *BusCardCaptureVerdictText(BusCardCaptureVerdict v);
 
+// ---- is the image safe to push back (the console's x)? ---------------------
+// A capture blanks the whole image before the BACKUP frame goes out, so after
+// a BACKUP that failed (SEND_TIMEOUT, NO_RESPONSE) or came back holed, the
+// image is mostly 0xFF, and a RESTORE of it erases the module's bank. The image
+// is pushable only when one of these holds:
+//   * it was loaded whole from PBCARD.BIN and no BACKUP has started since, or
+//   * the last BACKUP finished DONE with a CLEAN or REWRITTEN verdict, no
+//     BACKUP has started since, and no module has written into the card since
+//     (byte patches made with the console's w are fine: they do not go
+//     through the card slave).
+// The transport reports the events; the decision is here, host-tested.
+typedef enum : uint8_t {
+  BUSCARD_RESTORE_OK = 0,
+  BUSCARD_RESTORE_NO_IMAGE,        // nothing known about the image (no file, firmware card, fresh boot)
+  BUSCARD_RESTORE_CAPTURE_OPEN,    // a BACKUP is still running
+  BUSCARD_RESTORE_CAPTURE_FAILED,  // the last BACKUP did not finish DONE
+  BUSCARD_RESTORE_CAPTURE_BAD,     // it finished, but EMPTY or HOLED
+  BUSCARD_RESTORE_WRITTEN_SINCE,   // a module wrote into the card after the capture
+} BusCardRestoreBlock;
+
+void BusCardImageFromFile(int whole);     // enable loaded PBCARD.BIN (whole = full-size file)
+void BusCardImageForget(void);            // image of unknown origin (firmware card, detached)
+void BusCardImageCaptureBegin(void);      // a BACKUP blanked the image
+void BusCardImageCaptureEnd(int done);    // that BACKUP ended: 1 = DONE, 0 = FAILED; judges coverage now
+BusCardRestoreBlock BusCardRestoreCheck(void);
+const char *BusCardRestoreBlockText(BusCardRestoreBlock b);
+
+// Whether a module's own backup into the card (a burst that was not ours) has
+// settled: nothing dirty, or the dirty bytes are our own capture, or the last
+// write landed at least BUSCARD_SETTLE_MS ago. Flushing PBCARD.BIN before that
+// can persist a half-written bank. arm_ms = millis() of the last write seen
+// (0 = none seen yet).
+#define BUSCARD_SETTLE_MS 3000u
+int BusCardSelfBackupSettled(int dirty, int ours, uint32_t arm_ms, uint32_t now_ms);
+
 int  BusCardAttached(void);
 int  BusCardDirty(void);        // image modified since last ClearDirty
 void BusCardClearDirty(void);

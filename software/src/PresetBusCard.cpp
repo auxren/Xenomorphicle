@@ -18,6 +18,12 @@ static uint32_t ptr_staged = 0;
 
 static BusCardStats stats;
 static BusCardCoverage cov;
+// Image provenance for BusCardRestoreCheck().
+enum { IMG_NONE, IMG_FILE, IMG_CAPTURE_OPEN, IMG_CAPTURE_ENDED };
+static uint8_t img_origin = IMG_NONE;
+static uint8_t cap_done = 0;
+static BusCardCaptureVerdict cap_verdict = BUSCARD_CAPTURE_EMPTY;
+static uint32_t cap_writes = 0;  // stats.bytes_written when the capture ended
 static uint32_t txn_data = 0;    // data bytes in the open write transaction
 
 static void coverage_clear(void) {
@@ -37,6 +43,7 @@ int BusCardInitEx(uint8_t *image, uint32_t size, uint8_t abytes) {
   phase = 0;
   stats = BusCardStats();
   coverage_clear();
+  img_origin = IMG_NONE;
   if (!image) return 0;  // detach is always fine
   if (abytes != 2 && abytes != 3) return -1;
   if (size < 4) return -1;
@@ -127,6 +134,51 @@ const char *BusCardCaptureVerdictText(BusCardCaptureVerdict v) {
     case BUSCARD_CAPTURE_HOLED:     return "HOLED";
   }
   return "?";
+}
+
+void BusCardImageFromFile(int whole) { img_origin = whole ? IMG_FILE : IMG_NONE; }
+void BusCardImageForget(void) { img_origin = IMG_NONE; }
+void BusCardImageCaptureBegin(void) { img_origin = IMG_CAPTURE_OPEN; }
+
+void BusCardImageCaptureEnd(int done) {
+  if (img_origin != IMG_CAPTURE_OPEN) return;   // no capture began: nothing to judge
+  img_origin = IMG_CAPTURE_ENDED;
+  cap_done = done ? 1 : 0;
+  cap_verdict = BusCardCaptureJudge(&cov);
+  cap_writes = stats.bytes_written;
+}
+
+BusCardRestoreBlock BusCardRestoreCheck(void) {
+  switch (img_origin) {
+    case IMG_FILE:         return card ? BUSCARD_RESTORE_OK : BUSCARD_RESTORE_NO_IMAGE;
+    case IMG_CAPTURE_OPEN: return BUSCARD_RESTORE_CAPTURE_OPEN;
+    case IMG_CAPTURE_ENDED:
+      if (!card) return BUSCARD_RESTORE_NO_IMAGE;
+      if (!cap_done) return BUSCARD_RESTORE_CAPTURE_FAILED;
+      if (cap_verdict != BUSCARD_CAPTURE_CLEAN && cap_verdict != BUSCARD_CAPTURE_REWRITTEN)
+        return BUSCARD_RESTORE_CAPTURE_BAD;
+      if (stats.bytes_written != cap_writes) return BUSCARD_RESTORE_WRITTEN_SINCE;
+      return BUSCARD_RESTORE_OK;
+    default:               return BUSCARD_RESTORE_NO_IMAGE;
+  }
+}
+
+const char *BusCardRestoreBlockText(BusCardRestoreBlock b) {
+  switch (b) {
+    case BUSCARD_RESTORE_OK:             return "ok";
+    case BUSCARD_RESTORE_NO_IMAGE:       return "no known-good image (no whole PBCARD.BIN, and no clean capture)";
+    case BUSCARD_RESTORE_CAPTURE_OPEN:   return "a BACKUP is still running";
+    case BUSCARD_RESTORE_CAPTURE_FAILED: return "the last BACKUP failed; the image was blanked for it";
+    case BUSCARD_RESTORE_CAPTURE_BAD:    return "the last BACKUP was EMPTY or HOLED; the image is not the bank";
+    case BUSCARD_RESTORE_WRITTEN_SINCE:  return "a module wrote into the card after the capture";
+  }
+  return "?";
+}
+
+int BusCardSelfBackupSettled(int dirty, int ours, uint32_t arm_ms, uint32_t now_ms) {
+  if (!dirty || ours) return 1;
+  if (!arm_ms) return 0;                         // bytes landed, not even seen by the loop yet
+  return now_ms - arm_ms >= BUSCARD_SETTLE_MS;
 }
 
 int BusCardAttached(void) { return card != NULL; }

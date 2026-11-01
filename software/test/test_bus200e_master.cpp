@@ -724,10 +724,13 @@ static int sends_at_last_begin;
 static uint32_t fake_capture;
 static void f_begin_capture(void) { begin_calls++; sends_at_last_begin = send_calls; }
 static uint32_t f_capture_bytes(void) { return fake_capture; }
+static int end_calls, end_last_done;
+static uint32_t end_capture_seen;     // capture_bytes value when end ran
+static void f_end_capture(int done) { end_calls++; end_last_done = done; end_capture_seen = Bus200eMasterBytesTransferred(); }
 
 static const Bus200eMasterOps capture_ops = {
   f_now, f_gate_open, f_probe_card, f_send_frame, f_suppress_echo, f_card_activity,
-  f_begin_capture, f_capture_bytes,
+  f_begin_capture, f_capture_bytes, f_end_capture,
 };
 
 static void reset_capture(void) {
@@ -735,6 +738,7 @@ static void reset_capture(void) {
   begin_calls = 0;
   sends_at_last_begin = -1;
   fake_capture = 0;
+  end_calls = 0; end_last_done = -1; end_capture_seen = 0;
   Bus200eMasterInit(&capture_ops);
 }
 
@@ -830,6 +834,52 @@ static void test_capture_no_leak_across_jobs(void) {
   CHECK(Bus200eMasterAcked() == 0);
 }
 
+static void test_end_capture_once_per_backup(void) {
+  printf("test_end_capture_once_per_backup\n");
+  // DONE
+  reset_capture();
+  CHECK(Bus200eMasterBackup(0x20, 0x00) == 0);
+  Bus200eMasterTask();
+  fake_activity = 3180; fake_capture = 3180; fake_now += 10; Bus200eMasterTask();
+  CHECK(end_calls == 0);
+  fake_now += BUS200E_MASTER_QUIET_DONE_MS + 10; Bus200eMasterTask();
+  CHECK(end_calls == 1 && end_last_done == 1 && end_capture_seen == 3180);
+  fake_now += 5000; Bus200eMasterTask();
+  CHECK(end_calls == 1);                       // not again while it sits in DONE
+  // hard cap is a DONE too
+  reset_capture();
+  CHECK(Bus200eMasterBackup(0x20, 0x00) == 0);
+  Bus200eMasterTask();
+  for (uint32_t t = 0; t < BUS200E_MASTER_HARD_CAP_MS + 200; t += 100) {
+    fake_activity++; fake_now += 100; Bus200eMasterTask();
+  }
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_DONE);
+  CHECK(end_calls == 1 && end_last_done == 1);
+  // NO_RESPONSE
+  reset_capture();
+  CHECK(Bus200eMasterBackup(0x20, 0x00) == 0);
+  Bus200eMasterTask();
+  fake_now += BUS200E_MASTER_ACTIVITY_TIMEOUT_MS + 10; Bus200eMasterTask();
+  CHECK(Bus200eMasterLastError() == BUS200E_MASTER_ERR_NO_RESPONSE);
+  CHECK(end_calls == 1 && end_last_done == 0);
+  // SEND_TIMEOUT after failed sends (begin_capture had run)
+  reset_capture();
+  send_result = 1;
+  CHECK(Bus200eMasterBackup(0x20, 0x00) == 0);
+  Bus200eMasterTask();
+  CHECK(begin_calls == 1);
+  fake_now += BUS200E_MASTER_SEND_TIMEOUT_MS + 10; Bus200eMasterTask();
+  CHECK(Bus200eMasterLastError() == BUS200E_MASTER_ERR_SEND_TIMEOUT);
+  CHECK(end_calls == 1 && end_last_done == 0);
+  // a RESTORE never reports a capture end
+  reset_capture();
+  CHECK(Bus200eMasterRestore(0x20, 0x00) == 0);
+  Bus200eMasterTask();
+  fake_now += BUS200E_MASTER_ACTIVITY_TIMEOUT_MS + 10; Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_FAILED);
+  CHECK(end_calls == 0);
+}
+
 static void test_capture_ops_optional(void) {
   printf("test_capture_ops_optional\n");
   // only one of the two set: still a valid table, each used on its own
@@ -867,6 +917,7 @@ int main() {
   test_capture_holed_reads_short();
   test_capture_no_leak_across_jobs();
   test_capture_ops_optional();
+  test_end_capture_once_per_backup();
 
   test_query_happy_path();
   test_query_bad_args();
