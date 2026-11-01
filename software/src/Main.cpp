@@ -1055,17 +1055,24 @@ FLASHMEM __attribute__((noinline)) static void SelfTest() {
     const char *tf = "SELFTST.TMP";
     uint8_t pat[64], chk[64];
     for (unsigned i = 0; i < sizeof(pat); ++i) pat[i] = (uint8_t)(i * 37 + 5);
-    PhzConfig::myfs.remove(tf);
-    File f = PhzConfig::myfs.open(tf, FILE_WRITE_BEGIN);
-    bool ok = f && f.write(pat, sizeof(pat)) == sizeof(pat);
-    if (f) f.close();
-    if (ok) {
-      f = PhzConfig::myfs.open(tf, FILE_READ);
-      ok = f && f.read(chk, sizeof(chk)) == sizeof(chk)
-             && memcmp(pat, chk, sizeof(pat)) == 0;
+    bool ok = false;
+    File f;
+    {
+      // Erase/program stalls the loop 11-84 ms; declare it so the pass is not
+      // counted in the rt budget's loop_max. Fades the audio for the duration.
+      OC::RT::PersistenceWindow window("selftest fs");
+      PhzConfig::myfs.remove(tf);
+      f = PhzConfig::myfs.open(tf, FILE_WRITE_BEGIN);
+      ok = f && f.write(pat, sizeof(pat)) == sizeof(pat);
       if (f) f.close();
+      if (ok) {
+        f = PhzConfig::myfs.open(tf, FILE_READ);
+        ok = f && f.read(chk, sizeof(chk)) == sizeof(chk)
+               && memcmp(pat, chk, sizeof(pat)) == 0;
+        if (f) f.close();
+      }
+      PhzConfig::myfs.remove(tf);
     }
-    PhzConfig::myfs.remove(tf);
     Serial.printf("fs write-verify: %s\n", ok ? "PASS" : "FAIL");
     f = PhzConfig::myfs.open("CRASH.LOG", FILE_READ);
     if (f) {

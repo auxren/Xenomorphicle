@@ -218,6 +218,19 @@ inline volatile bool window_open = false;
 inline volatile bool window_seen = false;
 inline volatile bool midi_window_seen = false;
 
+// One finished loop pass of `us` microseconds. A pass that held a declared
+// persistence window is the window's to report, not the loop's, so it is
+// skipped (and the flag consumed). Shared by firmware LoopPass() and the host
+// tests so the exclusion is exercised off-target.
+inline void RecordLoopPass(uint32_t us) {
+  if (window_seen) {
+    window_seen = false;
+    return;
+  }
+  if (us > stats.loop_pass_max_us) stats.loop_pass_max_us = us;
+  stats.loop_hist.add(us);
+}
+
 // ---- the declared persistence window ------------------------------------
 // Some writes to the program flash cannot be avoided and cannot be made
 // quick: the core masks interrupts for the whole erase/program because code

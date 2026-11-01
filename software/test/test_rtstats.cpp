@@ -178,6 +178,23 @@ static void test_alloc_failures_and_window_length() {
   CHECK(v.failures == 2);
 }
 
+// A long pass inside a declared window must not raise loop_max or the
+// histogram; the same pass outside one must.
+static void test_loop_pass_inside_window_is_excluded() {
+  stats.reset();
+  window_seen = false;
+  { PersistenceWindow w("selftest fs"); }   // window held during this pass
+  RecordLoopPass(84000);                    // the 84 ms flash stall
+  CHECK(stats.loop_pass_max_us == 0);
+  CHECK(stats.loop_hist.total == 0);
+  CHECK(!window_seen);                      // consumed: next pass counts
+  RecordLoopPass(84000);                    // same stall, no window
+  CHECK(stats.loop_pass_max_us == 84000);
+  CHECK(stats.loop_hist.total == 1);
+  CHECK(!Evaluate(stats).pass[Verdict::LOOP_P100]);
+  stats.reset();
+}
+
 int main() {
   test_hist_empty_has_no_p95();
   test_hist_buckets_by_upper_bound();
@@ -193,6 +210,7 @@ int main() {
   test_loop_and_midi_percentile_rows();
   test_deferred_call_drop_fails_its_row();
   test_alloc_failures_and_window_length();
+  test_loop_pass_inside_window_is_excluded();
   printf("test_rtstats: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
 }

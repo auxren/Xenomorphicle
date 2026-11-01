@@ -35,14 +35,8 @@ void LoopPass() {
   const uint32_t now = ARM_DWT_CYCCNT;
   if (last_cycles) {
     const uint32_t us = cycles_to_us(now - last_cycles);
-    if (window_seen) {
-      // this pass held a declared persistence window: its length is the
-      // window's to report, not the loop's
-      window_seen = false;
-    } else {
-      if (us > stats.loop_pass_max_us) stats.loop_pass_max_us = us;
-      stats.loop_hist.add(us);
-    }
+    // a pass that held a declared window is skipped inside RecordLoopPass
+    RecordLoopPass(us);
   }
   last_cycles = now;
 
