@@ -145,6 +145,12 @@ typedef enum : uint8_t {
 } BusCardRestoreBlock;
 
 void BusCardImageFromFile(int whole);     // enable loaded PBCARD.BIN (whole = full-size file)
+// The image was reloaded (k off/on re-runs the enable) while a BACKUP job is
+// still open: the job's capture is gone and the file bytes now under it are
+// not what it will be judged on, so it stays an open capture -- refused until
+// the job ends and is judged (on coverage the reload reset). Otherwise the
+// same as BusCardImageFromFile(whole).
+void BusCardImageReloaded(int whole, int capture_running);
 void BusCardImageForget(void);            // image of unknown origin (firmware card, detached)
 void BusCardImageCaptureBegin(void);      // a BACKUP blanked the image
 void BusCardImageCaptureEnd(int done);    // that BACKUP ended: 1 = DONE, 0 = FAILED; judges coverage now
@@ -152,12 +158,25 @@ BusCardRestoreBlock BusCardRestoreCheck(void);
 const char *BusCardRestoreBlockText(BusCardRestoreBlock b);
 
 // Whether a module's own backup into the card (a burst that was not ours) has
-// settled: nothing dirty, or the dirty bytes are our own capture, or the last
-// write landed at least BUSCARD_SETTLE_MS ago. Flushing PBCARD.BIN before that
-// can persist a half-written bank. arm_ms = millis() of the last write seen
-// (0 = none seen yet).
+// settled, so PBCARD.BIN may be flushed without persisting a half-written
+// bank. Settled when: nothing is dirty; or the dirty bytes are our own
+// capture; or the loop has seen every write (unseen = 0) and either the last
+// one is BUSCARD_SETTLE_MS old or its flush already ran (arm_ms = 0: the loop
+// disarms when it flushes, so a dirty image with arm 0 and nothing unseen is
+// a flush that FAILED -- waiting longer cannot help, and refusing would make
+// every BACKUP BUSY until the card was re-enabled). unseen = writes landed
+// that the loop has not counted yet.
 #define BUSCARD_SETTLE_MS 3000u
-int BusCardSelfBackupSettled(int dirty, int ours, uint32_t arm_ms, uint32_t now_ms);
+int BusCardSelfBackupSettled(int dirty, int ours, int unseen, uint32_t arm_ms, uint32_t now_ms);
+
+// One line of the console's card dump, "%04lX:" then " %02X" per byte then
+// CR LF (what Serial.printf/println produced byte by byte), into out. n bytes
+// from img (n <= 16). Returns the length. out needs BUSCARD_DUMP_LINE_MAX.
+#ifdef BUSCARD_TEST_HOOKS
+extern void (*buscard_test_capture_end_hook)(void);
+#endif
+#define BUSCARD_DUMP_LINE_MAX (8 + 16 * 3 + 2 + 1)
+int BusCardFormatDumpLine(char *out, uint32_t off, const uint8_t *img, uint32_t n);
 
 int  BusCardAttached(void);
 int  BusCardDirty(void);        // image modified since last ClearDirty

@@ -618,13 +618,92 @@ static void test_restore_check_provenance() {
 }
 
 static void test_self_backup_settled() {
-  CHECK(BusCardSelfBackupSettled(0, 0, 0, 100) == 1);          // nothing dirty
-  CHECK(BusCardSelfBackupSettled(1, 1, 0, 100) == 1);          // our own capture
-  CHECK(BusCardSelfBackupSettled(1, 0, 0, 100) == 0);          // written, not yet seen
-  CHECK(BusCardSelfBackupSettled(1, 0, 1000, 1000 + BUSCARD_SETTLE_MS - 1) == 0);
-  CHECK(BusCardSelfBackupSettled(1, 0, 1000, 1000 + BUSCARD_SETTLE_MS) == 1);
-  CHECK(BusCardSelfBackupSettled(1, 0, 0xFFFFFF00u, 0xFFFFFF00u + 10) == 0);   // across the wrap
-  CHECK(BusCardSelfBackupSettled(1, 0, 0xFFFFFF00u, 0xFFFFFF00u + BUSCARD_SETTLE_MS) == 1);
+  // args: dirty, ours, unseen, arm_ms, now_ms
+  CHECK(BusCardSelfBackupSettled(0, 0, 0, 0, 100) == 1);       // nothing dirty
+  CHECK(BusCardSelfBackupSettled(1, 1, 1, 0, 100) == 1);       // our own capture
+  CHECK(BusCardSelfBackupSettled(1, 0, 1, 0, 100) == 0);       // written, not yet seen
+  CHECK(BusCardSelfBackupSettled(1, 0, 1, 1000, 9000) == 0);   // seen once, more since
+  CHECK(BusCardSelfBackupSettled(1, 0, 0, 1000, 1000 + BUSCARD_SETTLE_MS - 1) == 0);
+  CHECK(BusCardSelfBackupSettled(1, 0, 0, 1000, 1000 + BUSCARD_SETTLE_MS) == 1);
+  CHECK(BusCardSelfBackupSettled(1, 0, 0, 0xFFFFFF00u, 0xFFFFFF00u + 10) == 0);   // across the wrap
+  CHECK(BusCardSelfBackupSettled(1, 0, 0, 0xFFFFFF00u, 0xFFFFFF00u + BUSCARD_SETTLE_MS) == 1);
+}
+
+static void test_settled_after_failed_flush() {
+  // card_task saw the burst, waited 3 s, disarmed (arm = 0) and flushed; the
+  // flush FAILED, so the image stays dirty. Every later BACKUP used to be BUSY
+  // until the card was re-enabled. Seen + disarmed + still dirty = settled.
+  CHECK(BusCardSelfBackupSettled(/*dirty*/ 1, /*ours*/ 0, /*unseen*/ 0, /*arm*/ 0, 123456) == 1);
+  CHECK(BusCardSelfBackupSettled(1, 0, 0, 0, 0) == 1);
+}
+
+static int hook_writes = 0;
+static void hook_module_writes(void) {      // the slave ISR, mid-judgement
+  // inside the bank (a rewrite): the verdict stays whole, so only the
+  // write-count snapshot can refuse this
+  const uint8_t b[1] = {0x5A};
+  m_write_at(0x0005, b, 1);
+  hook_writes++;
+}
+
+static void test_capture_end_snapshot_before_judge() {
+  BusCardInit(img, BUSCARD_SIZE);
+  BusCardCoverageReset(); BusCardImageCaptureBegin();
+  emit_bank(33, 30, 64);
+  buscard_test_capture_end_hook = hook_module_writes;
+  BusCardImageCaptureEnd(1);
+  buscard_test_capture_end_hook = nullptr;
+  CHECK(hook_writes == 1);
+  // the write landed after the snapshot: it must count as written since
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_WRITTEN_SINCE);
+}
+
+static void test_reload_during_capture_stays_refused() {
+  // k off/on while our BACKUP runs: the enable reloads PBCARD.BIN and re-inits
+  // the card. The job is still open, so x must stay refused.
+  BusCardInit(img, BUSCARD_SIZE);
+  BusCardImageFromFile(1);
+  BusCardCoverageReset(); BusCardImageCaptureBegin();
+  emit_bank(106, 30, 128, -1, 0, -1);
+  BusCardInit(img, BUSCARD_SIZE);              // the re-enable
+  BusCardImageReloaded(/*whole*/ 1, /*capture_running*/ 1);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_CAPTURE_OPEN);
+  // the job then ends DONE, but its coverage was reset by the reload
+  emit_bank(106, 30, 128, -1, 0, -1);           // (even if the module wrote it all again)
+  BusCardImageCaptureEnd(1);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);   // judged on what it really wrote: whole
+  // a reload with the tail of a capture only: holed, refused
+  BusCardImageFromFile(1);
+  BusCardCoverageReset(); BusCardImageCaptureBegin();
+  BusCardInit(img, BUSCARD_SIZE);
+  BusCardImageReloaded(1, 1);
+  const uint8_t d[4] = {1, 2, 3, 4};
+  m_write_at(0x0800, d, 4);
+  BusCardImageCaptureEnd(1);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_CAPTURE_BAD);
+  // no job running: a reload is a plain file load
+  BusCardInit(img, BUSCARD_SIZE);
+  BusCardImageReloaded(1, 0);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_OK);
+  BusCardImageReloaded(0, 0);
+  CHECK(BusCardRestoreCheck() == BUSCARD_RESTORE_NO_IMAGE);
+}
+
+static void test_dump_line_format() {
+  // byte-identical to the old Serial.printf("%04lX:") + " %02X"... + println
+  uint8_t b[16];
+  for (int i = 0; i < 16; ++i) b[i] = (uint8_t)(i * 17 + 3);
+  const uint32_t offs[] = {0, 0x10, 0xABC0, 0xFFF0};
+  for (uint32_t off : offs) {
+    for (uint32_t n = 0; n <= 16; ++n) {
+      char want[80], got[BUSCARD_DUMP_LINE_MAX];
+      int w = snprintf(want, sizeof(want), "%04lX:", (unsigned long)off);
+      for (uint32_t i = 0; i < n; ++i) w += snprintf(want + w, sizeof(want) - w, " %02X", b[i]);
+      w += snprintf(want + w, sizeof(want) - w, "\r\n");
+      const int g = BusCardFormatDumpLine(got, off, b, n);
+      CHECK(g == w && memcmp(got, want, w) == 0);
+    }
+  }
 }
 
 static void test_coverage_verdict_text() {
@@ -664,6 +743,10 @@ int main() {
   test_coverage_out_of_order_is_holed();
   test_restore_check_provenance();
   test_self_backup_settled();
+  test_settled_after_failed_flush();
+  test_capture_end_snapshot_before_judge();
+  test_reload_during_capture_stays_refused();
+  test_dump_line_format();
   printf("test_buscard: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
 }

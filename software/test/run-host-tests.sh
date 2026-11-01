@@ -109,7 +109,7 @@ suite test_bus200e                  ../src/PresetBus200e.cpp
 suite test_bus200e_master           ../src/Bus200eMaster.cpp ../src/PresetBus200e.cpp
 suite test_bus200e_sysex            ../src/Bus200eSysEx.cpp
 suite test_bus200e_bridge           ../src/Bus200eBridge.cpp ../src/Bus200eSysEx.cpp
-suite test_buscard                  ../src/PresetBusCard.cpp
+suite test_buscard                  ../src/PresetBusCard.cpp -DBUSCARD_TEST_HOOKS
 suite test_csr_capture              ../src/Bus200eMaster.cpp ../src/PresetBus200e.cpp ../src/PresetBusCard.cpp
 suite test_midi_types
 suite test_miditxring

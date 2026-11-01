@@ -863,8 +863,10 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   }
   // What the console's x may push: a whole PBCARD.BIN, nothing else, until a
   // capture says otherwise (BusCardRestoreCheck).
+  // A k off/on in the middle of one of our BACKUPs must not turn the job's
+  // image into "a whole PBCARD.BIN" that x would push.
   if (fw_mode) BusCardImageForget();
-  else BusCardImageFromFile(got == BUSCARD_SIZE);
+  else BusCardImageReloaded(got == BUSCARD_SIZE, MasterTransferring() && !Bus200eMasterIsRestore());
   fw_size = size;
   fw_addr_bytes = abytes;
   if (fw_mode) {
@@ -1214,8 +1216,11 @@ FLASHMEM static int master_backup_impl(uint8_t mod_addr) {
   // but only once it has settled (3 s without a write, card_task's own rule):
   // flushing mid-burst would persist a half-written bank. Until then, BUSY.
   if (card_serving &&
-      !BusCardSelfBackupSettled(BusCardDirty(), card_burst_ours, card_flush_arm_ms, millis())) {
-    Serial.println("PresetBus: BACKUP refused - a module is still writing its own backup into the card (try again in 3 s)");
+      !BusCardSelfBackupSettled(BusCardDirty(), card_burst_ours,
+                                BusCardGetStats()->bytes_written != card_seen_writes,
+                                card_flush_arm_ms, millis())) {
+    Serial.println("PresetBus: BACKUP refused - a module is still writing its own backup into the card; "
+                   "try again once the card has been quiet for 3 s");
     return -BUS200E_MASTER_ERR_BUSY;
   }
   card_image_flush("before capture");
@@ -1997,11 +2002,14 @@ FLASHMEM void DumpCard() {
   }
   Serial.printf("PresetBus: card image dump, %lu bytes (last master transfer)\n",
                 (unsigned long)n);
-  for (uint32_t off = 0; off < n && off < BUSCARD_SIZE; off += 16) {
-    Serial.printf("%04lX:", (unsigned long)off);
-    for (uint32_t i = off; i < off + 16 && i < n && i < BUSCARD_SIZE; ++i)
-      Serial.printf(" %02X", card_image[i]);
-    Serial.println();
+  // One write per line, not one printf per byte: a 251e bank is 63,120
+  // bytes, and 63,120 printf calls held a single loop pass for a large part
+  // of the ~150 ms loop_max seen on the bench. Output is byte-identical.
+  char line[BUSCARD_DUMP_LINE_MAX];
+  const uint32_t end = n < BUSCARD_SIZE ? n : BUSCARD_SIZE;
+  for (uint32_t off = 0; off < end; off += 16) {
+    const uint32_t k = (end - off < 16) ? end - off : 16;
+    Serial.write(line, BusCardFormatDumpLine(line, off, card_image + off, k));
   }
   if (backup) print_capture_line();
 }

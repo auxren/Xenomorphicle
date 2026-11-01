@@ -24,6 +24,11 @@ static uint8_t img_origin = IMG_NONE;
 static uint8_t cap_done = 0;
 static BusCardCaptureVerdict cap_verdict = BUSCARD_CAPTURE_EMPTY;
 static uint32_t cap_writes = 0;  // stats.bytes_written when the capture ended
+#ifdef BUSCARD_TEST_HOOKS
+// Host tests only: runs inside BusCardImageCaptureEnd between the write-count
+// snapshot and the judgement, where the slave ISR can land a byte on target.
+void (*buscard_test_capture_end_hook)(void) = nullptr;
+#endif
 static uint32_t txn_data = 0;    // data bytes in the open write transaction
 
 static void coverage_clear(void) {
@@ -137,15 +142,26 @@ const char *BusCardCaptureVerdictText(BusCardCaptureVerdict v) {
 }
 
 void BusCardImageFromFile(int whole) { img_origin = whole ? IMG_FILE : IMG_NONE; }
+void BusCardImageReloaded(int whole, int capture_running) {
+  if (capture_running) img_origin = IMG_CAPTURE_OPEN;
+  else BusCardImageFromFile(whole);
+}
 void BusCardImageForget(void) { img_origin = IMG_NONE; }
 void BusCardImageCaptureBegin(void) { img_origin = IMG_CAPTURE_OPEN; }
 
 void BusCardImageCaptureEnd(int done) {
   if (img_origin != IMG_CAPTURE_OPEN) return;   // no capture began: nothing to judge
+  // Snapshot the write count BEFORE judging: a module write landing during
+  // the judgement then shows up as WRITTEN_SINCE instead of being absorbed
+  // into the snapshot after a verdict that never saw it.
+  const uint32_t writes = stats.bytes_written;
+#ifdef BUSCARD_TEST_HOOKS
+  if (buscard_test_capture_end_hook) buscard_test_capture_end_hook();
+#endif
   img_origin = IMG_CAPTURE_ENDED;
   cap_done = done ? 1 : 0;
   cap_verdict = BusCardCaptureJudge(&cov);
-  cap_writes = stats.bytes_written;
+  cap_writes = writes;
 }
 
 BusCardRestoreBlock BusCardRestoreCheck(void) {
@@ -175,10 +191,32 @@ const char *BusCardRestoreBlockText(BusCardRestoreBlock b) {
   return "?";
 }
 
-int BusCardSelfBackupSettled(int dirty, int ours, uint32_t arm_ms, uint32_t now_ms) {
+int BusCardSelfBackupSettled(int dirty, int ours, int unseen, uint32_t arm_ms, uint32_t now_ms) {
   if (!dirty || ours) return 1;
-  if (!arm_ms) return 0;                         // bytes landed, not even seen by the loop yet
+  if (unseen) return 0;                          // bytes landed the loop has not seen yet
+  if (!arm_ms) return 1;                         // seen and already flushed (the flush failed)
   return now_ms - arm_ms >= BUSCARD_SETTLE_MS;
+}
+
+int BusCardFormatDumpLine(char *out, uint32_t off, const uint8_t *img, uint32_t n) {
+  static const char hex[] = "0123456789ABCDEF";
+  int k = 0;
+  char tmp[8];
+  int t = 0;
+  do { tmp[t++] = hex[off & 0xF]; off >>= 4; } while (off && t < 8);
+  while (t < 4) tmp[t++] = '0';
+  while (t) out[k++] = tmp[--t];
+  out[k++] = ':';
+  if (n > 16) n = 16;
+  for (uint32_t i = 0; i < n; ++i) {
+    out[k++] = ' ';
+    out[k++] = hex[img[i] >> 4];
+    out[k++] = hex[img[i] & 0xF];
+  }
+  out[k++] = '\r';
+  out[k++] = '\n';
+  out[k] = 0;
+  return k;
 }
 
 int BusCardAttached(void) { return card != NULL; }
