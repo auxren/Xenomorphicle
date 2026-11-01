@@ -42,7 +42,7 @@ typedef struct {
 } BusCardStats;
 
 // Attach backing storage (caller owns it; NULL detaches). Resets pointer,
-// transaction state and stats; leaves the image contents untouched.
+// transaction state, stats and coverage; leaves the image contents untouched.
 // size must be a power of two >= 4 (pointer wrap is a mask); returns 0 on
 // success, -1 on a bad size (card left detached).
 int BusCardInit(uint8_t *image, uint32_t size);
@@ -76,6 +76,53 @@ void BusCardStop(void);
 // keeps the pointer identical to a real 24xx address counter, so chunked
 // current-address reads (no pointer rewrite per chunk) stay aligned.
 void BusCardTxRewind(void);
+
+// ---- capture coverage (what a master BACKUP actually wrote) ----------------
+// The lifetime counters above cannot say whether a capture is whole: a byte
+// lost on receive lowers bytes_written, a burst the module resends raises it,
+// and the image keeps whatever an earlier transfer left in the holes. The
+// Studio H CSR showed all three (2026-09-19: twelve captures climbing +13 per
+// attempt past its 3,180-byte bank, stale slots that agreed with each other).
+//
+// Coverage follows the card ADDRESS each byte lands at, since the BACKUP
+// (mem_off 0) was reset with BusCardCoverageReset():
+//   contig     bytes [0, contig) were each written, in order. This is the
+//              size of the capture that can be trusted.
+//   extent     highest offset written + 1.
+//   data_bytes every data byte written, rewrites included (= the old count).
+//   rewrites   data bytes written below contig: a resent burst, or a pointer
+//              that jumped backwards.
+//   beyond     data bytes written above contig: something before them is
+//              missing (a hole). first_hole is where the first one opened.
+//   bursts     write transactions that carried data.
+// Every module seen so far writes its bank in ascending bursts from offset 0,
+// each a [ptr_hi][ptr_lo][data...] transaction (24xx page-write style; the
+// burst breaks at record and card-page boundaries). A bank written out of
+// order would read as HOLED here even if every byte arrived -- conservative
+// on purpose: a capture is only called whole when the addresses prove it.
+// ISR-written, loop-read; the reset is a few word stores.
+#define BUSCARD_NO_HOLE 0xFFFFFFFFu
+typedef struct {
+  uint32_t contig;
+  uint32_t extent;
+  uint32_t data_bytes;
+  uint32_t rewrites;
+  uint32_t beyond;
+  uint32_t bursts;
+  uint32_t first_hole;   // BUSCARD_NO_HOLE when none
+} BusCardCoverage;
+
+typedef enum : uint8_t {
+  BUSCARD_CAPTURE_EMPTY = 0,  // nothing written since the reset
+  BUSCARD_CAPTURE_CLEAN,      // [0, extent) written once each, in order
+  BUSCARD_CAPTURE_REWRITTEN,  // whole, but some bytes were written twice
+  BUSCARD_CAPTURE_HOLED,      // a gap below extent: do not trust past contig
+} BusCardCaptureVerdict;
+
+void BusCardCoverageReset(void);
+const BusCardCoverage *BusCardGetCoverage(void);
+BusCardCaptureVerdict BusCardCaptureJudge(const BusCardCoverage *c);
+const char *BusCardCaptureVerdictText(BusCardCaptureVerdict v);
 
 int  BusCardAttached(void);
 int  BusCardDirty(void);        // image modified since last ClearDirty

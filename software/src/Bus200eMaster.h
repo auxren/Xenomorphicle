@@ -120,6 +120,23 @@ typedef struct {
   // RESTORE -- the target is reading out of it). Only the delta matters;
   // this module never inspects the absolute value.
   uint32_t (*card_activity)(void);
+
+  // ---- optional (NULL = not used); BACKUP jobs only, never a RESTORE ----
+  // Called right before every attempt to master the BACKUP frame, on a quiet
+  // bus (tx_gate_open() just said so), so nothing can be writing to the card.
+  // On target it blanks the card image to 0xFF and resets the card's capture
+  // coverage: without that, a byte the module's write never delivered keeps
+  // whatever an EARLIER capture left there, and two bad captures can agree
+  // with each other (the Studio H CSR, 2026-09-19). Never called for a
+  // RESTORE: the image IS the data being restored.
+  void (*begin_capture)(void);
+
+  // How many bytes of the capture can be trusted: on target the card's
+  // contiguous coverage from offset 0 (BusCardGetCoverage()->contig), which
+  // counts each card address once and stops at the first hole. When set,
+  // Bus200eMasterBytesTransferred() reports this for a BACKUP instead of the
+  // card_activity() delta, which counts rewrites and misses lost bytes.
+  uint32_t (*capture_bytes)(void);
 } Bus200eMasterOps;
 
 // Reset all state and store `ops`. All fields of `ops` must be non-NULL
@@ -166,7 +183,19 @@ int Bus200eMasterIsRestore(void);      // 1 = RESTORE, 0 = BACKUP, of the active
 // transaction ever served, not "how much this job moved" (see
 // PresetBusCard.h). Callers wanting "how big was the capture I just did"
 // (e.g. PresetBus.cpp's DumpCard()) want this, not BusCardGetStats().
+//
+// With ops->capture_bytes set (the target build sets it), a BACKUP reports
+// that instead: the contiguous coverage sampled while the job ran and frozen
+// with it, so a holed capture reads SHORT (up to the hole) rather than full,
+// and a resent burst does not inflate it. Every module whose bank arrives
+// whole, once, in order reads exactly as before. A RESTORE always reports the
+// card_activity() delta.
 uint32_t Bus200eMasterBytesTransferred(void);
+
+// The raw card_activity() delta of the active/last job, whatever
+// capture_bytes says: every data byte the card took, rewrites included. Kept
+// for the console, where wire bytes != capture bytes is itself a finding.
+uint32_t Bus200eMasterActivityBytes(void);
 
 // The target module announced the end of its transfer (BUS200E_OP_XFER_DONE,
 // cmd 0x0A -- see parse_frame() in PresetBus200e.cpp for the one bench

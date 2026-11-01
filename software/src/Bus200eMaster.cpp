@@ -27,6 +27,7 @@ static uint32_t activity_baseline;      // card_activity() sampled at send time
 static uint32_t last_activity_val;
 static uint32_t last_activity_change_ms;
 static int      job_acked;              // target announced XFER_DONE
+static uint32_t capture_val;            // ops->capture_bytes(), sampled while the job ran
 
 // ---- QUERY sibling FSM state (see Bus200eMaster.h) -------------------------
 static Bus200eQueryState  q_state = BUS200E_QUERY_IDLE;
@@ -71,6 +72,7 @@ MASTER_CODE void Bus200eMasterInit(const Bus200eMasterOps *o) {
   last_activity_val = 0;
   last_activity_change_ms = 0;
   job_acked = 0;
+  capture_val = 0;
 }
 
 MASTER_CODE int Bus200eMasterFindFreeCard(const uint8_t *candidates, uint8_t n,
@@ -106,6 +108,7 @@ MASTER_CODE static int start_job(uint8_t mod_addr, uint8_t card_lo, int is_resto
   last_activity_val = 0;
   last_activity_change_ms = send_start_ms;
   job_acked = 0;
+  capture_val = 0;
   state = BUS200E_MASTER_SENDING;
   return 0;
 }
@@ -115,6 +118,15 @@ int Bus200eMasterBackup(uint8_t mod_addr, uint8_t card_lo) {
 }
 int Bus200eMasterRestore(uint8_t mod_addr, uint8_t card_lo) {
   return start_job(mod_addr, card_lo, 1);
+}
+
+// Coverage is sampled only while a BACKUP runs, so it freezes with the job
+// exactly as last_activity_val does; a later write into the card (a module
+// backing itself up on a WPM-less bus) cannot change a finished job's answer.
+// The DONE decision is taken on a pass that sampled first, after the quiet
+// window: every byte of the transfer is in by then.
+static void sample_capture(void) {
+  if (!job_is_restore && ops->capture_bytes) capture_val = ops->capture_bytes();
 }
 
 MASTER_CODE void Bus200eMasterTask(void) {
@@ -143,6 +155,10 @@ MASTER_CODE void Bus200eMasterTask(void) {
         last_error = BUS200E_MASTER_ERR_BAD_ARGS;
         return;
       }
+      // A BACKUP starts from a blank image and zero coverage, set up here on
+      // the quiet bus the gate just reported, before the module can be told
+      // to write. Repeated on a retry: still nothing has been written.
+      if (!job_is_restore && ops->begin_capture) ops->begin_capture();
       if (ops->send_frame(f, (uint8_t) n) != 0) return;  // NAK/arb loss: retry
 
       ops->suppress_echo(f, (uint8_t) n);
@@ -156,6 +172,7 @@ MASTER_CODE void Bus200eMasterTask(void) {
     case BUS200E_MASTER_WAIT_ACTIVITY: {
       const uint32_t act = ops->card_activity();
       if (act != activity_baseline) {
+        sample_capture();
         last_activity_val = act;
         last_activity_change_ms = now;
         state = BUS200E_MASTER_TRANSFERRING;
@@ -169,6 +186,7 @@ MASTER_CODE void Bus200eMasterTask(void) {
     }
 
     case BUS200E_MASTER_TRANSFERRING: {
+      sample_capture();
       const uint32_t act = ops->card_activity();
       if (act != last_activity_val) {
         last_activity_val = act;
@@ -200,7 +218,12 @@ uint8_t Bus200eMasterCardAddr(void) { return job_card_lo; }
 uint8_t Bus200eMasterModAddr(void) { return job_mod_addr; }
 int Bus200eMasterIsRestore(void) { return job_is_restore; }
 
+uint32_t Bus200eMasterActivityBytes(void) {
+  return last_activity_val - activity_baseline;
+}
+
 uint32_t Bus200eMasterBytesTransferred(void) {
+  if (!job_is_restore && ops && ops->capture_bytes) return capture_val;
   return last_activity_val - activity_baseline;
 }
 

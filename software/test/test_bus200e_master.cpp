@@ -714,6 +714,138 @@ static void test_query_init_clears_state(void) {
   CHECK(Bus200eMasterQueryVersion(v, sizeof(v)) == 0);
 }
 
+// ---- optional capture ops (begin_capture / capture_bytes) -------------------
+// The target clears the card image and the coverage right before the BACKUP
+// frame goes out, and reports the contiguous coverage as the job's size. The
+// fake records the order of calls so "cleared before sent" is checked, not
+// assumed.
+static int begin_calls;
+static int sends_at_last_begin;
+static uint32_t fake_capture;
+static void f_begin_capture(void) { begin_calls++; sends_at_last_begin = send_calls; }
+static uint32_t f_capture_bytes(void) { return fake_capture; }
+
+static const Bus200eMasterOps capture_ops = {
+  f_now, f_gate_open, f_probe_card, f_send_frame, f_suppress_echo, f_card_activity,
+  f_begin_capture, f_capture_bytes,
+};
+
+static void reset_capture(void) {
+  reset();
+  begin_calls = 0;
+  sends_at_last_begin = -1;
+  fake_capture = 0;
+  Bus200eMasterInit(&capture_ops);
+}
+
+static void test_capture_cleared_before_each_send(void) {
+  printf("test_capture_cleared_before_each_send\n");
+  reset_capture();
+  CHECK(Bus200eMasterBackup(0x20, 0x00) == 0);
+  CHECK(begin_calls == 0);                 // not at accept time: the bus may be busy
+  fake_gate_open = 0;
+  Bus200eMasterTask();
+  CHECK(begin_calls == 0);                 // gate shut: nothing sent, nothing cleared
+  fake_gate_open = 1;
+  send_fail_countdown = 2;                 // two NAKs, then a clean send
+  Bus200eMasterTask();
+  CHECK(begin_calls == 1 && sends_at_last_begin == 0 && send_calls == 1);
+  Bus200eMasterTask();
+  CHECK(begin_calls == 2 && sends_at_last_begin == 1 && send_calls == 2);
+  Bus200eMasterTask();
+  CHECK(begin_calls == 3 && sends_at_last_begin == 2 && send_calls == 3);
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_WAIT_ACTIVITY);
+  Bus200eMasterTask();                     // waiting: no further clears
+  CHECK(begin_calls == 3);
+}
+
+static void test_capture_never_cleared_for_restore(void) {
+  printf("test_capture_never_cleared_for_restore\n");
+  reset_capture();
+  CHECK(Bus200eMasterRestore(0x20, 0x00) == 0);
+  Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_WAIT_ACTIVITY);
+  CHECK(begin_calls == 0);
+  // and a RESTORE reports the activity delta, not the capture coverage
+  fake_capture = 9999;
+  fake_activity = 3180; fake_now += 10; Bus200eMasterTask();
+  fake_now += BUS200E_MASTER_QUIET_DONE_MS + 10; Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_DONE);
+  CHECK(Bus200eMasterBytesTransferred() == 3180);
+  CHECK(Bus200eMasterActivityBytes() == 3180);
+}
+
+static void test_capture_bytes_reported_and_frozen(void) {
+  printf("test_capture_bytes_reported_and_frozen\n");
+  reset_capture();
+  CHECK(Bus200eMasterBackup(0x20, 0x00) == 0);
+  Bus200eMasterTask();
+  // the CSR, 2026-09-19 shape: more raw bytes than the bank (a resent burst),
+  // but only 3,180 card addresses written
+  fake_activity = 100; fake_capture = 100; fake_now += 10; Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_TRANSFERRING);
+  CHECK(Bus200eMasterBytesTransferred() == 100);
+  fake_activity = 3223; fake_capture = 3180; fake_now += 10; Bus200eMasterTask();
+  fake_now += BUS200E_MASTER_QUIET_DONE_MS + 10; Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_DONE);
+  CHECK(Bus200eMasterBytesTransferred() == 3180);
+  CHECK(Bus200eMasterActivityBytes() == 3223);
+  // a later write into the card does not move a finished job's answer
+  fake_capture = 5; fake_activity = 4000;
+  fake_now += 1000; Bus200eMasterTask();
+  CHECK(Bus200eMasterBytesTransferred() == 3180);
+  CHECK(Bus200eMasterActivityBytes() == 3223);
+}
+
+static void test_capture_holed_reads_short(void) {
+  printf("test_capture_holed_reads_short\n");
+  reset_capture();
+  CHECK(Bus200eMasterBackup(0x20, 0x00) == 0);
+  Bus200eMasterTask();
+  // a burst lost its tail: raw count short, coverage stops at the hole
+  fake_activity = 2993; fake_capture = 1200; fake_now += 10; Bus200eMasterTask();
+  Bus200eMasterXferDone(0x20);
+  fake_now += BUS200E_MASTER_QUIET_ACKED_MS + 10; Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_DONE);
+  CHECK(Bus200eMasterBytesTransferred() == 1200);   // what a write guard compares
+}
+
+static void test_capture_no_leak_across_jobs(void) {
+  printf("test_capture_no_leak_across_jobs\n");
+  reset_capture();
+  CHECK(Bus200eMasterBackup(0x20, 0x00) == 0);
+  Bus200eMasterTask();
+  fake_activity = 3180; fake_capture = 3180; fake_now += 10; Bus200eMasterTask();
+  fake_now += BUS200E_MASTER_QUIET_DONE_MS + 10; Bus200eMasterTask();
+  CHECK(Bus200eMasterBytesTransferred() == 3180);
+  // the next job fails before any byte: it must read 0, not the last capture
+  CHECK(Bus200eMasterBackup(0x20, 0x00) == 0);
+  CHECK(Bus200eMasterBytesTransferred() == 0);
+  fake_capture = 0;   // what begin_capture did on target
+  Bus200eMasterTask();
+  fake_now += BUS200E_MASTER_ACTIVITY_TIMEOUT_MS + 10; Bus200eMasterTask();
+  CHECK(Bus200eMasterGetState() == BUS200E_MASTER_FAILED);
+  CHECK(Bus200eMasterLastError() == BUS200E_MASTER_ERR_NO_RESPONSE);
+  CHECK(Bus200eMasterBytesTransferred() == 0);
+  CHECK(Bus200eMasterAcked() == 0);
+}
+
+static void test_capture_ops_optional(void) {
+  printf("test_capture_ops_optional\n");
+  // only one of the two set: still a valid table, each used on its own
+  Bus200eMasterOps half = capture_ops;
+  half.capture_bytes = nullptr;
+  reset();
+  begin_calls = 0;
+  Bus200eMasterInit(&half);
+  CHECK(Bus200eMasterBackup(0x28, 0x00) == 0);
+  Bus200eMasterTask();
+  CHECK(begin_calls == 1);
+  fake_activity = 990; fake_now += 10; Bus200eMasterTask();
+  fake_now += BUS200E_MASTER_QUIET_DONE_MS + 10; Bus200eMasterTask();
+  CHECK(Bus200eMasterBytesTransferred() == 990);   // falls back to the delta
+}
+
 int main() {
   test_find_free_card();
   test_bad_ops_rejected();
@@ -729,6 +861,12 @@ int main() {
   test_no_response_timeout();
   test_hard_cap_forces_done();
   test_reset_only_from_terminal_states();
+  test_capture_cleared_before_each_send();
+  test_capture_never_cleared_for_restore();
+  test_capture_bytes_reported_and_frozen();
+  test_capture_holed_reads_short();
+  test_capture_no_leak_across_jobs();
+  test_capture_ops_optional();
 
   test_query_happy_path();
   test_query_bad_args();

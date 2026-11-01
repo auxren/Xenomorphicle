@@ -17,6 +17,14 @@ static uint8_t phase = 0;
 static uint32_t ptr_staged = 0;
 
 static BusCardStats stats;
+static BusCardCoverage cov;
+static uint32_t txn_data = 0;    // data bytes in the open write transaction
+
+static void coverage_clear(void) {
+  cov = BusCardCoverage();
+  cov.first_hole = BUSCARD_NO_HOLE;
+  txn_data = 0;
+}
 
 int BusCardInitEx(uint8_t *image, uint32_t size, uint8_t abytes) {
   card = NULL;
@@ -28,6 +36,7 @@ int BusCardInitEx(uint8_t *image, uint32_t size, uint8_t abytes) {
   in_txn = 0;
   phase = 0;
   stats = BusCardStats();
+  coverage_clear();
   if (!image) return 0;  // detach is always fine
   if (abytes != 2 && abytes != 3) return -1;
   if (size < 4) return -1;
@@ -47,6 +56,7 @@ void BusCardStart(int is_read) {
   if (in_txn) BusCardStop();  // lost STOP: close the old transaction first
   in_txn = is_read ? 2 : 1;
   phase = 0;
+  txn_data = 0;
   if (is_read) stats.txns_read++; else stats.txns_write++;
 }
 
@@ -61,6 +71,17 @@ void BusCardRxByte(uint8_t b) {
       card[ptr] = b;
       dirty = 1;
       stats.bytes_written++;
+      if (txn_data++ == 0) cov.bursts++;
+      cov.data_bytes++;
+      if (ptr == cov.contig) {
+        cov.contig++;
+      } else if (ptr < cov.contig) {
+        cov.rewrites++;
+      } else {
+        if (cov.first_hole == BUSCARD_NO_HOLE) cov.first_hole = cov.contig;
+        cov.beyond++;
+      }
+      if (ptr + 1 > cov.extent) cov.extent = ptr + 1;
     }
     ptr = (ptr + 1) & ptr_mask;
   }
@@ -87,6 +108,25 @@ void BusCardStop(void) {
   if (in_txn == 1 && phase > 0 && phase < addr_bytes) ptr = ptr_staged & ptr_mask;
   in_txn = 0;
   phase = 0;
+}
+
+void BusCardCoverageReset(void) { coverage_clear(); }
+const BusCardCoverage *BusCardGetCoverage(void) { return &cov; }
+
+BusCardCaptureVerdict BusCardCaptureJudge(const BusCardCoverage *c) {
+  if (!c || c->data_bytes == 0) return BUSCARD_CAPTURE_EMPTY;
+  if (c->beyond || c->contig < c->extent) return BUSCARD_CAPTURE_HOLED;
+  return c->rewrites ? BUSCARD_CAPTURE_REWRITTEN : BUSCARD_CAPTURE_CLEAN;
+}
+
+const char *BusCardCaptureVerdictText(BusCardCaptureVerdict v) {
+  switch (v) {
+    case BUSCARD_CAPTURE_EMPTY:     return "EMPTY";
+    case BUSCARD_CAPTURE_CLEAN:     return "CLEAN";
+    case BUSCARD_CAPTURE_REWRITTEN: return "REWRITTEN";
+    case BUSCARD_CAPTURE_HOLED:     return "HOLED";
+  }
+  return "?";
 }
 
 int BusCardAttached(void) { return card != NULL; }

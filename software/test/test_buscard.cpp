@@ -359,6 +359,183 @@ static void test_v2_mode_does_not_change_v1() {
   CHECK(img[BUSCARD_SIZE - 1] == 0x11 && img[0] == 0x22);
 }
 
+// ---- capture coverage --------------------------------------------------------
+// A module's BACKUP, as the card sees it: ascending [ptr_hi][ptr_lo][data...]
+// bursts from offset 0, each ending at a record or a card-page boundary.
+// Geometry from the bench: CSR 106-byte records / 128-byte pages (54 bursts),
+// 259e 33 / 64, 251e 2104 / 64 (pages assumed; only the order matters here).
+static uint8_t bank_byte(uint32_t off) { return (uint8_t)(off * 7u + 3u); }
+
+// Emit the bank as bursts. drop_after: in burst number drop_burst, deliver only
+// the first drop_after data bytes (what a receiver that closes the transaction
+// mid-burst keeps). resend_burst: send that burst twice.
+static uint32_t emit_bank(uint32_t rec, uint32_t slots, uint32_t page,
+                          int drop_burst = -1, uint32_t drop_after = 0,
+                          int resend_burst = -1) {
+  uint32_t bursts = 0;
+  for (uint32_t s = 0; s < slots; ++s) {
+    uint32_t a = s * rec, left = rec;
+    while (left) {
+      const uint32_t room = page - (a % page);
+      const uint32_t n = left < room ? left : room;
+      uint8_t d[256];
+      for (uint32_t i = 0; i < n; ++i) d[i] = bank_byte(a + i);
+      const int reps = ((int)bursts == resend_burst) ? 2 : 1;
+      for (int r = 0; r < reps; ++r) {
+        if ((int)bursts == drop_burst) m_write_at((uint16_t)a, d, drop_after);
+        else m_write_at((uint16_t)a, d, n);
+      }
+      a += n; left -= n; ++bursts;
+    }
+  }
+  return bursts;
+}
+
+static bool bank_ok(uint32_t len) {
+  for (uint32_t i = 0; i < len; ++i) if (img[i] != bank_byte(i)) return false;
+  return true;
+}
+
+static void test_coverage_csr_clean() {
+  BusCardInit(img, BUSCARD_SIZE);
+  memset(img, 0xFF, sizeof(img));
+  const uint32_t bursts = emit_bank(106, 30, 128);
+  const BusCardCoverage *c = BusCardGetCoverage();
+  CHECK(bursts == 54);                          // the WPM capture's burst count
+  CHECK(c->contig == 3180 && c->extent == 3180);
+  CHECK(c->data_bytes == 3180 && c->bursts == 54);
+  CHECK(c->rewrites == 0 && c->beyond == 0 && c->first_hole == BUSCARD_NO_HOLE);
+  CHECK(BusCardCaptureJudge(c) == BUSCARD_CAPTURE_CLEAN);
+  CHECK(bank_ok(3180));
+  CHECK(img[3180] == 0xFF);
+}
+
+static void test_coverage_csr_holed_burst() {
+  // 2026-09-19 shape: one burst loses its tail on receive, the card pointer
+  // still walks to the end of the bank, the count comes up short, and the
+  // tail keeps what was there before.
+  BusCardInit(img, BUSCARD_SIZE);
+  memset(img, 0xA5, sizeof(img));              // "an earlier capture"
+  emit_bank(106, 30, 128, /*drop_burst*/ 3, /*drop_after*/ 40);
+  const BusCardCoverage *c = BusCardGetCoverage();
+  CHECK(BusCardPointer() == 3180);             // the old tell: ptr reached the end ...
+  CHECK(c->data_bytes < 3180);                 // ... while the count did not
+  CHECK(c->extent == 3180);
+  CHECK(c->contig < 3180);                     // the trustworthy size stops at the hole
+  CHECK(c->first_hole == c->contig);
+  CHECK(c->beyond > 0);
+  CHECK(BusCardCaptureJudge(c) == BUSCARD_CAPTURE_HOLED);
+  CHECK(img[c->contig] == 0xA5);               // the stale byte the hole leaves
+}
+
+static void test_coverage_resent_burst() {
+  // A module that resends a burst (its EEPROM write NACK-retried) writes the
+  // same addresses twice: the raw count runs past the bank, coverage does not.
+  BusCardInit(img, BUSCARD_SIZE);
+  emit_bank(106, 30, 128, -1, 0, /*resend_burst*/ 10);
+  const BusCardCoverage *c = BusCardGetCoverage();
+  CHECK(c->data_bytes > 3180);
+  CHECK(c->contig == 3180 && c->extent == 3180 && c->beyond == 0);
+  CHECK(c->rewrites == c->data_bytes - 3180);
+  CHECK(c->bursts == 55);
+  CHECK(BusCardCaptureJudge(c) == BUSCARD_CAPTURE_REWRITTEN);
+  CHECK(bank_ok(3180));
+}
+
+static void test_coverage_partial_then_resend_heals() {
+  // The tail of a burst is lost and the module resends the whole burst at
+  // once: the hole is filled before anything past it lands, so the capture
+  // is whole (with rewrites), not holed.
+  BusCardInit(img, BUSCARD_SIZE);
+  const uint8_t d[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  m_write_at(0, d, 3);
+  m_write_at(0, d, 8);
+  const BusCardCoverage *c = BusCardGetCoverage();
+  CHECK(c->contig == 8 && c->extent == 8 && c->rewrites == 3 && c->beyond == 0);
+  CHECK(BusCardCaptureJudge(c) == BUSCARD_CAPTURE_REWRITTEN);
+}
+
+static void test_coverage_other_modules_unchanged() {
+  // Every module that already captured correctly reads exactly as before:
+  // contig == the raw count == the bank, CLEAN.
+  struct { uint32_t rec, slots, page; } g[] = {
+    {33, 30, 64},     // 259e, 990
+    {56, 30, 64},     // 257e, 1680
+    {25, 30, 64},     // 272e, 750
+    {14, 30, 64},     // 227e, 420
+    {2104, 30, 64},   // 251e, 63120
+  };
+  for (auto &m : g) {
+    BusCardInit(img, BUSCARD_SIZE);
+    emit_bank(m.rec, m.slots, m.page);
+    const BusCardCoverage *c = BusCardGetCoverage();
+    const uint32_t bank = m.rec * m.slots;
+    CHECK(c->contig == bank && c->data_bytes == bank && c->extent == bank);
+    CHECK(c->data_bytes == BusCardGetStats()->bytes_written);
+    CHECK(BusCardCaptureJudge(c) == BUSCARD_CAPTURE_CLEAN);
+    CHECK(bank_ok(bank));
+  }
+}
+
+static void test_coverage_ignores_pointer_writes_and_reads() {
+  BusCardInit(img, BUSCARD_SIZE);
+  const uint8_t ptr_only[2] = {0x00, 0x10};
+  m_write(ptr_only, 2);                         // random-read positioning
+  m_write(ptr_only, 0);                         // WPM-style empty probe
+  uint8_t r[16];
+  m_read_at(0x0000, r, 16);                     // a module reading the card
+  const BusCardCoverage *c = BusCardGetCoverage();
+  CHECK(c->data_bytes == 0 && c->bursts == 0 && c->contig == 0 && c->extent == 0);
+  CHECK(BusCardCaptureJudge(c) == BUSCARD_CAPTURE_EMPTY);
+  CHECK(BusCardCaptureJudge(nullptr) == BUSCARD_CAPTURE_EMPTY);
+}
+
+static void test_coverage_reset() {
+  BusCardInit(img, BUSCARD_SIZE);
+  emit_bank(33, 30, 64);
+  const uint32_t written = BusCardGetStats()->bytes_written;
+  BusCardCoverageReset();
+  const BusCardCoverage *c = BusCardGetCoverage();
+  CHECK(c->contig == 0 && c->extent == 0 && c->data_bytes == 0 && c->bursts == 0);
+  CHECK(c->first_hole == BUSCARD_NO_HOLE);
+  CHECK(BusCardGetStats()->bytes_written == written);  // lifetime stats untouched
+  CHECK(bank_ok(990));                                   // and the image
+  // a second capture after the reset counts from zero again
+  emit_bank(33, 30, 64);
+  CHECK(c->contig == 990 && c->rewrites == 0 && BusCardCaptureJudge(c) == BUSCARD_CAPTURE_CLEAN);
+  // without the reset the same second capture would be all rewrites
+  emit_bank(33, 30, 64);
+  CHECK(c->rewrites == 990 && BusCardCaptureJudge(c) == BUSCARD_CAPTURE_REWRITTEN);
+  // Init resets coverage too
+  BusCardInit(img, BUSCARD_SIZE);
+  CHECK(c->contig == 0 && c->rewrites == 0 && c->first_hole == BUSCARD_NO_HOLE);
+}
+
+static void test_coverage_pointer_jump_is_holed() {
+  // Two data bytes taken as a pointer (a mis-framed transaction) send the
+  // rest of the burst elsewhere. Forward: a hole. Backward: rewrites, and the
+  // next burst then lands past contig: still a hole.
+  BusCardInit(img, BUSCARD_SIZE);
+  const uint8_t d[4] = {9, 9, 9, 9};
+  m_write_at(0, d, 4);
+  m_write_at(0x0400, d, 4);
+  CHECK(BusCardCaptureJudge(BusCardGetCoverage()) == BUSCARD_CAPTURE_HOLED);
+  CHECK(BusCardGetCoverage()->first_hole == 4);
+  BusCardInit(img, BUSCARD_SIZE);
+  m_write_at(0, d, 4);
+  m_write_at(2, d, 2);   // jumped back
+  m_write_at(8, d, 4);   // the module's next burst, where it should be
+  CHECK(BusCardGetCoverage()->rewrites == 2);
+  CHECK(BusCardCaptureJudge(BusCardGetCoverage()) == BUSCARD_CAPTURE_HOLED);
+}
+
+static void test_coverage_verdict_text() {
+  CHECK(strcmp(BusCardCaptureVerdictText(BUSCARD_CAPTURE_CLEAN), "CLEAN") == 0);
+  CHECK(strcmp(BusCardCaptureVerdictText(BUSCARD_CAPTURE_HOLED), "HOLED") == 0);
+  CHECK(strcmp(BusCardCaptureVerdictText(BUSCARD_CAPTURE_REWRITTEN), "REWRITTEN") == 0);
+  CHECK(strcmp(BusCardCaptureVerdictText(BUSCARD_CAPTURE_EMPTY), "EMPTY") == 0);
+}
+
 int main() {
   test_v2_init_and_width();
   test_v2_random_access_above_64k();
@@ -377,6 +554,15 @@ int main() {
   test_full_251e_bank_does_not_wrap();
   test_pointer_space_is_fully_addressable();
   test_detached();
+  test_coverage_csr_clean();
+  test_coverage_csr_holed_burst();
+  test_coverage_resent_burst();
+  test_coverage_partial_then_resend_heals();
+  test_coverage_other_modules_unchanged();
+  test_coverage_ignores_pointer_writes_and_reads();
+  test_coverage_reset();
+  test_coverage_pointer_jump_is_holed();
+  test_coverage_verdict_text();
   printf("test_buscard: %d checks, %d failures\n", checks, fails);
   return fails ? 1 : 0;
 }

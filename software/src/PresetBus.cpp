@@ -556,6 +556,12 @@ static uint32_t card_gap_max_us = 0;     // longest inter-chunk gap this burst
 // jobs was open -- it is a bank we asked a module for, not a module backing
 // itself up to us. See card_task() for why that decides whether it persists.
 static bool card_burst_ours = false;
+// The image was blanked for a master BACKUP (master_begin_capture) since it
+// was last loaded from PBCARD.BIN, so outside whatever a module writes next it
+// no longer mirrors the file. A write burst that is NOT ours must then not be
+// flushed: the sector compare would carry the capture (and the 0xFF blanking)
+// into PBCARD.BIN. Cleared by every enable, which reloads the file.
+static bool card_image_capture = false;
 static constexpr const char *kCardFile = "PBCARD.BIN";
 // firmware-card mode (see PresetBus.h): its own file, read-only while serving
 static constexpr const char *kFwCardFile = "FWCARD.BIN";
@@ -674,6 +680,16 @@ FLASHMEM static void card_image_flush(const char *why) {
     BusCardClearDirty();
     card_burst_ours = false;
     Serial.printf("PresetBus: card image kept in RAM, PBCARD.BIN untouched (%s)\n", why);
+    return;
+  }
+  if (card_image_capture) {
+    // A module wrote to us after a master capture blanked the image. Writing
+    // the sectors that differ from the file would put the capture (and the
+    // blanking) into PBCARD.BIN, not just this module's bank. Keep it in RAM;
+    // 'k' twice reloads PBCARD.BIN, and the module can back up again then.
+    BusCardClearDirty();
+    Serial.printf("PresetBus: card image holds a master capture, PBCARD.BIN not rewritten (%s); "
+                  "k twice reloads the file\n", why);
     return;
   }
   const CardSectors::Plan plan = card_sectors.plan(card_image, Buchla200eCrc32);
@@ -856,6 +872,7 @@ FLASHMEM static int card_serve_enable_at(bool on, uint8_t card_lo) {
   card_seen_reads = 0;
   card_flush_arm_ms = 0;
   card_burst_ours = false;
+  card_image_capture = false;
   card_addr7 = addr7;
   card_addr_lo = card_lo & 0x7F;
   slave_reconfig(true, addr7);
@@ -1121,9 +1138,31 @@ static uint32_t master_card_activity() {
   return Bus200eMasterIsRestore() ? cs->bytes_read : cs->bytes_written;
 }
 
+// A BACKUP starts from an erased image and zero coverage. Without the blank,
+// a byte the module's write never delivered keeps what an EARLIER capture (or
+// PBCARD.BIN, loaded at enable) left there, and the dump shows it as data: the
+// Studio H CSR's two "reference" captures of 2026-09-18/19 agreed with each
+// other, and not with the bank, in exactly the slots such stale bytes filled.
+// Bus200eMaster calls this on a quiet bus right before it masters the frame,
+// so no card transaction is open; the coverage reset is still IRQ-masked
+// because the slave ISR writes those words.
+static void master_begin_capture() {
+  if (!card_serving || !card_image || fw_mode) return;
+  memset(card_image, 0xFF, BUSCARD_SIZE);
+  card_image_capture = true;
+  __disable_irq();
+  BusCardCoverageReset();
+  __enable_irq();
+}
+
+// The capture's trustworthy size: bytes [0, contig) each landed at their own
+// card address, in order, since master_begin_capture(). See PresetBusCard.h.
+static uint32_t master_capture_bytes() { return BusCardGetCoverage()->contig; }
+
 static const Bus200eMasterOps kMasterOps = {
   master_now_ms, master_tx_gate_open, master_probe_card,
   master_send_frame, master_suppress_echo, master_card_activity,
+  master_begin_capture, master_capture_bytes,
 };
 
 // Raw arbitrary-frame master send. See PresetBus.h for the contract. Mirrors
@@ -1162,6 +1201,10 @@ FLASHMEM static int master_backup_impl(uint8_t mod_addr) {
     const int err = card_serve_enable_at(true, card_lo);
     if (err != 0) return -BUS200E_MASTER_ERR_NO_FREE_CARD;
   }
+  // The capture blanks the image (master_begin_capture). A module's own
+  // backup into us that has not been flushed yet goes to PBCARD.BIN first;
+  // a no-op when nothing is dirty.
+  card_image_flush("before capture");
   return Bus200eMasterBackup(mod_addr, card_lo);
 }
 
@@ -1766,6 +1809,21 @@ const Stats &GetStats() { return stats; }
 void SetVerbose(bool on) { verbose = on; }
 bool Verbose() { return verbose; }
 
+// One line on what the last BACKUP wrote, by card address. The coverage is
+// live (a later write into the card moves it); bytes= on the master line is
+// the frozen one.
+FLASHMEM static void print_capture_line() {
+  const BusCardCoverage c = *BusCardGetCoverage();
+  Serial.printf("capture: verdict=%s contig=%lu extent=%lu wire=%lu data=%lu bursts=%lu rewrites=%lu beyond=%lu",
+                BusCardCaptureVerdictText(BusCardCaptureJudge(&c)),
+                (unsigned long)c.contig, (unsigned long)c.extent,
+                (unsigned long)Bus200eMasterActivityBytes(),
+                (unsigned long)c.data_bytes, (unsigned long)c.bursts,
+                (unsigned long)c.rewrites, (unsigned long)c.beyond);
+  if (c.first_hole != BUSCARD_NO_HOLE) Serial.printf(" first_hole=%04lX", (unsigned long)c.first_hole);
+  Serial.println();
+}
+
 FLASHMEM void DebugDump() {
   Serial.println("--- PresetBus ---");
   Serial.printf("fwcard: armed=%d serving=%d used=%lu size=%lu ptr_bytes=%u\n", (int)FwCardArmed(), (int)fw_mode,
@@ -1839,16 +1897,20 @@ FLASHMEM void DebugDump() {
       "TRANSFERRING", "DONE", "FAILED",
     };
     static const char *const merrs[] = {
-      "NONE", "BUSY", "BAD_ARGS", "NO_FREE_CARD", "SEND_TIMEOUT", "NO_RESPONSE",
+      "NONE", "BUSY", "BAD_ARGS", "NO_FREE_CARD", "SEND_TIMEOUT", "NO_RESPONSE", "FW_CARD",
     };
     const Bus200eMasterState ms = Bus200eMasterGetState();
     const Bus200eMasterError me = Bus200eMasterLastError();
+    // bytes = what can be trusted (a BACKUP: contiguous coverage from 0);
+    // acked = the module sent its 0x0A completion frame -- NOT that the
+    // BACKUP frame was acknowledged (a refused send ends in SEND_TIMEOUT).
     Serial.printf("master: state=%s error=%s mod=%02X card_lo=%02X restore=%d bytes=%lu acked=%d\n",
-                  ms <= 6 ? mstates[ms] : "?", me <= 5 ? merrs[me] : "?",
+                  ms <= 6 ? mstates[ms] : "?", me <= 6 ? merrs[me] : "?",
                   Bus200eMasterModAddr(), Bus200eMasterCardAddr(),
                   Bus200eMasterIsRestore(),
                   (unsigned long)Bus200eMasterBytesTransferred(),
                   Bus200eMasterAcked());
+    if (!Bus200eMasterIsRestore()) print_capture_line();
   }
   {
     static const char *const qstates[] = {
@@ -1898,9 +1960,17 @@ FLASHMEM void DumpCard() {
   // reported length on the second dump even though the image content is
   // byte-identical (990 real bytes, then 990 more of misleadingly-included
   // 0xFF filler).
-  const uint32_t n = Bus200eMasterBytesTransferred();
+  //
+  // For a BACKUP that count is the contiguous coverage (PresetBusCard.h): a
+  // holed capture would stop at the hole, so the dump runs to the extent the
+  // module wrote instead and the capture line after it says HOLED -- the bytes
+  // past first_hole are shown, not vouched for.
+  uint32_t n = Bus200eMasterBytesTransferred();
+  const bool backup = !Bus200eMasterIsRestore();
+  if (backup && BusCardGetCoverage()->extent > n) n = BusCardGetCoverage()->extent;
   if (n == 0) {
     Serial.println("PresetBus: no completed master transfer yet (0 bytes)");
+    if (backup) print_capture_line();
     return;
   }
   Serial.printf("PresetBus: card image dump, %lu bytes (last master transfer)\n",
@@ -1911,6 +1981,7 @@ FLASHMEM void DumpCard() {
       Serial.printf(" %02X", card_image[i]);
     Serial.println();
   }
+  if (backup) print_capture_line();
 }
 
 }  // namespace PresetBus
