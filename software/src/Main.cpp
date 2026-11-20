@@ -55,6 +55,7 @@
 #include "PresetEngine.h"
 #include "PresetBus.h"
 #include "PresetBusUI.h"
+#include "FwCardScreen.h"
 #include "Bus200eBridgeUsb.h"
 #include "HSUtils.h"
 #include "CvMeter.h"
@@ -1172,6 +1173,50 @@ FLASHMEM static void MeterConsoleTask() {
 }
 #endif
 
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+// Firmware-card load status (FwCardScreen.h). Drawn instead of the app while a
+// card is served and for the rest of the boot once the load looks finished.
+// Reads PresetBus counters only: no bus traffic, no heap. FwCardImageLen() opens
+// FWCARD.BIN, so it is asked once and cached (retried at most once a second).
+static FwCardScreen::Tracker fwcard_screen;
+static uint32_t fwcard_len = 0;
+static uint32_t fwcard_len_try_ms = 0;
+
+FLASHMEM __attribute__((noinline)) static bool FwCardScreenDraw() {
+  const bool mode = OC::PresetBus::FwCardMode();
+  if (mode && !fwcard_len && millis() - fwcard_len_try_ms >= 1000u) {
+    fwcard_len_try_ms = millis();
+    fwcard_len = OC::PresetBus::FwCardImageLen();
+  }
+  fwcard_screen.Update(millis(), mode, OC::PresetBus::FwCardServedBytes(),
+                       OC::PresetBus::FwCardFirstReadAgeS(), fwcard_len);
+  if (!fwcard_screen.Active()) return false;
+
+  char rows[FwCardScreen::kRows][FwCardScreen::kCols + 1];
+  bool bar;
+  uint32_t pct;
+  fwcard_screen.Rows(rows, &bar, &pct);
+  graphics.drawFrame(0, 0, 128, 64);
+  graphics.setPrintPos(4, 3);
+  graphics.print("FIRMWARE CARD");
+  graphics.drawHLine(1, 13, 126);
+  graphics.setPrintPos(4, 18);
+  graphics.print(rows[0]);
+  int y = 28;
+  if (bar) {
+    graphics.drawFrame(4, y, 120, 8);
+    graphics.drawRect(6, y + 2, (int)(pct * 116 / 100), 4);
+    y += 12;
+  }
+  for (int i = 1; i < FwCardScreen::kRows; ++i, y += 10) {
+    if (!rows[i][0]) continue;
+    graphics.setPrintPos(4, y);
+    graphics.print(rows[i]);
+  }
+  return true;
+}
+#endif
+
 FLASHMEM __attribute__((noinline)) void loop() {
   using namespace OC;
   CORE::app_isr_enabled = true;
@@ -1202,6 +1247,13 @@ FLASHMEM __attribute__((noinline)) void loop() {
     if (MENU_REDRAW && CORE::display_update_enabled) {
       GRAPHICS_BEGIN_FRAME(false); // Don't busy wait
 
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+      // Modal firmware-card status. Yields to the two screens the user opens
+      // on purpose, so the app switcher and preset overlay stay reachable.
+      if (UI_MODE_APP_SETTINGS != ui_mode && !OC::PresetBusUI::Active() && FwCardScreenDraw()) {
+        // drawn
+      } else
+#endif
       if (UI_MODE_APP_SETTINGS == ui_mode) {
         // Only draw the App menu here...
         // Handle events and process state changes elsewhere.

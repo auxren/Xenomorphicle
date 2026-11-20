@@ -146,6 +146,7 @@ suite test_scope_fft                ../src/ScopeFft.cpp
 suite test_scope_decim            -pthread ../src/ScopeFft.cpp
 suite test_scope_freq
 suite test_scope_fmt
+suite test_fwcard_screen
 suite test_scope_freq_line          -include host_stubs/nofloat_printf.h ../src/ScopeFreqLine.cpp
 suite test_scope_freq_service       -pthread ../src/ScopeFreqService.cpp ../src/ScopeFreqLine.cpp ../src/ScopeSources.cpp
 suite test_scope_freq_console       ../src/ScopeFreqConsole.cpp
