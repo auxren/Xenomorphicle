@@ -1190,6 +1190,7 @@ FLASHMEM __attribute__((noinline)) static bool FwCardScreenDraw() {
   }
   fwcard_screen.Update(millis(), mode, OC::PresetBus::FwCardServedBytes(),
                        OC::PresetBus::FwCardFirstReadAgeS(), fwcard_len);
+  if (fwcard_screen.TakeStarted()) Serial.println("fwcard: module started reading");
   if (!fwcard_screen.Active()) return false;
 
   char rows[FwCardScreen::kRows][FwCardScreen::kCols + 1];
@@ -1200,15 +1201,17 @@ FLASHMEM __attribute__((noinline)) static bool FwCardScreenDraw() {
   graphics.setPrintPos(4, 3);
   graphics.print("FIRMWARE CARD");
   graphics.drawHLine(1, 13, 126);
-  graphics.setPrintPos(4, 18);
+  // Rows are 9 px apart; the bar takes the gap under row 0. The last row ends
+  // at y=63 with the bar (rows 1-3 at 37/46/55), at y=60 without (rows 0-4).
+  graphics.setPrintPos(4, 16);
   graphics.print(rows[0]);
-  int y = 28;
+  int y = 25;
   if (bar) {
-    graphics.drawFrame(4, y, 120, 8);
-    graphics.drawRect(6, y + 2, (int)(pct * 116 / 100), 4);
-    y += 12;
+    graphics.drawFrame(4, 26, 120, 8);
+    graphics.drawRect(6, 28, (int)(pct * 116 / 100), 4);
+    y = 37;
   }
-  for (int i = 1; i < FwCardScreen::kRows; ++i, y += 10) {
+  for (int i = 1; i < FwCardScreen::kRows; ++i, y += 9) {
     if (!rows[i][0]) continue;
     graphics.setPrintPos(4, y);
     graphics.print(rows[i]);
@@ -1216,6 +1219,17 @@ FLASHMEM __attribute__((noinline)) static bool FwCardScreenDraw() {
   return true;
 }
 #endif
+
+// Called from Ui::DispatchEvents (OC_ui.cpp): true = the firmware-card screen is
+// up and took the event. See FwCardScreen::Tracker::Swallow for what dismisses.
+bool FwCardScreenSwallow(bool press) {
+#if defined(ARDUINO_TEENSY41) && defined(PRESET_BUS)
+  return fwcard_screen.Swallow(press);
+#else
+  (void)press;
+  return false;
+#endif
+}
 
 FLASHMEM __attribute__((noinline)) void loop() {
   using namespace OC;

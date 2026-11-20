@@ -19,6 +19,8 @@
 #include "PresetBusUI.h"
 #include "BootWeasel.h"
 
+bool FwCardScreenSwallow(bool press);   // Main.cpp (global): firmware-card status screen
+
 
 extern uint_fast8_t MENU_REDRAW;
 
@@ -255,6 +257,12 @@ UiMode Ui::DispatchEvents(const RuntimeSlot &appslot) {
         break;
       }
     }
+
+    // Firmware-card status screen: while it is up the app is not on screen, so
+    // it gets no events; a button press dismisses it (unless a load is running).
+    // After the chords above, so A/Z + encoder still reach the menu and I/O settings.
+    if (::FwCardScreenSwallow(UI::EVENT_BUTTON_DOWN == event.type))
+      continue;
 
     if (UI_MODE_SCREENSAVER == app->DispatchEvent(event)) {
       screensaver_ = true;

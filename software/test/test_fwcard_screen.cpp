@@ -35,49 +35,49 @@ static void reading_progress() {
   Tracker t;
   CHECK(t.Update(1000, true, 100, 0, 1000) == READING);
   CHECK(t.Percent() == 10 && t.Pass() == 1);
-  CHECK(Has(t, "10%") && Has(t, "100/1000 B") && Has(t, "0 s"));
+  CHECK(Has(t, "MODULE UPDATING") && Has(t, "10%") && Has(t, "100/1000 B") && Has(t, "0 s"));
   CHECK(t.Update(2000, true, 999, 1, 1000) == READING);
   CHECK(t.Percent() == 99);
   // Unknown length: no divide by zero, never done.
   Tracker u;
   CHECK(u.Update(0, true, 50, 0, 0) == READING);
   CHECK(u.Percent() == 0);
-  CHECK(u.Update(60000, true, 50, 60, 0) == READING);
+  CHECK(u.Update(60000, true, 50, 60, 0) == READING);   // no length: never stalled either
 }
 
 // Done needs the full length AND kDoneQuietS of silence; short of either it is READING.
 static void done_needs_full_and_quiet() {
   Tracker t;
   t.Update(0, true, 500, 0, 1000);
-  CHECK(t.Update(kDoneQuietS * 1000u + 5000, true, 500, 9, 1000) == READING);   // quiet but not full
+  CHECK(t.Update(kDoneQuietS * 1000u + 5000, true, 500, 9, 1000) == READING);   // quiet but not full (not done)
   Tracker f;
   f.Update(0, true, 1000, 0, 1000);
   CHECK(f.Update(kDoneQuietS * 1000u - 1, true, 1000, 7, 1000) == READING);     // full, not quiet long enough
-  CHECK(f.Update(kDoneQuietS * 1000u, true, 1000, 8, 1000) == DONE);
-  CHECK(Has(f, "Update complete") && Has(f, "OFF"));
+  CHECK(f.Update(kDoneQuietS * 1000u, true, 1000, 12, 1000) == DONE);
+  CHECK(Has(f, "UPDATE COMPLETE") && Has(f, "OFF"));
 }
 
 // A 251e reads twice: the bar clamps, the pass count shows, a resumed read takes DONE back.
 static void two_passes_and_resume() {
   Tracker t;
   t.Update(0, true, 1000, 0, 1000);
-  CHECK(t.Update(9000, true, 1000, 9, 1000) == DONE);
-  CHECK(t.Update(9100, true, 1200, 9, 1000) == READING);
+  CHECK(t.Update(kDoneQuietS * 1000u, true, 1000, 12, 1000) == DONE);
+  CHECK(t.Update(kDoneQuietS * 1000u + 100, true, 1200, 12, 1000) == READING);
   CHECK(t.Percent() == 100 && t.Pass() == 2);
   CHECK(Has(t, "100% pass 2") && Has(t, "1200/1000 B"));
   CHECK(t.Update(30000, true, 2000, 30, 1000) == READING);
   CHECK(t.Pass() == 2 && t.Percent() == 100);
-  CHECK(t.Update(39000, true, 2000, 39, 1000) == DONE);
+  CHECK(t.Update(30000 + kDoneQuietS * 1000u, true, 2000, 42, 1000) == DONE);
 }
 
 // The card disarms after 30 s of quiet: counters read 0 and mode is false, DONE must stay.
 static void done_survives_disarm() {
   Tracker t;
   t.Update(0, true, 1000, 0, 1000);
-  t.Update(9000, true, 1000, 9, 1000);
+  t.Update(12000, true, 1000, 12, 1000);
   CHECK(t.state() == DONE);
   CHECK(t.Update(40000, false, 0, kNever, 0) == DONE);
-  CHECK(t.Active() && Has(t, "Update complete") && Has(t, "1000 B in 9 s"));
+  CHECK(t.Active() && Has(t, "UPDATE COMPLETE") && Has(t, "1000 B in 12 s"));
   CHECK(t.Update(900000, false, 0, kNever, 0) == DONE);
 }
 
@@ -86,7 +86,62 @@ static void partial_then_gone_is_idle() {
   Tracker t;
   t.Update(0, true, 400, 0, 1000);
   CHECK(t.Update(60000, false, 0, kNever, 0) == IDLE);
-  CHECK(!Has(t, "Update complete"));
+  CHECK(!Has(t, "UPDATE COMPLETE"));
+}
+
+// First read: READY turns into READING at once, and the Serial edge fires exactly once.
+static void first_read_edge() {
+  Tracker t;
+  t.Update(0, true, 0, kNever, 1000);
+  CHECK(t.state() == READY && !t.TakeStarted());
+  CHECK(t.Update(50, true, 64, 0, 1000) == READING);
+  CHECK(Has(t, "MODULE UPDATING"));
+  CHECK(t.TakeStarted());
+  CHECK(!t.TakeStarted());
+  t.Update(100, true, 128, 0, 1000);
+  CHECK(!t.TakeStarted());
+}
+
+// Started, then silent short of the image: STALLED after kStallS, not before; clears on a read.
+static void stall_timer() {
+  Tracker t;
+  t.Update(0, true, 400, 0, 1000);
+  CHECK(t.Update(kStallS * 1000u - 1, true, 400, 19, 1000) == READING);
+  CHECK(t.Update(kStallS * 1000u, true, 400, 20, 1000) == STALLED);
+  CHECK(Has(t, "READ STALLED 40%") && Has(t, "Remote"));
+  CHECK(t.Update(kStallS * 1000u + 500, true, 450, 21, 1000) == READING);
+  // and the full-length case is the DONE timer, never a stall
+  Tracker f;
+  f.Update(0, true, 1000, 0, 1000);
+  CHECK(f.Update(kStallS * 1000u, true, 1000, 20, 1000) == DONE);
+  // a stall that ends with the card gone is nothing
+  Tracker g;
+  g.Update(0, true, 400, 0, 1000);
+  g.Update(kStallS * 1000u, true, 400, 20, 1000);
+  CHECK(g.Update(kStallS * 1000u + 1, false, 0, kNever, 0) == IDLE);
+}
+
+// Dismiss: READY/STALLED/DONE hide on a press and stay hidden; READING swallows without hiding.
+static void dismiss() {
+  Tracker t;
+  CHECK(!t.Swallow(true));                       // idle: events go to the app
+  t.Update(0, true, 0, kNever, 1000);
+  CHECK(t.Swallow(false) && t.Active());          // turning an encoder does not dismiss
+  CHECK(t.Swallow(true) && !t.Active());          // a press does
+  t.Update(10, true, 0, kNever, 1000);
+  CHECK(!t.Active() && !t.Swallow(true));         // still hidden, app gets its events
+  t.Update(20, true, 100, 0, 1000);               // the module starts: shows again
+  CHECK(t.state() == READING && t.Active());
+  CHECK(t.Swallow(true) && t.Active());           // swallowed, not dismissed
+  t.Update(20 + kStallS * 1000u, true, 100, 20, 1000);
+  CHECK(t.state() == STALLED && t.Active());
+  CHECK(t.Swallow(true) && !t.Active());
+  t.Update(30000, true, 1000, 30, 1000);
+  t.Update(30000 + kDoneQuietS * 1000u, true, 1000, 42, 1000);
+  CHECK(t.state() == DONE && t.Active());
+  CHECK(t.Swallow(true) && !t.Active());
+  t.Update(90000, false, 0, kNever, 0);          // disarmed: stays dismissed
+  CHECK(t.state() == DONE && !t.Active());
 }
 
 // Rows never overflow the 21-column screen, even at absurd values.
@@ -107,6 +162,9 @@ int main() {
   two_passes_and_resume();
   done_survives_disarm();
   partial_then_gone_is_idle();
+  first_read_edge();
+  stall_timer();
+  dismiss();
   rows_fit();
   printf("%d checks, %d failed\n", checks, fails);
   return fails ? 1 : 0;

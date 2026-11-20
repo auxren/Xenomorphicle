@@ -8,24 +8,36 @@
 //
 // States
 //   IDLE     not serving a card (and nothing finished this boot): draw nothing
-//   READY    serving, the module has not read a byte yet
-//   READING  the module is reading: bar, percent, bytes, seconds
+//   READY    card armed and served, no module has read a byte yet
+//   READING  first read arrived: "MODULE UPDATING", bar, percent, bytes, seconds
+//   STALLED  reads started, then stopped short of the image length for kStallS
 //   DONE     the whole image was served and the reads then went quiet
+//
+// Which modules read how often: a 251e reads the image TWICE (served bytes go to
+// ~2x the image length; the pass count on screen shows it), a 267e and a 257e
+// read it once, about 45 s. Do not assume one pass.
 //
 // DONE is a HEURISTIC and cannot be anything else. The Xeno sees only the
 // module's reads of the card; it never hears from the module that the new
 // firmware is programmed. "Every byte served, then nothing for kDoneQuietS"
 // looks exactly the same as "every byte served, module paused (erasing,
-// programming, waiting on the operator)". A 251e reads the image TWICE (served
-// bytes go to ~2x the image length), so on the first pass's end the bus can sit
-// quiet long enough to trip DONE; the next byte moves the screen back to
-// READING with the pass count at 2. The text therefore says "Update complete"
-// only after kDoneQuietS of silence, and takes it back if the reads resume.
+// programming, waiting on the operator)". On a 251e the gap between its two
+// passes can be long enough to trip DONE; the next byte moves the screen back to
+// READING with the pass count at 2. So "UPDATE COMPLETE" is only said after the
+// served count reached the image length AND kDoneQuietS of silence followed, and
+// it is taken back if the reads resume. STALLED is the same guess from the other
+// side: reads stopped short of the image for kStallS may be a failed read or a
+// slow module; it clears by itself if the reads resume.
 //
 // The latch: PresetBus disarms the card (and leaves FwCardMode()) 30 s after a
 // full read, and FwCardServedBytes() reads 0 from then on. DONE is remembered
-// here so the screen keeps saying "switch the case OFF, then ON" for the rest
-// of this boot (static state, set by Update() while the card was still served).
+// here so the screen keeps saying "switch the case OFF, then ON" until the next
+// boot or until the user dismisses it with a button press.
+//
+// Dismiss: a button press while READY, STALLED or DONE hides the screen (so the
+// app, and its own "READ FAIL: fw card" message, is reachable). It stays hidden
+// until the state changes. While READING every event is swallowed instead and
+// nothing is dismissed: the app cannot be driven blind under the bar.
 // ---------------------------------------------------------------------------
 
 #include <stddef.h>
@@ -35,13 +47,15 @@
 namespace FwCardScreen {
 
 // Quiet time, after served >= image length, before the screen calls it done.
-static constexpr uint32_t kDoneQuietS = 8;
+static constexpr uint32_t kDoneQuietS = 12;
+// Quiet time, with served < image length, before a started read is called stalled.
+static constexpr uint32_t kStallS = 20;
 
 static constexpr uint32_t kNever = 0xFFFFFFFFu;   // FwCardFirstReadAgeS(): no read yet
 static constexpr int kCols = 21;                  // the OLED text width
 static constexpr int kRows = 5;                   // text rows under the title
 
-enum State : uint8_t { IDLE, READY, READING, DONE };
+enum State : uint8_t { IDLE, READY, READING, STALLED, DONE };
 
 class Tracker {
  public:
@@ -57,21 +71,41 @@ class Tracker {
     len_ = len;
     if (age_s == kNever) {          // serving, first read still to come
       state_ = READY;
-      return state_;
+    } else {
+      if (!seen_) {                 // the first read of the image
+        seen_ = true;
+        started_ = true;
+        served_ = served;
+        moved_ms_ = now_ms;
+      } else if (served != served_) {
+        served_ = served;
+        moved_ms_ = now_ms;
+      }
+      age_s_ = age_s;
+      const uint32_t quiet_ms = now_ms - moved_ms_;
+      if (len_ && served_ >= len_)
+        state_ = (quiet_ms >= kDoneQuietS * 1000u) ? DONE : READING;
+      else
+        state_ = (len_ && quiet_ms >= kStallS * 1000u) ? STALLED : READING;
     }
-    if (!seen_ || served != served_) {
-      seen_ = true;
-      served_ = served;
-      moved_ms_ = now_ms;
-    }
-    age_s_ = age_s;
-    const bool full = len_ && served_ >= len_;
-    state_ = (full && (now_ms - moved_ms_) >= kDoneQuietS * 1000u) ? DONE : READING;
+    if (dismissed_ && state_ != dismissed_state_) dismissed_ = false;
     return state_;
   }
 
+  // True once, on the first frame after the module's first read arrived (for the
+  // Serial log line).
+  bool TakeStarted() { const bool s = started_; started_ = false; return s; }
+
+  // A UI event arrived while the screen may be up. Returns true if the screen
+  // took it (the caller drops the event). press = a button went down.
+  bool Swallow(bool press) {
+    if (!Active()) return false;
+    if (press && state_ != READING) { dismissed_ = true; dismissed_state_ = state_; }
+    return true;
+  }
+
   State state() const { return state_; }
-  bool Active() const { return state_ != IDLE; }
+  bool Active() const { return state_ != IDLE && !(dismissed_ && dismissed_state_ == state_); }
   uint32_t served() const { return served_; }
   uint32_t len() const { return len_; }
   uint32_t age_s() const { return age_s_; }
@@ -96,20 +130,29 @@ class Tracker {
         Put(rows[1], "Hold the module's");
         Put(rows[2], "Remote, power the");
         Put(rows[3], "case on");
+        Put(rows[4], "Any button: hide");
         break;
       case READING:
-        Put(rows[0], "Module is reading");
+        Put(rows[0], "MODULE UPDATING");
         *bar = true;
         if (Pass() > 1) snprintf(rows[1], kCols + 1, "%lu%% pass %lu", (unsigned long)*pct, (unsigned long)Pass());
         else            snprintf(rows[1], kCols + 1, "%lu%%", (unsigned long)*pct);
         snprintf(rows[2], kCols + 1, "%lu/%lu B", (unsigned long)served_, (unsigned long)len_);
         snprintf(rows[3], kCols + 1, "%lu s", (unsigned long)age_s_);
         break;
+      case STALLED:
+        snprintf(rows[0], kCols + 1, "READ STALLED %lu%%", (unsigned long)*pct);
+        Put(rows[1], "Check the bus, retry");
+        Put(rows[2], "the module's Remote");
+        Put(rows[3], "hold");
+        Put(rows[4], "Any button: hide");
+        break;
       case DONE:
-        Put(rows[0], "Update complete");
+        Put(rows[0], "UPDATE COMPLETE");
         Put(rows[1], "Switch the case OFF,");
         Put(rows[2], "then ON");
         snprintf(rows[3], kCols + 1, "%lu B in %lu s", (unsigned long)served_, (unsigned long)age_s_);
+        Put(rows[4], "Any button: hide");
         break;
       case IDLE:
       default:
@@ -122,6 +165,9 @@ class Tracker {
 
   State state_ = IDLE;
   bool seen_ = false;        // a read was seen this boot
+  bool started_ = false;     // first read seen, not yet reported
+  bool dismissed_ = false;
+  State dismissed_state_ = IDLE;
   uint32_t served_ = 0;
   uint32_t len_ = 0;
   uint32_t age_s_ = 0;
