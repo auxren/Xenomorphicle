@@ -1200,6 +1200,10 @@ class FwDoneMarker final : public FwCardScreen::Marker {
     OC::RT::PersistenceWindow window("fwcard done marker");
     PhzConfig::myfs.remove(kFile);
   }
+  void Disarm() override {   // removes FWCARD.ARM; takes effect at the next boot only
+    OC::RT::PersistenceWindow window("fwcard disarm");
+    OC::PresetBus::FwCardArm(false);
+  }
  private:
   static constexpr const char *kFile = "FWDONE.TXT";
 };
@@ -1222,6 +1226,7 @@ FLASHMEM __attribute__((noinline)) static bool FwCardScreenDraw() {
   const int saved = fwcard_screen.TakeSaved();
   if (saved > 0) Serial.println("fwcard: update completed, marker saved");
   else if (saved < 0) Serial.println("fwcard: update completed, marker NOT saved");
+  if (fwcard_screen.TakeDisarmed()) Serial.println("fwcard: disarmed at update complete");
   if (fwcard_screen.TakeShowing()) Serial.println("fwcard: showing post-update message");
   if (!fwcard_screen.Active()) return false;
 

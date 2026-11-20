@@ -147,10 +147,11 @@ static void dismiss() {
 // A fake marker: no flash, counts every call.
 struct FakeMarker : Marker {
   bool present = false, save_ok = true;
-  int saves = 0, removes = 0;
+  int saves = 0, removes = 0, disarms = 0;   // disarms: FakeArm, the FwCardArm(false) calls
   bool Exists() override { return present; }
   bool Save() override { saves++; if (save_ok) present = true; return save_ok; }
   void Remove() override { removes++; present = false; }
+  void Disarm() override { disarms++; }
 };
 
 // DONE saves the marker exactly once per boot, and only DONE does.
@@ -161,11 +162,12 @@ static void marker_saved_once_at_done() {
   t.Update(0, true, 0, kNever, 1000);
   t.Update(10, true, 500, 0, 1000);
   t.Update(kStallS * 1000u + 10, true, 500, 20, 1000);   // stalled: not a save
-  CHECK(m.saves == 0 && t.TakeSaved() == 0);
+  CHECK(m.saves == 0 && t.TakeSaved() == 0 && m.disarms == 0);
   t.Update(30000, true, 1000, 30, 1000);
   CHECK(m.saves == 0);                                     // full but not quiet yet
   t.Update(30000 + kDoneQuietS * 1000u, true, 1000, 42, 1000);
   CHECK(t.state() == DONE && m.saves == 1 && m.present);
+  CHECK(m.disarms == 1 && t.TakeDisarmed() && !t.TakeDisarmed());
   CHECK(t.TakeSaved() == 1 && t.TakeSaved() == 0);
   for (uint32_t i = 1; i < 50; ++i) t.Update(50000 + i * 16, true, 1000, 42, 1000);
   t.Update(60000, false, 0, kNever, 0);
@@ -173,7 +175,7 @@ static void marker_saved_once_at_done() {
   // resumed reads then DONE again (251e pass 2): still one save
   t.Update(70000, true, 1500, 50, 1000);
   t.Update(70000 + kDoneQuietS * 1000u, true, 1500, 62, 1000);
-  CHECK(t.state() == DONE && m.saves == 1);
+  CHECK(t.state() == DONE && m.saves == 1 && m.disarms == 1);   // withdrawn and re-reached: not again
 }
 
 static void marker_save_failure_is_reported_not_retried() {
@@ -184,8 +186,9 @@ static void marker_save_failure_is_reported_not_retried() {
   t.Update(0, true, 1000, 0, 1000);
   t.Update(kDoneQuietS * 1000u, true, 1000, 12, 1000);
   CHECK(t.state() == DONE && t.TakeSaved() == -1);
+  CHECK(m.disarms == 1);                    // a failed save still disarms, once
   t.Update(kDoneQuietS * 1000u + 100, true, 1000, 12, 1000);
-  CHECK(m.saves == 1);
+  CHECK(m.saves == 1 && m.disarms == 1);
 }
 
 // Next boot with the marker: shown, marker consumed at once, shown for kPostShowS, then gone.

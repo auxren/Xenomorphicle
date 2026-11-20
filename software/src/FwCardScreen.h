@@ -43,6 +43,17 @@
 // Xeno saw the whole image read and then quiet", with all the doubt DONE
 // carries: it is not proof the module programmed itself.
 //
+// Disarm at DONE: the first time a boot reaches DONE the card is also disarmed
+// (Marker::Disarm, FwCardArm(false)), once. The reason is the message above: if
+// the case is power-cycled before PresetBus's own disarm (30 s of quiet after the
+// full read), the card would still be armed, the next boot would serve it again
+// and show READY, and POST would never appear. Disarming only takes effect at the
+// next boot (PresetBus.h), so the read in progress, including a 251e second pass,
+// is not disturbed. It is done whether or not the marker save worked: the module
+// has been served the whole image either way, and re-serving it on the next boot
+// helps nobody. (If DONE was a false alarm between a 251e's passes, the update
+// still completes; only the next boot will not serve the card again.)
+//
 // Dismiss: a button press while READY, STALLED or DONE hides the screen (so the
 // app, and its own "READ FAIL: fw card" message, is reachable). It stays hidden
 // until the state changes. While READING every event is swallowed instead and
@@ -76,6 +87,7 @@ class Marker {
   virtual bool Exists() = 0;
   virtual bool Save() = 0;     // true = written and confirmed
   virtual void Remove() = 0;
+  virtual void Disarm() = 0;   // FwCardArm(false): no card served at the next boot
 };
 
 class Tracker {
@@ -119,6 +131,8 @@ class Tracker {
     if (state_ == DONE && !saved_ && marker_) {      // once per boot, never retried
       saved_ = true;
       save_result_ = marker_->Save() ? 1 : -1;
+      marker_->Disarm();
+      disarmed_ = true;
     }
     if (dismissed_ && state_ != dismissed_state_) dismissed_ = false;
     return state_;
@@ -127,6 +141,7 @@ class Tracker {
   // 1 once after the marker was saved, -1 once after the save failed, else 0.
   int TakeSaved() { const int r = save_result_; save_result_ = 0; return r; }
   // True once, when the post-update message starts to show.
+  bool TakeDisarmed() { const bool d = disarmed_; disarmed_ = false; return d; }
   bool TakeShowing() { const bool s = showing_; showing_ = false; return s; }
 
   // True once, on the first frame after the module's first read arrived (for the
@@ -233,6 +248,7 @@ class Tracker {
   bool post_pending_ = false;  // marker found at boot, message not yet shown
   bool showing_ = false;
   bool saved_ = false;
+  bool disarmed_ = false;      // Disarm() called, not yet reported
   int save_result_ = 0;
   uint32_t post_ms_ = 0;
   State dismissed_state_ = IDLE;
