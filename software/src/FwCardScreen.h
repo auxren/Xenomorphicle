@@ -34,6 +34,15 @@
 // here so the screen keeps saying "switch the case OFF, then ON" until the next
 // boot or until the user dismisses it with a button press.
 //
+// The next boot (POST): reaching DONE saves a tiny marker through the Marker
+// interface below (once per boot; the implementation does the flash write).
+// On the next boot, if the marker exists and no card is being served, POST shows
+// "FIRMWARE LOADED" and what to do next for kPostShowS or until a button press,
+// and the marker is deleted at that moment so it shows once. If a card is served
+// on that boot the load states win and the marker waits. The marker says "the
+// Xeno saw the whole image read and then quiet", with all the doubt DONE
+// carries: it is not proof the module programmed itself.
+//
 // Dismiss: a button press while READY, STALLED or DONE hides the screen (so the
 // app, and its own "READ FAIL: fw card" message, is reachable). It stays hidden
 // until the state changes. While READING every event is swallowed instead and
@@ -51,23 +60,42 @@ static constexpr uint32_t kDoneQuietS = 12;
 // Quiet time, with served < image length, before a started read is called stalled.
 static constexpr uint32_t kStallS = 20;
 
+// How long the post-update message stays up on the boot after the load.
+static constexpr uint32_t kPostShowS = 60;
+
 static constexpr uint32_t kNever = 0xFFFFFFFFu;   // FwCardFirstReadAgeS(): no read yet
 static constexpr int kCols = 21;                  // the OLED text width
-static constexpr int kRows = 5;                   // text rows under the title
+static constexpr int kRows = 6;                   // text rows under the title
 
-enum State : uint8_t { IDLE, READY, READING, STALLED, DONE };
+enum State : uint8_t { IDLE, READY, READING, STALLED, DONE, POST };
+
+// The persistent "update completed" marker. The implementation owns the flash
+// write (inside a PersistenceWindow) and is never called from a bus context.
+class Marker {
+ public:
+  virtual bool Exists() = 0;
+  virtual bool Save() = 0;     // true = written and confirmed
+  virtual void Remove() = 0;
+};
 
 class Tracker {
  public:
   // Call once per frame. mode = FwCardMode(); served/age_s/len are the PresetBus
   // counters (len 0 = not known yet). now_ms is millis(). Returns the state.
+  // Once, when the filesystem is up: remember whether the previous boot left
+  // the marker. m must outlive the tracker.
+  void Attach(Marker *m) { marker_ = m; post_pending_ = m && m->Exists(); }
+
   State Update(uint32_t now_ms, bool mode, uint32_t served, uint32_t age_s, uint32_t len) {
     if (!mode) {
       // Card gone (disarmed after the full read, `k`, reboot-less leave): the
       // counters are 0 now. Keep the last view only if it was DONE.
-      if (state_ != DONE) state_ = IDLE;
+      if (state_ == DONE) return state_;
+      if (state_ != POST) state_ = IDLE;
+      if (state_ == POST || post_pending_) return UpdatePost(now_ms);
       return state_;
     }
+    if (state_ == POST) { state_ = IDLE; post_pending_ = false; }   // a card is served: it wins
     len_ = len;
     if (age_s == kNever) {          // serving, first read still to come
       state_ = READY;
@@ -88,9 +116,18 @@ class Tracker {
       else
         state_ = (len_ && quiet_ms >= kStallS * 1000u) ? STALLED : READING;
     }
+    if (state_ == DONE && !saved_ && marker_) {      // once per boot, never retried
+      saved_ = true;
+      save_result_ = marker_->Save() ? 1 : -1;
+    }
     if (dismissed_ && state_ != dismissed_state_) dismissed_ = false;
     return state_;
   }
+
+  // 1 once after the marker was saved, -1 once after the save failed, else 0.
+  int TakeSaved() { const int r = save_result_; save_result_ = 0; return r; }
+  // True once, when the post-update message starts to show.
+  bool TakeShowing() { const bool s = showing_; showing_ = false; return s; }
 
   // True once, on the first frame after the module's first read arrived (for the
   // Serial log line).
@@ -100,6 +137,10 @@ class Tracker {
   // took it (the caller drops the event). press = a button went down.
   bool Swallow(bool press) {
     if (!Active()) return false;
+    if (state_ == POST) {
+      if (press) { state_ = IDLE; post_pending_ = false; }
+      return true;
+    }
     if (press && state_ != READING) { dismissed_ = true; dismissed_state_ = state_; }
     return true;
   }
@@ -147,6 +188,14 @@ class Tracker {
         Put(rows[3], "hold");
         Put(rows[4], "Any button: hide");
         break;
+      case POST:
+        Put(rows[0], "FIRMWARE LOADED");
+        Put(rows[1], "Module should now run");
+        Put(rows[2], "the new firmware.");
+        Put(rows[3], "Check version: hold");
+        Put(rows[4], "Remote ~5 s, case on.");
+        Put(rows[5], "Then you are done.");
+        break;
       case DONE:
         Put(rows[0], "UPDATE COMPLETE");
         Put(rows[1], "Switch the case OFF,");
@@ -161,12 +210,31 @@ class Tracker {
   }
 
  private:
+  State UpdatePost(uint32_t now_ms) {
+    if (state_ != POST) {              // first frame: show, and consume the marker
+      state_ = POST;
+      post_ms_ = now_ms;
+      post_pending_ = false;
+      showing_ = true;
+      if (marker_) marker_->Remove();
+    } else if (now_ms - post_ms_ >= kPostShowS * 1000u) {
+      state_ = IDLE;
+    }
+    return state_;
+  }
+
   static void Put(char *dst, const char *s) { snprintf(dst, kCols + 1, "%s", s); }
 
   State state_ = IDLE;
   bool seen_ = false;        // a read was seen this boot
   bool started_ = false;     // first read seen, not yet reported
   bool dismissed_ = false;
+  Marker *marker_ = nullptr;
+  bool post_pending_ = false;  // marker found at boot, message not yet shown
+  bool showing_ = false;
+  bool saved_ = false;
+  int save_result_ = 0;
+  uint32_t post_ms_ = 0;
   State dismissed_state_ = IDLE;
   uint32_t served_ = 0;
   uint32_t len_ = 0;

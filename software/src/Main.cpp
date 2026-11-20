@@ -1182,7 +1182,35 @@ static FwCardScreen::Tracker fwcard_screen;
 static uint32_t fwcard_len = 0;
 static uint32_t fwcard_len_try_ms = 0;
 
+// The "update completed" marker on LittleFS (FWDONE.TXT, 1 byte). Saved once
+// when the load screen latches DONE, inside a PersistenceWindow like the fs
+// write-verify in SelfTest(); never touched from the bus side.
+class FwDoneMarker final : public FwCardScreen::Marker {
+ public:
+  bool Exists() override { return PhzConfig::myfs.exists(kFile); }
+  bool Save() override {
+    OC::RT::PersistenceWindow window("fwcard done marker");
+    File f = PhzConfig::myfs.open(kFile, FILE_WRITE_BEGIN);
+    bool ok = f && f.write((const uint8_t *)"1", 1) == 1;
+    if (f) f.close();
+    if (ok) ok = PhzConfig::myfs.exists(kFile);
+    return ok;
+  }
+  void Remove() override {
+    OC::RT::PersistenceWindow window("fwcard done marker");
+    PhzConfig::myfs.remove(kFile);
+  }
+ private:
+  static constexpr const char *kFile = "FWDONE.TXT";
+};
+static FwDoneMarker fwcard_marker;
+static bool fwcard_attached = false;
+
 FLASHMEM __attribute__((noinline)) static bool FwCardScreenDraw() {
+  if (!fwcard_attached) {   // first frame: LittleFS is mounted long before loop()
+    fwcard_attached = true;
+    fwcard_screen.Attach(&fwcard_marker);
+  }
   const bool mode = OC::PresetBus::FwCardMode();
   if (mode && !fwcard_len && millis() - fwcard_len_try_ms >= 1000u) {
     fwcard_len_try_ms = millis();
@@ -1191,6 +1219,10 @@ FLASHMEM __attribute__((noinline)) static bool FwCardScreenDraw() {
   fwcard_screen.Update(millis(), mode, OC::PresetBus::FwCardServedBytes(),
                        OC::PresetBus::FwCardFirstReadAgeS(), fwcard_len);
   if (fwcard_screen.TakeStarted()) Serial.println("fwcard: module started reading");
+  const int saved = fwcard_screen.TakeSaved();
+  if (saved > 0) Serial.println("fwcard: update completed, marker saved");
+  else if (saved < 0) Serial.println("fwcard: update completed, marker NOT saved");
+  if (fwcard_screen.TakeShowing()) Serial.println("fwcard: showing post-update message");
   if (!fwcard_screen.Active()) return false;
 
   char rows[FwCardScreen::kRows][FwCardScreen::kCols + 1];
@@ -1202,16 +1234,18 @@ FLASHMEM __attribute__((noinline)) static bool FwCardScreenDraw() {
   graphics.print("FIRMWARE CARD");
   graphics.drawHLine(1, 13, 126);
   // Rows are 9 px apart; the bar takes the gap under row 0. The last row ends
-  // at y=63 with the bar (rows 1-3 at 37/46/55), at y=60 without (rows 0-4).
+  // at y=63 with the bar (rows 1-3 at 37/46/55), at y=60 without (rows 0-4); the
+  // six-row post-update message uses a pitch of 8 and ends at y=63.
   graphics.setPrintPos(4, 16);
   graphics.print(rows[0]);
-  int y = 25;
+  const int pitch = rows[5][0] ? 8 : 9;   // six rows only on the post-update message
+  int y = 16 + pitch;
   if (bar) {
     graphics.drawFrame(4, 26, 120, 8);
     graphics.drawRect(6, 28, (int)(pct * 116 / 100), 4);
     y = 37;
   }
-  for (int i = 1; i < FwCardScreen::kRows; ++i, y += 9) {
+  for (int i = 1; i < FwCardScreen::kRows; ++i, y += pitch) {
     if (!rows[i][0]) continue;
     graphics.setPrintPos(4, y);
     graphics.print(rows[i]);
