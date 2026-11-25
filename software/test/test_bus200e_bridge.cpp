@@ -1710,7 +1710,7 @@ static void test_info_r_appends_bridge_level() {
   const SentMsg *m = last_sent();
   CHECK(m && m->cmd == BUS200E_SYSEX_CMD_INFO_R);
   // schema, n_seq, max_steps, dump len x3, chunk, max packets lo/hi, serving, LEVEL
-  CHECK(m && m->raw == bytes({ 2, 0, 0, 0, 0, 0, 42, 25, 12, 0, 1 }));
+  CHECK(m && m->raw == bytes({ 2, 0, 0, 0, 0, 0, 42, 25, 12, 0, 2 }));
   CHECK(m && m->raw.size() == 11 && m->raw[10] == BUS200E_SYSEX_BRIDGE_LEVEL);
 }
 

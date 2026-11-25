@@ -706,8 +706,8 @@ static void test_fw_end_arm_and_plain_commands(void) {
   const uint8_t info[11] = { 2, 30, 16, 0x50, 0x6D, 0x03, 42, 0x7F, 0x7F,
                              1, BUS200E_SYSEX_BRIDGE_LEVEL };
   n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_INFO_R, info, 11, nullptr, 0, out, sizeof(out));
-  CHECK(n == 16 && out[15] == 1 && out[4] == 0x41);
-  record("INFO_R_level1", out, n);
+  CHECK(n == 16 && out[15] == 2 && out[4] == 0x41);
+  record("INFO_R_level2", out, n);
 
   // ACK / NAK for the new commands.
   const uint8_t ack[3] = { 0x21, 0x0A, 0x0A };

@@ -177,6 +177,7 @@ typedef enum {
   BUS200E_SYSEX_CMD_SCAN       = 0x25,  // H->D [first, last]
   BUS200E_SYSEX_CMD_POLL_DONE  = 0x26,  // H->D none
   BUS200E_SYSEX_CMD_BUS_STATUS = 0x27,  // H->D none
+  BUS200E_SYSEX_CMD_MOD_XFER   = 0x28,  // H->D [want_reply, packed frame 7..17] (level 2)
   BUS200E_SYSEX_CMD_ACK       = 0x40,
   BUS200E_SYSEX_CMD_INFO_R    = 0x41,
   BUS200E_SYSEX_CMD_DUMP_DATA = 0x44,
@@ -186,6 +187,7 @@ typedef enum {
   BUS200E_SYSEX_CMD_SCAN_R       = 0x65, // one per responder: [idx, count(0x7F=unknown), addr, ver_valid, v0..v6]
   BUS200E_SYSEX_CMD_SCAN_END     = 0x66, // [n_found]
   BUS200E_SYSEX_CMD_BUS_STATUS_R = 0x67, // [wpm_present, bus_quiet, dialect, last_error]
+  BUS200E_SYSEX_CMD_MOD_XFER_R   = 0x68, // [result, packed reply 0..18] (level 2)
   BUS200E_SYSEX_CMD_NAK       = 0x7E,
 } Bus200eSysExCmd;
 
@@ -209,11 +211,13 @@ typedef enum {
   BUS200E_SYSEX_NAK_FW_SEQUENCE  = 16,  // FW_DATA out of order / without FW_BEGIN
   BUS200E_SYSEX_NAK_CAL_RUN      = 17,  // a Cal Routine run (or its pending COMMIT verdict)
                                         // owns the bus: GET_DUMP / PUT_DUMP refused; retry later
+  BUS200E_SYSEX_NAK_FRAME_REFUSED = 18, // MOD_XFER frame fails the allowlist
 } Bus200eSysExNakReason;
 
 // Appended to INFO_R: which command set this firmware speaks (1 = the
-// FW_*/SCAN/POLL_DONE/BUS_STATUS commands of docs/bus200e-sysex-fw.md).
-#define BUS200E_SYSEX_BRIDGE_LEVEL 1
+// FW_*/SCAN/POLL_DONE/BUS_STATUS commands of docs/bus200e-sysex-fw.md; 2 adds
+// MOD_XFER / MOD_XFER_R, see Bus200eModXfer.h).
+#define BUS200E_SYSEX_BRIDGE_LEVEL 2
 
 #define BUS200E_SYSEX_CHUNK_BYTES 42   // raw bytes per DUMP_DATA chunk
 
