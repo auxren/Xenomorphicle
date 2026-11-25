@@ -123,7 +123,7 @@ static void test_allowlist_matches_fixture() {
     ++rows;
     ok ? ++accepted : ++refused;
   }
-  CHECK(rows == 38 && accepted == 14 && refused == 24);
+  CHECK(rows == 146 && accepted == 19 && refused == 127);
   // A null frame is refused, not dereferenced.
   CHECK(!Bus200eModXferAllowed(nullptr, 7, 0));
   // want_reply values other than 0/1 are refused.
@@ -317,7 +317,7 @@ static void test_allowlist_pins_each_clause() {
     }
     ++swept;
   }
-  CHECK(swept == 14);
+  CHECK(swept == 19);
   // op lengths
   CHECK(!allowed_hex("0700220C28CA0300", 0));      // op 3, n 8
   CHECK(!allowed_hex("0700220C28CA0400", 0));      // op 4, n 8
