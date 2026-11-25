@@ -184,15 +184,25 @@ static int pop_calls;
 struct QReply { std::vector<uint8_t> frame; uint32_t at; };
 static std::vector<QReply> reply_q;
 
+// Optional busy window: after every ACKed send, the NEXT attempt sees -1 until
+// raw_busy_ms have passed since that attempt's first call.
+static uint32_t raw_busy_ms, raw_win_start;
+static bool raw_prev_ack, raw_win_open;
 static int f_raw_send(const uint8_t *f, uint8_t n) {
   raw_calls.push_back({ std::vector<uint8_t>(f, f + n), fake_now });
+  if (raw_busy_ms && raw_prev_ack) { raw_win_open = true; raw_win_start = fake_now; raw_prev_ack = false; }
+  if (raw_win_open) {
+    if ((uint32_t) (fake_now - raw_win_start) < raw_busy_ms) return -1;
+    raw_win_open = false;
+  }
+  if (raw_busy_ms) { raw_prev_ack = true; return 0; }
   if (raw_script_pos < raw_script.size()) return raw_script[raw_script_pos++];
   return fake_raw_default;
 }
 static int f_pop_reply(uint8_t *f, uint8_t *n) {
   pop_calls++;
   for (size_t i = 0; i < reply_q.size(); ++i) {
-    if (reply_q[i].at > fake_now) continue;
+    if ((int32_t) (reply_q[i].at - fake_now) > 0) continue;   // wrap-safe
     memcpy(f, reply_q[i].frame.data(), reply_q[i].frame.size());
     *n = (uint8_t) reply_q[i].frame.size();
     reply_q.erase(reply_q.begin() + (long) i);
@@ -257,6 +267,7 @@ static void reset_all(uint32_t card_size = kFakeCardSmall) {
   fake_cal_run = 0;
   raw_calls.clear(); raw_script.clear(); raw_script_pos = 0; fake_raw_default = 0;
   fake_cal_job = 0; pop_calls = 0; reply_q.clear();
+  raw_busy_ms = 0; raw_win_start = 0; raw_prev_ack = false; raw_win_open = false;
   memset(fake_ver_known, 0, sizeof(fake_ver_known));
   memcpy(fake_ver_bytes, "31.2C2 ", 7);
   sent.clear();
@@ -2065,7 +2076,7 @@ static void test_modxfer_busy_retries_then_result3_no_send_counted() {
   feed_xfer(1, kRd);
   xfer_run();
   CHECK(xfer_results(&r, &got) == 1 && r == 2);
-  CHECK(fake_now - 1000 >= BUS200E_BRIDGE_XFER_REPLY_MS + BUS200E_BRIDGE_XFER_BUSY_GIVEUP_MS);
+  CHECK(fake_now - 1000 >= BUS200E_BRIDGE_XFER_BUSY_GIVEUP_MS && fake_now - 1000 <= 1300);
 }
 
 static void test_modxfer_refused_frame_nak18_no_send() {
@@ -2362,6 +2373,87 @@ static void test_modxfer_late_reply_survives_a_busy_resend() {
   CHECK(raw_calls.size() == 5);
 }
 
+static void test_modxfer_busy_budget_is_one_second_for_the_whole_exchange() {
+  printf("test_modxfer_busy_budget_is_one_second_for_the_whole_exchange\n");
+  // Every send after the first sees a bus that is busy for 990 ms. One busy budget
+  // (from acceptance) covers all sends, so the exchange ends at about 1000 ms, not
+  // after 4 x (990 + 60).
+  reset_all();
+  raw_busy_ms = 990;
+  raw_script = { 0 };
+  feed_xfer(1, kRd);
+  const uint32_t t0 = fake_now;
+  xfer_run();
+  int r = -1; Bytes got;
+  CHECK(xfer_results(&r, &got) == 1 && r == 2);        // it had been sent once: not result 3
+  CHECK(fake_now - t0 <= 1300);
+  CHECK(fake_now - t0 >= BUS200E_BRIDGE_XFER_BUSY_GIVEUP_MS);
+  // the first send ACKs, the first resend gets the bus late, the next resend runs out of budget
+  reset_all();
+  raw_busy_ms = 700;
+  feed_xfer(1, kRd);
+  const uint32_t t1 = fake_now;
+  xfer_run();
+  CHECK(xfer_results(&r, &got) == 1 && r == 2);
+  CHECK(fake_now - t1 <= 1300);
+  // nothing ever gets on the bus: result 3 within the same bound
+  reset_all();
+  fake_raw_default = -1;
+  feed_xfer(1, kRd);
+  const uint32_t t2 = fake_now;
+  xfer_run();
+  CHECK(xfer_results(&r, &got) == 1 && r == 3 && fake_now - t2 <= 1300);
+}
+
+static void test_modxfer_survives_the_millisecond_clock_wrap() {
+  printf("test_modxfer_survives_the_millisecond_clock_wrap\n");
+  int r = -1; Bytes got;
+  // busy retries and the 1 s give-up across the wrap
+  reset_all();
+  fake_now = 0xFFFFFF00u;
+  fake_raw_default = -1;
+  feed_xfer(0, kWr);
+  xfer_run();
+  CHECK(xfer_results(&r, &got) == 1 && r == 3);
+  CHECK((uint32_t) (fake_now - 0xFFFFFF00u) >= 1000 && (uint32_t) (fake_now - 0xFFFFFF00u) <= 1005);
+  CHECK(raw_calls.size() >= 190 && raw_calls.size() <= 205);
+  for (size_t i = 1; i < raw_calls.size(); ++i)
+    CHECK((uint32_t) (raw_calls[i].at - raw_calls[i - 1].at) >= BUS200E_BRIDGE_XFER_BUSY_RETRY_MS);
+  // reply windows and resends across the wrap: 4 sends 60 ms apart, then result 2
+  reset_all();
+  fake_now = 0xFFFFFFE0u;
+  feed_xfer(1, kRd);
+  xfer_run();
+  CHECK(xfer_results(&r, &got) == 1 && r == 2 && raw_calls.size() == 4);
+  for (size_t i = 1; i < raw_calls.size(); ++i)
+    CHECK((uint32_t) (raw_calls[i].at - raw_calls[i - 1].at) == BUS200E_BRIDGE_XFER_REPLY_MS);
+  // a reply that lands on the far side of the wrap is still matched
+  reset_all();
+  fake_now = 0xFFFFFFE0u;
+  const Bytes rep = rd_reply();
+  reply_q.push_back({ rep, 0xFFFFFFE0u + 50 });     // after the wrap
+  feed_xfer(1, kRd);
+  xfer_run();
+  CHECK(xfer_results(&r, &got) == 1 && r == 1 && got == rep && raw_calls.size() == 1);
+}
+
+static void test_modxfer_active_accessor_for_the_console() {
+  printf("test_modxfer_active_accessor_for_the_console\n");
+  reset_all();
+  CHECK(Bus200eBridgeModXferActive() == 0);
+  feed_xfer(0, kWr);
+  CHECK(Bus200eBridgeModXferActive() == 1);   // from acceptance, before the first send
+  xfer_run();
+  CHECK(Bus200eBridgeModXferActive() == 0);
+  fake_q_hold = 1;
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x2B });
+  CHECK(Bus200eBridgeModXferActive() == 0);   // another job is not an exchange
+  reset_all();
+  feed_xfer(1, kRd);
+  Bus200eBridgeAbort();
+  CHECK(Bus200eBridgeModXferActive() == 0);
+}
+
 static void test_modxfer_reply_wire_format() {
   printf("test_modxfer_reply_wire_format\n");
   reset_all();
@@ -2472,6 +2564,9 @@ int main() {
   test_modxfer_abort_returns_to_idle_silently();
   test_modxfer_stale_drain_is_bounded_and_reads_only();
   test_modxfer_late_reply_survives_a_busy_resend();
+  test_modxfer_busy_budget_is_one_second_for_the_whole_exchange();
+  test_modxfer_survives_the_millisecond_clock_wrap();
+  test_modxfer_active_accessor_for_the_console();
   test_modxfer_reply_wire_format();
   test_info_r_reports_level_2();
 

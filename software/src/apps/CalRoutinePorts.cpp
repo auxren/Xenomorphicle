@@ -812,6 +812,11 @@ const char *ErrName(int e) {
 bool AddrOk(uint8_t a) { return (a >= 0x28 && a <= 0x2B) || a == 0x5C; }
 
 void StartJob() {
+  if (Bus200eBridgeModXferActive()) {   // a USB table exchange owns the bus: never interleave frames
+    Serial.printf("CALR,259E,%02X,ERR,BUSY\r\n", caddr);
+    cjob = J_NONE;
+    return;
+  }
   cbus.Begin(Bus(), Clock(), caddr);
   bool ok = false;
   switch (cjob) {
@@ -875,7 +880,7 @@ FLASHMEM bool Cal259Consume(int cmd) {
 
 FLASHMEM void Cal259Command() {
   if (CalBusy()) { Serial.println("CALR,259E,ERR,BUSY_CAL"); return; }
-  if (cjob != J_NONE) { Serial.println("CALR,259E,ERR,BUSY"); return; }
+  if (cjob != J_NONE || Bus200eBridgeModXferActive()) { Serial.println("CALR,259E,ERR,BUSY"); return; }
   cstate = CS_ADDR_HI;
 }
 

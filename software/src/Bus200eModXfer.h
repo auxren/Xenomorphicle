@@ -7,9 +7,9 @@
 // MOD_XFER (SysEx cmd 0x28, reply 0x68, bridge level 2): send ONE allowlisted
 // 200e bus frame to a 259e and, where the frame asks for it, return the
 // module's answer. Pure logic -- no Arduino/Teensy/USB dependency, host-tested
-// in test_bus200e_modxfer.cpp against fixtures/mod_xfer_vectors.json (a byte
-// copy of the Buccaneer app's fixture). The wire format is app/PROTOCOL.md
-// "Bridge level 2: MOD_XFER" in the Buchla_FW repository.
+// in test_bus200e_modxfer.cpp against fixtures/mod_xfer_vectors.json,
+// the same vectors a host-side client checks. The wire format is "Bridge level
+// 2: MOD_XFER" in docs/bus200e-sysex-fw.md.
 //
 // This is NOT CalRec::FrameAllowed (a different allowlist, for the Cal
 // Routine); neither calls the other.

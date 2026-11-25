@@ -1,7 +1,6 @@
 // Host tests for the MOD_XFER codec and 259e table-command allowlist
-// (src/Bus200eModXfer.cpp). The fixture fixtures/mod_xfer_vectors.json is a
-// byte copy of the Buccaneer app's app/fixtures/sysex/mod_xfer_vectors.json:
-// both sides check the same bytes.
+// (src/Bus200eModXfer.cpp). The fixture fixtures/mod_xfer_vectors.json holds
+// the vectors a host-side client checks too: both sides check the same bytes.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

@@ -2,10 +2,19 @@
 // Arduino/Teensy headers, no dynamic allocation. See Bus200eModXfer.h.
 #include <string.h>
 
+// Cold, loop-context code: flash-resident on target, like Bus200eSysEx.cpp and
+// the bridge; host builds compile it bare.
+#if defined(__IMXRT1062__)
+#include <Arduino.h>
+#define MODXFER_CODE FLASHMEM
+#else
+#define MODXFER_CODE
+#endif
+
 #include "Bus200eModXfer.h"
 #include "Bus200eSysEx.h"
 
-bool Bus200eModXferAllowed(const uint8_t *frame, uint8_t n, uint8_t want_reply) {
+MODXFER_CODE bool Bus200eModXferAllowed(const uint8_t *frame, uint8_t n, uint8_t want_reply) {
   if (!frame || want_reply > 1) return false;
   if (n < 7 || n > BUS200E_MOD_XFER_FRAME_MAX) return false;
   if (frame[0] != (uint8_t) (n - 1) || frame[1] != 0x00 || frame[2] != 0x22) return false;
@@ -22,14 +31,14 @@ bool Bus200eModXferAllowed(const uint8_t *frame, uint8_t n, uint8_t want_reply) 
   }
 }
 
-bool Bus200eModXferReplyMatches(const uint8_t *request, const uint8_t *reply, uint8_t reply_n) {
+MODXFER_CODE bool Bus200eModXferReplyMatches(const uint8_t *request, const uint8_t *reply, uint8_t reply_n) {
   if (!request || !reply) return false;
   if (reply_n < 6 || reply_n > BUS200E_MOD_XFER_REPLY_MAX) return false;
   return reply[0] == (uint8_t) (reply_n - 1) && reply[1] == 0x22 && reply[2] == request[4] &&
          reply[3] == 0x19 && reply[4] == request[6] && reply[5] == request[7];
 }
 
-int Bus200eModXferParse(const uint8_t *payload, uint32_t len, uint8_t *want_reply,
+MODXFER_CODE int Bus200eModXferParse(const uint8_t *payload, uint32_t len, uint8_t *want_reply,
                         uint8_t frame[BUS200E_MOD_XFER_FRAME_MAX], uint8_t *n) {
   if (!payload || !want_reply || !frame || !n) return -1;
   if (len < 2) return -1;  // want_reply plus at least one packed group
@@ -44,7 +53,7 @@ int Bus200eModXferParse(const uint8_t *payload, uint32_t len, uint8_t *want_repl
   return 0;
 }
 
-int Bus200eModXferBuildReply(uint8_t result, const uint8_t *reply, uint8_t reply_n,
+MODXFER_CODE int Bus200eModXferBuildReply(uint8_t result, const uint8_t *reply, uint8_t reply_n,
                              uint8_t *out, uint32_t cap) {
   if (!out || result > BUS200E_MOD_XFER_BUS_ERROR) return -1;
   if (reply_n > BUS200E_MOD_XFER_REPLY_MAX || (reply_n && !reply)) return -1;

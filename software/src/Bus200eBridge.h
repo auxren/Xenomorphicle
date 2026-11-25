@@ -274,6 +274,8 @@ void Bus200eBridgeHandleSysEx(const uint8_t *sysex, uint32_t len);
 void Bus200eBridgeTask(void);
 
 Bus200eBridgeState Bus200eBridgeGetState(void);
+// 1 while a MOD_XFER exchange owns the bus (the console '=' client refuses to start then).
+int Bus200eBridgeModXferActive(void);
 uint8_t Bus200eBridgeModAddr(void);    // target module of the active/last session
 uint32_t Bus200eBridgeDumpBytes(void); // raw length of the last dump sent/received
 uint8_t Bus200eBridgeLastNak(void);    // last Bus200eSysExNakReason sent (0 = none)

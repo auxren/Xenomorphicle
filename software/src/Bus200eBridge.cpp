@@ -75,7 +75,7 @@ static uint8_t  g_mx_waiting = 0;    // 0: (re)send the frame; 1: ACKed, waiting
 static uint8_t  g_mx_drained = 0;    // stale replies were dropped before the first send
 static uint8_t  g_mx_resends = 0;    // READ resends made so far
 static uint8_t  g_mx_busy_seen = 0;  // raw_send answered -1 during this attempt
-static uint32_t g_mx_attempt_ms = 0; // when this attempt began (busy give-up is measured from it)
+static uint32_t g_mx_start_ms = 0;   // when the request was accepted: ONE busy budget covers every send
 static uint32_t g_mx_try_ms = 0;     // last raw_send that answered -1
 static uint32_t g_mx_wait_ms = 0;    // when the frame was ACKed (reply window start)
 
@@ -164,7 +164,7 @@ BRIDGE_CODE static void session_reset(void) {
   g_mx_drained = 0;
   g_mx_resends = 0;
   g_mx_busy_seen = 0;
-  g_mx_attempt_ms = 0;
+  g_mx_start_ms = 0;
   g_mx_try_ms = 0;
   g_mx_wait_ms = 0;
 }
@@ -205,6 +205,7 @@ BRIDGE_CODE void Bus200eBridgeInit(const Bus200eBridgeOps *ops) {
 BRIDGE_CODE void Bus200eBridgeAbort(void) { end_session(); }
 
 BRIDGE_CODE Bus200eBridgeState Bus200eBridgeGetState(void) { return g_state; }
+BRIDGE_CODE int Bus200eBridgeModXferActive(void) { return g_state == BUS200E_BRIDGE_MOD_XFER ? 1 : 0; }
 BRIDGE_CODE uint8_t Bus200eBridgeModAddr(void) { return g_mod_addr; }
 BRIDGE_CODE uint32_t Bus200eBridgeDumpBytes(void) { return g_dump_bytes; }
 BRIDGE_CODE uint8_t Bus200eBridgeLastNak(void) { return g_last_nak; }
@@ -674,7 +675,7 @@ BRIDGE_CODE static void handle_mod_xfer(const uint8_t *payload, uint32_t len) {
   memcpy(g_mx_frame, frame, n);
   g_mx_n = n;
   g_mx_want = want;
-  g_mx_attempt_ms = g_ops->now_ms();
+  g_mx_start_ms = g_ops->now_ms();
   g_state = BUS200E_BRIDGE_MOD_XFER;
 }
 
@@ -927,9 +928,9 @@ BRIDGE_CODE static void modxfer_finish(uint8_t result, const uint8_t *reply, uin
 // bus frame, never a wait).
 BRIDGE_CODE static void modxfer_send_step(uint32_t now) {
   if (g_mx_busy_seen) {
-    if ((uint32_t) (now - g_mx_attempt_ms) >= BUS200E_BRIDGE_XFER_BUSY_GIVEUP_MS) {
-      // This attempt never got on the bus. A READ that already went out once has
-      // not failed to send: it just got no answer.
+    if ((uint32_t) (now - g_mx_start_ms) >= BUS200E_BRIDGE_XFER_BUSY_GIVEUP_MS) {
+      // The one busy budget (from acceptance) is spent. Before any send: result 3.
+      // A READ that already went out once has not failed to send: no answer.
       modxfer_finish(g_mx_resends ? BUS200E_MOD_XFER_NO_REPLY : BUS200E_MOD_XFER_BUS_BUSY, 0, 0);
       return;
     }
@@ -984,7 +985,6 @@ BRIDGE_CODE static void pump_modxfer(void) {
   g_mx_resends++;
   g_mx_waiting = 0;
   g_mx_busy_seen = 0;
-  g_mx_attempt_ms = now;
   modxfer_send_step(now);   // the window is over: resend in this pass
 }
 
