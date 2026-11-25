@@ -271,10 +271,97 @@ static void test_reply_matches_only_same_target_what_arg() {
   CHECK(!Bus200eModXferReplyMatches(req, nullptr, 11));
 }
 
+// Every clause of the allowlist on its own: shapes that are valid in all but
+// one respect. These do not depend on the fixture (which stays a copy of the
+// app's).
+static bool allowed_hex(const char *hex, uint8_t want) {
+  uint8_t f[40];
+  const int n = unhex(hex, f, sizeof(f));
+  CHECK(n >= 0);
+  return n >= 0 && Bus200eModXferAllowed(f, (uint8_t) n, want);
+}
+
+static void test_allowlist_pins_each_clause() {
+  printf("test_allowlist_pins_each_clause\n");
+  // positive controls
+  CHECK(allowed_hex("1000220C28CA0000088081828384858687", 0));  // 17-byte PUT, 8 data
+  CHECK(allowed_hex("0600220C28CA03", 0));
+  CHECK(allowed_hex("070022182BCA1000", 1));
+  // the bus command byte: other commands with otherwise valid shapes
+  CHECK(!allowed_hex("0600221228CA03", 0));
+  CHECK(!allowed_hex("0600221228CA03", 1));
+  CHECK(!allowed_hex("0600220B28CA04", 0));
+  CHECK(!allowed_hex("0900221228CA0100BEEF", 0));
+  CHECK(!allowed_hex("0700221228CA1000", 1));
+  CHECK(!allowed_hex("0700220B28CA1000", 1));
+  // sweep: each accepted fixture frame with only frame[3] replaced
+  int swept = 0;
+  std::string row;
+  for (int i = 0; nth_row("allow", i, &row); ++i) {
+    if (row.find("\"ok\": true") == std::string::npos) continue;
+    std::string hex;
+    int want = -1;
+    CHECK(str_field(row, "frame", &hex) && int_field(row, "want_reply", &want));
+    uint8_t f[40];
+    const int n = unhex(hex, f, sizeof(f));
+    CHECK(n >= 7);
+    if (n < 7) continue;
+    CHECK(Bus200eModXferAllowed(f, (uint8_t) n, (uint8_t) want));
+    for (int c = 0; c < 256; ++c) {
+      if (c == 0x0C || c == 0x18) continue;
+      uint8_t g[40];
+      memcpy(g, f, (size_t) n);
+      g[3] = (uint8_t) c;
+      CHECK(!Bus200eModXferAllowed(g, (uint8_t) n, 0));
+      CHECK(!Bus200eModXferAllowed(g, (uint8_t) n, 1));
+    }
+    ++swept;
+  }
+  CHECK(swept == 14);
+  // op lengths
+  CHECK(!allowed_hex("0700220C28CA0300", 0));      // op 3, n 8
+  CHECK(!allowed_hex("0700220C28CA0400", 0));      // op 4, n 8
+  CHECK(!allowed_hex("0500220C28CA", 0));          // n 6
+  CHECK(!allowed_hex("0600220C28CA0300", 0));      // length byte wrong for n 8
+  CHECK(!allowed_hex("0A00220C28CA020103E01000", 0));  // op 2, n 12 (length byte 0A -> also wrong)
+  CHECK(!allowed_hex("0B00220C28CA020103E01000", 0));  // op 2, n 12, length byte right
+  CHECK(!allowed_hex("0800220C28CA010000", 0));    // op 1, n 9
+  CHECK(!allowed_hex("0A00220C28CA0100BEEF00", 0));  // op 1, n 11, length byte right
+  CHECK(!allowed_hex("0900220C28CA020103E010", 0));  // op 2 with n 10 (len byte 09)
+  CHECK(!allowed_hex("0800220C28CA0000", 0));      // op 0, n 9
+  // want_reply on the write path and wrong want on the read path
+  CHECK(!allowed_hex("0600220C28CA03", 1));
+  CHECK(!allowed_hex("0900220C28CA0100BEEF", 1));
+  CHECK(!allowed_hex("070022182BCA1000", 0));
+  // every n 1..6 with a valid-looking prefix
+  const uint8_t base[7] = { 0x06, 0x00, 0x22, 0x0C, 0x28, 0xCA, 0x03 };
+  for (uint8_t n = 0; n < 7; ++n) {
+    uint8_t f[7];
+    memcpy(f, base, 7);
+    f[0] = n ? (uint8_t) (n - 1) : 0;
+    CHECK(!Bus200eModXferAllowed(f, n, 0));
+    CHECK(!Bus200eModXferAllowed(f, n, 1));
+  }
+  // n < 7 must be refused before any frame[5]/frame[6] read: exact-size heap
+  // buffers make an ASan build trap if the lower bound is dropped.
+  for (uint8_t n = 1; n < 7; ++n) {
+    uint8_t *f = new uint8_t[n];
+    for (uint8_t i = 0; i < n; ++i) f[i] = base[i];
+    f[0] = (uint8_t) (n - 1);
+    CHECK(!Bus200eModXferAllowed(f, n, 0));
+    CHECK(!Bus200eModXferAllowed(f, n, 1));
+    delete[] f;
+  }
+  // target range edges
+  CHECK(allowed_hex("0600220C29CA03", 0) && allowed_hex("0600220C2ACA03", 0));
+  CHECK(!allowed_hex("0600220C2CCA03", 0) && !allowed_hex("0600220C27CA03", 0));
+}
+
 int main() {
   load_fixture();
   test_allowlist_matches_fixture();
   test_parse_matches_fixture();
+  test_allowlist_pins_each_clause();
   test_build_reply_matches_fixture();
   test_parse_rejects_truncated_packing();
   test_parse_rejects_frame_over_17();
