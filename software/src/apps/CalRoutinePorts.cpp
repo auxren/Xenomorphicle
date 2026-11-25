@@ -879,6 +879,8 @@ FLASHMEM void Cal259Command() {
   cstate = CS_ADDR_HI;
 }
 
+FLASHMEM bool Cal259JobActive() { return cjob != J_NONE; }
+
 FLASHMEM void Cal259Task() {
   if (cjob == J_NONE) return;
   if (CalBusy()) {  // the Cal Routine started under us: let go
@@ -937,6 +939,7 @@ FLASHMEM void Cal259Task() {
 FLASHMEM bool Cal259Consume(int) { return false; }
 FLASHMEM void Cal259Command() {}
 FLASHMEM void Cal259Task() {}
+FLASHMEM bool Cal259JobActive() { return false; }
 
 #endif
 

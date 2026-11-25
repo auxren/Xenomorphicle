@@ -16,6 +16,7 @@
 #endif
 
 #include "Bus200eBridge.h"
+#include "Bus200eModXfer.h"
 
 // ---- session state -----------------------------------------------------------
 
@@ -63,6 +64,20 @@ static uint8_t  g_scan_have_done = 0;
 static uint32_t g_scan_done_ms = 0; // when the previous query was resolved
 static uint8_t  g_scan_trying = 0;  // query_start for g_scan_next has been refused busy
 static uint32_t g_scan_try_ms = 0;  // when that first attempt was made
+
+// MOD_XFER (bridge level 2): one allowlisted frame, stored by the handler and
+// sent from Task(). g_mx_frame is only ever a frame that passed
+// Bus200eModXferAllowed with g_mx_want, so a READ is exactly 8 bytes.
+static uint8_t  g_mx_frame[BUS200E_MOD_XFER_FRAME_MAX];
+static uint8_t  g_mx_n = 0;
+static uint8_t  g_mx_want = 0;
+static uint8_t  g_mx_waiting = 0;    // 0: (re)send the frame; 1: ACKed, waiting for the reply
+static uint8_t  g_mx_drained = 0;    // stale replies were dropped before the first send
+static uint8_t  g_mx_resends = 0;    // READ resends made so far
+static uint8_t  g_mx_busy_seen = 0;  // raw_send answered -1 during this attempt
+static uint32_t g_mx_attempt_ms = 0; // when this attempt began (busy give-up is measured from it)
+static uint32_t g_mx_try_ms = 0;     // last raw_send that answered -1
+static uint32_t g_mx_wait_ms = 0;    // when the frame was ACKed (reply window start)
 
 // ---- small helpers -------------------------------------------------------------
 
@@ -142,6 +157,16 @@ BRIDGE_CODE static void session_reset(void) {
   g_scan_done_ms = 0;
   g_scan_trying = 0;
   g_scan_try_ms = 0;
+  memset(g_mx_frame, 0, sizeof(g_mx_frame));
+  g_mx_n = 0;
+  g_mx_want = 0;
+  g_mx_waiting = 0;
+  g_mx_drained = 0;
+  g_mx_resends = 0;
+  g_mx_busy_seen = 0;
+  g_mx_attempt_ms = 0;
+  g_mx_try_ms = 0;
+  g_mx_wait_ms = 0;
 }
 
 // The scan shortens the master's QUERY reply timeout; every way out of a scan
@@ -613,6 +638,69 @@ BRIDGE_CODE static void handle_bus_status(void) {
   if (n > 0) g_ops->send_message(out, (uint32_t) n);
 }
 
+// ---- MOD_XFER (bridge level 2, docs/bus200e-sysex-fw.md) ----------------------------
+
+// The handler only validates and stores: it transmits nothing and sends no
+// reply. Task() sends the frame (pump_modxfer) and answers with MOD_XFER_R.
+// Refusal order (the first that applies wins): no raw_send NAK 2; a firmware
+// load being received NAK 10; busy NAK 5; card armed or serving NAK 10; Cal
+// Routine run or console '=' job NAK 17; payload does not parse NAK 6; frame
+// outside the allowlist NAK 18; a READ with no pop_reply NAK 2.
+BRIDGE_CODE static void handle_mod_xfer(const uint8_t *payload, uint32_t len) {
+  const uint8_t cmd = BUS200E_SYSEX_CMD_MOD_XFER;
+  if (!g_ops->raw_send) { send_nak(cmd, BUS200E_SYSEX_NAK_UNKNOWN_CMD); return; }
+  if (g_state == BUS200E_BRIDGE_FW_RECEIVING) { send_nak(cmd, BUS200E_SYSEX_NAK_FW_BUSY); return; }
+  if (busy()) { send_nak(cmd, BUS200E_SYSEX_NAK_BUSY); return; }
+  if ((g_ops->fw_armed && g_ops->fw_armed()) || (g_ops->fw_serving && g_ops->fw_serving())) {
+    send_nak(cmd, BUS200E_SYSEX_NAK_FW_BUSY);
+    return;
+  }
+  if (cal_run() || (g_ops->cal_job_active && g_ops->cal_job_active())) {
+    send_nak(cmd, BUS200E_SYSEX_NAK_CAL_RUN);
+    return;
+  }
+  uint8_t want = 0, n = 0;
+  uint8_t frame[BUS200E_MOD_XFER_FRAME_MAX];
+  if (Bus200eModXferParse(payload, len, &want, frame, &n) != 0) {
+    send_nak(cmd, BUS200E_SYSEX_NAK_CHECKSUM);
+    return;
+  }
+  if (!Bus200eModXferAllowed(frame, n, want)) {
+    send_nak(cmd, BUS200E_SYSEX_NAK_FRAME_REFUSED);
+    return;
+  }
+  if (want && !g_ops->pop_reply) { send_nak(cmd, BUS200E_SYSEX_NAK_UNKNOWN_CMD); return; }
+  session_reset();
+  memcpy(g_mx_frame, frame, n);
+  g_mx_n = n;
+  g_mx_want = want;
+  g_mx_attempt_ms = g_ops->now_ms();
+  g_state = BUS200E_BRIDGE_MOD_XFER;
+}
+
+// While an exchange runs every command that would start or feed another job is
+// NAK 5. The read-only queries (INFO, STATUS, BUS_STATUS, FW_STATUS) answer, as
+// they do during a scan.
+BRIDGE_CODE static int mod_xfer_refuses(uint8_t cmd) {
+  if (g_state != BUS200E_BRIDGE_MOD_XFER) return 0;
+  switch (cmd) {
+    case BUS200E_SYSEX_CMD_GET_DUMP:
+    case BUS200E_SYSEX_CMD_PUT_DUMP:
+    case BUS200E_SYSEX_CMD_DUMP_DATA:
+    case BUS200E_SYSEX_CMD_DUMP_END:
+    case BUS200E_SYSEX_CMD_SCAN:
+    case BUS200E_SYSEX_CMD_POLL_DONE:
+    case BUS200E_SYSEX_CMD_MOD_XFER:
+    case BUS200E_SYSEX_CMD_FW_BEGIN:
+    case BUS200E_SYSEX_CMD_FW_DATA:
+    case BUS200E_SYSEX_CMD_FW_END:
+    case BUS200E_SYSEX_CMD_FW_ARM:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
 // ---- RX entry point --------------------------------------------------------------
 
 BRIDGE_CODE void Bus200eBridgeHandleSysEx(const uint8_t *sysex, uint32_t len) {
@@ -650,6 +738,8 @@ BRIDGE_CODE void Bus200eBridgeHandleSysEx(const uint8_t *sysex, uint32_t len) {
     return;
   }
 
+  if (mod_xfer_refuses(cmd)) { send_nak(cmd, BUS200E_SYSEX_NAK_BUSY); return; }
+
   switch (cmd) {
     case BUS200E_SYSEX_CMD_INFO:      handle_info(); break;
     case BUS200E_SYSEX_CMD_STATUS:    handle_status(); break;
@@ -660,6 +750,7 @@ BRIDGE_CODE void Bus200eBridgeHandleSysEx(const uint8_t *sysex, uint32_t len) {
     case BUS200E_SYSEX_CMD_SCAN:       handle_scan(raw, raw_len); break;
     case BUS200E_SYSEX_CMD_POLL_DONE:  handle_poll_done(); break;
     case BUS200E_SYSEX_CMD_BUS_STATUS: handle_bus_status(); break;
+    case BUS200E_SYSEX_CMD_MOD_XFER:   handle_mod_xfer(raw, raw_len); break;
     case BUS200E_SYSEX_CMD_FW_BEGIN:
     case BUS200E_SYSEX_CMD_FW_DATA:
     case BUS200E_SYSEX_CMD_FW_END:
@@ -823,6 +914,80 @@ BRIDGE_CODE static void pump_scan(void) {
   g_scan_next++;
 }
 
+// Every way out of an exchange: back to IDLE, then exactly one MOD_XFER_R.
+// `reply` is non-NULL only for result 1.
+BRIDGE_CODE static void modxfer_finish(uint8_t result, const uint8_t *reply, uint8_t reply_n) {
+  session_reset();
+  uint8_t out[BUS200E_SYSEX_MAX_MESSAGE];
+  const int n = Bus200eModXferBuildReply(result, reply, reply_n, out, sizeof(out));
+  if (n > 0) g_ops->send_message(out, (uint32_t) n);
+}
+
+// Phase 0: one attempt to put the frame on the bus (raw_send is one synchronous
+// bus frame, never a wait).
+BRIDGE_CODE static void modxfer_send_step(uint32_t now) {
+  if (g_mx_busy_seen) {
+    if ((uint32_t) (now - g_mx_attempt_ms) >= BUS200E_BRIDGE_XFER_BUSY_GIVEUP_MS) {
+      // This attempt never got on the bus. A READ that already went out once has
+      // not failed to send: it just got no answer.
+      modxfer_finish(g_mx_resends ? BUS200E_MOD_XFER_NO_REPLY : BUS200E_MOD_XFER_BUS_BUSY, 0, 0);
+      return;
+    }
+    if ((uint32_t) (now - g_mx_try_ms) < BUS200E_BRIDGE_XFER_BUSY_RETRY_MS) return;
+  }
+  if (g_mx_want && !g_mx_drained) {   // replies already queued answer nothing we sent
+    uint8_t junk[BUS200E_MOD_XFER_REPLY_MAX + 2], jn = 0;
+    for (int i = 0; i < 8 && g_ops->pop_reply(junk, &jn); ++i) {}
+  }
+  g_mx_drained = 1;
+  const int rc = g_ops->raw_send(g_mx_frame, g_mx_n);
+  if (rc == -1) {   // bus not quiet: NOT sent, try again shortly
+    g_mx_busy_seen = 1;
+    g_mx_try_ms = now;
+    return;
+  }
+  if (rc != 0) {    // a bus error may follow a frame the module latched: never resent
+    modxfer_finish(BUS200E_MOD_XFER_BUS_ERROR, 0, 0);
+    return;
+  }
+  if (!g_mx_want) { modxfer_finish(BUS200E_MOD_XFER_SENT, 0, 0); return; }
+  g_mx_waiting = 1;
+  g_mx_wait_ms = now;
+}
+
+// One non-blocking step: send, or wait up to BUS200E_BRIDGE_XFER_REPLY_MS for
+// the matching reply and then, for a READ only, send again.
+BRIDGE_CODE static void pump_modxfer(void) {
+  if (!g_ops->raw_send || (g_mx_want && !g_ops->pop_reply)) {
+    end_session();   // ops swapped under us: nothing left to drive
+    return;
+  }
+  const uint32_t now = g_ops->now_ms();
+  if (!g_mx_waiting) { modxfer_send_step(now); return; }
+  // Waiting for the answer to a READ (the only frame with want_reply 1, 8 bytes).
+  if (g_mx_want == 1 && g_mx_n == 8) {
+    uint8_t reply[BUS200E_MOD_XFER_REPLY_MAX + 2], rn = 0;
+    for (int i = 0; i < 8; ++i) {
+      rn = 0;
+      if (!g_ops->pop_reply(reply, &rn)) break;
+      if (rn <= BUS200E_MOD_XFER_REPLY_MAX && Bus200eModXferReplyMatches(g_mx_frame, reply, rn)) {
+        modxfer_finish(BUS200E_MOD_XFER_REPLY, reply, rn);
+        return;
+      }
+    }
+  }
+  if ((uint32_t) (now - g_mx_wait_ms) < BUS200E_BRIDGE_XFER_REPLY_MS) return;
+  if (g_mx_resends >= BUS200E_BRIDGE_XFER_RESENDS) {
+    modxfer_finish(BUS200E_MOD_XFER_NO_REPLY, 0, 0);
+    return;
+  }
+  g_mx_resends++;
+  g_mx_waiting = 0;
+  g_mx_busy_seen = 0;
+  g_mx_attempt_ms = now;
+  modxfer_send_step(now);   // the window is over: resend in this pass
+}
+
 BRIDGE_CODE void Bus200eBridgeTask(void) {
   if (!ops_ok()) return;
   switch (g_state) {
@@ -830,6 +995,7 @@ BRIDGE_CODE void Bus200eBridgeTask(void) {
     case BUS200E_BRIDGE_SENDING:   pump_send(); break;
     case BUS200E_BRIDGE_RESTORING: pump_restore(); break;
     case BUS200E_BRIDGE_SCANNING:  pump_scan(); break;
+    case BUS200E_BRIDGE_MOD_XFER:  pump_modxfer(); break;
     case BUS200E_BRIDGE_RECEIVING:
       if (g_ops->now_ms() - g_rx_last_ms > BUS200E_BRIDGE_RX_TIMEOUT_MS) {
         send_nak(BUS200E_SYSEX_CMD_PUT_DUMP, BUS200E_SYSEX_NAK_SEND_TIMEOUT);

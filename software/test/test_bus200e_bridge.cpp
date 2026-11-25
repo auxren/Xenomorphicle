@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "../src/Bus200eBridge.h"
+#include "../src/Bus200eModXfer.h"
 
 static int checks = 0, fails = 0;
 #define CHECK(cond) do { \
@@ -170,6 +171,37 @@ static uint16_t f_ver_gen() { return fake_ver_gen; }
 static int fake_cal_run;
 static int f_cal_run() { return fake_cal_run; }
 
+// ---- fake MOD_XFER side ---------------------------------------------------------
+// raw_send answers from a script (then fake_raw_default) and logs every call;
+// pop_reply hands out queued replies once fake_now reaches their arrival time.
+struct RawCall { std::vector<uint8_t> frame; uint32_t at; };
+static std::vector<RawCall> raw_calls;
+static std::vector<int> raw_script;        // consumed front to back
+static size_t raw_script_pos;
+static int fake_raw_default;
+static int fake_cal_job;
+static int pop_calls;
+struct QReply { std::vector<uint8_t> frame; uint32_t at; };
+static std::vector<QReply> reply_q;
+
+static int f_raw_send(const uint8_t *f, uint8_t n) {
+  raw_calls.push_back({ std::vector<uint8_t>(f, f + n), fake_now });
+  if (raw_script_pos < raw_script.size()) return raw_script[raw_script_pos++];
+  return fake_raw_default;
+}
+static int f_pop_reply(uint8_t *f, uint8_t *n) {
+  pop_calls++;
+  for (size_t i = 0; i < reply_q.size(); ++i) {
+    if (reply_q[i].at > fake_now) continue;
+    memcpy(f, reply_q[i].frame.data(), reply_q[i].frame.size());
+    *n = (uint8_t) reply_q[i].frame.size();
+    reply_q.erase(reply_q.begin() + (long) i);
+    return 1;
+  }
+  return 0;
+}
+static int f_cal_job() { return fake_cal_job; }
+
 static const Bus200eBridgeOps fake_ops = {
   f_now,
   f_card_serving, f_card_serve_enable, f_card_image, f_card_size, f_card_dirty,
@@ -183,6 +215,7 @@ static const Bus200eBridgeOps fake_ops = {
   f_ver_gen,
   f_set_timeout,
   f_cal_run,
+  f_raw_send, f_pop_reply, f_cal_job,
 };
 
 static void reset_all(uint32_t card_size = kFakeCardSmall) {
@@ -222,6 +255,8 @@ static void reset_all(uint32_t card_size = kFakeCardSmall) {
   fake_ver_addr = 0;
   fake_ver_gen = 0;
   fake_cal_run = 0;
+  raw_calls.clear(); raw_script.clear(); raw_script_pos = 0; fake_raw_default = 0;
+  fake_cal_job = 0; pop_calls = 0; reply_q.clear();
   memset(fake_ver_known, 0, sizeof(fake_ver_known));
   memcpy(fake_ver_bytes, "31.2C2 ", 7);
   sent.clear();
@@ -1786,6 +1821,572 @@ static void test_garbled_fw_data_without_fw_ops_naks_unknown() {
   Bus200eBridgeInit(&fake_ops);
 }
 
+
+// ---- MOD_XFER (bridge level 2) ---------------------------------------------------
+
+typedef std::vector<uint8_t> Bytes;
+
+// An allowed 259e write (op 3, 7 bytes) and an allowed read of target 0x2B.
+static const Bytes kWr = { 0x06, 0x00, 0x22, 0x0C, 0x28, 0xCA, 0x03 };
+static const Bytes kRd = { 0x07, 0x00, 0x22, 0x18, 0x2B, 0xCA, 0x10, 0x00 };
+// A matching answer to kRd: cmd 0x19 from 0x2B, what 0x10, arg 0x00, 5 data bytes.
+static Bytes rd_reply(uint8_t src = 0x2B, uint8_t what = 0x10, uint8_t arg = 0x00,
+                      uint8_t cmd = 0x19, uint8_t fill = 1) {
+  return { 0x0A, 0x22, src, cmd, what, arg, fill, 2, 3, 4, 5 };
+}
+
+static std::vector<uint8_t> modxfer_payload(uint8_t want, const Bytes &frame) {
+  uint8_t packed[40];
+  const int pn = Bus200eSysExPack(frame.data(), (uint32_t) frame.size(), packed, sizeof(packed));
+  assert(pn > 0);
+  std::vector<uint8_t> p;
+  p.push_back(want);
+  p.insert(p.end(), packed, packed + pn);
+  return p;
+}
+
+static void feed_xfer(uint8_t want, const Bytes &frame) {
+  const std::vector<uint8_t> p = modxfer_payload(want, frame);
+  uint8_t msg[BUS200E_SYSEX_MAX_MESSAGE];
+  const int n = Bus200eSysExBuildMessage(BUS200E_SYSEX_CMD_MOD_XFER, p.data(), (uint32_t) p.size(),
+                                         nullptr, 0, msg, sizeof(msg));
+  assert(n > 0);
+  Bus200eBridgeHandleSysEx(msg, (uint32_t) n);
+}
+
+// Task() once per millisecond of fake time until the bridge settles.
+static void xfer_run(int max_ms = 5000) {
+  while (max_ms-- > 0 && Bus200eBridgeGetState() != BUS200E_BRIDGE_IDLE) {
+    Bus200eBridgeTask();
+    fake_now += 1;
+  }
+}
+
+// The MOD_XFER_R in `sent` (exactly one expected); fills result and the unpacked reply.
+static int xfer_results(int *result, Bytes *reply) {
+  int cnt = 0;
+  for (const SentMsg &m : sent) {
+    if (m.cmd != BUS200E_SYSEX_CMD_MOD_XFER_R) continue;
+    ++cnt;
+    if (m.raw.empty()) continue;
+    *result = m.raw[0];
+    uint8_t out[32];
+    const int n = m.raw.size() > 1
+        ? Bus200eSysExUnpack(m.raw.data() + 1, (uint32_t) m.raw.size() - 1, out, sizeof(out)) : 0;
+    reply->assign(out, out + (n > 0 ? n : 0));
+  }
+  return cnt;
+}
+
+static void test_modxfer_write_ack_is_result0_one_send() {
+  printf("test_modxfer_write_ack_is_result0_one_send\n");
+  reset_all();
+  feed_xfer(0, kWr);
+  xfer_run();
+  int r = -1; Bytes rep;
+  CHECK(xfer_results(&r, &rep) == 1 && r == 0 && rep.empty());
+  CHECK(raw_calls.size() == 1 && raw_calls[0].frame == kWr);
+  CHECK(sent.size() == 1 && sent[0].raw.size() == 1);   // nothing after result
+  CHECK(pop_calls == 0);                                // a write never looks for replies
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  // the exchange is over: a new one is accepted
+  sent.clear();
+  feed_xfer(0, kWr);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_MOD_XFER);
+  xfer_run();
+  CHECK(xfer_results(&r, &rep) == 1 && r == 0 && raw_calls.size() == 2);
+}
+
+static void test_modxfer_handler_sends_nothing_before_task() {
+  printf("test_modxfer_handler_sends_nothing_before_task\n");
+  reset_all();
+  feed_xfer(0, kWr);
+  CHECK(raw_calls.empty() && sent.empty() && pop_calls == 0);   // no ACK, nothing on the bus
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_MOD_XFER);
+  fake_now += 500;                                              // time alone sends nothing
+  CHECK(raw_calls.empty());
+  Bus200eBridgeTask();
+  CHECK(raw_calls.size() == 1 && sent.size() == 1);
+  // and a READ: the first Task() drains and sends, still before any reply
+  reset_all();
+  feed_xfer(1, kRd);
+  CHECK(raw_calls.empty() && pop_calls == 0 && sent.empty());
+}
+
+static void test_modxfer_read_returns_matching_reply() {
+  printf("test_modxfer_read_returns_matching_reply\n");
+  reset_all();
+  const Bytes rep = rd_reply();
+  reply_q.push_back({ rep, 1000 + 10 });     // arrives 10 ms after the request
+  feed_xfer(1, kRd);
+  xfer_run();
+  int r = -1; Bytes got;
+  CHECK(xfer_results(&r, &got) == 1 && r == 1 && got == rep);
+  CHECK(raw_calls.size() == 1 && raw_calls[0].frame == kRd);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  // a reply exactly at the 60 ms mark still wins over the resend
+  reset_all();
+  reply_q.push_back({ rep, 1000 + BUS200E_BRIDGE_XFER_REPLY_MS });
+  feed_xfer(1, kRd);
+  xfer_run();
+  CHECK(xfer_results(&r, &got) == 1 && r == 1 && got == rep && raw_calls.size() == 1);
+  // 6 and 18 byte replies are the limits
+  reset_all();
+  Bytes r6 = { 0x05, 0x22, 0x2B, 0x19, 0x10, 0x00 };
+  reply_q.push_back({ r6, 1001 });
+  feed_xfer(1, kRd);
+  xfer_run();
+  CHECK(xfer_results(&r, &got) == 1 && r == 1 && got == r6);
+}
+
+static void test_modxfer_read_skips_stale_and_foreign_replies() {
+  printf("test_modxfer_read_skips_stale_and_foreign_replies\n");
+  reset_all();
+  // 8 stale replies already queued (one would even match): all drained before the send
+  for (int i = 0; i < 8; ++i) reply_q.push_back({ rd_reply(0x2B, 0x10, 0x00, 0x19, (uint8_t) (0x40 + i)), 0 });
+  // foreign ones arrive after the send: wrong source, what, arg, cmd 0x13, wrong length byte
+  reply_q.push_back({ rd_reply(0x2A), 1005 });
+  reply_q.push_back({ rd_reply(0x2B, 0x11), 1006 });
+  reply_q.push_back({ rd_reply(0x2B, 0x10, 0x01), 1007 });
+  reply_q.push_back({ rd_reply(0x2B, 0x10, 0x00, 0x13), 1008 });
+  Bytes badlen = rd_reply(); badlen[0] = 0x09;
+  reply_q.push_back({ badlen, 1009 });
+  const Bytes good = rd_reply(0x2B, 0x10, 0x00, 0x19, 0x77);
+  reply_q.push_back({ good, 1020 });
+  feed_xfer(1, kRd);
+  xfer_run();
+  int r = -1; Bytes got;
+  CHECK(xfer_results(&r, &got) == 1 && r == 1 && got == good);
+  CHECK(raw_calls.size() == 1);
+  CHECK(reply_q.empty());
+  // only a reply to the other target: never accepted, ends with result 2
+  reset_all();
+  reply_q.push_back({ rd_reply(0x28), 1010 });
+  feed_xfer(1, kRd);
+  xfer_run();
+  CHECK(xfer_results(&r, &got) == 1 && r == 2 && got.empty());
+}
+
+static void test_modxfer_read_no_reply_after_3_resends_is_result2() {
+  printf("test_modxfer_read_no_reply_after_3_resends_is_result2\n");
+  reset_all();
+  feed_xfer(1, kRd);
+  xfer_run();
+  int r = -1; Bytes got;
+  CHECK(xfer_results(&r, &got) == 1 && r == 2 && got.empty());
+  CHECK(raw_calls.size() == 4);                        // 1 + 3 resends, never more
+  for (size_t i = 0; i < raw_calls.size() && i < 4; ++i) {
+    CHECK(raw_calls[i].frame == kRd);
+    CHECK(raw_calls[i].at == 1000 + i * BUS200E_BRIDGE_XFER_REPLY_MS);
+  }
+  CHECK(fake_now - 1000 <= 4 * BUS200E_BRIDGE_XFER_REPLY_MS + 2);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+}
+
+static void test_modxfer_write_never_resent_on_error_result4() {
+  printf("test_modxfer_write_never_resent_on_error_result4\n");
+  const int errs[] = { 2, 3, 4, 5, -2, 1, -7 };
+  for (int e : errs) {
+    reset_all();
+    fake_raw_default = e;
+    feed_xfer(0, kWr);
+    xfer_run(300);
+    int r = -1; Bytes got;
+    CHECK(xfer_results(&r, &got) == 1 && r == 4 && got.empty());
+    CHECK(raw_calls.size() == 1);                      // exactly one attempt, ever
+    CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+    for (int i = 0; i < 100; ++i) { Bus200eBridgeTask(); fake_now += 10; }
+    CHECK(raw_calls.size() == 1);
+  }
+  // an error after earlier -1 (not sent) answers: still one error attempt, result 4
+  reset_all();
+  raw_script = { -1, -1, 4 };
+  feed_xfer(0, kWr);
+  xfer_run();
+  int r = -1; Bytes got;
+  CHECK(xfer_results(&r, &got) == 1 && r == 4 && raw_calls.size() == 3);
+}
+
+static void test_modxfer_read_error_is_not_resent_and_resend_error_ends() {
+  printf("test_modxfer_read_error_is_not_resent_and_resend_error_ends\n");
+  // first attempt errors: result 4, no resend
+  reset_all();
+  fake_raw_default = 4;
+  feed_xfer(1, kRd);
+  xfer_run();
+  int r = -1; Bytes got;
+  CHECK(xfer_results(&r, &got) == 1 && r == 4 && raw_calls.size() == 1);
+  // ACK, no reply, the resend errors: result 4, two attempts
+  reset_all();
+  raw_script = { 0, 4 };
+  feed_xfer(1, kRd);
+  xfer_run();
+  CHECK(xfer_results(&r, &got) == 1 && r == 4 && raw_calls.size() == 2);
+  // the third attempt errors
+  reset_all();
+  raw_script = { 0, 0, -2 };
+  feed_xfer(1, kRd);
+  xfer_run();
+  CHECK(xfer_results(&r, &got) == 1 && r == 4 && raw_calls.size() == 3);
+}
+
+static void test_modxfer_busy_retries_then_result3_no_send_counted() {
+  printf("test_modxfer_busy_retries_then_result3_no_send_counted\n");
+  reset_all();
+  fake_raw_default = -1;                  // the bus is never quiet
+  feed_xfer(0, kWr);
+  xfer_run();
+  int r = -1; Bytes got;
+  CHECK(xfer_results(&r, &got) == 1 && r == 3 && got.empty());
+  CHECK(fake_now - 1000 >= BUS200E_BRIDGE_XFER_BUSY_GIVEUP_MS &&
+        fake_now - 1000 <= BUS200E_BRIDGE_XFER_BUSY_GIVEUP_MS + 5);
+  // retried every 5 ms, no faster, and a few hundred tries at most
+  CHECK(raw_calls.size() >= 190 && raw_calls.size() <= 205);
+  for (size_t i = 1; i < raw_calls.size(); ++i)
+    CHECK(raw_calls[i].at - raw_calls[i - 1].at >= BUS200E_BRIDGE_XFER_BUSY_RETRY_MS);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  // a READ that never finds the bus quiet: result 3, no waiting for replies
+  reset_all();
+  fake_raw_default = -1;
+  feed_xfer(1, kRd);
+  xfer_run();
+  CHECK(xfer_results(&r, &got) == 1 && r == 3);
+  // the bus frees up after 3 tries: the write goes out once, result 0
+  reset_all();
+  raw_script = { -1, -1, -1, 0 };
+  feed_xfer(0, kWr);
+  xfer_run();
+  CHECK(xfer_results(&r, &got) == 1 && r == 0 && raw_calls.size() == 4);
+  CHECK(raw_calls[3].at - raw_calls[0].at == 3 * BUS200E_BRIDGE_XFER_BUSY_RETRY_MS);
+  // a READ whose RESEND finds the bus busy for 1 s: the frame went out once, so not result 3
+  reset_all();
+  raw_script = { 0 };
+  fake_raw_default = -1;
+  feed_xfer(1, kRd);
+  xfer_run();
+  CHECK(xfer_results(&r, &got) == 1 && r == 2);
+  CHECK(fake_now - 1000 >= BUS200E_BRIDGE_XFER_REPLY_MS + BUS200E_BRIDGE_XFER_BUSY_GIVEUP_MS);
+}
+
+static void test_modxfer_refused_frame_nak18_no_send() {
+  printf("test_modxfer_refused_frame_nak18_no_send\n");
+  struct Case { uint8_t want; Bytes f; } cases[] = {
+    { 0, { 0x06, 0x00, 0x22, 0x0C, 0x27, 0xCA, 0x03 } },          // target 0x27
+    { 0, { 0x06, 0x00, 0x22, 0x0C, 0x2C, 0xCA, 0x03 } },          // target 0x2C
+    { 0, { 0x06, 0x00, 0x22, 0x0C, 0x28, 0xCB, 0x03 } },          // magic
+    { 0, { 0x06, 0x00, 0x22, 0x12, 0x28, 0xCA, 0x03 } },          // bus cmd 0x12
+    { 0, { 0x06, 0x00, 0x22, 0x0C, 0x28, 0xCA, 0x09 } },          // op 9
+    { 1, kWr },                                                   // write asking for a reply
+    { 0, kRd },                                                   // read not asking for one
+    { 0, { 0x06, 0x00, 0x23, 0x0C, 0x28, 0xCA, 0x03 } },          // wrong source
+    { 0, { 0x05, 0x00, 0x22, 0x0C, 0x28, 0xCA, 0x03 } },          // length byte wrong
+    { 0, { 0x0A, 0x00, 0x22, 0x0C, 0x28, 0xCA, 0x03, 0, 0, 0 } }, // op 3 too long
+  };
+  for (const Case &c : cases) {
+    reset_all();
+    feed_xfer(c.want, c.f);
+    CHECK(nak_code(last_sent()) == 18);
+    CHECK(last_sent() && last_sent()->raw.size() == 2 && last_sent()->raw[0] == BUS200E_SYSEX_CMD_MOD_XFER);
+    CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+    xfer_run(50);
+    for (int i = 0; i < 50; ++i) { Bus200eBridgeTask(); fake_now += 10; }
+    CHECK(raw_calls.empty() && pop_calls == 0 && sent.size() == 1);
+  }
+}
+
+static void test_modxfer_bad_payload_nak6() {
+  printf("test_modxfer_bad_payload_nak6\n");
+  // want_reply 2; a frame of 6 bytes; a frame of 18 bytes; a non-7-bit byte is
+  // not representable through feed(), so use a short payload (want only)
+  reset_all();
+  feed_xfer(2, kWr);
+  CHECK(nak_code(last_sent()) == 6);
+  reset_all();
+  feed_xfer(0, { 0x05, 0x00, 0x22, 0x0C, 0x28, 0xCA });
+  CHECK(nak_code(last_sent()) == 6);
+  reset_all();
+  feed_xfer(0, Bytes(18, 0x00));
+  CHECK(nak_code(last_sent()) == 6);
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_MOD_XFER, { 0 });
+  CHECK(nak_code(last_sent()) == 6);
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_MOD_XFER, {});
+  CHECK(nak_code(last_sent()) == 6);
+  CHECK(raw_calls.empty() && Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+}
+
+static void test_modxfer_nak5_while_busy() {
+  printf("test_modxfer_nak5_while_busy\n");
+  reset_all();
+  fake_q_hold = 1;
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x2B });
+  Bus200eBridgeTask();
+  sent.clear();
+  feed_xfer(0, kWr);
+  CHECK(nak_code(last_sent()) == 5);
+  CHECK(raw_calls.empty() && Bus200eBridgeGetState() == BUS200E_BRIDGE_SCANNING);
+  // a dump session in flight
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x5C });
+  feed_xfer(0, kWr);
+  CHECK(nak_code(last_sent()) == 5);
+  CHECK(raw_calls.empty() && Bus200eBridgeGetState() == BUS200E_BRIDGE_RECEIVING);
+  // busy outranks a refused frame
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x5C });
+  feed_xfer(0, { 0x06, 0x00, 0x22, 0x0C, 0x27, 0xCA, 0x03 });
+  CHECK(nak_code(last_sent()) == 5);
+}
+
+static void test_modxfer_nak10_card_armed() {
+  printf("test_modxfer_nak10_card_armed\n");
+  reset_all();
+  fw_armed_v = 1;
+  feed_xfer(0, kWr);
+  CHECK(nak_code(last_sent()) == 10);
+  CHECK(raw_calls.empty() && Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  xfer_run(10); Bus200eBridgeTask();
+  CHECK(raw_calls.empty());
+  // armed outranks a refused frame
+  reset_all();
+  fw_armed_v = 1;
+  feed_xfer(0, { 0x06, 0x00, 0x22, 0x0C, 0x27, 0xCA, 0x03 });
+  CHECK(nak_code(last_sent()) == 10);
+}
+
+static void test_modxfer_nak10_card_serving() {
+  printf("test_modxfer_nak10_card_serving\n");
+  reset_all();
+  fw_serving_v = 1;
+  feed_xfer(1, kRd);
+  CHECK(nak_code(last_sent()) == 10);
+  CHECK(raw_calls.empty() && pop_calls == 0 && Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  // a firmware load being received is also 10 (as for GET_DUMP and SCAN)
+  reset_all();
+  begin_ok();
+  sent.clear();
+  feed_xfer(0, kWr);
+  CHECK(nak_code(last_sent()) == 10);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_FW_RECEIVING && fw_abort_calls == 0 && raw_calls.empty());
+  // serving outranks cal run
+  reset_all();
+  fw_serving_v = 1; fake_cal_run = 1;
+  feed_xfer(0, kWr);
+  CHECK(nak_code(last_sent()) == 10);
+}
+
+static void test_modxfer_nak17_cal_run() {
+  printf("test_modxfer_nak17_cal_run\n");
+  reset_all();
+  fake_cal_run = 1;
+  feed_xfer(0, kWr);
+  CHECK(nak_code(last_sent()) == 17);
+  CHECK(raw_calls.empty() && Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  // 17 outranks a malformed payload and a refused frame
+  reset_all();
+  fake_cal_run = 1;
+  feed_xfer(2, kWr);
+  CHECK(nak_code(last_sent()) == 17);
+  feed_xfer(0, { 0x06, 0x00, 0x22, 0x0C, 0x27, 0xCA, 0x03 });
+  CHECK(nak_code(last_sent()) == 17);
+}
+
+static void test_modxfer_nak17_cal_job() {
+  printf("test_modxfer_nak17_cal_job\n");
+  reset_all();
+  fake_cal_job = 1;
+  feed_xfer(1, kRd);
+  CHECK(nak_code(last_sent()) == 17);
+  CHECK(raw_calls.empty() && Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  // the console job is not a Cal Routine run for the dump commands
+  feed(BUS200E_SYSEX_CMD_GET_DUMP, { 0x5C });
+  CHECK(nak_code(last_sent()) != 17);
+  // the job ending frees MOD_XFER
+  reset_all();
+  fake_cal_job = 1;
+  feed_xfer(1, kRd);
+  fake_cal_job = 0;
+  feed_xfer(0, kWr);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_MOD_XFER);
+  // no job op at all: never active
+  reset_all();
+  Bus200eBridgeOps bare = fake_ops;
+  bare.cal_job_active = nullptr;
+  Bus200eBridgeInit(&bare);
+  feed_xfer(0, kWr);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_MOD_XFER);
+  Bus200eBridgeInit(&fake_ops);
+}
+
+static void test_modxfer_null_ops_nak2() {
+  printf("test_modxfer_null_ops_nak2\n");
+  reset_all();
+  Bus200eBridgeOps bare = fake_ops;
+  bare.raw_send = nullptr;
+  Bus200eBridgeInit(&bare);
+  feed_xfer(0, kWr);
+  CHECK(nak_code(last_sent()) == 2);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE && raw_calls.empty());
+  feed_xfer(1, kRd);
+  CHECK(nak_code(last_sent()) == 2);
+  // a READ cannot work without pop_reply: NAK 2 and nothing sent; a write still can
+  Bus200eBridgeOps nopop = fake_ops;
+  nopop.pop_reply = nullptr;
+  Bus200eBridgeInit(&nopop);
+  feed_xfer(1, kRd);
+  CHECK(nak_code(last_sent()) == 2);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE && raw_calls.empty());
+  feed_xfer(0, kWr);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_MOD_XFER);
+  xfer_run();
+  CHECK(raw_calls.size() == 1);
+  // and with no ops table at all nothing happens
+  Bus200eBridgeInit(&fake_ops);
+}
+
+static void test_modxfer_second_request_while_running_nak5() {
+  printf("test_modxfer_second_request_while_running_nak5\n");
+  reset_all();
+  feed_xfer(1, kRd);
+  Bus200eBridgeTask();                       // first send went out, waiting for a reply
+  CHECK(raw_calls.size() == 1);
+  sent.clear();
+  feed_xfer(0, kWr);                         // a second MOD_XFER
+  CHECK(nak_code(last_sent()) == 5);
+  feed(BUS200E_SYSEX_CMD_GET_DUMP, { 0x5C });
+  CHECK(nak_code(last_sent()) == 5);
+  feed(BUS200E_SYSEX_CMD_PUT_DUMP, { 0x5C });
+  CHECK(nak_code(last_sent()) == 5);
+  feed(BUS200E_SYSEX_CMD_SCAN, { 0x28, 0x2B });
+  CHECK(nak_code(last_sent()) == 5);
+  feed(BUS200E_SYSEX_CMD_POLL_DONE, {});
+  CHECK(nak_code(last_sent()) == 5);
+  feed_fw_begin(2, 1000, 1);
+  CHECK(nak_code(last_sent()) == 5);
+  feed(BUS200E_SYSEX_CMD_FW_ARM, { 1 });
+  CHECK(nak_code(last_sent()) == 5);
+  feed(BUS200E_SYSEX_CMD_DUMP_END, { 0, 0, 0 });
+  CHECK(nak_code(last_sent()) == 5);
+  CHECK(fw_arm_calls == 0 && fw_begin_calls == 0 && fake_poll_calls == 0 && fake_backup_calls == 0);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_MOD_XFER);
+  // the exchange itself is untouched: it still ends with exactly one MOD_XFER_R
+  sent.clear();
+  reply_q.push_back({ rd_reply(), 1000 });
+  xfer_run();
+  int r = -1; Bytes got;
+  CHECK(xfer_results(&r, &got) == 1 && r == 1 && raw_calls.size() == 1);
+}
+
+static void test_modxfer_status_answers_during_exchange() {
+  printf("test_modxfer_status_answers_during_exchange\n");
+  reset_all();
+  feed_xfer(1, kRd);
+  Bus200eBridgeTask();
+  sent.clear();
+  feed(BUS200E_SYSEX_CMD_STATUS, {});
+  const SentMsg *m = last_sent();
+  CHECK(m && m->cmd == BUS200E_SYSEX_CMD_STATUS_R && m->raw.size() == 5);
+  CHECK(m && m->raw.size() == 5 && m->raw[3] == 0 && m->raw[4] == (uint8_t) BUS200E_BRIDGE_MOD_XFER);
+  feed(BUS200E_SYSEX_CMD_BUS_STATUS, {});
+  CHECK(last_sent() && last_sent()->cmd == BUS200E_SYSEX_CMD_BUS_STATUS_R);
+  feed(BUS200E_SYSEX_CMD_INFO, {});
+  CHECK(last_sent() && last_sent()->cmd == BUS200E_SYSEX_CMD_INFO_R);
+  feed(BUS200E_SYSEX_CMD_FW_STATUS, {});
+  CHECK(last_sent() && last_sent()->cmd == BUS200E_SYSEX_CMD_FW_STATUS_R);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_MOD_XFER && raw_calls.size() == 1);
+}
+
+static void test_modxfer_abort_returns_to_idle_silently() {
+  printf("test_modxfer_abort_returns_to_idle_silently\n");
+  reset_all();
+  feed_xfer(1, kRd);
+  Bus200eBridgeTask();
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_MOD_XFER && raw_calls.size() == 1);
+  sent.clear();
+  Bus200eBridgeAbort();
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  fake_now += 1000;
+  for (int i = 0; i < 20; ++i) { Bus200eBridgeTask(); fake_now += 100; }
+  CHECK(sent.empty() && raw_calls.size() == 1);        // no MOD_XFER_R, no resend
+  CHECK(fake_q_reset_calls == 0 && fw_abort_calls == 0 && fake_timeouts.empty());
+  // Init() mid-exchange does the same
+  reset_all();
+  feed_xfer(0, kWr);
+  Bus200eBridgeInit(&fake_ops);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+  for (int i = 0; i < 20; ++i) { Bus200eBridgeTask(); fake_now += 100; }
+  CHECK(sent.empty() && raw_calls.empty());
+  // before the first Task(): aborted, then nothing is ever sent
+  reset_all();
+  feed_xfer(0, kWr);
+  Bus200eBridgeAbort();
+  Bus200eBridgeTask();
+  CHECK(raw_calls.empty() && sent.empty());
+  // a fresh exchange after an abort starts clean (no left-over resend count or timers)
+  feed_xfer(1, kRd);
+  xfer_run();
+  int r = -1; Bytes got;
+  CHECK(xfer_results(&r, &got) == 1 && r == 2 && raw_calls.size() == 4);
+}
+
+static void test_modxfer_stale_drain_is_bounded_and_reads_only() {
+  printf("test_modxfer_stale_drain_is_bounded_and_reads_only\n");
+  reset_all();
+  for (int i = 0; i < 12; ++i) reply_q.push_back({ rd_reply(0x2B, 0x10, 0x00, 0x19, (uint8_t) i), 0 });
+  feed_xfer(1, kRd);
+  Bus200eBridgeTask();                       // drain (at most 8), then send
+  CHECK(raw_calls.size() == 1);
+  CHECK(pop_calls <= 9);
+  // a write leaves the ring alone
+  reset_all();
+  reply_q.push_back({ rd_reply(), 0 });
+  feed_xfer(0, kWr);
+  xfer_run();
+  CHECK(pop_calls == 0 && reply_q.size() == 1);
+}
+
+static void test_modxfer_late_reply_survives_a_busy_resend() {
+  printf("test_modxfer_late_reply_survives_a_busy_resend\n");
+  // First send ACKed, no answer within 60 ms, the resend finds the bus busy for a
+  // while; the module's (late) answer to the FIRST send lands in that gap and is
+  // still the answer: the stale drain happens once, before the first send only.
+  reset_all();
+  raw_script = { 0, -1, -1, -1, 0 };
+  const Bytes rep = rd_reply();
+  reply_q.push_back({ rep, 1000 + BUS200E_BRIDGE_XFER_REPLY_MS + 2 });
+  feed_xfer(1, kRd);
+  xfer_run();
+  int r = -1; Bytes got;
+  CHECK(xfer_results(&r, &got) == 1 && r == 1 && got == rep);
+  CHECK(raw_calls.size() == 5);
+}
+
+static void test_modxfer_reply_wire_format() {
+  printf("test_modxfer_reply_wire_format\n");
+  reset_all();
+  Bytes r18(18, 0x55);
+  r18[0] = 0x11; r18[1] = 0x22; r18[2] = 0x2B; r18[3] = 0x19; r18[4] = 0x10; r18[5] = 0x00;
+  reply_q.push_back({ r18, 1001 });
+  feed_xfer(1, kRd);
+  xfer_run();
+  const SentMsg *m = last_sent();
+  CHECK(m && m->cmd == BUS200E_SYSEX_CMD_MOD_XFER_R && m->parse_rc == 0);
+  CHECK(m && m->raw.size() == 1 + 21 && m->raw[0] == 1);   // result + 18 bytes packed 7-in-8
+  int r = -1; Bytes got;
+  CHECK(xfer_results(&r, &got) == 1 && r == 1 && got == r18);
+}
+
+static void test_info_r_reports_level_2() {
+  printf("test_info_r_reports_level_2\n");
+  reset_all();
+  feed(BUS200E_SYSEX_CMD_INFO, {});
+  const SentMsg *m = last_sent();
+  CHECK(m && m->cmd == BUS200E_SYSEX_CMD_INFO_R && m->raw.size() == 11);
+  CHECK(m && m->raw.size() == 11 && m->raw[10] == 2);
+  CHECK(BUS200E_SYSEX_BRIDGE_LEVEL == 2);
+}
+
 int main() {
   test_cal_run_refuses_get_dump();
   test_cal_run_refuses_put_dump();
@@ -1849,6 +2450,30 @@ int main() {
   test_bus_status_r_fields();
   test_info_r_appends_bridge_level();
   test_fw_status_r_reports_last_version();
+
+  test_modxfer_write_ack_is_result0_one_send();
+  test_modxfer_handler_sends_nothing_before_task();
+  test_modxfer_read_returns_matching_reply();
+  test_modxfer_read_skips_stale_and_foreign_replies();
+  test_modxfer_read_no_reply_after_3_resends_is_result2();
+  test_modxfer_write_never_resent_on_error_result4();
+  test_modxfer_read_error_is_not_resent_and_resend_error_ends();
+  test_modxfer_busy_retries_then_result3_no_send_counted();
+  test_modxfer_refused_frame_nak18_no_send();
+  test_modxfer_bad_payload_nak6();
+  test_modxfer_nak5_while_busy();
+  test_modxfer_nak10_card_armed();
+  test_modxfer_nak10_card_serving();
+  test_modxfer_nak17_cal_run();
+  test_modxfer_nak17_cal_job();
+  test_modxfer_null_ops_nak2();
+  test_modxfer_second_request_while_running_nak5();
+  test_modxfer_status_answers_during_exchange();
+  test_modxfer_abort_returns_to_idle_silently();
+  test_modxfer_stale_drain_is_bounded_and_reads_only();
+  test_modxfer_late_reply_survives_a_busy_resend();
+  test_modxfer_reply_wire_format();
+  test_info_r_reports_level_2();
 
   test_info_and_status();
   test_unknown_command_and_bad_version();

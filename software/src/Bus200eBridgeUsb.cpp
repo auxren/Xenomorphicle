@@ -96,6 +96,11 @@ static uint8_t op_bus_dialect() { return OC::PresetBus::BusDialect(); }
 static uint8_t op_last_version_addr() { return OC::PresetBus::LastVersionAddr(); }
 static uint16_t op_fw_version_gen() { return OC::PresetBus::FwVersionFrames(); }
 static int op_cal_run_active() { return CalRoutinePorts::CalRunActive() ? 1 : 0; }
+static int op_cal_job_active() { return CalRoutinePorts::Cal259JobActive() ? 1 : 0; }
+// MOD_XFER: one raw frame (0 ACK, -1 bus not quiet = not sent, -2 bad args,
+// else a Wire error) and the cmd-0x19 reply ring. Both are loop-context calls.
+static int op_raw_send(const uint8_t *frame, uint8_t n) { return OC::PresetBus::SendRawFrame(frame, n); }
+static int op_pop_reply(uint8_t *frame, uint8_t *n) { return OC::PresetBus::PopCalReply(frame, n) ? 1 : 0; }
 
 // card_mark_dirty is deliberately NULL. PresetBus.h flags it as an open
 // design question that a foreign-module capture shares PBCARD.BIN with
@@ -117,6 +122,7 @@ static const Bus200eBridgeOps kOps = {
   op_fw_version_gen,
   op_query_set_reply_timeout_ms,
   op_cal_run_active,
+  op_raw_send, op_pop_reply, op_cal_job_active,
 };
 
 // ---- public ----------------------------------------------------------------
@@ -153,11 +159,12 @@ bool Polling() { return polling; }
 void SetPolling(bool on) { polling = on; }
 
 FLASHMEM void DebugDump() {
-  static const char *kState[] = { "idle", "capturing", "sending", "receiving", "restoring" };
+  static const char *kState[] = { "idle", "capturing", "sending", "receiving", "restoring",
+                                  "fw-receiving", "scanning", "mod-xfer" };
   const int s = (int) Bus200eBridgeGetState();
   Serial.printf("bridge: %s  mod=%02X  last dump=%lu B  last NAK=%u  "
                 "poll=%s  rx dropped=%lu\n",
-                (s >= 0 && s < 5) ? kState[s] : "?",
+                (s >= 0 && s < 8) ? kState[s] : "?",
                 Bus200eBridgeModAddr(),
                 (unsigned long) Bus200eBridgeDumpBytes(),
                 Bus200eBridgeLastNak(),

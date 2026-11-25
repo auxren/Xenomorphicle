@@ -10,6 +10,11 @@
 // simulator builds that do not link it answer false (see CalRunActive.cpp users).
 namespace CalRoutinePorts {
 bool CalRunActive();
+
+// True while a console '=' read of a 259e/251e (its own bus client) has a job in
+// flight. The USB bridge's MOD_XFER refuses (NAK 17) while it is, so the two bus
+// clients never interleave frames. False in builds without the console.
+bool Cal259JobActive();
 }
 
 #endif  // CALRUNACTIVE_H_

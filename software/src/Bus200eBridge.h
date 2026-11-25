@@ -144,6 +144,7 @@ typedef enum {
   BUS200E_BRIDGE_RESTORING,  // DUMP_END was clean; MasterRestore running
   BUS200E_BRIDGE_FW_RECEIVING,  // FW_BEGIN accepted; collecting FW_DATA
   BUS200E_BRIDGE_SCANNING,      // SCAN accepted; Task() walks first..last
+  BUS200E_BRIDGE_MOD_XFER,      // MOD_XFER accepted; Task() sends, waits, answers (level 2)
 } Bus200eBridgeState;
 
 // Everything platform-specific. All fields must be non-NULL except
@@ -218,7 +219,29 @@ typedef struct {
   // not at its ~4.5 s verdict: the host's 3 s ack timeout is shorter, and a
   // host that retries would send a second COMMIT.)
   int (*cal_run_active)(void);
+
+  // ---- MOD_XFER (bridge level 2, docs/bus200e-sysex-fw.md), APPEND-ONLY -----
+  // raw_send NULL -> MOD_XFER answers NAK 2 (and a READ also needs pop_reply);
+  // cal_job_active NULL -> never. None of these may block: Task() calls them
+  // from the loop, one step per pass.
+  //
+  // raw_send: one 200e bus frame. 0 = ACKed; -1 = the bus was not quiet and the
+  // frame was NOT sent (retry); anything else (-2 bad args, or a Wire error) =
+  // an error that may follow a frame the module latched: never resent.
+  int (*raw_send)(const uint8_t *frame, uint8_t n);
+  // pop_reply: 1 = a cmd-0x19 reply frame (whole, <= 18 bytes into `frame`,
+  // length in *n) was popped from the receive ring, oldest first.
+  int (*pop_reply)(uint8_t *frame, uint8_t *n);
+  // 1 = a console '=' request to a 259e is in flight (its own bus client).
+  int (*cal_job_active)(void);
 } Bus200eBridgeOps;
+
+// MOD_XFER timing. One reply window, then a READ is resent (a write never is).
+#define BUS200E_BRIDGE_XFER_REPLY_MS 60
+#define BUS200E_BRIDGE_XFER_RESENDS 3
+// A bus that is not quiet is retried this often, for this long, then result 3.
+#define BUS200E_BRIDGE_XFER_BUSY_RETRY_MS 5
+#define BUS200E_BRIDGE_XFER_BUSY_GIVEUP_MS 1000
 
 // QUERY reply timeout during a scan: an absent address costs this plus the
 // scan gap (~450 ms), so a 61-address sweep takes ~30 s instead of ~70 s.
