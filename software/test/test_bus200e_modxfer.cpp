@@ -326,8 +326,10 @@ static void test_allowlist_pins_each_clause() {
   CHECK(!allowed_hex("0B00220C28CA020103E01000", 0));  // op 2, n 12, length byte right
   CHECK(!allowed_hex("0800220C28CA010000", 0));    // op 1, n 9
   CHECK(!allowed_hex("0A00220C28CA0100BEEF00", 0));  // op 1, n 11, length byte right
-  CHECK(!allowed_hex("0900220C28CA020103E010", 0));  // op 2 with n 10 (len byte 09)
-  CHECK(!allowed_hex("0800220C28CA0000", 0));      // op 0, n 9
+  // op 2, 11 bytes (the right size for op 2) but length byte 09 (says 10): the length-byte rule refuses it
+  CHECK(!allowed_hex("0900220C28CA020103E010", 0));
+  // op 0, 8 bytes with length byte 08 (says 9): the length-byte rule refuses it (op 0 also needs 10..17)
+  CHECK(!allowed_hex("0800220C28CA0000", 0));
   // want_reply on the write path and wrong want on the read path
   CHECK(!allowed_hex("0600220C28CA03", 1));
   CHECK(!allowed_hex("0900220C28CA0100BEEF", 1));
