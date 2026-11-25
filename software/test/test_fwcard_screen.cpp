@@ -256,11 +256,18 @@ static void post_yields_to_served_card() {
 static void rows_fit() {
   Tracker t;
   t.Update(0, true, 4000000000u, 4000000u, 4000000000u);
-  char rows[kRows][kCols + 1];
+  // Guard bytes on both sides: a row that ran past its width would change them.
+  struct { char before[8]; char rows[kRows][kCols + 1]; char after[8]; } g;
+  memset(g.before, 0x5A, sizeof g.before);
+  memset(g.after, 0x5A, sizeof g.after);
   bool bar; uint32_t pct;
-  t.Rows(rows, &bar, &pct);
-  for (int i = 0; i < kRows; ++i) CHECK(strlen(rows[i]) <= (size_t)kCols);
+  t.Rows(g.rows, &bar, &pct);
+  for (int i = 0; i < kRows; ++i) CHECK(strlen(g.rows[i]) <= (size_t)kCols);
   CHECK(bar);
+  // "4000000000/4000000000 B" is 23 characters: the row keeps the first 21.
+  CHECK(strcmp(g.rows[2], "4000000000/4000000000") == 0);
+  for (size_t i = 0; i < sizeof g.before; ++i) CHECK(g.before[i] == 0x5A);
+  for (size_t i = 0; i < sizeof g.after; ++i) CHECK(g.after[i] == 0x5A);
 }
 
 int main() {

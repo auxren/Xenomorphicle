@@ -62,7 +62,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 namespace FwCardScreen {
 
@@ -191,13 +193,13 @@ class Tracker {
       case READING:
         Put(rows[0], "MODULE UPDATING");
         *bar = true;
-        if (Pass() > 1) snprintf(rows[1], kCols + 1, "%lu%% pass %lu", (unsigned long)*pct, (unsigned long)Pass());
-        else            snprintf(rows[1], kCols + 1, "%lu%%", (unsigned long)*pct);
-        snprintf(rows[2], kCols + 1, "%lu/%lu B", (unsigned long)served_, (unsigned long)len_);
-        snprintf(rows[3], kCols + 1, "%lu s", (unsigned long)age_s_);
+        if (Pass() > 1) Putf(rows[1], "%lu%% pass %lu", (unsigned long)*pct, (unsigned long)Pass());
+        else            Putf(rows[1], "%lu%%", (unsigned long)*pct);
+        Putf(rows[2], "%lu/%lu B", (unsigned long)served_, (unsigned long)len_);
+        Putf(rows[3], "%lu s", (unsigned long)age_s_);
         break;
       case STALLED:
-        snprintf(rows[0], kCols + 1, "READ STALLED %lu%%", (unsigned long)*pct);
+        Putf(rows[0], "READ STALLED %lu%%", (unsigned long)*pct);
         Put(rows[1], "Check the bus, retry");
         Put(rows[2], "the module's Remote");
         Put(rows[3], "hold");
@@ -215,7 +217,7 @@ class Tracker {
         Put(rows[0], "UPDATE COMPLETE");
         Put(rows[1], "Switch the case OFF,");
         Put(rows[2], "then ON");
-        snprintf(rows[3], kCols + 1, "%lu B in %lu s", (unsigned long)served_, (unsigned long)age_s_);
+        Putf(rows[3], "%lu B in %lu s", (unsigned long)served_, (unsigned long)age_s_);
         Put(rows[4], "Any button: hide");
         break;
       case IDLE:
@@ -238,7 +240,22 @@ class Tracker {
     return state_;
   }
 
-  static void Put(char *dst, const char *s) { snprintf(dst, kCols + 1, "%s", s); }
+  // A row holds kCols characters; longer text is cut at the row width.
+  static void Put(char *dst, const char *s) {
+    const size_t n = strnlen(s, kCols);
+    memcpy(dst, s, n);
+    dst[n] = '\0';
+  }
+  // Formatted row. The text is built in a buffer that fits the longest form, then cut
+  // to the row width by Put, so a long number shortens the row instead of overrunning it.
+  static void Putf(char *dst, const char *fmt, ...) __attribute__((format(printf, 2, 3))) {
+    char tmp[64];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(tmp, sizeof tmp, fmt, ap);
+    va_end(ap);
+    Put(dst, tmp);
+  }
 
   State state_ = IDLE;
   bool seen_ = false;        // a read was seen this boot
