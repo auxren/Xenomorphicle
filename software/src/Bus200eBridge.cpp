@@ -644,14 +644,18 @@ BRIDGE_CODE static void handle_bus_status(void) {
 // The handler only validates and stores: it transmits nothing and sends no
 // reply. Task() sends the frame (pump_modxfer) and answers with MOD_XFER_R.
 // Refusal order (the first that applies wins): no raw_send NAK 2; a firmware
-// load being received NAK 10; busy NAK 5; card armed or serving NAK 10; Cal
+// load being received NAK 10; busy, or the PresetBus master not idle (a BACKUP
+// or RESTORE started elsewhere), NAK 5; card armed or serving NAK 10; Cal
 // Routine run or console '=' job NAK 17; payload does not parse NAK 6; frame
 // outside the allowlist NAK 18; a READ with no pop_reply NAK 2.
 BRIDGE_CODE static void handle_mod_xfer(const uint8_t *payload, uint32_t len) {
   const uint8_t cmd = BUS200E_SYSEX_CMD_MOD_XFER;
   if (!g_ops->raw_send) { send_nak(cmd, BUS200E_SYSEX_NAK_UNKNOWN_CMD); return; }
   if (g_state == BUS200E_BRIDGE_FW_RECEIVING) { send_nak(cmd, BUS200E_SYSEX_NAK_FW_BUSY); return; }
-  if (busy()) { send_nak(cmd, BUS200E_SYSEX_NAK_BUSY); return; }
+  if (busy() || g_ops->master_state() != BUS200E_MASTER_IDLE) {
+    send_nak(cmd, BUS200E_SYSEX_NAK_BUSY);
+    return;
+  }
   if ((g_ops->fw_armed && g_ops->fw_armed()) || (g_ops->fw_serving && g_ops->fw_serving())) {
     send_nak(cmd, BUS200E_SYSEX_NAK_FW_BUSY);
     return;
@@ -927,6 +931,17 @@ BRIDGE_CODE static void modxfer_finish(uint8_t result, const uint8_t *reply, uin
 // Phase 0: one attempt to put the frame on the bus (raw_send is one synchronous
 // bus frame, never a wait).
 BRIDGE_CODE static void modxfer_send_step(uint32_t now) {
+  if (g_mx_busy_seen && !g_mx_resends) {
+    // Still in the busy retry before the frame ever went out: a Cal Routine run
+    // that has opened, or a firmware card that became armed or serving, owns the
+    // bus now. End before sending: result 3, nothing was sent. (Once any send
+    // answered other than -1 this never applies.)
+    if (cal_run() || (g_ops->cal_job_active && g_ops->cal_job_active()) ||
+        (g_ops->fw_armed && g_ops->fw_armed()) || (g_ops->fw_serving && g_ops->fw_serving())) {
+      modxfer_finish(BUS200E_MOD_XFER_BUS_BUSY, 0, 0);
+      return;
+    }
+  }
   if (g_mx_busy_seen) {
     if ((uint32_t) (now - g_mx_start_ms) >= BUS200E_BRIDGE_XFER_BUSY_GIVEUP_MS) {
       // The one busy budget (from acceptance) is spent. Before any send: result 3.

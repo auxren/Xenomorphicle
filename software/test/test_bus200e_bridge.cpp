@@ -2150,6 +2150,95 @@ static void test_modxfer_nak5_while_busy() {
   CHECK(nak_code(last_sent()) == 5);
 }
 
+static void test_modxfer_nak5_while_master_not_idle() {
+  printf("test_modxfer_nak5_while_master_not_idle\n");
+  // A BACKUP or RESTORE started from the console or the UI drives the PresetBus
+  // master: MOD_XFER refuses, as SCAN does, and nothing goes on the bus.
+  const Bus200eMasterState states[] = { BUS200E_MASTER_SENDING, BUS200E_MASTER_DONE,
+                                        BUS200E_MASTER_FAILED };
+  for (Bus200eMasterState s : states) {
+    reset_all();
+    fake_state = s;
+    feed_xfer(0, kWr);
+    CHECK(nak_code(last_sent()) == 5);
+    CHECK(raw_calls.empty() && pop_calls == 0 && Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+    xfer_run(50);
+    for (int i = 0; i < 50; ++i) { Bus200eBridgeTask(); fake_now += 10; }
+    CHECK(raw_calls.empty() && sent.size() == 1);
+    reset_all();
+    fake_state = s;
+    feed_xfer(1, kRd);
+    CHECK(nak_code(last_sent()) == 5);
+    CHECK(raw_calls.empty() && pop_calls == 0);
+  }
+  // it ranks with busy: before a card armed and before a refused frame
+  reset_all();
+  fake_state = BUS200E_MASTER_SENDING;
+  fw_armed_v = 1;
+  feed_xfer(0, kWr);
+  CHECK(nak_code(last_sent()) == 5);
+  reset_all();
+  fake_state = BUS200E_MASTER_SENDING;
+  feed_xfer(0, { 0x06, 0x00, 0x22, 0x0C, 0x27, 0xCA, 0x03 });
+  CHECK(nak_code(last_sent()) == 5);
+  // the master back at IDLE: accepted
+  reset_all();
+  feed_xfer(0, kWr);
+  CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_MOD_XFER);
+}
+
+// A frame not yet on the bus (only -1 answers so far) whose exchange sees a Cal
+// Routine run open, or a firmware card become armed or serving, ends at once with
+// result 3: it was never sent. `which` 0 cal run, 1 console cal job, 2 armed, 3 serving.
+static void set_guard(int which, int v) {
+  switch (which) {
+    case 0: fake_cal_run = v; break;
+    case 1: fake_cal_job = v; break;
+    case 2: fw_armed_v = v; break;
+    default: fw_serving_v = v; break;
+  }
+}
+
+static void test_modxfer_busy_retry_ends_result3_when_guard_appears() {
+  printf("test_modxfer_busy_retry_ends_result3_when_guard_appears\n");
+  for (int which = 0; which < 4; ++which) {
+    for (uint8_t want = 0; want <= 1; ++want) {
+      reset_all();
+      fake_raw_default = -1;                       // bus never quiet
+      feed_xfer(want, want ? kRd : kWr);
+      for (int i = 0; i < 30; ++i) { Bus200eBridgeTask(); fake_now += 1; }
+      const size_t tries = raw_calls.size();
+      CHECK(tries >= 2 && Bus200eBridgeGetState() == BUS200E_BRIDGE_MOD_XFER);
+      set_guard(which, 1);
+      fake_raw_default = 0;                        // the bus would now be free
+      const uint32_t t = fake_now;
+      xfer_run();
+      int r = -1; Bytes got;
+      CHECK(xfer_results(&r, &got) == 1 && r == 3 && got.empty());
+      CHECK(raw_calls.size() == tries);            // not one more attempt
+      CHECK(fake_now - t <= BUS200E_BRIDGE_XFER_BUSY_RETRY_MS + 1);
+      CHECK(Bus200eBridgeGetState() == BUS200E_BRIDGE_IDLE);
+    }
+  }
+}
+
+static void test_modxfer_guard_after_a_send_does_not_claim_not_sent() {
+  printf("test_modxfer_guard_after_a_send_does_not_claim_not_sent\n");
+  // A READ that went out once and then meets a busy bus on its resend: a guard
+  // appearing then must not turn the outcome into "not sent" (result 3).
+  for (int which = 0; which < 4; ++which) {
+    reset_all();
+    raw_script = { 0 };
+    fake_raw_default = -1;
+    feed_xfer(1, kRd);
+    for (int i = 0; i < 80; ++i) { Bus200eBridgeTask(); fake_now += 1; }
+    set_guard(which, 1);
+    xfer_run();
+    int r = -1; Bytes got;
+    CHECK(xfer_results(&r, &got) == 1 && r != 3);
+  }
+}
+
 static void test_modxfer_nak10_card_armed() {
   printf("test_modxfer_nak10_card_armed\n");
   reset_all();
@@ -2554,6 +2643,9 @@ int main() {
   test_modxfer_refused_frame_nak18_no_send();
   test_modxfer_bad_payload_nak6();
   test_modxfer_nak5_while_busy();
+  test_modxfer_nak5_while_master_not_idle();
+  test_modxfer_busy_retry_ends_result3_when_guard_appears();
+  test_modxfer_guard_after_a_send_does_not_claim_not_sent();
   test_modxfer_nak10_card_armed();
   test_modxfer_nak10_card_serving();
   test_modxfer_nak17_cal_run();

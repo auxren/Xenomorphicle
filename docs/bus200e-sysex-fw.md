@@ -368,7 +368,7 @@ bus in any case, and a refused request leaves the bridge idle.
 |---|---|---|
 | 1 | 2 UNKNOWN_CMD | the device has no bus-frame sender (a build without MOD_XFER support) |
 | 2 | 10 FW_BUSY | a firmware load is being received |
-| 3 | 5 BUSY | any job is running, including a MOD_XFER exchange that has not answered yet |
+| 3 | 5 BUSY | any job is running, including a MOD_XFER exchange that has not answered yet, or the PresetBus master is not idle (a BACKUP or RESTORE started from the console or the device's own screens) |
 | 4 | 10 FW_BUSY | a firmware card is armed or serving |
 | 5 | 17 CAL_RUN | a Cal Routine run is open, a cancelled 259e run's COMMIT answer is pending, or a console `=` read is in flight |
 | 6 | 6 CHECKSUM | the payload does not unpack, `want_reply` is not 0 or 1, or the frame is shorter than 7 or longer than 17 bytes |
@@ -401,6 +401,10 @@ reply and result 1 always does. A write is never resent and never waits for a re
   was accepted and covers the whole exchange. When it is spent before any send the device answers result 3
   (BUS_BUSY): only result 3 means the frame was not sent. A READ that was already sent once when the budget
   runs out has not failed to send and answers result 2.
+- While the frame has not gone out yet (every attempt so far found the bus busy), the device checks again
+  before each retry that no Cal Routine run has opened (or console `=` read started) and no firmware card
+  has become armed or serving. If one has, the exchange ends at once with result 3 (BUS_BUSY): nothing was
+  sent. This check never applies once any send has answered other than "bus busy".
 - Any other failure to send (a bus error, including a rejected argument) answers result 4 after exactly one
   attempt; the frame is never resent, for a write or a READ. A bus error on a READ's resend also answers 4.
 - One request is outstanding at a time; wait for `MOD_XFER_R` (or a NAK) before the next `MOD_XFER`.
@@ -531,7 +535,9 @@ the master commands answer NAK 10 FW_BUSY.
 ## NAK error codes
 
 `7E <cmd> <errcode>`. Codes 1, 2, 5, 6 are hOC's exact meanings; 7–9 were added
-for foreign-module mastering; 10–16 are new here.
+for foreign-module mastering; 10–16 are new at bridge level 1; 17 is the firmware's
+existing CAL_RUN (older than level 2, which only adds MOD_XFER as a command that can
+answer it); 18 is new at level 2.
 
 | code | name | meaning |
 |---|---|---|
